@@ -224,11 +224,8 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                     })
                     .cloned()
                     .collect();
-                let state = crate::tui::screens::add::AddState::new(
-                    ws.name.clone(),
-                    available,
-                    vec![],
-                );
+                let state =
+                    crate::tui::screens::add::AddState::new(ws.name.clone(), available, vec![]);
                 app.screen = Screen::AddRepos(state);
             }
             None
