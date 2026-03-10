@@ -1,7 +1,8 @@
 use crate::tui::app::{App, Pane, Screen};
+use crate::tui::theme;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Row, Table, TableState},
     Frame,
@@ -52,15 +53,10 @@ fn render_dashboard(app: &App, frame: &mut Frame) {
 
 fn render_title(frame: &mut Frame, area: Rect) {
     let title = Line::from(vec![
-        Span::styled(
-            " space ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(" space ", theme::title()),
         Span::styled(
             format!("v{}", env!("CARGO_PKG_VERSION")),
-            Style::default().fg(Color::DarkGray),
+            theme::muted(),
         ),
     ]);
     frame.render_widget(Paragraph::new(title), area);
@@ -77,9 +73,9 @@ fn render_main(app: &App, frame: &mut Frame, area: Rect) {
 fn render_workspace_list(app: &App, frame: &mut Frame, area: Rect) {
     let focused = app.focus == Pane::Left;
     let border_style = if focused {
-        Style::default().fg(Color::Cyan)
+        theme::border_focused()
     } else {
-        Style::default().fg(Color::DarkGray)
+        theme::border_unfocused()
     };
 
     let items: Vec<ListItem> = app
@@ -103,11 +99,7 @@ fn render_workspace_list(app: &App, frame: &mut Frame, area: Rect) {
                 .border_style(border_style)
                 .title(" WORKSPACES "),
         )
-        .highlight_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(theme::selected())
         .highlight_symbol("> ");
 
     let mut state = ListState::default();
@@ -120,9 +112,9 @@ fn render_workspace_list(app: &App, frame: &mut Frame, area: Rect) {
 fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
     let focused = app.focus == Pane::Right;
     let border_style = if focused {
-        Style::default().fg(Color::Cyan)
+        theme::border_focused()
     } else {
-        Style::default().fg(Color::DarkGray)
+        theme::border_unfocused()
     };
 
     let ws_name = app
@@ -149,9 +141,9 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
         .iter()
         .map(|r| {
             let status_style = if r.status.modified + r.status.staged > 0 {
-                Style::default().fg(Color::Yellow)
+                theme::warn()
             } else {
-                Style::default().fg(Color::Green)
+                theme::status_clean()
             };
             let status_str = if r.status.modified + r.status.staged > 0 {
                 format!("{}m {}s", r.status.modified, r.status.staged)
@@ -165,9 +157,9 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
             };
             Row::new(vec![
                 ratatui::text::Span::raw(r.name.clone()),
-                ratatui::text::Span::styled(r.branch.clone(), Style::default().fg(Color::Green)),
+                ratatui::text::Span::styled(r.branch.clone(), theme::branch()),
                 ratatui::text::Span::styled(status_str, status_style),
-                ratatui::text::Span::styled(ab, Style::default().fg(Color::Yellow)),
+                ratatui::text::Span::styled(ab, theme::warn()),
             ])
         })
         .collect();
@@ -187,7 +179,7 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
     )
     .header(header)
     .block(block)
-    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    .row_highlight_style(theme::highlight_row());
 
     let mut state = TableState::default();
     if !repos.is_empty() && focused {
@@ -200,7 +192,7 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     let msg = app.status_message.as_deref().unwrap_or(
         "<enter> go  <c> create  <a> add  <d> delete  <r> refresh  </> search  <q> quit",
     );
-    let bar = Paragraph::new(msg).style(Style::default().fg(Color::DarkGray));
+    let bar = Paragraph::new(msg).style(theme::muted());
     frame.render_widget(bar, area);
 }
 
@@ -223,7 +215,7 @@ fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &m
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(theme::border_focused())
         .title(" Workspace Name ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -237,17 +229,17 @@ fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &m
     .split(inner);
 
     frame.render_widget(
-        Paragraph::new("Enter workspace name:").style(Style::default().fg(Color::White)),
+        Paragraph::new("Enter workspace name:").style(theme::text()),
         sections[0],
     );
     frame.render_widget(
         Paragraph::new(format!("> {}", state.ws_name.value()))
-            .style(Style::default().fg(Color::Cyan)),
+            .style(theme::input_style()),
         sections[1],
     );
     if let Some(err) = &state.error {
         frame.render_widget(
-            Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red)),
+            Paragraph::new(err.as_str()).style(theme::error()),
             sections[2],
         );
     }
@@ -260,7 +252,7 @@ fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, fram
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(theme::border_focused())
         .title(" Branch Strategy ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -276,11 +268,7 @@ fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, fram
         .enumerate()
         .map(|(i, opt)| {
             if i == state.branch_strategy_idx {
-                ListItem::new(format!("> {}", opt)).style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )
+                ListItem::new(format!("> {}", opt)).style(theme::selected())
             } else {
                 ListItem::new(format!("  {}", opt))
             }
@@ -297,7 +285,7 @@ fn render_creating_progress(state: &crate::tui::screens::create::CreateState, fr
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(theme::border_focused())
         .title(" Creating Workspace ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -307,9 +295,9 @@ fn render_creating_progress(state: &crate::tui::screens::create::CreateState, fr
         .iter()
         .map(|l| {
             if l.starts_with("  \u{2713}") {
-                Line::from(Span::styled(l.clone(), Style::default().fg(Color::Green)))
+                Line::from(Span::styled(l.clone(), theme::success()))
             } else if l.starts_with("  \u{2717}") {
-                Line::from(Span::styled(l.clone(), Style::default().fg(Color::Red)))
+                Line::from(Span::styled(l.clone(), theme::error()))
             } else {
                 Line::from(Span::raw(l.clone()))
             }
@@ -323,12 +311,12 @@ fn render_creating_progress(state: &crate::tui::screens::create::CreateState, fr
     if let Some(err) = &state.error {
         frame.render_widget(
             Paragraph::new(format!("Error: {}  [ESC to dismiss]", err))
-                .style(Style::default().fg(Color::Red)),
+                .style(theme::error()),
             sections[1],
         );
     } else {
         frame.render_widget(
-            Paragraph::new("Done! [ENTER to continue]").style(Style::default().fg(Color::Green)),
+            Paragraph::new("Done! [ENTER to continue]").style(theme::success()),
             sections[1],
         );
     }
@@ -352,7 +340,7 @@ fn render_add_branch_strategy(state: &crate::tui::screens::add::AddState, frame:
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(theme::border_focused())
         .title(" Branch Strategy ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -368,11 +356,7 @@ fn render_add_branch_strategy(state: &crate::tui::screens::add::AddState, frame:
         .enumerate()
         .map(|(i, opt)| {
             if i == state.branch_strategy_idx {
-                ListItem::new(format!("> {}", opt)).style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )
+                ListItem::new(format!("> {}", opt)).style(theme::selected())
             } else {
                 ListItem::new(format!("  {}", opt))
             }
@@ -389,7 +373,7 @@ fn render_add_progress(state: &crate::tui::screens::add::AddState, frame: &mut F
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(theme::border_focused())
         .title(" Adding Repos ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -399,9 +383,9 @@ fn render_add_progress(state: &crate::tui::screens::add::AddState, frame: &mut F
         .iter()
         .map(|l| {
             if l.starts_with("  \u{2713}") {
-                Line::from(Span::styled(l.clone(), Style::default().fg(Color::Green)))
+                Line::from(Span::styled(l.clone(), theme::success()))
             } else if l.starts_with("  \u{2717}") {
-                Line::from(Span::styled(l.clone(), Style::default().fg(Color::Red)))
+                Line::from(Span::styled(l.clone(), theme::error()))
             } else {
                 Line::from(Span::raw(l.clone()))
             }
@@ -415,12 +399,12 @@ fn render_add_progress(state: &crate::tui::screens::add::AddState, frame: &mut F
     if let Some(err) = &state.error {
         frame.render_widget(
             Paragraph::new(format!("Error: {}  [ESC to dismiss]", err))
-                .style(Style::default().fg(Color::Red)),
+                .style(theme::error()),
             sections[1],
         );
     } else {
         frame.render_widget(
-            Paragraph::new("Done! [ENTER to continue]").style(Style::default().fg(Color::Green)),
+            Paragraph::new("Done! [ENTER to continue]").style(theme::success()),
             sections[1],
         );
     }
@@ -434,7 +418,7 @@ fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red))
+        .border_style(theme::border_danger())
         .title(" Confirm Delete ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -442,9 +426,7 @@ fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
             format!("Remove workspace '{}'?", state.workspace_name),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            theme::text().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
@@ -452,15 +434,15 @@ fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame
     for name in &state.repo_names {
         lines.push(Line::from(Span::styled(
             format!("  {}  (clean)", name),
-            Style::default().fg(Color::DarkGray),
+            theme::dim_text(),
         )));
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("  [y] confirm", Style::default().fg(Color::Green)),
+        Span::styled("  [y] confirm", theme::success()),
         Span::raw("   "),
-        Span::styled("[n/ESC] cancel", Style::default().fg(Color::DarkGray)),
+        Span::styled("[n/ESC] cancel", theme::muted()),
     ]));
 
     frame.render_widget(Paragraph::new(lines), inner);
@@ -473,7 +455,7 @@ fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame:
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(theme::border_focused())
         .title(" Configuration  ESC=save and exit ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -495,11 +477,9 @@ fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame:
 
         let is_focused = i == state.focused;
         let label_style = if is_focused {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
+            theme::selected()
         } else {
-            Style::default().fg(Color::White)
+            theme::text()
         };
 
         frame.render_widget(
@@ -510,14 +490,14 @@ fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame:
         if is_focused && state.editing {
             frame.render_widget(
                 Paragraph::new(format!("> {}", state.input.value()))
-                    .style(Style::default().fg(Color::Yellow)),
+                    .style(theme::input_style()),
                 sub[1],
             );
         } else {
             let value_style = if is_focused {
-                Style::default().fg(Color::Cyan)
+                theme::selected()
             } else {
-                Style::default().fg(Color::DarkGray)
+                theme::dim_text()
             };
             frame.render_widget(
                 Paragraph::new(field.value.clone()).style(value_style),
@@ -530,7 +510,7 @@ fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame:
     let hint_idx = state.fields.len() + 1;
     frame.render_widget(
         Paragraph::new("↑↓ navigate  ENTER edit  ESC save & exit")
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(theme::muted()),
         sections[hint_idx],
     );
 }

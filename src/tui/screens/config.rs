@@ -1,8 +1,31 @@
 use tui_input::Input;
 
+/// Replace $HOME prefix with ~ for display
+pub fn tilde_collapse(path: &str) -> String {
+    if let Some(home) = dirs::home_dir() {
+        let home_str = home.display().to_string();
+        if path.starts_with(&home_str) {
+            return format!("~{}", &path[home_str.len()..]);
+        }
+    }
+    path.to_string()
+}
+
+/// Expand leading ~ to $HOME for saving
+pub fn tilde_expand(path: &str) -> String {
+    if path.starts_with("~/") || path == "~" {
+        if let Some(home) = dirs::home_dir() {
+            return format!("{}{}", home.display(), &path[1..]);
+        }
+    }
+    path.to_string()
+}
+
 #[derive(Debug)]
 pub struct ConfigField {
     pub label: &'static str,
+    #[allow(dead_code)]
+    pub hint: &'static str, // grey subtext shown next to label, empty string if none
     pub value: String,
 }
 
@@ -19,20 +42,23 @@ impl ConfigState {
         let fields = vec![
             ConfigField {
                 label: "Workspaces dir",
-                value: config.workspaces.dir.display().to_string(),
+                hint: "",
+                value: tilde_collapse(&config.workspaces.dir.display().to_string()),
             },
             ConfigField {
                 label: "Repo roots",
+                hint: "(comma-separated)",
                 value: config
                     .repos
                     .roots
                     .iter()
-                    .map(|p| p.display().to_string())
+                    .map(|p| tilde_collapse(&p.display().to_string()))
                     .collect::<Vec<_>>()
                     .join(", "),
             },
             ConfigField {
                 label: "Max depth",
+                hint: "(integer)",
                 value: config.repos.max_depth.to_string(),
             },
         ];
@@ -69,14 +95,14 @@ impl ConfigState {
 
         // Field 0: workspaces dir
         if let Some(f) = self.fields.first() {
-            config.workspaces.dir = std::path::PathBuf::from(&f.value);
+            config.workspaces.dir = std::path::PathBuf::from(tilde_expand(f.value.trim()));
         }
         // Field 1: repo roots (comma-separated)
         if let Some(f) = self.fields.get(1) {
             config.repos.roots = f
                 .value
                 .split(',')
-                .map(|s| std::path::PathBuf::from(s.trim()))
+                .map(|s| std::path::PathBuf::from(tilde_expand(s.trim())))
                 .collect();
         }
         // Field 2: max depth — return error if not a valid number

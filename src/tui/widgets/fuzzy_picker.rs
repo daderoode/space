@@ -216,9 +216,10 @@ impl FuzzyPicker {
     }
 }
 
+use crate::tui::theme;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame,
@@ -233,7 +234,7 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(theme::border_focused())
         .title(format!(" {} ", picker.prompt));
 
     let inner = block.inner(area);
@@ -255,7 +256,7 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
     // Input line
     let input_text = format!("> {}", picker.input.value());
     frame.render_widget(
-        Paragraph::new(input_text).style(Style::default().fg(Color::White)),
+        Paragraph::new(input_text).style(theme::text()),
         sections[0],
     );
 
@@ -265,13 +266,11 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
         let scope_line = Line::from(vec![
             Span::styled(
                 format!("  scope: {}/", eff),
-                Style::default().fg(Color::DarkGray),
+                theme::muted(),
             ),
             Span::styled(
                 "  CTRL-S: cycle",
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM),
+                theme::muted(),
             ),
         ]);
         frame.render_widget(Paragraph::new(scope_line), sections[1]);
@@ -286,19 +285,18 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
             let toggled = picker.toggled.contains(&i);
             let dot = if toggled { "● " } else { "  " };
             let line = Line::from(vec![
-                Span::styled(dot, Style::default().fg(Color::Cyan)),
+                Span::styled(dot, Style::default().fg(theme::TEAL)),
                 Span::raw(item.name.clone()),
                 Span::styled(
                     format!("  ({})", item.parent),
-                    Style::default().fg(Color::DarkGray),
+                    theme::muted(),
                 ),
             ]);
             ListItem::new(line)
         })
         .collect();
 
-    let list =
-        List::new(visible_items).highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let list = List::new(visible_items).highlight_style(theme::highlight_row());
 
     let mut list_state = ListState::default();
     if !picker.filtered.is_empty() {
@@ -310,7 +308,7 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
     let status = Line::from(vec![
         Span::styled(
             format!("{} selected", picker.toggled.len()),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(theme::TEAL),
         ),
         Span::raw("  "),
         Span::styled(
@@ -319,7 +317,7 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
                 picker.filtered.len(),
                 picker.all_items.len()
             ),
-            Style::default().fg(Color::DarkGray),
+            theme::muted(),
         ),
     ]);
     frame.render_widget(Paragraph::new(status), sections[3]);
