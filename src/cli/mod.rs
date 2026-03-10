@@ -10,6 +10,15 @@ pub mod remove;
 pub mod repos;
 pub mod status;
 
+/// Run the TUI event loop and print the cd marker if a workspace was selected.
+pub(crate) fn run_tui_and_emit_cd(app: &mut App) -> Result<()> {
+    tui::app::run(app)?;
+    if let Some(ref path) = app.space_cd_target {
+        println!("__SPACE_CD__:{}", path.display());
+    }
+    Ok(())
+}
+
 pub fn dispatch(cmd: Commands) -> Result<()> {
     match cmd {
         Commands::Ls { verbose } => list::run(verbose),
@@ -20,11 +29,7 @@ pub fn dispatch(cmd: Commands) -> Result<()> {
             let mut app = App::new()?;
             let state = screens::go::GoState::new(&app.workspaces);
             app.screen = Screen::GoWorkspace(state);
-            tui::app::run(&mut app)?;
-            if let Some(path) = app.space_cd_target {
-                println!("__SPACE_CD__:{}", path.display());
-            }
-            Ok(())
+            run_tui_and_emit_cd(&mut app)
         }
 
         Commands::Go { name: Some(name) } => go::run(Some(name)),
@@ -35,21 +40,17 @@ pub fn dispatch(cmd: Commands) -> Result<()> {
                 app.repos_cache.clone(),
                 repos,
             ));
-            tui::app::run(&mut app)?;
-            if let Some(path) = app.space_cd_target {
-                println!("__SPACE_CD__:{}", path.display());
-            }
-            Ok(())
+            run_tui_and_emit_cd(&mut app)
         }
 
         Commands::Add { workspace, repos } => {
             let mut app = App::new()?;
-            // Find workspace index and load its detail so we know existing repos
-            let ws_idx = app.workspaces.iter().position(|w| w.name == workspace);
-            if let Some(idx) = ws_idx {
-                app.selected_ws = idx;
-                app.load_selected_workspace_detail();
-            }
+            // Find workspace index — bail early if not found
+            let Some(idx) = app.workspaces.iter().position(|w| w.name == workspace) else {
+                anyhow::bail!("workspace '{}' not found", workspace);
+            };
+            app.selected_ws = idx;
+            app.load_selected_workspace_detail();
             // Determine available repos (exclude those already in the workspace)
             let existing_names: std::collections::HashSet<String> = app
                 .workspaces
@@ -79,21 +80,14 @@ pub fn dispatch(cmd: Commands) -> Result<()> {
                 available,
                 repos,
             ));
-            tui::app::run(&mut app)?;
-            if let Some(path) = app.space_cd_target {
-                println!("__SPACE_CD__:{}", path.display());
-            }
-            Ok(())
+            run_tui_and_emit_cd(&mut app)
         }
 
         Commands::Config => {
             let mut app = App::new()?;
-            app.screen = Screen::ConfigEditor(screens::config::ConfigState::from_config(&app.config));
-            tui::app::run(&mut app)?;
-            if let Some(path) = app.space_cd_target {
-                println!("__SPACE_CD__:{}", path.display());
-            }
-            Ok(())
+            app.screen =
+                Screen::ConfigEditor(screens::config::ConfigState::from_config(&app.config));
+            run_tui_and_emit_cd(&mut app)
         }
 
         Commands::Rm { name, force: false } => {
@@ -113,19 +107,12 @@ pub fn dispatch(cmd: Commands) -> Result<()> {
                 workspace_path: ws_path,
                 repo_names,
             });
-            tui::app::run(&mut app)?;
-            if let Some(path) = app.space_cd_target {
-                println!("__SPACE_CD__:{}", path.display());
-            }
-            Ok(())
+            run_tui_and_emit_cd(&mut app)
         }
 
         Commands::Rm { name, force: true } => remove::run(&name, true),
 
-        Commands::Completions { shell } => {
-            crate::shell::print_completions(&shell);
-            Ok(())
-        }
+        Commands::Completions { shell } => crate::shell::print_completions(&shell),
     }
 }
 

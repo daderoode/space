@@ -11,11 +11,7 @@ fn main() -> anyhow::Result<()> {
         None => {
             // No args → TUI dashboard
             let mut app = tui::app::App::new()?;
-            tui::app::run(&mut app)?;
-            if let Some(path) = app.space_cd_target {
-                println!("__SPACE_CD__:{}", path.display());
-            }
-            Ok(())
+            cli::run_tui_and_emit_cd(&mut app)
         }
         Some(cmd) => cli::dispatch(cmd),
     }
@@ -68,7 +64,7 @@ pub enum Commands {
     Config,
     /// Generate shell completions
     Completions {
-        /// Shell name (e.g. bash, zsh, fish)
+        /// Shell name (only 'zsh' is supported)
         shell: String,
     },
 }

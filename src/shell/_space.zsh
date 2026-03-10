@@ -20,7 +20,7 @@ _space_workspaces_dir() {
 
   if [[ -r "$config_file" ]]; then
     parsed="$(sed -n '/^\[workspaces\]/,/^\[/{/^\s*dir\s*=/p}' "$config_file" | sed 's/.*=\s*"\(.*\)"/\1/')"
-    [[ -n "$parsed" ]] && workspaces_dir="$parsed"
+    [[ -n "$parsed" ]] && workspaces_dir="${parsed/#\~/$HOME}"
   fi
 
   print -r -- "$workspaces_dir"

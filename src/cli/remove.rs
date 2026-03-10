@@ -3,7 +3,7 @@ use crate::core::{config::SpaceConfig, workspace};
 
 pub fn run(name: &str, force: bool) -> Result<()> {
     if !force {
-        unreachable!("non-force remove handled by TUI in dispatch");
+        anyhow::bail!("use --force to remove a workspace without confirmation, or run without --force to use the interactive TUI");
     }
     let cfg = SpaceConfig::load()?;
     workspace::remove_workspace(&cfg.workspaces.dir, name, true)?;

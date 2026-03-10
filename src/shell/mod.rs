@@ -1,8 +1,11 @@
 pub mod completions;
 
-pub fn print_completions(shell: &str) {
+pub fn print_completions(shell: &str) -> anyhow::Result<()> {
     match shell {
-        "zsh" => print!("{}", completions::generate_zsh()),
-        other => eprintln!("unsupported shell: {other}. Only 'zsh' is supported."),
+        "zsh" => {
+            print!("{}", completions::generate_zsh());
+            Ok(())
+        }
+        other => anyhow::bail!("unsupported shell: {}. Only 'zsh' is supported.", other),
     }
 }

@@ -1,18 +1,18 @@
 use anyhow::Result;
-use crate::core::config::SpaceConfig;
+use crate::core::{config::SpaceConfig, workspace};
 
 pub fn run(name: Option<String>) -> Result<()> {
     match name {
         None => unreachable!("go without name handled in dispatch"),
         Some(n) => {
             let cfg = SpaceConfig::load()?;
-            let ws_path = cfg.workspaces.dir.join(&n);
-            if ws_path.is_dir() {
-                println!("__SPACE_CD__:{}", ws_path.display());
-                Ok(())
-            } else {
-                anyhow::bail!("workspace '{}' not found", n)
-            }
+            let workspaces = workspace::list_workspaces(&cfg.workspaces.dir)?;
+            let ws = workspaces
+                .iter()
+                .find(|w| w.name == n)
+                .ok_or_else(|| anyhow::anyhow!("workspace '{}' not found", n))?;
+            println!("__SPACE_CD__:{}", ws.path.display());
+            Ok(())
         }
     }
 }
