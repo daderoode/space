@@ -61,7 +61,7 @@ pub enum Commands {
     },
     /// Edit configuration interactively
     Config,
-    /// Generate shell completions (stub — not yet implemented in v0.2.0)
+    /// Generate shell completions
     Completions {
         /// Shell name (e.g. bash, zsh, fish)
         shell: String,

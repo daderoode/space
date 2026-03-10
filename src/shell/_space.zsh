@@ -19,7 +19,7 @@ _space_workspaces_dir() {
   local parsed
 
   if [[ -r "$config_file" ]]; then
-    parsed="$(grep -E '^\s*workspaces_dir\s*=' "$config_file" | head -1 | sed 's/.*=\s*"\(.*\)"/\1/')"
+    parsed="$(sed -n '/^\[workspaces\]/,/^\[/{/^\s*dir\s*=/p}' "$config_file" | sed 's/.*=\s*"\(.*\)"/\1/')"
     [[ -n "$parsed" ]] && workspaces_dir="$parsed"
   fi
 
@@ -60,7 +60,7 @@ _space() {
   local -a candidates
 
   if (( CURRENT == 2 )); then
-    candidates=(ls list status st add rm remove go repos create config completions help)
+    candidates=(ls list status st add rm remove go repos create config completions)
     compadd -- "${candidates[@]}"
     return 0
   fi
@@ -89,7 +89,7 @@ _space() {
       if (( CURRENT == 3 )); then
         candidates=("${(@f)$(_space_workspace_names)}")
         (( ${#candidates[@]} > 0 )) && compadd -- "${candidates[@]}"
-      elif (( CURRENT == 4 )); then
+      elif (( CURRENT >= 4 )); then
         candidates=("${(@f)$(_space_available_workspace_repos "$words[3]")}")
         (( ${#candidates[@]} > 0 )) && compadd -- "${candidates[@]}"
       fi
