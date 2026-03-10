@@ -939,6 +939,14 @@ fn handle_config_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
 fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
+    // Drain any stale input that accumulated before the TUI started —
+    // e.g. keystrokes typed during a previous frozen/crashed session that
+    // left the terminal in raw mode.  Without this, buffered events replay
+    // immediately into the first field, corrupting it.
+    while event::poll(std::time::Duration::ZERO)? {
+        let _ = event::read()?;
+    }
+
     enum ActiveScreen {
         Dashboard,
         Create,
