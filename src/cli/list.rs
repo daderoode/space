@@ -1,5 +1,6 @@
 use crate::core::{config::SpaceConfig, workspace};
 use anyhow::Result;
+use colored::Colorize;
 
 pub fn run(verbose: bool) -> Result<()> {
     let cfg = SpaceConfig::load()?;
@@ -12,25 +13,32 @@ pub fn run(verbose: bool) -> Result<()> {
 
     for ws in &workspaces {
         if verbose {
-            let detail =
-                workspace::workspace_detail(&cfg.workspaces.dir, &ws.name).unwrap_or_else(|_| {
-                    workspace::Workspace {
-                        name: ws.name.clone(),
-                        path: ws.path.clone(),
-                        repos: vec![],
-                    }
+            let detail = workspace::workspace_detail(&cfg.workspaces.dir, &ws.name)
+                .unwrap_or_else(|_| workspace::Workspace {
+                    name: ws.name.clone(),
+                    path: ws.path.clone(),
+                    repos: vec![],
                 });
-            println!("{} ({} repos)", ws.name, detail.repos.len());
+            println!("{}  ({} repos)", ws.name.cyan().bold(), detail.repos.len());
             for repo in &detail.repos {
-                let dirty = if repo.status.modified + repo.status.staged > 0 {
-                    " *"
+                let status_label = if repo.status.modified + repo.status.staged > 0 {
+                    "modified".yellow().to_string()
                 } else {
-                    ""
+                    "clean".green().to_string()
                 };
-                println!("  {} [{}]{}", repo.name, repo.branch, dirty);
+                println!(
+                    "  {:<30} {}  [{}]",
+                    repo.name,
+                    repo.branch.green(),
+                    status_label
+                );
             }
         } else {
-            println!("{}", ws.name);
+            // Count repos from directory listing
+            let repo_count = std::fs::read_dir(&ws.path)
+                .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).count())
+                .unwrap_or(0);
+            println!("{}  ({} repos)", ws.name.cyan().bold(), repo_count);
         }
     }
     Ok(())
