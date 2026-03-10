@@ -20,46 +20,20 @@ pub fn dispatch(cmd: Commands) -> Result<()> {
         Commands::Add { workspace, repos } => add::run(&workspace, repos),
         Commands::Rm { name, force } => remove::run(&name, force),
         Commands::Config => config::run(),
-        Commands::Completions { shell } => {
-            use clap::CommandFactory;
-            crate::shell::completions::generate(shell, &mut crate::Cli::command());
-            Ok(())
+        Commands::Completions { shell: _ } => {
+            // clap_complete removed in v0.2.0 — stub until Task 10/11
+            anyhow::bail!("shell completions not yet implemented in v0.2.0")
         }
     }
 }
 
-use crate::core::{config::SpaceConfig, git, repo, workspace::BranchStrategy};
+use crate::core::{config::SpaceConfig, repo, workspace::BranchStrategy};
 use std::path::Path;
 
 /// Interactively pick a branch strategy for a given repo.
-pub fn pick_branch_strategy(repo_path: &Path, ws_name: &str) -> Result<BranchStrategy> {
-    let options = [
-        format!("New branch '{}' off default", ws_name),
-        "Select existing branch".to_string(),
-        "Detached HEAD at default branch".to_string(),
-    ];
-    let idx = dialoguer::Select::new()
-        .with_prompt("Branch strategy")
-        .items(&options)
-        .default(0)
-        .interact()?;
-
-    match idx {
-        0 => Ok(BranchStrategy::NewBranch(ws_name.to_string())),
-        1 => {
-            let branches = git::list_branches(repo_path)?;
-            let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
-            if names.is_empty() {
-                anyhow::bail!("no branches found");
-            }
-            let sel = dialoguer::FuzzySelect::new()
-                .with_prompt("Branch")
-                .items(&names)
-                .interact()?;
-            Ok(BranchStrategy::ExistingBranch(names[sel].to_string()))
-        }
-        _ => Ok(BranchStrategy::DetachedHead),
-    }
+/// Stub — dialoguer removed in v0.2.0 (Task 10/11 will rewrite with TUI).
+pub fn pick_branch_strategy(_repo_path: &Path, ws_name: &str) -> Result<BranchStrategy> {
+    Ok(BranchStrategy::NewBranch(ws_name.to_string()))
 }
 
 /// Resolve repo arg strings to paths using the cache + fuzzy match.

@@ -106,18 +106,54 @@ pub fn create_worktree(
 
     let base_branch = git::detect_base_branch(repo_path);
 
+    // Auto-fetch — ignore errors for offline use
+    let _ = Command::new("git")
+        .args(["fetch", "--quiet", "origin"])
+        .current_dir(repo_path)
+        .status();
+
     let status = match strategy {
-        BranchStrategy::NewBranch(branch_name) => Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                "-b",
-                branch_name,
-                &wt_path.to_string_lossy(),
-                &base_branch,
-            ])
-            .current_dir(repo_path)
-            .status(),
+        BranchStrategy::NewBranch(branch_name) => {
+            // 1. Local branch exists?
+            let local_exists = Command::new("git")
+                .args(["rev-parse", "--verify", branch_name])
+                .current_dir(repo_path)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+            // 2. Remote branch exists?
+            let remote_ref = format!("origin/{}", branch_name);
+            let remote_exists = Command::new("git")
+                .args(["rev-parse", "--verify", &remote_ref])
+                .current_dir(repo_path)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+            if local_exists {
+                Command::new("git")
+                    .args(["worktree", "add", &wt_path.to_string_lossy(), branch_name])
+                    .current_dir(repo_path)
+                    .status()
+            } else if remote_exists {
+                Command::new("git")
+                    .args([
+                        "worktree", "add", "--track", "-b", branch_name,
+                        &wt_path.to_string_lossy(), &remote_ref,
+                    ])
+                    .current_dir(repo_path)
+                    .status()
+            } else {
+                Command::new("git")
+                    .args([
+                        "worktree", "add", "-b", branch_name,
+                        &wt_path.to_string_lossy(), &base_branch,
+                    ])
+                    .current_dir(repo_path)
+                    .status()
+            }
+        }
 
         BranchStrategy::ExistingBranch(branch_name) => {
             let local = branch_name.strip_prefix("origin/").unwrap_or(branch_name);

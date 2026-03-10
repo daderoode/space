@@ -1,7 +1,2 @@
-use clap::Command;
-use clap_complete::{generate as clap_generate, Shell};
-use std::io;
-
-pub fn generate(shell: Shell, cmd: &mut Command) {
-    clap_generate(shell, cmd, "space", &mut io::stdout());
-}
+// clap_complete removed in v0.2.0 — stub until shell completion is rewritten (Task 10/11)
+pub fn generate_stub() {}
