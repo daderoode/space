@@ -90,11 +90,14 @@ pub fn load_cache(path: &Path) -> Option<Vec<PathBuf>> {
 /// Initialise a non-git directory as a git repo with an empty initial commit.
 pub fn init_repo(path: &Path) -> Result<()> {
     let home_name = std::env::var("USER").unwrap_or_else(|_| "space".to_string());
-    Command::new("git")
+    let init_status = Command::new("git")
         .args(["init"])
         .current_dir(path)
         .status()
         .with_context(|| format!("git init at {}", path.display()))?;
+    if !init_status.success() {
+        anyhow::bail!("git init failed at {}", path.display());
+    }
     // Set local identity so commit doesn't fail if global config missing
     let _ = Command::new("git")
         .args(["config", "user.email", "space@local"])
@@ -104,11 +107,14 @@ pub fn init_repo(path: &Path) -> Result<()> {
         .args(["config", "user.name", &home_name])
         .current_dir(path)
         .status();
-    Command::new("git")
+    let commit_status = Command::new("git")
         .args(["commit", "--allow-empty", "-m", "initial commit"])
         .current_dir(path)
         .status()
         .with_context(|| "initial commit failed")?;
+    if !commit_status.success() {
+        anyhow::bail!("initial commit failed at {}", path.display());
+    }
     Ok(())
 }
 
