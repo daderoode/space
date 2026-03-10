@@ -1,79 +1,107 @@
+use crate::tui;
+use crate::tui::app::{App, Screen};
+use crate::tui::screens;
 use crate::Commands;
 use anyhow::Result;
 
-pub mod add;
-pub mod config;
-pub mod create;
 pub mod go;
 pub mod list;
 pub mod remove;
 pub mod repos;
 pub mod status;
 
+/// Run the TUI event loop and print the cd marker if a workspace was selected.
+pub(crate) fn run_tui_and_emit_cd(app: &mut App) -> Result<()> {
+    tui::app::run(app)?;
+    if let Some(ref path) = app.space_cd_target {
+        println!("__SPACE_CD__:{}", path.display());
+    }
+    Ok(())
+}
+
 pub fn dispatch(cmd: Commands) -> Result<()> {
     match cmd {
         Commands::Ls { verbose } => list::run(verbose),
         Commands::Status { name } => status::run(&name),
-        Commands::Go { name } => go::run(name),
         Commands::Repos { refresh } => repos::run(refresh),
-        Commands::Create { repos } => create::run(repos),
-        Commands::Add { workspace, repos } => add::run(&workspace, repos),
-        Commands::Rm { name, force } => remove::run(&name, force),
-        Commands::Config => config::run(),
-        Commands::Completions { shell } => {
-            use clap::CommandFactory;
-            crate::shell::completions::generate(shell, &mut crate::Cli::command());
-            Ok(())
+
+        Commands::Go { name: None } => {
+            let mut app = App::new()?;
+            let state = screens::go::GoState::new(&app.workspaces);
+            app.screen = Screen::GoWorkspace(state);
+            run_tui_and_emit_cd(&mut app)
         }
-    }
-}
 
-use crate::core::{config::SpaceConfig, git, repo, workspace::BranchStrategy};
-use std::path::Path;
+        Commands::Go { name: Some(name) } => go::run(Some(name)),
 
-/// Interactively pick a branch strategy for a given repo.
-pub fn pick_branch_strategy(repo_path: &Path, ws_name: &str) -> Result<BranchStrategy> {
-    let options = [
-        format!("New branch '{}' off default", ws_name),
-        "Select existing branch".to_string(),
-        "Detached HEAD at default branch".to_string(),
-    ];
-    let idx = dialoguer::Select::new()
-        .with_prompt("Branch strategy")
-        .items(&options)
-        .default(0)
-        .interact()?;
-
-    match idx {
-        0 => Ok(BranchStrategy::NewBranch(ws_name.to_string())),
-        1 => {
-            let branches = git::list_branches(repo_path)?;
-            let names: Vec<&str> = branches.iter().map(|b| b.name.as_str()).collect();
-            if names.is_empty() {
-                anyhow::bail!("no branches found");
-            }
-            let sel = dialoguer::FuzzySelect::new()
-                .with_prompt("Branch")
-                .items(&names)
-                .interact()?;
-            Ok(BranchStrategy::ExistingBranch(names[sel].to_string()))
+        Commands::Create { repos } => {
+            let mut app = App::new()?;
+            app.screen = Screen::CreateWorkspace(screens::create::CreateState::new(
+                app.repos_cache.clone(),
+                repos,
+            ));
+            run_tui_and_emit_cd(&mut app)
         }
-        _ => Ok(BranchStrategy::DetachedHead),
-    }
-}
 
-/// Resolve repo arg strings to paths using the cache + fuzzy match.
-pub fn resolve_repos(args: &[String], cfg: &SpaceConfig) -> Vec<std::path::PathBuf> {
-    let cache_path = SpaceConfig::cache_path();
-    let all_repos = repo::load_cache(&cache_path)
-        .unwrap_or_else(|| repo::find_repos_in(&cfg.repos.roots, cfg.repos.max_depth));
-    args.iter()
-        .flat_map(|q| {
-            let matches = repo::fuzzy_match(q, &all_repos);
-            if matches.is_empty() {
-                eprintln!("warning: no repo matching '{}'", q);
-            }
-            matches.into_iter().take(1)
-        })
-        .collect()
+        Commands::Add { workspace, repos } => {
+            let mut app = App::new()?;
+            // Find workspace index — bail early if not found
+            let Some(idx) = app.workspaces.iter().position(|w| w.name == workspace) else {
+                anyhow::bail!("workspace '{}' not found", workspace);
+            };
+            app.selected_ws = idx;
+            app.load_selected_workspace_detail();
+            // Determine available repos (exclude those already in the workspace)
+            let existing_names: std::collections::HashSet<String> = app
+                .workspaces
+                .get(app.selected_ws)
+                .map(|w| w.repos.iter().map(|r| r.name.clone()).collect())
+                .unwrap_or_default();
+            let available: Vec<std::path::PathBuf> = app
+                .repos_cache
+                .iter()
+                .filter(|p| {
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    !existing_names.contains(&name)
+                })
+                .cloned()
+                .collect();
+            app.screen = Screen::AddRepos(screens::add::AddState::new(
+                workspace.clone(),
+                available,
+                repos,
+            ));
+            run_tui_and_emit_cd(&mut app)
+        }
+
+        Commands::Config => {
+            let mut app = App::new()?;
+            app.screen =
+                Screen::ConfigEditor(screens::config::ConfigState::from_config(&app.config));
+            run_tui_and_emit_cd(&mut app)
+        }
+
+        Commands::Rm { name, force: false } => {
+            let mut app = App::new()?;
+            // Build DeleteState: find workspace to get repo names for display
+            let ws_detail = app.workspaces.iter().find(|w| w.name == name);
+            let repo_names: Vec<String> = if let Some(ws) = ws_detail {
+                ws.repos.iter().map(|r| r.name.clone()).collect()
+            } else {
+                vec![]
+            };
+            app.screen = Screen::ConfirmDelete(screens::delete::DeleteState {
+                workspace_name: name.clone(),
+                repo_names,
+            });
+            run_tui_and_emit_cd(&mut app)
+        }
+
+        Commands::Rm { name, force: true } => remove::run(&name, true),
+
+        Commands::Completions { shell } => crate::shell::print_completions(&shell),
+    }
 }

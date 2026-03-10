@@ -1,5 +1,6 @@
 use crate::core::{config::SpaceConfig, workspace};
 use anyhow::Result;
+use colored::Colorize;
 
 pub fn run(verbose: bool) -> Result<()> {
     let cfg = SpaceConfig::load()?;
@@ -20,17 +21,33 @@ pub fn run(verbose: bool) -> Result<()> {
                         repos: vec![],
                     }
                 });
-            println!("{} ({} repos)", ws.name, detail.repos.len());
+            println!("{}  ({} repos)", ws.name.cyan().bold(), detail.repos.len());
             for repo in &detail.repos {
-                let dirty = if repo.status.modified + repo.status.staged > 0 {
-                    " *"
+                let status_label = if repo.status.modified + repo.status.staged > 0 {
+                    "modified".yellow().to_string()
                 } else {
-                    ""
+                    "clean".green().to_string()
                 };
-                println!("  {} [{}]{}", repo.name, repo.branch, dirty);
+                println!(
+                    "  {:<30} {}  [{}]",
+                    repo.name,
+                    repo.branch.green(),
+                    status_label
+                );
             }
         } else {
-            println!("{}", ws.name);
+            // Count git worktrees (dirs with a .git file/dir) to match verbose output
+            let repo_count = std::fs::read_dir(&ws.path)
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .filter(|e| {
+                            let p = e.path();
+                            p.is_dir() && p.join(".git").exists()
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            println!("{}  ({} repos)", ws.name.cyan().bold(), repo_count);
         }
     }
     Ok(())

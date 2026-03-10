@@ -1,18 +1,19 @@
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 
 mod cli;
 mod core;
 mod shell;
+mod tui;
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    match cli.command {
-        Some(cmd) => cli::dispatch(cmd),
+    let cli_args = Cli::parse();
+    match cli_args.command {
         None => {
-            // TUI deferred to v0.2.0 — print help for now
-            Cli::command().print_help()?;
-            Ok(())
+            // No args → TUI dashboard
+            let mut app = tui::app::App::new()?;
+            cli::run_tui_and_emit_cd(&mut app)
         }
+        Some(cmd) => cli::dispatch(cmd),
     }
 }
 
@@ -63,7 +64,7 @@ pub enum Commands {
     Config,
     /// Generate shell completions
     Completions {
-        #[arg(value_enum)]
-        shell: clap_complete::Shell,
+        /// Shell name (only 'zsh' is supported)
+        shell: String,
     },
 }
