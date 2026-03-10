@@ -79,7 +79,7 @@ impl FuzzyPicker {
     }
 
     /// Extract scope from query (text before and including last `/`)
-    fn query_scope(&self) -> Option<String> {
+    pub fn query_scope(&self) -> Option<String> {
         let q = self.input.value();
         if let Some(pos) = q.rfind('/') {
             let scope_part = &q[..pos];
@@ -217,17 +217,8 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Check if scope is active
-    let eff_scope: Option<String> = {
-        let q = picker.input.value();
-        if let Some(pos) = q.rfind('/') {
-            let scope_part = &q[..pos];
-            if !scope_part.is_empty() {
-                let scope_dir = scope_part.rsplit('/').next().unwrap_or(scope_part);
-                Some(scope_dir.to_string())
-            } else { None }
-        } else { None }
-    }.or_else(|| picker.scope.clone());
+    // Check if scope is active (reuse the picker's own logic)
+    let eff_scope: Option<String> = picker.query_scope().or_else(|| picker.scope.clone());
     let show_scope = eff_scope.is_some();
     let scope_height = if show_scope { 1u16 } else { 0u16 };
 
