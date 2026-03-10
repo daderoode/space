@@ -60,7 +60,10 @@ impl CreateState {
 
     pub fn branch_strategy(&self) -> BranchStrategy {
         match self.branch_strategy_idx {
-            1 => BranchStrategy::DetachedHead,
+            // 0: New branch with workspace name
+            // 1: Checkout existing branch with same name (if it exists)
+            // 2: Detached HEAD
+            1 => BranchStrategy::ExistingBranch(self.ws_name.value().to_string()),
             2 => BranchStrategy::DetachedHead,
             _ => BranchStrategy::NewBranch(self.ws_name.value().to_string()),
         }

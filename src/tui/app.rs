@@ -319,6 +319,11 @@ fn handle_create_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
         CreateStage::Creating => {
             match key.code {
                 KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
+                    // Capture error message before switching screens
+                    let error_msg = {
+                        let Screen::CreateWorkspace(ref st) = app.screen else { return; };
+                        st.error.clone()
+                    };
                     app.screen = Screen::Dashboard;
                     if let Ok(ws) =
                         crate::core::workspace::list_workspaces(&app.config.workspaces.dir)
@@ -326,6 +331,9 @@ fn handle_create_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
                         app.workspaces = ws;
                         app.selected_ws = 0;
                         app.load_selected_workspace_detail();
+                    }
+                    if let Some(err) = error_msg {
+                        app.status_message = Some(format!("Create failed: {}", err));
                     }
                 }
                 _ => {}

@@ -252,8 +252,8 @@ fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, fram
 
     let options = [
         format!("New branch '{}'", state.ws_name.value()),
+        format!("Existing branch '{}' (if present)", state.ws_name.value()),
         "Detached HEAD".to_string(),
-        "Detached HEAD (force)".to_string(),
     ];
 
     let items: Vec<ListItem> = options
