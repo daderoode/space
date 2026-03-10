@@ -853,7 +853,34 @@ fn handle_search_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
 }
 
 fn handle_config_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
-    use ratatui::crossterm::event::KeyCode;
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    // Ctrl-S: commit any active edit, save, exit to dashboard
+    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let Screen::ConfigEditor(ref mut st) = app.screen {
+            if st.editing {
+                st.commit_edit();
+            }
+        }
+        let base_config = app.config.clone();
+        let result = {
+            let Screen::ConfigEditor(ref st) = app.screen else {
+                return;
+            };
+            st.save_to_config(base_config)
+        };
+        match result {
+            Ok(new_config) => {
+                app.config = new_config;
+                app.status_message = Some("Config saved".to_string());
+            }
+            Err(e) => {
+                app.status_message = Some(format!("Save failed: {}", e));
+            }
+        }
+        app.screen = Screen::Dashboard;
+        return;
+    }
 
     let editing = {
         let Screen::ConfigEditor(ref st) = app.screen else {
@@ -863,7 +890,6 @@ fn handle_config_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
     };
 
     if editing {
-        // In editing mode: Esc cancels, Enter commits, other keys feed input
         match key.code {
             KeyCode::Esc => {
                 let Screen::ConfigEditor(ref mut st) = app.screen else {
@@ -872,10 +898,13 @@ fn handle_config_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
                 st.cancel_edit();
             }
             KeyCode::Enter => {
+                // Commit and advance to next field
                 let Screen::ConfigEditor(ref mut st) = app.screen else {
                     return;
                 };
                 st.commit_edit();
+                let next = (st.focused + 1).min(st.fields.len() - 1);
+                st.focused = next;
             }
             _ => {
                 let Screen::ConfigEditor(ref mut st) = app.screen else {
@@ -887,26 +916,9 @@ fn handle_config_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
             }
         }
     } else {
-        // Not editing: navigate fields, Enter=edit, Esc=save+exit
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
-                // Save config and return to dashboard (pass in-memory config as base)
-                let base_config = app.config.clone();
-                let result = {
-                    let Screen::ConfigEditor(ref st) = app.screen else {
-                        return;
-                    };
-                    st.save_to_config(base_config)
-                };
-                match result {
-                    Ok(new_config) => {
-                        app.config = new_config;
-                        app.status_message = Some("Config saved".to_string());
-                    }
-                    Err(e) => {
-                        app.status_message = Some(format!("Config save failed: {}", e));
-                    }
-                }
+                // Exit without saving
                 app.screen = Screen::Dashboard;
             }
             KeyCode::Enter => {

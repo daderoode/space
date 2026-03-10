@@ -449,67 +449,84 @@ fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame
 }
 
 fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame: &mut Frame) {
-    use ratatui::widgets::Clear;
+    use crate::tui::theme;
+    use ratatui::widgets::{BorderType, Clear};
+
     let area = frame.area();
     frame.render_widget(Clear, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(theme::border_focused())
-        .title(" Configuration  ESC=save and exit ");
+        .title(" Configuration ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Build vertical layout: 2 rows per field + 1 hint line
-    let field_rows: u16 = 2;
+    // Layout: per field → label row (1) + value row (1) + gap (1) = 3 rows each
+    // Plus a spacer + hint bar at bottom
     let mut constraints: Vec<Constraint> = state
         .fields
         .iter()
-        .map(|_| Constraint::Length(field_rows))
+        .flat_map(|_| [Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
         .collect();
     constraints.push(Constraint::Min(0)); // spacer
-    constraints.push(Constraint::Length(1)); // hint line
+    constraints.push(Constraint::Length(1)); // hint bar
     let sections = Layout::vertical(constraints).split(inner);
 
     for (i, field) in state.fields.iter().enumerate() {
-        let row_area = sections[i];
-        let sub = Layout::horizontal([Constraint::Length(22), Constraint::Min(0)]).split(row_area);
+        let label_area = sections[i * 3];
+        let value_area = sections[i * 3 + 1];
+        // sections[i * 3 + 2] is the gap row — intentionally empty
 
         let is_focused = i == state.focused;
-        let label_style = if is_focused {
-            theme::selected()
+
+        // Label row: "Label  hint"
+        let label_line = if field.hint.is_empty() {
+            ratatui::text::Line::from(ratatui::text::Span::styled(
+                field.label,
+                if is_focused { theme::selected() } else { theme::text() },
+            ))
         } else {
-            theme::text()
+            ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(
+                    field.label,
+                    if is_focused { theme::selected() } else { theme::text() },
+                ),
+                ratatui::text::Span::raw("  "),
+                ratatui::text::Span::styled(field.hint, theme::muted()),
+            ])
         };
+        frame.render_widget(Paragraph::new(label_line), label_area);
 
-        frame.render_widget(
-            Paragraph::new(format!("{}:", field.label)).style(label_style),
-            sub[0],
-        );
-
+        // Value row
         if is_focused && state.editing {
+            // Show input value with blinking cursor
             frame.render_widget(
-                Paragraph::new(format!("> {}", state.input.value()))
-                    .style(theme::input_style()),
-                sub[1],
+                Paragraph::new(state.input.value()).style(theme::input_style()),
+                value_area,
             );
+            // Set terminal cursor position
+            let cursor_x = value_area.x + state.input.visual_cursor() as u16;
+            let cursor_y = value_area.y;
+            frame.set_cursor_position((cursor_x, cursor_y));
         } else {
             let value_style = if is_focused {
-                theme::selected()
+                theme::border_focused() // TEAL for focused-not-editing
             } else {
                 theme::dim_text()
             };
             frame.render_widget(
                 Paragraph::new(field.value.clone()).style(value_style),
-                sub[1],
+                value_area,
             );
         }
     }
 
-    // Hint line is the last section
-    let hint_idx = state.fields.len() + 1;
+    // Hint bar
+    let hint_idx = state.fields.len() * 3 + 1;
     frame.render_widget(
-        Paragraph::new("↑↓ navigate  ENTER edit  ESC save & exit")
+        Paragraph::new("↑↓ navigate  ·  Enter edit  ·  Esc cancel  ·  Ctrl-S save")
             .style(theme::muted()),
         sections[hint_idx],
     );
