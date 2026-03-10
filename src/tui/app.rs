@@ -55,7 +55,7 @@ impl App {
         // Load repo cache if available
         let repos_cache = crate::core::repo::load_cache(&SpaceConfig::cache_path())
             .unwrap_or_default();
-        Ok(Self {
+        let mut app = Self {
             config,
             workspaces,
             repos_cache,
@@ -66,11 +66,25 @@ impl App {
             should_quit: false,
             space_cd_target: None,
             status_message: None,
-        })
+        };
+        app.load_selected_workspace_detail();
+        Ok(app)
     }
 
     pub fn selected_workspace(&self) -> Option<&Workspace> {
         self.workspaces.get(self.selected_ws)
+    }
+
+    pub fn load_selected_workspace_detail(&mut self) {
+        if let Some(ws) = self.workspaces.get(self.selected_ws) {
+            let name = ws.name.clone();
+            match workspace::workspace_detail(&self.config.workspaces.dir, &name) {
+                Ok(detail) => {
+                    self.workspaces[self.selected_ws] = detail;
+                }
+                Err(_) => {}
+            }
+        }
     }
 }
 
@@ -87,11 +101,13 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
         Message::SelectWorkspaceUp => {
             if app.selected_ws > 0 { app.selected_ws -= 1; }
             app.selected_repo = 0;
+            app.load_selected_workspace_detail();
             None
         }
         Message::SelectWorkspaceDown => {
             if app.selected_ws + 1 < app.workspaces.len() { app.selected_ws += 1; }
             app.selected_repo = 0;
+            app.load_selected_workspace_detail();
             None
         }
         Message::SelectRepoUp => {
