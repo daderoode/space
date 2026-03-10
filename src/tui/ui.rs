@@ -1,10 +1,10 @@
 use crate::tui::app::{App, Pane, Screen};
 use crate::tui::theme;
 use ratatui::{
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Row, Table, TableState},
+    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Row, Table, TableState},
     Frame,
 };
 
@@ -92,20 +92,28 @@ fn render_workspace_list(app: &App, frame: &mut Frame, area: Rect) {
         })
         .collect();
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border_style)
+        .title(" WORKSPACES ");
+
+    if app.workspaces.is_empty() {
+        let empty_msg = Paragraph::new("No workspaces yet\n\nPress c to create one")
+            .style(theme::muted())
+            .alignment(Alignment::Center)
+            .block(block);
+        frame.render_widget(empty_msg, area);
+        return;
+    }
+
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(border_style)
-                .title(" WORKSPACES "),
-        )
+        .block(block)
         .highlight_style(theme::selected())
         .highlight_symbol("> ");
 
     let mut state = ListState::default();
-    if !app.workspaces.is_empty() {
-        state.select(Some(app.selected_ws));
-    }
+    state.select(Some(app.selected_ws));
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -124,6 +132,7 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border_style)
         .title(format!(" {} ", ws_name));
 
@@ -189,11 +198,31 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
-    let msg = app.status_message.as_deref().unwrap_or(
-        "<enter> go  <c> create  <a> add  <d> delete  <r> refresh  </> search  <q> quit",
-    );
-    let bar = Paragraph::new(msg).style(theme::muted());
-    frame.render_widget(bar, area);
+    if let Some(msg) = &app.status_message {
+        frame.render_widget(Paragraph::new(msg.as_str()).style(theme::muted()), area);
+        return;
+    }
+
+    let sep = || Span::styled("  ·  ", theme::muted());
+    let key = |k: &'static str| Span::styled(k, theme::text());
+    let act = |a: &'static str| Span::styled(a, theme::muted());
+
+    let bar = Line::from(vec![
+        key("enter"), act(" go"),
+        sep(),
+        key("c"), act(" create"),
+        sep(),
+        key("a"), act(" add"),
+        sep(),
+        key("d"), act(" delete"),
+        sep(),
+        key("r"), act(" refresh"),
+        sep(),
+        key("/"), act(" search"),
+        sep(),
+        key("q"), act(" quit"),
+    ]);
+    frame.render_widget(Paragraph::new(bar), area);
 }
 
 fn render_create_overlay(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
@@ -215,6 +244,7 @@ fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &m
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(theme::border_focused())
         .title(" Workspace Name ");
     let inner = block.inner(area);
@@ -252,6 +282,7 @@ fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, fram
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(theme::border_focused())
         .title(" Branch Strategy ");
     let inner = block.inner(area);
@@ -285,6 +316,7 @@ fn render_creating_progress(state: &crate::tui::screens::create::CreateState, fr
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(theme::border_focused())
         .title(" Creating Workspace ");
     let inner = block.inner(area);
@@ -340,6 +372,7 @@ fn render_add_branch_strategy(state: &crate::tui::screens::add::AddState, frame:
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(theme::border_focused())
         .title(" Branch Strategy ");
     let inner = block.inner(area);
@@ -373,6 +406,7 @@ fn render_add_progress(state: &crate::tui::screens::add::AddState, frame: &mut F
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(theme::border_focused())
         .title(" Adding Repos ");
     let inner = block.inner(area);
@@ -418,6 +452,7 @@ fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(theme::border_danger())
         .title(" Confirm Delete ");
     let inner = block.inner(area);
@@ -449,8 +484,7 @@ fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame
 }
 
 fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame: &mut Frame) {
-    use crate::tui::theme;
-    use ratatui::widgets::{BorderType, Clear};
+    use ratatui::widgets::Clear;
 
     let area = frame.area();
     frame.render_widget(Clear, area);

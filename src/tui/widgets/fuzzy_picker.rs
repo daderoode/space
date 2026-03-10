@@ -230,7 +230,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame,
 };
 
@@ -278,6 +278,7 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
 
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(theme::border_focused())
         .title(format!(" {} ", picker.prompt));
 
