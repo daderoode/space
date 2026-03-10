@@ -1,10 +1,10 @@
 use crate::tui::app::{App, Pane, Screen};
 use ratatui::{
-    Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Row, Table, TableState},
+    Frame,
 };
 
 pub fn view(app: &App, frame: &mut Frame) {
@@ -39,9 +39,9 @@ fn render_dashboard(app: &App, frame: &mut Frame) {
 
     // Outer layout: title bar / main / status bar
     let outer = Layout::vertical([
-        Constraint::Length(1),  // title
-        Constraint::Min(0),     // main
-        Constraint::Length(1),  // status bar
+        Constraint::Length(1), // title
+        Constraint::Min(0),    // main
+        Constraint::Length(1), // status bar
     ])
     .split(area);
 
@@ -52,7 +52,12 @@ fn render_dashboard(app: &App, frame: &mut Frame) {
 
 fn render_title(frame: &mut Frame, area: Rect) {
     let title = Line::from(vec![
-        Span::styled(" space ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " space ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             format!("v{}", env!("CARGO_PKG_VERSION")),
             Style::default().fg(Color::DarkGray),
@@ -62,11 +67,8 @@ fn render_title(frame: &mut Frame, area: Rect) {
 }
 
 fn render_main(app: &App, frame: &mut Frame, area: Rect) {
-    let panes = Layout::horizontal([
-        Constraint::Percentage(30),
-        Constraint::Percentage(70),
-    ])
-    .split(area);
+    let panes =
+        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).split(area);
 
     render_workspace_list(app, frame, panes[0]);
     render_repo_table(app, frame, panes[1]);
@@ -139,10 +141,7 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
         .unwrap_or(&[]);
 
     if repos.is_empty() {
-        frame.render_widget(
-            Paragraph::new("  No repos").block(block),
-            area,
-        );
+        frame.render_widget(Paragraph::new("  No repos").block(block), area);
         return;
     }
 
@@ -277,8 +276,11 @@ fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, fram
         .enumerate()
         .map(|(i, opt)| {
             if i == state.branch_strategy_idx {
-                ListItem::new(format!("> {}", opt))
-                    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                ListItem::new(format!("> {}", opt)).style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
                 ListItem::new(format!("  {}", opt))
             }
@@ -326,8 +328,7 @@ fn render_creating_progress(state: &crate::tui::screens::create::CreateState, fr
         );
     } else {
         frame.render_widget(
-            Paragraph::new("Done! [ENTER to continue]")
-                .style(Style::default().fg(Color::Green)),
+            Paragraph::new("Done! [ENTER to continue]").style(Style::default().fg(Color::Green)),
             sections[1],
         );
     }
@@ -367,8 +368,11 @@ fn render_add_branch_strategy(state: &crate::tui::screens::add::AddState, frame:
         .enumerate()
         .map(|(i, opt)| {
             if i == state.branch_strategy_idx {
-                ListItem::new(format!("> {}", opt))
-                    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                ListItem::new(format!("> {}", opt)).style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
                 ListItem::new(format!("  {}", opt))
             }
@@ -416,8 +420,7 @@ fn render_add_progress(state: &crate::tui::screens::add::AddState, frame: &mut F
         );
     } else {
         frame.render_widget(
-            Paragraph::new("Done! [ENTER to continue]")
-                .style(Style::default().fg(Color::Green)),
+            Paragraph::new("Done! [ENTER to continue]").style(Style::default().fg(Color::Green)),
             sections[1],
         );
     }
@@ -439,7 +442,9 @@ fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
             format!("Remove workspace '{}'?", state.workspace_name),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
@@ -475,7 +480,9 @@ fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame:
 
     // Build vertical layout: 2 rows per field + 1 hint line
     let field_rows: u16 = 2;
-    let mut constraints: Vec<Constraint> = state.fields.iter()
+    let mut constraints: Vec<Constraint> = state
+        .fields
+        .iter()
         .map(|_| Constraint::Length(field_rows))
         .collect();
     constraints.push(Constraint::Min(0)); // spacer
@@ -484,14 +491,13 @@ fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame:
 
     for (i, field) in state.fields.iter().enumerate() {
         let row_area = sections[i];
-        let sub = Layout::horizontal([
-            Constraint::Length(22),
-            Constraint::Min(0),
-        ]).split(row_area);
+        let sub = Layout::horizontal([Constraint::Length(22), Constraint::Min(0)]).split(row_area);
 
         let is_focused = i == state.focused;
         let label_style = if is_focused {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };

@@ -1,5 +1,4 @@
 use crate::tui::widgets::fuzzy_picker::{FuzzyPicker, PickerItem};
-use std::path::PathBuf;
 
 pub struct GoState {
     pub picker: FuzzyPicker,
@@ -16,11 +15,7 @@ impl GoState {
             })
             .collect();
         GoState {
-            picker: FuzzyPicker::new(
-                "Go to workspace  ENTER=go  ESC=cancel",
-                items,
-                false,
-            ),
+            picker: FuzzyPicker::new("Go to workspace  ENTER=go  ESC=cancel", items, false),
         }
     }
 }

@@ -1,7 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use nucleo::{Config as NucleoConfig, Utf32Str};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use walkdir::WalkDir;
 
 /// Walk `roots` up to `max_depth` levels, returning paths that contain `.git`.
@@ -44,8 +43,8 @@ pub fn find_repos_in(roots: &[PathBuf], max_depth: u32) -> Vec<PathBuf> {
     repos
 }
 
-/// Fuzzy-match `query` against a list of repo paths using nucleo.
-/// Matches against the full path string; returns results sorted by score descending.
+/// Fuzzy-matches repo paths against a query string. Used in tests.
+#[allow(dead_code)]
 pub fn fuzzy_match(query: &str, repos: &[PathBuf]) -> Vec<PathBuf> {
     if query.is_empty() {
         return repos.to_vec();
@@ -85,37 +84,6 @@ pub fn load_cache(path: &Path) -> Option<Vec<PathBuf>> {
             .map(PathBuf::from)
             .collect(),
     )
-}
-
-/// Initialise a non-git directory as a git repo with an empty initial commit.
-pub fn init_repo(path: &Path) -> Result<()> {
-    let home_name = std::env::var("USER").unwrap_or_else(|_| "space".to_string());
-    let init_status = Command::new("git")
-        .args(["init"])
-        .current_dir(path)
-        .status()
-        .with_context(|| format!("git init at {}", path.display()))?;
-    if !init_status.success() {
-        anyhow::bail!("git init failed at {}", path.display());
-    }
-    // Set local identity so commit doesn't fail if global config missing
-    let _ = Command::new("git")
-        .args(["config", "user.email", "space@local"])
-        .current_dir(path)
-        .status();
-    let _ = Command::new("git")
-        .args(["config", "user.name", &home_name])
-        .current_dir(path)
-        .status();
-    let commit_status = Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "initial commit"])
-        .current_dir(path)
-        .status()
-        .with_context(|| "initial commit failed")?;
-    if !commit_status.success() {
-        anyhow::bail!("initial commit failed at {}", path.display());
-    }
-    Ok(())
 }
 
 /// Write repo paths to a newline-delimited cache file.

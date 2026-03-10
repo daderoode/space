@@ -8,11 +8,7 @@ impl SearchState {
     pub fn new(repos: Vec<std::path::PathBuf>) -> Self {
         let items: Vec<PickerItem> = repos.into_iter().map(PickerItem::from_path).collect();
         SearchState {
-            picker: FuzzyPicker::new(
-                "Search repos  ENTER=navigate  ESC=cancel",
-                items,
-                false,
-            ),
+            picker: FuzzyPicker::new("Search repos  ENTER=navigate  ESC=cancel", items, false),
         }
     }
 }

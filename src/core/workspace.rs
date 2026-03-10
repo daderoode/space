@@ -139,16 +139,25 @@ pub fn create_worktree(
             } else if remote_exists {
                 Command::new("git")
                     .args([
-                        "worktree", "add", "--track", "-b", branch_name,
-                        &wt_path.to_string_lossy(), &remote_ref,
+                        "worktree",
+                        "add",
+                        "--track",
+                        "-b",
+                        branch_name,
+                        &wt_path.to_string_lossy(),
+                        &remote_ref,
                     ])
                     .current_dir(repo_path)
                     .status()
             } else {
                 Command::new("git")
                     .args([
-                        "worktree", "add", "-b", branch_name,
-                        &wt_path.to_string_lossy(), &base_branch,
+                        "worktree",
+                        "add",
+                        "-b",
+                        branch_name,
+                        &wt_path.to_string_lossy(),
+                        &base_branch,
                     ])
                     .current_dir(repo_path)
                     .status()

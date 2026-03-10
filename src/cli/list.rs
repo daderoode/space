@@ -13,11 +13,13 @@ pub fn run(verbose: bool) -> Result<()> {
 
     for ws in &workspaces {
         if verbose {
-            let detail = workspace::workspace_detail(&cfg.workspaces.dir, &ws.name)
-                .unwrap_or_else(|_| workspace::Workspace {
-                    name: ws.name.clone(),
-                    path: ws.path.clone(),
-                    repos: vec![],
+            let detail =
+                workspace::workspace_detail(&cfg.workspaces.dir, &ws.name).unwrap_or_else(|_| {
+                    workspace::Workspace {
+                        name: ws.name.clone(),
+                        path: ws.path.clone(),
+                        repos: vec![],
+                    }
                 });
             println!("{}  ({} repos)", ws.name.cyan().bold(), detail.repos.len());
             for repo in &detail.repos {

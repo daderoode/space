@@ -8,7 +8,7 @@ fn init_bare_repo(dir: &std::path::Path) {
         .output()
         .unwrap();
     Command::new("git")
-        .args(["config", "user.email", "test@example.com"])
+        .args(["config", "user.email", "space@local"])
         .current_dir(dir)
         .output()
         .unwrap();

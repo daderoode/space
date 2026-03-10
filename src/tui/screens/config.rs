@@ -23,7 +23,10 @@ impl ConfigState {
             },
             ConfigField {
                 label: "Repo roots",
-                value: config.repos.roots.iter()
+                value: config
+                    .repos
+                    .roots
+                    .iter()
                     .map(|p| p.display().to_string())
                     .collect::<Vec<_>>()
                     .join(", "),
@@ -43,7 +46,7 @@ impl ConfigState {
 
     pub fn start_editing(&mut self) {
         let value = self.fields[self.focused].value.clone();
-        self.input = self.input.clone().with_value(value.into());
+        self.input = self.input.clone().with_value(value);
         self.editing = true;
     }
 
@@ -65,18 +68,22 @@ impl ConfigState {
         let mut config = base;
 
         // Field 0: workspaces dir
-        if let Some(f) = self.fields.get(0) {
+        if let Some(f) = self.fields.first() {
             config.workspaces.dir = std::path::PathBuf::from(&f.value);
         }
         // Field 1: repo roots (comma-separated)
         if let Some(f) = self.fields.get(1) {
-            config.repos.roots = f.value.split(',')
+            config.repos.roots = f
+                .value
+                .split(',')
                 .map(|s| std::path::PathBuf::from(s.trim()))
                 .collect();
         }
         // Field 2: max depth — return error if not a valid number
         if let Some(f) = self.fields.get(2) {
-            config.repos.max_depth = f.value.parse::<u32>()
+            config.repos.max_depth = f
+                .value
+                .parse::<u32>()
                 .map_err(|_| anyhow::anyhow!("Max depth must be a number, got: '{}'", f.value))?;
         }
 

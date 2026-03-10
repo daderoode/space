@@ -9,7 +9,7 @@ fn init_repo(dir: &std::path::Path) {
         .output()
         .unwrap();
     Command::new("git")
-        .args(["config", "user.email", "test@example.com"])
+        .args(["config", "user.email", "space@local"])
         .current_dir(dir)
         .output()
         .unwrap();
@@ -90,7 +90,11 @@ fn create_worktree_reuses_existing_local_branch() {
         "my-feature",
         &BranchStrategy::NewBranch("my-feature".to_string()),
     );
-    assert!(result.is_ok(), "should reuse existing local branch: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "should reuse existing local branch: {:?}",
+        result
+    );
     assert!(result.unwrap().join(".git").exists());
 }
 

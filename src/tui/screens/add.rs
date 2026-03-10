@@ -12,7 +12,6 @@ pub enum AddStage {
 pub struct AddState {
     pub stage: AddStage,
     pub workspace_name: String,
-    pub workspace_path: PathBuf,
     pub picker: FuzzyPicker,
     pub selected_repos: Vec<PathBuf>,
     pub branch_strategy_idx: usize,
@@ -23,7 +22,6 @@ pub struct AddState {
 impl AddState {
     pub fn new(
         ws_name: String,
-        ws_path: PathBuf,
         available_repos: Vec<PathBuf>,
         initial_queries: Vec<String>,
     ) -> Self {
@@ -38,13 +36,12 @@ impl AddState {
         );
         // Pre-populate query if args were passed
         if !initial_queries.is_empty() {
-            picker.input = picker.input.with_value(initial_queries.join(" ").into());
+            picker.input = picker.input.with_value(initial_queries.join(" "));
             picker.refilter();
         }
         Self {
             stage: AddStage::PickRepos,
             workspace_name: ws_name,
-            workspace_path: ws_path,
             picker,
             selected_repos: vec![],
             branch_strategy_idx: 0,

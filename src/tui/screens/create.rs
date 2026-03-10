@@ -44,7 +44,7 @@ impl CreateState {
         );
         // Pre-populate query if args were passed
         if !initial_queries.is_empty() {
-            picker.input = picker.input.with_value(initial_queries.join(" ").into());
+            picker.input = picker.input.with_value(initial_queries.join(" "));
             picker.refilter();
         }
         Self {

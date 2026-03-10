@@ -1,8 +1,8 @@
-use crate::Commands;
-use anyhow::Result;
 use crate::tui;
 use crate::tui::app::{App, Screen};
 use crate::tui::screens;
+use crate::Commands;
+use anyhow::Result;
 
 pub mod go;
 pub mod list;
@@ -69,14 +69,8 @@ pub fn dispatch(cmd: Commands) -> Result<()> {
                 })
                 .cloned()
                 .collect();
-            let ws_path = app
-                .workspaces
-                .get(app.selected_ws)
-                .map(|w| w.path.clone())
-                .unwrap_or_else(|| app.config.workspaces.dir.join(&workspace));
             app.screen = Screen::AddRepos(screens::add::AddState::new(
                 workspace.clone(),
-                ws_path,
                 available,
                 repos,
             ));
@@ -92,19 +86,15 @@ pub fn dispatch(cmd: Commands) -> Result<()> {
 
         Commands::Rm { name, force: false } => {
             let mut app = App::new()?;
-            // Build DeleteState: find workspace to get its path and repos
+            // Build DeleteState: find workspace to get repo names for display
             let ws_detail = app.workspaces.iter().find(|w| w.name == name);
-            let (ws_path, repo_names) = if let Some(ws) = ws_detail {
-                (
-                    ws.path.clone(),
-                    ws.repos.iter().map(|r| r.name.clone()).collect(),
-                )
+            let repo_names: Vec<String> = if let Some(ws) = ws_detail {
+                ws.repos.iter().map(|r| r.name.clone()).collect()
             } else {
-                (app.config.workspaces.dir.join(&name), vec![])
+                vec![]
             };
             app.screen = Screen::ConfirmDelete(screens::delete::DeleteState {
                 workspace_name: name.clone(),
-                workspace_path: ws_path,
                 repo_names,
             });
             run_tui_and_emit_cd(&mut app)
@@ -114,29 +104,4 @@ pub fn dispatch(cmd: Commands) -> Result<()> {
 
         Commands::Completions { shell } => crate::shell::print_completions(&shell),
     }
-}
-
-use crate::core::{config::SpaceConfig, repo, workspace::BranchStrategy};
-use std::path::Path;
-
-/// Interactively pick a branch strategy for a given repo.
-/// Stub — dialoguer removed in v0.2.0 (Task 10/11 will rewrite with TUI).
-pub fn pick_branch_strategy(_repo_path: &Path, ws_name: &str) -> Result<BranchStrategy> {
-    Ok(BranchStrategy::NewBranch(ws_name.to_string()))
-}
-
-/// Resolve repo arg strings to paths using the cache + fuzzy match.
-pub fn resolve_repos(args: &[String], cfg: &SpaceConfig) -> Vec<std::path::PathBuf> {
-    let cache_path = SpaceConfig::cache_path();
-    let all_repos = repo::load_cache(&cache_path)
-        .unwrap_or_else(|| repo::find_repos_in(&cfg.repos.roots, cfg.repos.max_depth));
-    args.iter()
-        .flat_map(|q| {
-            let matches = repo::fuzzy_match(q, &all_repos);
-            if matches.is_empty() {
-                eprintln!("warning: no repo matching '{}'", q);
-            }
-            matches.into_iter().take(1)
-        })
-        .collect()
 }
