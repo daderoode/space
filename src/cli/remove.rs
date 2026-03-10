@@ -1,5 +1,12 @@
-// dialoguer removed in v0.2.0 — stub until TUI rewrite (Task 10/11)
 use anyhow::Result;
-pub fn run(_name: &str, _force: bool) -> Result<()> {
-    anyhow::bail!("not yet implemented in v0.2.0 — use TUI")
+use crate::core::{config::SpaceConfig, workspace};
+
+pub fn run(name: &str, force: bool) -> Result<()> {
+    if !force {
+        unreachable!("non-force remove handled by TUI in dispatch");
+    }
+    let cfg = SpaceConfig::load()?;
+    workspace::remove_workspace(&cfg.workspaces.dir, name, true)?;
+    println!("Removed workspace '{}'", name);
+    Ok(())
 }

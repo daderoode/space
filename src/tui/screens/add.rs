@@ -21,16 +21,26 @@ pub struct AddState {
 }
 
 impl AddState {
-    pub fn new(ws_name: String, ws_path: PathBuf, available_repos: Vec<PathBuf>) -> Self {
+    pub fn new(
+        ws_name: String,
+        ws_path: PathBuf,
+        available_repos: Vec<PathBuf>,
+        initial_queries: Vec<String>,
+    ) -> Self {
         let items: Vec<PickerItem> = available_repos
             .into_iter()
             .map(PickerItem::from_path)
             .collect();
-        let picker = FuzzyPicker::new(
+        let mut picker = FuzzyPicker::new(
             "Add repos  TAB=toggle  ENTER=confirm  ESC=cancel",
             items,
             true,
         );
+        // Pre-populate query if args were passed
+        if !initial_queries.is_empty() {
+            picker.input = picker.input.with_value(initial_queries.join(" ").into());
+            picker.refilter();
+        }
         Self {
             stage: AddStage::PickRepos,
             workspace_name: ws_name,

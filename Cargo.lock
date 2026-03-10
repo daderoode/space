@@ -1912,6 +1912,7 @@ dependencies = [
  "clap",
  "color-eyre",
  "colored",
+ "crossterm 0.28.1",
  "dirs",
  "git2",
  "indicatif",

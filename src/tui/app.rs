@@ -216,6 +216,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                     ws.name.clone(),
                     ws.path.clone(),
                     available,
+                    vec![],
                 );
                 app.screen = Screen::AddRepos(state);
             }

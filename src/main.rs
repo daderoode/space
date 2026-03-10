@@ -1,18 +1,23 @@
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 
 mod cli;
 mod core;
 mod shell;
+mod tui;
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    match cli.command {
-        Some(cmd) => cli::dispatch(cmd),
+    let cli_args = Cli::parse();
+    match cli_args.command {
         None => {
-            // TUI deferred to v0.2.0 — print help for now
-            Cli::command().print_help()?;
+            // No args → TUI dashboard
+            let mut app = tui::app::App::new()?;
+            tui::app::run(&mut app)?;
+            if let Some(path) = app.space_cd_target {
+                println!("__SPACE_CD__:{}", path.display());
+            }
             Ok(())
         }
+        Some(cmd) => cli::dispatch(cmd),
     }
 }
 
