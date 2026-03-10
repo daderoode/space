@@ -141,13 +141,16 @@ fn run_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
 ) -> Result<()> {
-    use ratatui::crossterm::event::{self, Event, KeyCode};
+    use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
     loop {
         terminal.draw(|frame| crate::tui::ui::view(app, frame))?;
 
         if event::poll(std::time::Duration::from_millis(16))? {
             if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
                 let msg = match (key.code, key.modifiers) {
                     (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => Some(Message::Quit),
                     (KeyCode::Tab, _) => Some(Message::FocusNext),

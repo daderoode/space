@@ -34,9 +34,16 @@ pub fn run(verbose: bool) -> Result<()> {
                 );
             }
         } else {
-            // Count repos from directory listing
+            // Count git worktrees (dirs with a .git file/dir) to match verbose output
             let repo_count = std::fs::read_dir(&ws.path)
-                .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.path().is_dir()).count())
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .filter(|e| {
+                            let p = e.path();
+                            p.is_dir() && p.join(".git").exists()
+                        })
+                        .count()
+                })
                 .unwrap_or(0);
             println!("{}  ({} repos)", ws.name.cyan().bold(), repo_count);
         }
