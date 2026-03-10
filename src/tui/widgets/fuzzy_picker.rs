@@ -41,6 +41,7 @@ pub struct FuzzyPicker {
     pub scope: Option<String>,
     pub available_scopes: Vec<String>,
     pub scope_idx: usize,
+    pub match_indices: Vec<Vec<u32>>, // parallel to `filtered` — match char positions per item
 }
 
 impl FuzzyPicker {
@@ -66,6 +67,7 @@ impl FuzzyPicker {
             scope: None,
             available_scopes: scopes,
             scope_idx: 0,
+            match_indices: vec![],
         };
         picker.refilter();
         picker
@@ -126,6 +128,7 @@ impl FuzzyPicker {
             .collect();
 
         if query.is_empty() {
+            self.match_indices = vec![vec![]; scoped.len()];
             self.filtered = scoped;
         } else {
             let mut matcher = nucleo::Matcher::new(NucleoConfig::DEFAULT);
@@ -136,20 +139,26 @@ impl FuzzyPicker {
                 AtomKind::Fuzzy,
             );
 
-            let mut scored: Vec<(u32, usize)> = scoped
+            let mut scored: Vec<(u32, usize, Vec<u32>)> = scoped
                 .iter()
                 .filter_map(|&i| {
                     let item = &self.all_items[i];
-                    // Match against "name (parent)" combined string
+                    // Match against "name parent" combined string
                     let display = format!("{} {}", item.name, item.parent);
                     let mut buf = Vec::new();
                     let haystack = Utf32Str::new(&display, &mut buf);
-                    pattern.score(haystack, &mut matcher).map(|s| (s, i))
+                    let score = pattern.score(haystack, &mut matcher)?;
+                    let mut indices: Vec<u32> = Vec::new();
+                    pattern.indices(haystack, &mut matcher, &mut indices);
+                    indices.sort_unstable();
+                    indices.dedup();
+                    Some((score, i, indices))
                 })
                 .collect();
 
             scored.sort_by(|a, b| b.0.cmp(&a.0));
-            self.filtered = scored.into_iter().map(|(_, i)| i).collect();
+            self.filtered = scored.iter().map(|(_, i, _)| *i).collect();
+            self.match_indices = scored.into_iter().map(|(_, _, idx)| idx).collect();
         }
 
         // Clamp highlight
@@ -219,11 +228,46 @@ impl FuzzyPicker {
 use crate::tui::theme;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame,
 };
+
+/// Build a list of styled spans for `text`, highlighting characters whose byte
+/// positions appear in `indices` with `highlight` and the rest with `normal`.
+fn build_highlighted_spans<'a>(
+    text: &'a str,
+    indices: &[u32],
+    normal: Style,
+    highlight: Style,
+) -> Vec<Span<'a>> {
+    let match_set: HashSet<usize> = indices
+        .iter()
+        .map(|&i| i as usize)
+        .filter(|&i| i < text.len())
+        .collect();
+
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    let mut current = String::new();
+    let mut current_is_match = false;
+
+    for (byte_idx, ch) in text.char_indices() {
+        let is_match = match_set.contains(&byte_idx);
+        if is_match != current_is_match && !current.is_empty() {
+            let style = if current_is_match { highlight } else { normal };
+            spans.push(Span::styled(current.clone(), style));
+            current.clear();
+        }
+        current_is_match = is_match;
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        let style = if current_is_match { highlight } else { normal };
+        spans.push(Span::styled(current, style));
+    }
+    spans
+}
 
 /// Render the picker as a centered overlay popup.
 pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
@@ -259,6 +303,10 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
         Paragraph::new(input_text).style(theme::text()),
         sections[0],
     );
+    // Show cursor at correct position (offset +2 for "> " prefix)
+    let cursor_x = sections[0].x + 2 + picker.input.visual_cursor() as u16;
+    let cursor_y = sections[0].y;
+    frame.set_cursor_position((cursor_x, cursor_y));
 
     // Scope line
     if show_scope {
@@ -277,22 +325,39 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
     }
 
     // Items list
+    let highlight_style = Style::default()
+        .fg(theme::MINT)
+        .add_modifier(Modifier::BOLD);
+
     let visible_items: Vec<ListItem> = picker
         .filtered
         .iter()
-        .map(|&i| {
+        .enumerate()
+        .map(|(list_idx, &i)| {
             let item = &picker.all_items[i];
             let toggled = picker.toggled.contains(&i);
             let dot = if toggled { "● " } else { "  " };
-            let line = Line::from(vec![
-                Span::styled(dot, Style::default().fg(theme::TEAL)),
-                Span::raw(item.name.clone()),
-                Span::styled(
-                    format!("  ({})", item.parent),
-                    theme::muted(),
-                ),
-            ]);
-            ListItem::new(line)
+
+            let indices = picker
+                .match_indices
+                .get(list_idx)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            let name_spans = build_highlighted_spans(
+                &item.name,
+                indices,
+                theme::text(),
+                highlight_style,
+            );
+
+            let mut line_spans = vec![Span::styled(dot, Style::default().fg(theme::TEAL))];
+            line_spans.extend(name_spans);
+            line_spans.push(Span::styled(
+                format!("  ({})", item.parent),
+                theme::muted(),
+            ));
+
+            ListItem::new(Line::from(line_spans))
         })
         .collect();
 
