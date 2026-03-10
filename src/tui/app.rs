@@ -600,7 +600,7 @@ fn handle_add_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
 fn do_add(app: &mut App) {
     use crate::core::workspace::create_worktree;
 
-    let (ws_name, ws_path, strategy, repos, ws_dir) = {
+    let (ws_name, _ws_path, strategy, repos, ws_dir) = {
         let Screen::AddRepos(ref st) = app.screen else { return; };
         (
             st.workspace_name.clone(),
@@ -628,10 +628,6 @@ fn do_add(app: &mut App) {
             let Screen::AddRepos(ref mut st) = app.screen else { return; };
             st.progress.push(format!("Adding worktree for {}...", repo_name));
         }
-
-        // Create the worktree in ws_dir/<ws_name>/<repo_name> — same layout as create
-        let worktree_target = ws_dir.join(&ws_name).join(&repo_name);
-        let _ = std::fs::create_dir_all(worktree_target.parent().unwrap_or(&ws_dir));
 
         match create_worktree(repo_path, &ws_dir, &ws_name, &strategy) {
             Ok(_) => {
