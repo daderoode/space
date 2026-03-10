@@ -56,9 +56,13 @@ impl ConfigState {
         self.editing = false;
     }
 
-    /// Apply fields back to a SpaceConfig and save.
-    pub fn save_to_config(&self) -> anyhow::Result<crate::core::config::SpaceConfig> {
-        let mut config = crate::core::config::SpaceConfig::load()?;
+    /// Apply fields back to the provided base config and save to disk.
+    /// Takes the in-memory config as base (avoids TOCTOU with re-loading from disk).
+    pub fn save_to_config(
+        &self,
+        base: crate::core::config::SpaceConfig,
+    ) -> anyhow::Result<crate::core::config::SpaceConfig> {
+        let mut config = base;
 
         // Field 0: workspaces dir
         if let Some(f) = self.fields.get(0) {
@@ -70,11 +74,10 @@ impl ConfigState {
                 .map(|s| std::path::PathBuf::from(s.trim()))
                 .collect();
         }
-        // Field 2: max depth
+        // Field 2: max depth — return error if not a valid number
         if let Some(f) = self.fields.get(2) {
-            if let Ok(d) = f.value.parse::<u32>() {
-                config.repos.max_depth = d;
-            }
+            config.repos.max_depth = f.value.parse::<u32>()
+                .map_err(|_| anyhow::anyhow!("Max depth must be a number, got: '{}'", f.value))?;
         }
 
         config.save()?;

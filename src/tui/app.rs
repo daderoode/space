@@ -66,6 +66,7 @@ pub enum Message {
     SelectRepoUp,
     SelectRepoDown,
     GoToWorkspace,
+    StartGo,
     StartCreate,
     StartAdd,
     StartDelete,
@@ -190,6 +191,11 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 vec![],
             );
             app.screen = Screen::CreateWorkspace(state);
+            None
+        }
+        Message::StartGo => {
+            let state = crate::tui::screens::go::GoState::new(&app.workspaces);
+            app.screen = Screen::GoWorkspace(state);
             None
         }
         Message::StartAdd => {
@@ -777,10 +783,11 @@ fn handle_config_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
         // Not editing: navigate fields, Enter=edit, Esc=save+exit
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
-                // Save config and return to dashboard
+                // Save config and return to dashboard (pass in-memory config as base)
+                let base_config = app.config.clone();
                 let result = {
                     let Screen::ConfigEditor(ref st) = app.screen else { return; };
-                    st.save_to_config()
+                    st.save_to_config(base_config)
                 };
                 match result {
                     Ok(new_config) => {
@@ -850,6 +857,7 @@ fn run_loop(
                         (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => Some(Message::Quit),
                         (KeyCode::Tab, _) => Some(Message::FocusNext),
                         (KeyCode::Enter, _) => Some(Message::GoToWorkspace),
+                        (KeyCode::Char('g'), _) => Some(Message::StartGo),
                         (KeyCode::Char('c'), _) => Some(Message::StartCreate),
                         (KeyCode::Char('a'), _) => Some(Message::StartAdd),
                         (KeyCode::Char('d'), _) => Some(Message::StartDelete),

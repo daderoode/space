@@ -473,24 +473,21 @@ fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame:
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let field_height = (state.fields.len() as u16) * 3 + 2;
-    let sections = Layout::vertical([
-        Constraint::Length(field_height),
-        Constraint::Min(0),
-    ]).split(inner);
-
-    let field_area = sections[0];
-    let row_height = field_area.height / (state.fields.len() as u16).max(1);
+    // Build vertical layout: 2 rows per field + 1 hint line
+    let field_rows: u16 = 2;
+    let mut constraints: Vec<Constraint> = state.fields.iter()
+        .map(|_| Constraint::Length(field_rows))
+        .collect();
+    constraints.push(Constraint::Min(0)); // spacer
+    constraints.push(Constraint::Length(1)); // hint line
+    let sections = Layout::vertical(constraints).split(inner);
 
     for (i, field) in state.fields.iter().enumerate() {
-        let y = field_area.y + (i as u16) * row_height;
-        let label_area = Rect { x: field_area.x, y, width: 20, height: 1 };
-        let value_area = Rect {
-            x: field_area.x + 22,
-            y,
-            width: field_area.width.saturating_sub(22),
-            height: 1,
-        };
+        let row_area = sections[i];
+        let sub = Layout::horizontal([
+            Constraint::Length(22),
+            Constraint::Min(0),
+        ]).split(row_area);
 
         let is_focused = i == state.focused;
         let label_style = if is_focused {
@@ -501,14 +498,14 @@ fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame:
 
         frame.render_widget(
             Paragraph::new(format!("{}:", field.label)).style(label_style),
-            label_area,
+            sub[0],
         );
 
         if is_focused && state.editing {
             frame.render_widget(
                 Paragraph::new(format!("> {}", state.input.value()))
                     .style(Style::default().fg(Color::Yellow)),
-                value_area,
+                sub[1],
             );
         } else {
             let value_style = if is_focused {
@@ -518,21 +515,17 @@ fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame:
             };
             frame.render_widget(
                 Paragraph::new(field.value.clone()).style(value_style),
-                value_area,
+                sub[1],
             );
         }
     }
 
-    let hint_area = Rect {
-        x: inner.x,
-        y: inner.y + inner.height.saturating_sub(1),
-        width: inner.width,
-        height: 1,
-    };
+    // Hint line is the last section
+    let hint_idx = state.fields.len() + 1;
     frame.render_widget(
         Paragraph::new("↑↓ navigate  ENTER edit  ESC save & exit")
             .style(Style::default().fg(Color::DarkGray)),
-        hint_area,
+        sections[hint_idx],
     );
 }
 
