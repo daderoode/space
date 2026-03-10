@@ -1,1 +1,2 @@
-// widgets added in task 6
+pub mod fuzzy_picker;
+pub use fuzzy_picker::FuzzyPicker;
