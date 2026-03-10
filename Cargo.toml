@@ -20,6 +20,7 @@ path = "src/lib.rs"
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
 colored = "3"
+crossterm = "0.28"
 git2 = { version = "0.19", default-features = false }
 nucleo = "0.5"
 ratatui = "0.30.0"

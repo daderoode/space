@@ -10,6 +10,11 @@ use ratatui::{
 pub fn view(app: &App, frame: &mut Frame) {
     match &app.screen {
         Screen::Dashboard => render_dashboard(app, frame),
+        Screen::CreateWorkspace(state) => {
+            // Render dashboard behind the overlay
+            render_dashboard(app, frame);
+            render_create_overlay(state, frame);
+        }
     }
 }
 
@@ -182,4 +187,143 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     );
     let bar = Paragraph::new(msg).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(bar, area);
+}
+
+fn render_create_overlay(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
+    use crate::tui::screens::create::CreateStage;
+    match &state.stage {
+        CreateStage::PickRepos => {
+            crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
+        }
+        CreateStage::NameWorkspace => render_name_input(state, frame),
+        CreateStage::PickBranchStrategy => render_branch_strategy(state, frame),
+        CreateStage::Creating => render_creating_progress(state, frame),
+    }
+}
+
+fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
+    use ratatui::widgets::Clear;
+    let area = centered_rect_fixed(50, 7, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Workspace Name ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let sections = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new("Enter workspace name:").style(Style::default().fg(Color::White)),
+        sections[0],
+    );
+    frame.render_widget(
+        Paragraph::new(format!("> {}", state.ws_name.value()))
+            .style(Style::default().fg(Color::Cyan)),
+        sections[1],
+    );
+    if let Some(err) = &state.error {
+        frame.render_widget(
+            Paragraph::new(err.as_str()).style(Style::default().fg(Color::Red)),
+            sections[2],
+        );
+    }
+}
+
+fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
+    use ratatui::widgets::Clear;
+    let area = centered_rect_fixed(50, 9, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Branch Strategy ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let options = [
+        format!("New branch '{}'", state.ws_name.value()),
+        "Detached HEAD".to_string(),
+        "Detached HEAD (force)".to_string(),
+    ];
+
+    let items: Vec<ListItem> = options
+        .iter()
+        .enumerate()
+        .map(|(i, opt)| {
+            if i == state.branch_strategy_idx {
+                ListItem::new(format!("> {}", opt))
+                    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            } else {
+                ListItem::new(format!("  {}", opt))
+            }
+        })
+        .collect();
+
+    frame.render_widget(List::new(items), inner);
+}
+
+fn render_creating_progress(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
+    use ratatui::widgets::Clear;
+    let area = centered_rect_fixed(60, 15, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Creating Workspace ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines: Vec<Line> = state
+        .progress
+        .iter()
+        .map(|l| {
+            if l.starts_with("  \u{2713}") {
+                Line::from(Span::styled(l.clone(), Style::default().fg(Color::Green)))
+            } else if l.starts_with("  \u{2717}") {
+                Line::from(Span::styled(l.clone(), Style::default().fg(Color::Red)))
+            } else {
+                Line::from(Span::raw(l.clone()))
+            }
+        })
+        .collect();
+
+    let sections = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(inner);
+
+    frame.render_widget(Paragraph::new(lines), sections[0]);
+
+    if let Some(err) = &state.error {
+        frame.render_widget(
+            Paragraph::new(format!("Error: {}  [ESC to dismiss]", err))
+                .style(Style::default().fg(Color::Red)),
+            sections[1],
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new("Done! [ENTER to continue]")
+                .style(Style::default().fg(Color::Green)),
+            sections[1],
+        );
+    }
+}
+
+fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    Rect {
+        x,
+        y,
+        width: width.min(area.width),
+        height: height.min(area.height),
+    }
 }
