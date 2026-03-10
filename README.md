@@ -89,7 +89,7 @@ On first run `space` writes defaults to `~/.config/space/config.toml`:
 
 ```toml
 [repos]
-roots = ["~/work", "~/StudioProjects"]
+roots = ["~/projects"]
 max_depth = 3
 cache_age_secs = 3600
 
@@ -97,7 +97,18 @@ cache_age_secs = 3600
 dir = "~/workspaces"
 ```
 
-Run `space config` to edit interactively, or edit the file directly.
+Run `space config` to edit interactively via the TUI:
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` or `j` / `k` | Move between fields |
+| `Enter` | Edit focused field |
+| `Esc` | Cancel edit |
+| `Ctrl-S` | Save and exit |
+
+The `Repo roots` field accepts a comma-separated list of paths (e.g. `~/projects, ~/work`).
+
+Or edit `~/.config/space/config.toml` directly.
 
 ## How it works
 

@@ -25,7 +25,7 @@ impl Default for SpaceConfig {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         Self {
             repos: RepoConfig {
-                roots: vec![home.join("work"), home.join("StudioProjects")],
+                roots: vec![home.join("projects")],
                 max_depth: 3,
                 cache_age_secs: 3600,
             },
