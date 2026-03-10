@@ -82,7 +82,10 @@ impl App {
                 Ok(detail) => {
                     self.workspaces[self.selected_ws] = detail;
                 }
-                Err(_) => {}
+                Err(_e) => {
+                    // Keep shallow workspace entry; note error for user
+                    self.status_message = Some(format!("Could not load '{}' detail", name));
+                }
             }
         }
     }
@@ -99,15 +102,19 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             None
         }
         Message::SelectWorkspaceUp => {
-            if app.selected_ws > 0 { app.selected_ws -= 1; }
-            app.selected_repo = 0;
-            app.load_selected_workspace_detail();
+            if app.selected_ws > 0 {
+                app.selected_ws -= 1;
+                app.selected_repo = 0;
+                app.load_selected_workspace_detail();
+            }
             None
         }
         Message::SelectWorkspaceDown => {
-            if app.selected_ws + 1 < app.workspaces.len() { app.selected_ws += 1; }
-            app.selected_repo = 0;
-            app.load_selected_workspace_detail();
+            if app.selected_ws + 1 < app.workspaces.len() {
+                app.selected_ws += 1;
+                app.selected_repo = 0;
+                app.load_selected_workspace_detail();
+            }
             None
         }
         Message::SelectRepoUp => {
