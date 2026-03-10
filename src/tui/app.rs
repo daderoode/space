@@ -49,6 +49,11 @@ pub enum Pane { Left, Right }
 pub enum Screen {
     Dashboard,
     CreateWorkspace(crate::tui::screens::create::CreateState),
+    GoWorkspace(crate::tui::screens::go::GoState),
+    AddRepos(crate::tui::screens::add::AddState),
+    ConfirmDelete(crate::tui::screens::delete::DeleteState),
+    RepoSearch(crate::tui::screens::search::SearchState),
+    ConfigEditor(crate::tui::screens::config::ConfigState),
 }
 
 #[derive(Debug)]
@@ -65,6 +70,7 @@ pub enum Message {
     StartAdd,
     StartDelete,
     StartSearch,
+    StartConfig,
     RefreshRepos,
     Tick,
 }
@@ -186,9 +192,51 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             app.screen = Screen::CreateWorkspace(state);
             None
         }
-        // Stubbed — wired in Tasks 8-9
-        Message::StartAdd | Message::StartDelete
-        | Message::StartSearch | Message::SelectWorkspace(_) | Message::Tick => None,
+        Message::StartAdd => {
+            if let Some(ws) = app.selected_workspace() {
+                let existing: std::collections::HashSet<_> = ws.repos.iter()
+                    .map(|r| r.name.clone())
+                    .collect();
+                let available: Vec<_> = app.repos_cache.iter()
+                    .filter(|p| {
+                        let name = p.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        !existing.contains(&name)
+                    })
+                    .cloned()
+                    .collect();
+                let state = crate::tui::screens::add::AddState::new(
+                    ws.name.clone(),
+                    ws.path.clone(),
+                    available,
+                );
+                app.screen = Screen::AddRepos(state);
+            }
+            None
+        }
+        Message::StartDelete => {
+            if let Some(ws) = app.selected_workspace() {
+                let state = crate::tui::screens::delete::DeleteState {
+                    workspace_name: ws.name.clone(),
+                    workspace_path: ws.path.clone(),
+                    repo_names: ws.repos.iter().map(|r| r.name.clone()).collect(),
+                };
+                app.screen = Screen::ConfirmDelete(state);
+            }
+            None
+        }
+        Message::StartSearch => {
+            let state = crate::tui::screens::search::SearchState::new(app.repos_cache.clone());
+            app.screen = Screen::RepoSearch(state);
+            None
+        }
+        Message::StartConfig => {
+            let state = crate::tui::screens::config::ConfigState::from_config(&app.config);
+            app.screen = Screen::ConfigEditor(state);
+            None
+        }
+        Message::SelectWorkspace(_) | Message::Tick => None,
     }
 }
 
@@ -409,11 +457,370 @@ fn do_create(app: &mut App) {
     // If there was an error, stay on Creating stage so user can see the log
 }
 
+fn handle_go_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
+    use ratatui::crossterm::event::KeyCode;
+
+    match key.code {
+        KeyCode::Esc => {
+            app.screen = Screen::Dashboard;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            let Screen::GoWorkspace(ref mut st) = app.screen else { return; };
+            st.picker.move_up();
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let Screen::GoWorkspace(ref mut st) = app.screen else { return; };
+            st.picker.move_down();
+        }
+        KeyCode::Enter => {
+            let target = {
+                let Screen::GoWorkspace(ref st) = app.screen else { return; };
+                st.picker.confirmed_items().into_iter().next().map(|i| i.full_path.clone())
+            };
+            if let Some(path) = target {
+                app.space_cd_target = Some(path);
+                app.should_quit = true;
+            }
+        }
+        _ => {
+            let Screen::GoWorkspace(ref mut st) = app.screen else { return; };
+            if let Some(req) = key_to_input_request(&key) {
+                st.picker.input.handle(req);
+            }
+            st.picker.refilter();
+        }
+    }
+}
+
+fn handle_add_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
+    use crate::tui::screens::add::AddStage;
+    use ratatui::crossterm::event::KeyCode;
+
+    let stage = {
+        let Screen::AddRepos(ref st) = app.screen else { return; };
+        st.stage.clone()
+    };
+
+    match stage {
+        AddStage::PickRepos => match key.code {
+            KeyCode::Esc => {
+                app.screen = Screen::Dashboard;
+            }
+            KeyCode::Enter => {
+                let Screen::AddRepos(ref mut st) = app.screen else { return; };
+                let confirmed: Vec<PathBuf> = st
+                    .picker
+                    .confirmed_items()
+                    .into_iter()
+                    .map(|i| i.full_path.clone())
+                    .collect();
+                if confirmed.is_empty() {
+                    st.error = Some("Select at least one repo".to_string());
+                    return;
+                }
+                st.selected_repos = confirmed;
+                st.error = None;
+                st.stage = AddStage::PickBranchStrategy;
+            }
+            KeyCode::Tab => {
+                let Screen::AddRepos(ref mut st) = app.screen else { return; };
+                st.picker.toggle_highlighted();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let Screen::AddRepos(ref mut st) = app.screen else { return; };
+                st.picker.move_up();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let Screen::AddRepos(ref mut st) = app.screen else { return; };
+                st.picker.move_down();
+            }
+            KeyCode::Char('s')
+                if key
+                    .modifiers
+                    .contains(ratatui::crossterm::event::KeyModifiers::CONTROL) =>
+            {
+                let Screen::AddRepos(ref mut st) = app.screen else { return; };
+                st.picker.cycle_scope();
+            }
+            _ => {
+                let Screen::AddRepos(ref mut st) = app.screen else { return; };
+                if let Some(req) = key_to_input_request(&key) {
+                    st.picker.input.handle(req);
+                }
+                st.picker.refilter();
+            }
+        },
+
+        AddStage::PickBranchStrategy => match key.code {
+            KeyCode::Esc => {
+                let Screen::AddRepos(ref mut st) = app.screen else { return; };
+                st.stage = AddStage::PickRepos;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let Screen::AddRepos(ref mut st) = app.screen else { return; };
+                if st.branch_strategy_idx > 0 {
+                    st.branch_strategy_idx -= 1;
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let Screen::AddRepos(ref mut st) = app.screen else { return; };
+                if st.branch_strategy_idx < 2 {
+                    st.branch_strategy_idx += 1;
+                }
+            }
+            KeyCode::Enter => {
+                do_add(app);
+            }
+            _ => {}
+        },
+
+        AddStage::Creating => match key.code {
+            KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
+                let error_msg = {
+                    let Screen::AddRepos(ref st) = app.screen else { return; };
+                    st.error.clone()
+                };
+                app.screen = Screen::Dashboard;
+                if let Ok(ws) =
+                    crate::core::workspace::list_workspaces(&app.config.workspaces.dir)
+                {
+                    app.workspaces = ws;
+                    app.selected_ws = 0;
+                    app.load_selected_workspace_detail();
+                }
+                if let Some(err) = error_msg {
+                    app.status_message = Some(format!("Add failed: {}", err));
+                }
+            }
+            _ => {}
+        },
+    }
+}
+
+fn do_add(app: &mut App) {
+    use crate::core::workspace::create_worktree;
+
+    let (ws_name, ws_path, strategy, repos, ws_dir) = {
+        let Screen::AddRepos(ref st) = app.screen else { return; };
+        (
+            st.workspace_name.clone(),
+            st.workspace_path.clone(),
+            st.branch_strategy(),
+            st.selected_repos.clone(),
+            app.config.workspaces.dir.clone(),
+        )
+    };
+
+    {
+        let Screen::AddRepos(ref mut st) = app.screen else { return; };
+        st.stage = crate::tui::screens::add::AddStage::Creating;
+        st.progress.clear();
+        st.error = None;
+    }
+
+    for repo_path in &repos {
+        let repo_name = repo_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "?".to_string());
+
+        {
+            let Screen::AddRepos(ref mut st) = app.screen else { return; };
+            st.progress.push(format!("Adding worktree for {}...", repo_name));
+        }
+
+        // Create the worktree in ws_dir/<ws_name>/<repo_name> — same layout as create
+        let worktree_target = ws_dir.join(&ws_name).join(&repo_name);
+        let _ = std::fs::create_dir_all(worktree_target.parent().unwrap_or(&ws_dir));
+
+        match create_worktree(repo_path, &ws_dir, &ws_name, &strategy) {
+            Ok(_) => {
+                let Screen::AddRepos(ref mut st) = app.screen else { return; };
+                st.progress.push(format!("  \u{2713} {}", repo_name));
+            }
+            Err(e) => {
+                let Screen::AddRepos(ref mut st) = app.screen else { return; };
+                st.progress.push(format!("  \u{2717} {}: {}", repo_name, e));
+                st.error = Some(format!("Failed: {}", e));
+            }
+        }
+    }
+
+    let had_error = {
+        let Screen::AddRepos(ref st) = app.screen else { return; };
+        st.error.is_some()
+    };
+
+    if !had_error {
+        if let Ok(ws_list) = crate::core::workspace::list_workspaces(&ws_dir) {
+            app.workspaces = ws_list;
+            if let Some(idx) = app.workspaces.iter().position(|w| w.name == ws_name) {
+                app.selected_ws = idx;
+            }
+            app.load_selected_workspace_detail();
+        }
+        app.screen = Screen::Dashboard;
+        app.status_message = Some(format!("Added repos to workspace '{}'", ws_name));
+    }
+    // If there was an error, stay on Creating stage so user can see the log
+}
+
+fn handle_delete_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
+    use ratatui::crossterm::event::KeyCode;
+
+    let (ws_name, ws_dir) = {
+        let Screen::ConfirmDelete(ref st) = app.screen else { return; };
+        (st.workspace_name.clone(), app.config.workspaces.dir.clone())
+    };
+
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Enter => {
+            match crate::core::workspace::remove_workspace(&ws_dir, &ws_name, true) {
+                Ok(()) => {
+                    app.screen = Screen::Dashboard;
+                    if let Ok(ws) = crate::core::workspace::list_workspaces(&ws_dir) {
+                        app.workspaces = ws;
+                        app.selected_ws = 0;
+                    }
+                    app.load_selected_workspace_detail();
+                    app.status_message = Some(format!("Deleted workspace '{}'", ws_name));
+                }
+                Err(e) => {
+                    app.screen = Screen::Dashboard;
+                    app.status_message = Some(format!("Delete failed: {}", e));
+                }
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Esc => {
+            app.screen = Screen::Dashboard;
+        }
+        _ => {}
+    }
+}
+
+fn handle_search_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
+    use ratatui::crossterm::event::KeyCode;
+
+    match key.code {
+        KeyCode::Esc => {
+            app.screen = Screen::Dashboard;
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            let Screen::RepoSearch(ref mut st) = app.screen else { return; };
+            st.picker.move_up();
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let Screen::RepoSearch(ref mut st) = app.screen else { return; };
+            st.picker.move_down();
+        }
+        KeyCode::Enter => {
+            // Get the selected repo name before any mutation
+            let selected_name = {
+                let Screen::RepoSearch(ref st) = app.screen else { return; };
+                st.picker.confirmed_items()
+                    .into_iter()
+                    .next()
+                    .map(|i| i.name.clone())
+            };
+
+            app.screen = Screen::Dashboard;
+
+            if let Some(repo_name) = selected_name {
+                // Walk workspaces to find one containing this repo
+                let found_idx = app.workspaces.iter().position(|ws| {
+                    ws.repos.iter().any(|r| r.name == repo_name)
+                });
+                if let Some(idx) = found_idx {
+                    app.selected_ws = idx;
+                    app.selected_repo = 0;
+                    app.load_selected_workspace_detail();
+                } else {
+                    app.status_message = Some(
+                        "Not in any workspace — use 'c' to create one".to_string(),
+                    );
+                }
+            }
+        }
+        _ => {
+            let Screen::RepoSearch(ref mut st) = app.screen else { return; };
+            if let Some(req) = key_to_input_request(&key) {
+                st.picker.input.handle(req);
+            }
+            st.picker.refilter();
+        }
+    }
+}
+
+fn handle_config_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
+    use ratatui::crossterm::event::KeyCode;
+
+    let editing = {
+        let Screen::ConfigEditor(ref st) = app.screen else { return; };
+        st.editing
+    };
+
+    if editing {
+        // In editing mode: Esc cancels, Enter commits, other keys feed input
+        match key.code {
+            KeyCode::Esc => {
+                let Screen::ConfigEditor(ref mut st) = app.screen else { return; };
+                st.cancel_edit();
+            }
+            KeyCode::Enter => {
+                let Screen::ConfigEditor(ref mut st) = app.screen else { return; };
+                st.commit_edit();
+            }
+            _ => {
+                let Screen::ConfigEditor(ref mut st) = app.screen else { return; };
+                if let Some(req) = key_to_input_request(&key) {
+                    st.input.handle(req);
+                }
+            }
+        }
+    } else {
+        // Not editing: navigate fields, Enter=edit, Esc=save+exit
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                // Save config and return to dashboard
+                let result = {
+                    let Screen::ConfigEditor(ref st) = app.screen else { return; };
+                    st.save_to_config()
+                };
+                match result {
+                    Ok(new_config) => {
+                        app.config = new_config;
+                        app.status_message = Some("Config saved".to_string());
+                    }
+                    Err(e) => {
+                        app.status_message = Some(format!("Config save failed: {}", e));
+                    }
+                }
+                app.screen = Screen::Dashboard;
+            }
+            KeyCode::Enter => {
+                let Screen::ConfigEditor(ref mut st) = app.screen else { return; };
+                st.start_editing();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let Screen::ConfigEditor(ref mut st) = app.screen else { return; };
+                if st.focused > 0 { st.focused -= 1; }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let Screen::ConfigEditor(ref mut st) = app.screen else { return; };
+                if st.focused + 1 < st.fields.len() { st.focused += 1; }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn run_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
 ) -> Result<()> {
     use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+
+    enum ActiveScreen { Dashboard, Create, Go, Add, Delete, Search, Config }
 
     loop {
         terminal.draw(|frame| crate::tui::ui::view(app, frame))?;
@@ -423,16 +830,27 @@ fn run_loop(
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                // Determine which screen is active without holding a borrow,
-                // so we can pass `&mut app` into handle_create_key if needed.
-                let is_create = matches!(app.screen, Screen::CreateWorkspace(_));
 
-                let msg: Option<Message> = if is_create {
-                    handle_create_key(app, key);
-                    None
-                } else {
-                    // Screen::Dashboard
-                    match (key.code, key.modifiers) {
+                // Determine which screen is active without holding a borrow on app.screen,
+                // so we can pass `&mut app` into the handler functions.
+                let active = match &app.screen {
+                    Screen::Dashboard => ActiveScreen::Dashboard,
+                    Screen::CreateWorkspace(_) => ActiveScreen::Create,
+                    Screen::GoWorkspace(_) => ActiveScreen::Go,
+                    Screen::AddRepos(_) => ActiveScreen::Add,
+                    Screen::ConfirmDelete(_) => ActiveScreen::Delete,
+                    Screen::RepoSearch(_) => ActiveScreen::Search,
+                    Screen::ConfigEditor(_) => ActiveScreen::Config,
+                };
+
+                let msg: Option<Message> = match active {
+                    ActiveScreen::Create => { handle_create_key(app, key); None }
+                    ActiveScreen::Go => { handle_go_key(app, key); None }
+                    ActiveScreen::Add => { handle_add_key(app, key); None }
+                    ActiveScreen::Delete => { handle_delete_key(app, key); None }
+                    ActiveScreen::Search => { handle_search_key(app, key); None }
+                    ActiveScreen::Config => { handle_config_key(app, key); None }
+                    ActiveScreen::Dashboard => match (key.code, key.modifiers) {
                         (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => Some(Message::Quit),
                         (KeyCode::Tab, _) => Some(Message::FocusNext),
                         (KeyCode::Enter, _) => Some(Message::GoToWorkspace),
@@ -441,6 +859,7 @@ fn run_loop(
                         (KeyCode::Char('d'), _) => Some(Message::StartDelete),
                         (KeyCode::Char('r'), _) => Some(Message::RefreshRepos),
                         (KeyCode::Char('/'), _) => Some(Message::StartSearch),
+                        (KeyCode::Char('S'), _) => Some(Message::StartConfig),
                         (KeyCode::Up, _) | (KeyCode::Char('k'), _) => match app.focus {
                             Pane::Left => Some(Message::SelectWorkspaceUp),
                             Pane::Right => Some(Message::SelectRepoUp),
@@ -450,7 +869,7 @@ fn run_loop(
                             Pane::Right => Some(Message::SelectRepoDown),
                         },
                         _ => None,
-                    }
+                    },
                 };
 
                 if let Some(m) = msg {

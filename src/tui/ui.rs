@@ -11,10 +11,26 @@ pub fn view(app: &App, frame: &mut Frame) {
     match &app.screen {
         Screen::Dashboard => render_dashboard(app, frame),
         Screen::CreateWorkspace(state) => {
-            // Render dashboard behind the overlay
             render_dashboard(app, frame);
             render_create_overlay(state, frame);
         }
+        Screen::GoWorkspace(state) => {
+            render_dashboard(app, frame);
+            crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
+        }
+        Screen::AddRepos(state) => {
+            render_dashboard(app, frame);
+            render_add_overlay(state, frame);
+        }
+        Screen::ConfirmDelete(state) => {
+            render_dashboard(app, frame);
+            render_delete_confirm(state, frame);
+        }
+        Screen::RepoSearch(state) => {
+            render_dashboard(app, frame);
+            crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
+        }
+        Screen::ConfigEditor(state) => render_config_editor(state, frame),
     }
 }
 
@@ -315,6 +331,209 @@ fn render_creating_progress(state: &crate::tui::screens::create::CreateState, fr
             sections[1],
         );
     }
+}
+
+fn render_add_overlay(state: &crate::tui::screens::add::AddState, frame: &mut Frame) {
+    use crate::tui::screens::add::AddStage;
+    match &state.stage {
+        AddStage::PickRepos => {
+            crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
+        }
+        AddStage::PickBranchStrategy => render_add_branch_strategy(state, frame),
+        AddStage::Creating => render_add_progress(state, frame),
+    }
+}
+
+fn render_add_branch_strategy(state: &crate::tui::screens::add::AddState, frame: &mut Frame) {
+    use ratatui::widgets::Clear;
+    let area = centered_rect_fixed(50, 9, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Branch Strategy ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let options = [
+        format!("New branch '{}'", state.workspace_name),
+        format!("Existing branch '{}' (if present)", state.workspace_name),
+        "Detached HEAD".to_string(),
+    ];
+
+    let items: Vec<ListItem> = options
+        .iter()
+        .enumerate()
+        .map(|(i, opt)| {
+            if i == state.branch_strategy_idx {
+                ListItem::new(format!("> {}", opt))
+                    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            } else {
+                ListItem::new(format!("  {}", opt))
+            }
+        })
+        .collect();
+
+    frame.render_widget(List::new(items), inner);
+}
+
+fn render_add_progress(state: &crate::tui::screens::add::AddState, frame: &mut Frame) {
+    use ratatui::widgets::Clear;
+    let area = centered_rect_fixed(60, 15, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Adding Repos ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines: Vec<Line> = state
+        .progress
+        .iter()
+        .map(|l| {
+            if l.starts_with("  \u{2713}") {
+                Line::from(Span::styled(l.clone(), Style::default().fg(Color::Green)))
+            } else if l.starts_with("  \u{2717}") {
+                Line::from(Span::styled(l.clone(), Style::default().fg(Color::Red)))
+            } else {
+                Line::from(Span::raw(l.clone()))
+            }
+        })
+        .collect();
+
+    let sections = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(inner);
+
+    frame.render_widget(Paragraph::new(lines), sections[0]);
+
+    if let Some(err) = &state.error {
+        frame.render_widget(
+            Paragraph::new(format!("Error: {}  [ESC to dismiss]", err))
+                .style(Style::default().fg(Color::Red)),
+            sections[1],
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new("Done! [ENTER to continue]")
+                .style(Style::default().fg(Color::Green)),
+            sections[1],
+        );
+    }
+}
+
+fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame: &mut Frame) {
+    use ratatui::widgets::Clear;
+    let height = (5 + state.repo_names.len()).min(20) as u16;
+    let area = centered_rect_fixed(44, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red))
+        .title(" Confirm Delete ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            format!("Remove workspace '{}'?", state.workspace_name),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+
+    for name in &state.repo_names {
+        lines.push(Line::from(Span::styled(
+            format!("  {}  (clean)", name),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  [y] confirm", Style::default().fg(Color::Green)),
+        Span::raw("   "),
+        Span::styled("[n/ESC] cancel", Style::default().fg(Color::DarkGray)),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame: &mut Frame) {
+    use ratatui::widgets::Clear;
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Configuration  ESC=save and exit ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let field_height = (state.fields.len() as u16) * 3 + 2;
+    let sections = Layout::vertical([
+        Constraint::Length(field_height),
+        Constraint::Min(0),
+    ]).split(inner);
+
+    let field_area = sections[0];
+    let row_height = field_area.height / (state.fields.len() as u16).max(1);
+
+    for (i, field) in state.fields.iter().enumerate() {
+        let y = field_area.y + (i as u16) * row_height;
+        let label_area = Rect { x: field_area.x, y, width: 20, height: 1 };
+        let value_area = Rect {
+            x: field_area.x + 22,
+            y,
+            width: field_area.width.saturating_sub(22),
+            height: 1,
+        };
+
+        let is_focused = i == state.focused;
+        let label_style = if is_focused {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        frame.render_widget(
+            Paragraph::new(format!("{}:", field.label)).style(label_style),
+            label_area,
+        );
+
+        if is_focused && state.editing {
+            frame.render_widget(
+                Paragraph::new(format!("> {}", state.input.value()))
+                    .style(Style::default().fg(Color::Yellow)),
+                value_area,
+            );
+        } else {
+            let value_style = if is_focused {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            frame.render_widget(
+                Paragraph::new(field.value.clone()).style(value_style),
+                value_area,
+            );
+        }
+    }
+
+    let hint_area = Rect {
+        x: inner.x,
+        y: inner.y + inner.height.saturating_sub(1),
+        width: inner.width,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new("↑↓ navigate  ENTER edit  ESC save & exit")
+            .style(Style::default().fg(Color::DarkGray)),
+        hint_area,
+    );
 }
 
 fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
