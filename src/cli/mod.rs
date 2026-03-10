@@ -20,9 +20,9 @@ pub fn dispatch(cmd: Commands) -> Result<()> {
         Commands::Add { workspace, repos } => add::run(&workspace, repos),
         Commands::Rm { name, force } => remove::run(&name, force),
         Commands::Config => config::run(),
-        Commands::Completions { shell: _ } => {
-            // clap_complete removed in v0.2.0 — stub until Task 10/11
-            anyhow::bail!("shell completions not yet implemented in v0.2.0")
+        Commands::Completions { shell } => {
+            crate::shell::print_completions(&shell);
+            Ok(())
         }
     }
 }
