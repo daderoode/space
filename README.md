@@ -16,18 +16,26 @@ brew install daderoode/tap/space
 
 ## Setup (zsh)
 
-Add the shell wrapper to your `.zshrc` so `space go` can change your working
-directory:
+Add the shell wrapper to your `.zshrc`. This is required for `space go` to
+change directories and for TUI commands to render correctly:
 
 ```zsh
 space() {
-  local out
-  out=$(command space "$@")
-  if [[ $out == __SPACE_CD__:* ]]; then
-    cd "${out#__SPACE_CD__:}"
-  else
-    echo "$out"
-  fi
+  case "${1:-}" in
+    ls|list|status|st|repos|completions|--version|--help|-h|-V)
+      command space "$@"
+      ;;
+    *)
+      local cdfile="${TMPDIR:-/tmp}/.space_cd_$$"
+      __SPACE_CD_FILE__="$cdfile" command space "$@"
+      local ret=$?
+      if [[ -s "$cdfile" ]]; then
+        cd -- "$(<"$cdfile")"
+      fi
+      rm -f "$cdfile" 2>/dev/null
+      return $ret
+      ;;
+  esac
 }
 ```
 

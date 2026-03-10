@@ -11,7 +11,7 @@ pub fn run(name: Option<String>) -> Result<()> {
                 .iter()
                 .find(|w| w.name == n)
                 .ok_or_else(|| anyhow::anyhow!("workspace '{}' not found", n))?;
-            println!("__SPACE_CD__:{}", ws.path.display());
+            crate::cli::emit_cd_target(&ws.path);
             Ok(())
         }
     }

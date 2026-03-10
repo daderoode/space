@@ -10,11 +10,26 @@ pub mod remove;
 pub mod repos;
 pub mod status;
 
-/// Run the TUI event loop and print the cd marker if a workspace was selected.
+/// Emit the cd target path using the temp-file protocol when stdout is piped
+/// (e.g. inside the zsh wrapper's `$(...)`), otherwise fall back to the legacy
+/// stdout marker so bare-binary invocations still work.
+///
+/// New wrapper: sets `__SPACE_CD_FILE__` env var to a temp path; binary writes
+/// the path there instead of stdout, keeping stdout connected to the terminal
+/// so TUI rendering works.
+pub(crate) fn emit_cd_target(path: &std::path::Path) {
+    if let Ok(cdfile) = std::env::var("__SPACE_CD_FILE__") {
+        std::fs::write(&cdfile, path.display().to_string()).ok();
+    } else {
+        println!("__SPACE_CD__:{}", path.display());
+    }
+}
+
+/// Run the TUI event loop and emit the cd marker if a workspace was selected.
 pub(crate) fn run_tui_and_emit_cd(app: &mut App) -> Result<()> {
     tui::app::run(app)?;
     if let Some(ref path) = app.space_cd_target {
-        println!("__SPACE_CD__:{}", path.display());
+        emit_cd_target(path);
     }
     Ok(())
 }

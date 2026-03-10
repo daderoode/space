@@ -958,6 +958,14 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()
                     continue;
                 }
 
+                // Global: Ctrl-C always quits (raw mode swallows the OS signal)
+                if key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(event::KeyModifiers::CONTROL)
+                {
+                    app.should_quit = true;
+                    continue;
+                }
+
                 // Determine which screen is active without holding a borrow on app.screen,
                 // so we can pass `&mut app` into the handler functions.
                 let active = match &app.screen {
