@@ -5,8 +5,8 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Row, Table,
-        TableState, Wrap,
+        Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+        Wrap,
     },
     Frame,
 };
@@ -57,10 +57,7 @@ fn render_dashboard(app: &App, frame: &mut Frame) {
 fn render_title(frame: &mut Frame, area: Rect) {
     let title = Line::from(vec![
         Span::styled(" space ", theme::title()),
-        Span::styled(
-            format!("v{}", env!("CARGO_PKG_VERSION")),
-            theme::muted(),
-        ),
+        Span::styled(format!("v{}", env!("CARGO_PKG_VERSION")), theme::muted()),
     ]);
     frame.render_widget(Paragraph::new(title), area);
 }
@@ -211,21 +208,29 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     let act = |a: &'static str| Span::styled(a, theme::muted());
 
     let bar = Line::from(vec![
-        key("enter"), act(" go"),
+        key("enter"),
+        act(" go"),
         sep(),
-        key("c"), act(" create"),
+        key("c"),
+        act(" create"),
         sep(),
-        key("a"), act(" add"),
+        key("a"),
+        act(" add"),
         sep(),
-        key("d"), act(" delete"),
+        key("d"),
+        act(" delete"),
         sep(),
-        key("r"), act(" refresh"),
+        key("r"),
+        act(" refresh"),
         sep(),
-        key("/"), act(" search"),
+        key("/"),
+        act(" search"),
         sep(),
-        key("S"), act(" config"),
+        key("S"),
+        act(" config"),
         sep(),
-        key("q"), act(" quit"),
+        key("q"),
+        act(" quit"),
     ]);
     frame.render_widget(Paragraph::new(bar), area);
 }
@@ -273,8 +278,7 @@ fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &m
         sections[0],
     );
     frame.render_widget(
-        Paragraph::new(format!("> {}", state.ws_name.value()))
-            .style(theme::input_style()),
+        Paragraph::new(format!("> {}", state.ws_name.value())).style(theme::input_style()),
         sections[1],
     );
     if let Some(err) = &state.error {
@@ -293,7 +297,11 @@ fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, fram
     let area = centered_rect_fixed(62, height, frame.area());
     frame.render_widget(Clear, area);
 
-    let border_style = if has_error { theme::border_danger() } else { theme::border_focused() };
+    let border_style = if has_error {
+        theme::border_danger()
+    } else {
+        theme::border_focused()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -378,8 +386,7 @@ fn render_creating_progress(state: &crate::tui::screens::create::CreateState, fr
 
     if let Some(err) = &state.error {
         frame.render_widget(
-            Paragraph::new(format!("Error: {}  [ESC to dismiss]", err))
-                .style(theme::error()),
+            Paragraph::new(format!("Error: {}  [ESC to dismiss]", err)).style(theme::error()),
             sections[1],
         );
     } else {
@@ -413,7 +420,11 @@ fn render_add_branch_strategy(state: &crate::tui::screens::add::AddState, frame:
     let area = centered_rect_fixed(62, height, frame.area());
     frame.render_widget(Clear, area);
 
-    let border_style = if has_error { theme::border_danger() } else { theme::border_focused() };
+    let border_style = if has_error {
+        theme::border_danger()
+    } else {
+        theme::border_focused()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -497,8 +508,7 @@ fn render_add_progress(state: &crate::tui::screens::add::AddState, frame: &mut F
 
     if let Some(err) = &state.error {
         frame.render_widget(
-            Paragraph::new(format!("Error: {}  [ESC to dismiss]", err))
-                .style(theme::error()),
+            Paragraph::new(format!("Error: {}  [ESC to dismiss]", err)).style(theme::error()),
             sections[1],
         );
     } else {
@@ -567,7 +577,13 @@ fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame:
     let mut constraints: Vec<Constraint> = state
         .fields
         .iter()
-        .flat_map(|_| [Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)])
+        .flat_map(|_| {
+            [
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ]
+        })
         .collect();
     constraints.push(Constraint::Min(0)); // spacer
     constraints.push(Constraint::Length(1)); // hint bar
@@ -584,13 +600,21 @@ fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame:
         let label_line = if field.hint.is_empty() {
             ratatui::text::Line::from(ratatui::text::Span::styled(
                 field.label,
-                if is_focused { theme::selected() } else { theme::text() },
+                if is_focused {
+                    theme::selected()
+                } else {
+                    theme::text()
+                },
             ))
         } else {
             ratatui::text::Line::from(vec![
                 ratatui::text::Span::styled(
                     field.label,
-                    if is_focused { theme::selected() } else { theme::text() },
+                    if is_focused {
+                        theme::selected()
+                    } else {
+                        theme::text()
+                    },
                 ),
                 ratatui::text::Span::raw("  "),
                 ratatui::text::Span::styled(field.hint, theme::muted()),

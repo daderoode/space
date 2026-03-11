@@ -300,10 +300,7 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
 
     // Input line
     let input_text = format!("> {}", picker.input.value());
-    frame.render_widget(
-        Paragraph::new(input_text).style(theme::text()),
-        sections[0],
-    );
+    frame.render_widget(Paragraph::new(input_text).style(theme::text()), sections[0]);
     // Show cursor at correct position (offset +2 for "> " prefix)
     let cursor_x = sections[0].x + 2 + picker.input.visual_cursor() as u16;
     let cursor_y = sections[0].y;
@@ -313,14 +310,8 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
     if show_scope {
         let eff = eff_scope.unwrap_or_default();
         let scope_line = Line::from(vec![
-            Span::styled(
-                format!("  scope: {}/", eff),
-                theme::muted(),
-            ),
-            Span::styled(
-                "  CTRL-S: cycle",
-                theme::muted(),
-            ),
+            Span::styled(format!("  scope: {}/", eff), theme::muted()),
+            Span::styled("  CTRL-S: cycle", theme::muted()),
         ]);
         frame.render_widget(Paragraph::new(scope_line), sections[1]);
     }
@@ -344,19 +335,12 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
                 .get(list_idx)
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
-            let name_spans = build_highlighted_spans(
-                &item.name,
-                indices,
-                theme::text(),
-                highlight_style,
-            );
+            let name_spans =
+                build_highlighted_spans(&item.name, indices, theme::text(), highlight_style);
 
             let mut line_spans = vec![Span::styled(dot, Style::default().fg(theme::TEAL))];
             line_spans.extend(name_spans);
-            line_spans.push(Span::styled(
-                format!("  ({})", item.parent),
-                theme::muted(),
-            ));
+            line_spans.push(Span::styled(format!("  ({})", item.parent), theme::muted()));
 
             ListItem::new(Line::from(line_spans))
         })

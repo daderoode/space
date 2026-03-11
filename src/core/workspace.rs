@@ -114,14 +114,11 @@ fn git_worktree_add(args: &[&str], cwd: &Path) -> Result<()> {
         .find(|l| l.starts_with("fatal:"))
         .map(|l| l.trim_start_matches("fatal:").trim())
         .or_else(|| {
-            stderr
-                .lines()
-                .map(|l| l.trim())
-                .find(|l| {
-                    !l.is_empty()
-                        && !l.starts_with("Preparing worktree")
-                        && !l.starts_with("HEAD is now")
-                })
+            stderr.lines().map(|l| l.trim()).find(|l| {
+                !l.is_empty()
+                    && !l.starts_with("Preparing worktree")
+                    && !l.starts_with("HEAD is now")
+            })
         })
         .unwrap_or("git worktree add failed");
 
@@ -172,7 +169,15 @@ pub fn create_worktree(
                 git_worktree_add(&["worktree", "add", &wt, branch_name], repo_path)?;
             } else if remote_exists {
                 git_worktree_add(
-                    &["worktree", "add", "--track", "-b", branch_name, &wt, &remote_ref],
+                    &[
+                        "worktree",
+                        "add",
+                        "--track",
+                        "-b",
+                        branch_name,
+                        &wt,
+                        &remote_ref,
+                    ],
                     repo_path,
                 )?;
             } else {

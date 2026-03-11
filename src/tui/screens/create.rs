@@ -19,8 +19,8 @@ pub struct CreateState {
     pub selected_repos: Vec<PathBuf>,
     pub branch_strategy_idx: usize, // 0=new branch, 1=existing, 2=detached, 3=pick branch
     pub branch_picker: Option<FuzzyPicker>, // populated when entering PickBranch stage
-    pub picked_branch: Option<String>,      // branch name chosen via branch_picker
-    pub progress: Vec<String>,              // log lines shown during Creating stage
+    pub picked_branch: Option<String>, // branch name chosen via branch_picker
+    pub progress: Vec<String>,      // log lines shown during Creating stage
     pub error: Option<String>,
 }
 

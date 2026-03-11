@@ -91,6 +91,16 @@ space config                   # edit configuration interactively
 space completions zsh
 ```
 
+## Development
+
+Before pushing changes, run the same local verification sequence used by CI:
+
+```sh
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
+```
+
 ## Configuration
 
 On first run `space` writes defaults to `~/.config/space/config.toml`:
