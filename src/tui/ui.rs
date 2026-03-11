@@ -4,7 +4,10 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Row, Table, TableState},
+    widgets::{
+        Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Row, Table,
+        TableState, Wrap,
+    },
     Frame,
 };
 
@@ -285,8 +288,9 @@ fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &m
 fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
     use ratatui::widgets::Clear;
     let has_error = state.error.is_some();
-    let height = if has_error { 13 } else { 11 };
-    let area = centered_rect_fixed(60, height, frame.area());
+    // 2 borders + 4 options + 1 padding + (1 sep + 2 error) when error present
+    let height: u16 = if has_error { 10 } else { 8 };
+    let area = centered_rect_fixed(62, height, frame.area());
     frame.render_widget(Clear, area);
 
     let border_style = if has_error { theme::border_danger() } else { theme::border_focused() };
@@ -298,10 +302,16 @@ fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, fram
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // Layout: 4 option rows, then separator + error only when there's an error
     let sections = if has_error {
-        Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(inner)
+        Layout::vertical([
+            Constraint::Length(4), // options
+            Constraint::Length(1), // separator
+            Constraint::Length(2), // error (wraps to 2 lines)
+        ])
+        .split(inner)
     } else {
-        Layout::vertical([Constraint::Min(0), Constraint::Length(0)]).split(inner)
+        Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).split(inner)
     };
 
     let options = [
@@ -327,8 +337,10 @@ fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, fram
 
     if let Some(err) = &state.error {
         frame.render_widget(
-            Paragraph::new(format!("\u{26a0}  {}", err)).style(theme::error()),
-            sections[1],
+            Paragraph::new(format!("\u{26a0}  {}", err))
+                .style(theme::error())
+                .wrap(Wrap { trim: false }),
+            sections[2],
         );
     }
 }
@@ -397,8 +409,8 @@ fn render_add_overlay(state: &crate::tui::screens::add::AddState, frame: &mut Fr
 fn render_add_branch_strategy(state: &crate::tui::screens::add::AddState, frame: &mut Frame) {
     use ratatui::widgets::Clear;
     let has_error = state.error.is_some();
-    let height = if has_error { 13 } else { 11 };
-    let area = centered_rect_fixed(60, height, frame.area());
+    let height: u16 = if has_error { 10 } else { 8 };
+    let area = centered_rect_fixed(62, height, frame.area());
     frame.render_widget(Clear, area);
 
     let border_style = if has_error { theme::border_danger() } else { theme::border_focused() };
@@ -411,9 +423,14 @@ fn render_add_branch_strategy(state: &crate::tui::screens::add::AddState, frame:
     frame.render_widget(block, area);
 
     let sections = if has_error {
-        Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(inner)
+        Layout::vertical([
+            Constraint::Length(4),
+            Constraint::Length(1),
+            Constraint::Length(2),
+        ])
+        .split(inner)
     } else {
-        Layout::vertical([Constraint::Min(0), Constraint::Length(0)]).split(inner)
+        Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).split(inner)
     };
 
     let options = [
@@ -439,8 +456,10 @@ fn render_add_branch_strategy(state: &crate::tui::screens::add::AddState, frame:
 
     if let Some(err) = &state.error {
         frame.render_widget(
-            Paragraph::new(format!("\u{26a0}  {}", err)).style(theme::error()),
-            sections[1],
+            Paragraph::new(format!("\u{26a0}  {}", err))
+                .style(theme::error())
+                .wrap(Wrap { trim: false }),
+            sections[2],
         );
     }
 }
