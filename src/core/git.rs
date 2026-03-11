@@ -9,7 +9,6 @@ pub struct RepoStatus {
     pub untracked: usize,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct BranchInfo {
     pub name: String,
@@ -67,7 +66,6 @@ pub fn repo_status(repo_path: &Path) -> Result<RepoStatus> {
 }
 
 /// List local + remote branches. Remote HEAD refs (`origin/HEAD`) are excluded.
-#[allow(dead_code)]
 pub fn list_branches(repo_path: &Path) -> Result<Vec<BranchInfo>> {
     let repo = Repository::open(repo_path)?;
     let mut branches = Vec::new();

@@ -263,6 +263,44 @@ pub fn run(app: &mut App) -> Result<()> {
     result
 }
 
+/// Build a FuzzyPicker populated with local + remote branches from `repo_path`.
+/// Returns `None` if branch listing fails (not a git repo, etc.).
+fn build_branch_picker(
+    repo_path: &std::path::Path,
+    repo_name: &str,
+) -> Option<crate::tui::widgets::fuzzy_picker::FuzzyPicker> {
+    use crate::core::git::list_branches;
+    use crate::tui::widgets::fuzzy_picker::{FuzzyPicker, PickerItem};
+
+    let branches = list_branches(repo_path).ok()?;
+    if branches.is_empty() {
+        return None;
+    }
+
+    let items: Vec<PickerItem> = branches
+        .into_iter()
+        .map(|b| PickerItem {
+            name: if b.is_current {
+                format!("{} *", b.name)
+            } else {
+                b.name
+            },
+            parent: if b.is_remote {
+                "remote".to_string()
+            } else {
+                "local".to_string()
+            },
+            full_path: std::path::PathBuf::new(), // unused for branch picker
+        })
+        .collect();
+
+    Some(FuzzyPicker::new(
+        format!("Branch  ({})  ENTER=select  ESC=back", repo_name),
+        items,
+        false,
+    ))
+}
+
 fn handle_create_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
     use crate::tui::screens::create::CreateStage;
     use ratatui::crossterm::event::KeyCode;
@@ -389,14 +427,109 @@ fn handle_create_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
                 let Screen::CreateWorkspace(ref mut st) = app.screen else {
                     return;
                 };
-                if st.branch_strategy_idx < 2 {
+                if st.branch_strategy_idx < 3 {
                     st.branch_strategy_idx += 1;
                 }
             }
             KeyCode::Enter => {
-                do_create(app);
+                // If "Pick a branch..." selected, open branch picker
+                let idx = {
+                    let Screen::CreateWorkspace(ref st) = app.screen else {
+                        return;
+                    };
+                    st.branch_strategy_idx
+                };
+                if idx == 3 {
+                    // Build branch picker from the first selected repo
+                    let (repo_path, repo_name) = {
+                        let Screen::CreateWorkspace(ref st) = app.screen else {
+                            return;
+                        };
+                        let path = st.selected_repos.first().cloned();
+                        let name = path
+                            .as_ref()
+                            .and_then(|p| p.file_name())
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        (path, name)
+                    };
+                    if let Some(repo_path) = repo_path {
+                        match build_branch_picker(&repo_path, &repo_name) {
+                            Some(picker) => {
+                                let Screen::CreateWorkspace(ref mut st) = app.screen else {
+                                    return;
+                                };
+                                st.branch_picker = Some(picker);
+                                st.stage = CreateStage::PickBranch;
+                            }
+                            None => {
+                                let Screen::CreateWorkspace(ref mut st) = app.screen else {
+                                    return;
+                                };
+                                st.error =
+                                    Some(format!("Could not list branches for {}", repo_name));
+                            }
+                        }
+                    }
+                } else {
+                    do_create(app);
+                }
             }
             _ => {}
+        },
+
+        CreateStage::PickBranch => match key.code {
+            KeyCode::Esc => {
+                let Screen::CreateWorkspace(ref mut st) = app.screen else {
+                    return;
+                };
+                st.stage = CreateStage::PickBranchStrategy;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let Screen::CreateWorkspace(ref mut st) = app.screen else {
+                    return;
+                };
+                if let Some(ref mut bp) = st.branch_picker {
+                    bp.move_up();
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let Screen::CreateWorkspace(ref mut st) = app.screen else {
+                    return;
+                };
+                if let Some(ref mut bp) = st.branch_picker {
+                    bp.move_down();
+                }
+            }
+            KeyCode::Enter => {
+                let picked = {
+                    let Screen::CreateWorkspace(ref st) = app.screen else {
+                        return;
+                    };
+                    st.branch_picker
+                        .as_ref()
+                        .and_then(|bp| bp.confirmed_items().into_iter().next())
+                        .map(|item| item.name.clone())
+                };
+                if let Some(branch) = picked {
+                    let Screen::CreateWorkspace(ref mut st) = app.screen else {
+                        return;
+                    };
+                    st.picked_branch = Some(branch);
+                }
+                do_create(app);
+            }
+            _ => {
+                let Screen::CreateWorkspace(ref mut st) = app.screen else {
+                    return;
+                };
+                if let Some(ref mut bp) = st.branch_picker {
+                    if let Some(req) = key_to_input_request(&key) {
+                        bp.input.handle(req);
+                    }
+                    bp.refilter();
+                }
+            }
         },
 
         CreateStage::Creating => {
@@ -645,14 +778,107 @@ fn handle_add_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
                 let Screen::AddRepos(ref mut st) = app.screen else {
                     return;
                 };
-                if st.branch_strategy_idx < 2 {
+                if st.branch_strategy_idx < 3 {
                     st.branch_strategy_idx += 1;
                 }
             }
             KeyCode::Enter => {
-                do_add(app);
+                let idx = {
+                    let Screen::AddRepos(ref st) = app.screen else {
+                        return;
+                    };
+                    st.branch_strategy_idx
+                };
+                if idx == 3 {
+                    let (repo_path, repo_name) = {
+                        let Screen::AddRepos(ref st) = app.screen else {
+                            return;
+                        };
+                        let path = st.selected_repos.first().cloned();
+                        let name = path
+                            .as_ref()
+                            .and_then(|p| p.file_name())
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        (path, name)
+                    };
+                    if let Some(repo_path) = repo_path {
+                        match build_branch_picker(&repo_path, &repo_name) {
+                            Some(picker) => {
+                                let Screen::AddRepos(ref mut st) = app.screen else {
+                                    return;
+                                };
+                                st.branch_picker = Some(picker);
+                                st.stage = AddStage::PickBranch;
+                            }
+                            None => {
+                                let Screen::AddRepos(ref mut st) = app.screen else {
+                                    return;
+                                };
+                                st.error =
+                                    Some(format!("Could not list branches for {}", repo_name));
+                            }
+                        }
+                    }
+                } else {
+                    do_add(app);
+                }
             }
             _ => {}
+        },
+
+        AddStage::PickBranch => match key.code {
+            KeyCode::Esc => {
+                let Screen::AddRepos(ref mut st) = app.screen else {
+                    return;
+                };
+                st.stage = AddStage::PickBranchStrategy;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let Screen::AddRepos(ref mut st) = app.screen else {
+                    return;
+                };
+                if let Some(ref mut bp) = st.branch_picker {
+                    bp.move_up();
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let Screen::AddRepos(ref mut st) = app.screen else {
+                    return;
+                };
+                if let Some(ref mut bp) = st.branch_picker {
+                    bp.move_down();
+                }
+            }
+            KeyCode::Enter => {
+                let picked = {
+                    let Screen::AddRepos(ref st) = app.screen else {
+                        return;
+                    };
+                    st.branch_picker
+                        .as_ref()
+                        .and_then(|bp| bp.confirmed_items().into_iter().next())
+                        .map(|item| item.name.clone())
+                };
+                if let Some(branch) = picked {
+                    let Screen::AddRepos(ref mut st) = app.screen else {
+                        return;
+                    };
+                    st.picked_branch = Some(branch);
+                }
+                do_add(app);
+            }
+            _ => {
+                let Screen::AddRepos(ref mut st) = app.screen else {
+                    return;
+                };
+                if let Some(ref mut bp) = st.branch_picker {
+                    if let Some(req) = key_to_input_request(&key) {
+                        bp.input.handle(req);
+                    }
+                    bp.refilter();
+                }
+            }
         },
 
         AddStage::Creating => match key.code {

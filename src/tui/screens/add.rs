@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub enum AddStage {
     PickRepos,
     PickBranchStrategy,
+    PickBranch,
     Creating,
 }
 
@@ -15,6 +16,8 @@ pub struct AddState {
     pub picker: FuzzyPicker,
     pub selected_repos: Vec<PathBuf>,
     pub branch_strategy_idx: usize,
+    pub branch_picker: Option<FuzzyPicker>,
+    pub picked_branch: Option<String>,
     pub progress: Vec<String>,
     pub error: Option<String>,
 }
@@ -45,6 +48,8 @@ impl AddState {
             picker,
             selected_repos: vec![],
             branch_strategy_idx: 0,
+            branch_picker: None,
+            picked_branch: None,
             progress: vec![],
             error: None,
         }
@@ -54,6 +59,11 @@ impl AddState {
         match self.branch_strategy_idx {
             1 => BranchStrategy::ExistingBranch(self.workspace_name.clone()),
             2 => BranchStrategy::DetachedHead,
+            3 => BranchStrategy::ExistingBranch(
+                self.picked_branch
+                    .clone()
+                    .unwrap_or_else(|| self.workspace_name.clone()),
+            ),
             _ => BranchStrategy::NewBranch(self.workspace_name.clone()),
         }
     }

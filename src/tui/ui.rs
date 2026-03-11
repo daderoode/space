@@ -220,6 +220,8 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         sep(),
         key("/"), act(" search"),
         sep(),
+        key("S"), act(" config"),
+        sep(),
         key("q"), act(" quit"),
     ]);
     frame.render_widget(Paragraph::new(bar), area);
@@ -233,6 +235,11 @@ fn render_create_overlay(state: &crate::tui::screens::create::CreateState, frame
         }
         CreateStage::NameWorkspace => render_name_input(state, frame),
         CreateStage::PickBranchStrategy => render_branch_strategy(state, frame),
+        CreateStage::PickBranch => {
+            if let Some(ref picker) = state.branch_picker {
+                crate::tui::widgets::fuzzy_picker::render(picker, frame);
+            }
+        }
         CreateStage::Creating => render_creating_progress(state, frame),
     }
 }
@@ -277,7 +284,7 @@ fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &m
 
 fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
     use ratatui::widgets::Clear;
-    let area = centered_rect_fixed(50, 9, frame.area());
+    let area = centered_rect_fixed(54, 11, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -292,6 +299,7 @@ fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, fram
         format!("New branch '{}'", state.ws_name.value()),
         format!("Existing branch '{}' (if present)", state.ws_name.value()),
         "Detached HEAD".to_string(),
+        "Pick a branch...".to_string(),
     ];
 
     let items: Vec<ListItem> = options
@@ -361,13 +369,18 @@ fn render_add_overlay(state: &crate::tui::screens::add::AddState, frame: &mut Fr
             crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
         }
         AddStage::PickBranchStrategy => render_add_branch_strategy(state, frame),
+        AddStage::PickBranch => {
+            if let Some(ref picker) = state.branch_picker {
+                crate::tui::widgets::fuzzy_picker::render(picker, frame);
+            }
+        }
         AddStage::Creating => render_add_progress(state, frame),
     }
 }
 
 fn render_add_branch_strategy(state: &crate::tui::screens::add::AddState, frame: &mut Frame) {
     use ratatui::widgets::Clear;
-    let area = centered_rect_fixed(50, 9, frame.area());
+    let area = centered_rect_fixed(54, 11, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -382,6 +395,7 @@ fn render_add_branch_strategy(state: &crate::tui::screens::add::AddState, frame:
         format!("New branch '{}'", state.workspace_name),
         format!("Existing branch '{}' (if present)", state.workspace_name),
         "Detached HEAD".to_string(),
+        "Pick a branch...".to_string(),
     ];
 
     let items: Vec<ListItem> = options

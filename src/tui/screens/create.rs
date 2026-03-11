@@ -8,6 +8,7 @@ pub enum CreateStage {
     PickRepos,
     NameWorkspace,
     PickBranchStrategy,
+    PickBranch,
     Creating,
 }
 
@@ -16,8 +17,10 @@ pub struct CreateState {
     pub picker: FuzzyPicker,
     pub ws_name: Input,
     pub selected_repos: Vec<PathBuf>,
-    pub branch_strategy_idx: usize, // 0=new branch, 1=existing, 2=detached
-    pub progress: Vec<String>,      // log lines shown during Creating stage
+    pub branch_strategy_idx: usize, // 0=new branch, 1=existing, 2=detached, 3=pick branch
+    pub branch_picker: Option<FuzzyPicker>, // populated when entering PickBranch stage
+    pub picked_branch: Option<String>,      // branch name chosen via branch_picker
+    pub progress: Vec<String>,              // log lines shown during Creating stage
     pub error: Option<String>,
 }
 
@@ -28,6 +31,7 @@ impl std::fmt::Debug for CreateState {
             .field("ws_name", &self.ws_name.value())
             .field("selected_repos", &self.selected_repos)
             .field("branch_strategy_idx", &self.branch_strategy_idx)
+            .field("picked_branch", &self.picked_branch)
             .field("progress", &self.progress)
             .field("error", &self.error)
             .finish()
@@ -53,6 +57,8 @@ impl CreateState {
             ws_name: Input::default(),
             selected_repos: vec![],
             branch_strategy_idx: 0,
+            branch_picker: None,
+            picked_branch: None,
             progress: vec![],
             error: None,
         }
@@ -60,11 +66,13 @@ impl CreateState {
 
     pub fn branch_strategy(&self) -> BranchStrategy {
         match self.branch_strategy_idx {
-            // 0: New branch with workspace name
-            // 1: Checkout existing branch with same name (if it exists)
-            // 2: Detached HEAD
             1 => BranchStrategy::ExistingBranch(self.ws_name.value().to_string()),
             2 => BranchStrategy::DetachedHead,
+            3 => BranchStrategy::ExistingBranch(
+                self.picked_branch
+                    .clone()
+                    .unwrap_or_else(|| self.ws_name.value().to_string()),
+            ),
             _ => BranchStrategy::NewBranch(self.ws_name.value().to_string()),
         }
     }
