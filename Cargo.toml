@@ -1,6 +1,6 @@
 [package]
 name = "space"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "Workspace manager for multi-repo git worktrees"
 license = "MIT"
