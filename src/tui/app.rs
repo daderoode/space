@@ -411,12 +411,14 @@ fn handle_create_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
                 let Screen::CreateWorkspace(ref mut st) = app.screen else {
                     return;
                 };
+                st.error = None;
                 st.stage = CreateStage::NameWorkspace;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 let Screen::CreateWorkspace(ref mut st) = app.screen else {
                     return;
                 };
+                st.error = None;
                 if st.branch_strategy_idx > 0 {
                     st.branch_strategy_idx -= 1;
                 }
@@ -425,6 +427,7 @@ fn handle_create_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
                 let Screen::CreateWorkspace(ref mut st) = app.screen else {
                     return;
                 };
+                st.error = None;
                 if st.branch_strategy_idx < 3 {
                     st.branch_strategy_idx += 1;
                 }
@@ -606,6 +609,19 @@ fn do_create(app: &mut App) {
                 st.progress.push(format!("  \u{2713} {}", repo_name));
             }
             Err(e) => {
+                if e.to_string().contains("already checked out") {
+                    // Route the user back to the strategy picker with a clear explanation
+                    let Screen::CreateWorkspace(ref mut st) = app.screen else {
+                        return;
+                    };
+                    st.stage = crate::tui::screens::create::CreateStage::PickBranchStrategy;
+                    st.progress.clear();
+                    st.error = Some(format!(
+                        "'{}' is already checked out — pick a different strategy",
+                        repo_name
+                    ));
+                    return;
+                }
                 let Screen::CreateWorkspace(ref mut st) = app.screen else {
                     return;
                 };
@@ -762,12 +778,14 @@ fn handle_add_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
                 let Screen::AddRepos(ref mut st) = app.screen else {
                     return;
                 };
+                st.error = None;
                 st.stage = AddStage::PickRepos;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 let Screen::AddRepos(ref mut st) = app.screen else {
                     return;
                 };
+                st.error = None;
                 if st.branch_strategy_idx > 0 {
                     st.branch_strategy_idx -= 1;
                 }
@@ -776,6 +794,7 @@ fn handle_add_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
                 let Screen::AddRepos(ref mut st) = app.screen else {
                     return;
                 };
+                st.error = None;
                 if st.branch_strategy_idx < 3 {
                     st.branch_strategy_idx += 1;
                 }
@@ -949,6 +968,19 @@ fn do_add(app: &mut App) {
                 st.progress.push(format!("  \u{2713} {}", repo_name));
             }
             Err(e) => {
+                if e.to_string().contains("already checked out") {
+                    // Route the user back to the strategy picker with a clear explanation
+                    let Screen::AddRepos(ref mut st) = app.screen else {
+                        return;
+                    };
+                    st.stage = crate::tui::screens::add::AddStage::PickBranchStrategy;
+                    st.progress.clear();
+                    st.error = Some(format!(
+                        "'{}' is already checked out — pick a different strategy",
+                        repo_name
+                    ));
+                    return;
+                }
                 let Screen::AddRepos(ref mut st) = app.screen else {
                     return;
                 };

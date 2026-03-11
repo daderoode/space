@@ -117,7 +117,11 @@ fn git_worktree_add(args: &[&str], cwd: &Path) -> Result<()> {
             stderr
                 .lines()
                 .map(|l| l.trim())
-                .find(|l| !l.is_empty() && !l.starts_with("Preparing worktree") && !l.starts_with("HEAD is now"))
+                .find(|l| {
+                    !l.is_empty()
+                        && !l.starts_with("Preparing worktree")
+                        && !l.starts_with("HEAD is now")
+                })
         })
         .unwrap_or("git worktree add failed");
 

@@ -284,16 +284,25 @@ fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &m
 
 fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
     use ratatui::widgets::Clear;
-    let area = centered_rect_fixed(54, 11, frame.area());
+    let has_error = state.error.is_some();
+    let height = if has_error { 13 } else { 11 };
+    let area = centered_rect_fixed(60, height, frame.area());
     frame.render_widget(Clear, area);
 
+    let border_style = if has_error { theme::border_danger() } else { theme::border_focused() };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(theme::border_focused())
+        .border_style(border_style)
         .title(" Branch Strategy ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
+
+    let sections = if has_error {
+        Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(inner)
+    } else {
+        Layout::vertical([Constraint::Min(0), Constraint::Length(0)]).split(inner)
+    };
 
     let options = [
         format!("New branch '{}'", state.ws_name.value()),
@@ -314,7 +323,14 @@ fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, fram
         })
         .collect();
 
-    frame.render_widget(List::new(items), inner);
+    frame.render_widget(List::new(items), sections[0]);
+
+    if let Some(err) = &state.error {
+        frame.render_widget(
+            Paragraph::new(format!("\u{26a0}  {}", err)).style(theme::error()),
+            sections[1],
+        );
+    }
 }
 
 fn render_creating_progress(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
@@ -380,16 +396,25 @@ fn render_add_overlay(state: &crate::tui::screens::add::AddState, frame: &mut Fr
 
 fn render_add_branch_strategy(state: &crate::tui::screens::add::AddState, frame: &mut Frame) {
     use ratatui::widgets::Clear;
-    let area = centered_rect_fixed(54, 11, frame.area());
+    let has_error = state.error.is_some();
+    let height = if has_error { 13 } else { 11 };
+    let area = centered_rect_fixed(60, height, frame.area());
     frame.render_widget(Clear, area);
 
+    let border_style = if has_error { theme::border_danger() } else { theme::border_focused() };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(theme::border_focused())
+        .border_style(border_style)
         .title(" Branch Strategy ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
+
+    let sections = if has_error {
+        Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(inner)
+    } else {
+        Layout::vertical([Constraint::Min(0), Constraint::Length(0)]).split(inner)
+    };
 
     let options = [
         format!("New branch '{}'", state.workspace_name),
@@ -410,7 +435,14 @@ fn render_add_branch_strategy(state: &crate::tui::screens::add::AddState, frame:
         })
         .collect();
 
-    frame.render_widget(List::new(items), inner);
+    frame.render_widget(List::new(items), sections[0]);
+
+    if let Some(err) = &state.error {
+        frame.render_widget(
+            Paragraph::new(format!("\u{26a0}  {}", err)).style(theme::error()),
+            sections[1],
+        );
+    }
 }
 
 fn render_add_progress(state: &crate::tui::screens::add::AddState, frame: &mut Frame) {
