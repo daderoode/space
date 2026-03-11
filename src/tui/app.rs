@@ -4,6 +4,9 @@ use crate::core::{
 };
 use anyhow::Result;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(5);
 
 /// Convert a ratatui/crossterm 0.29 KeyEvent into a tui_input InputRequest,
 /// bypassing the tui_input crossterm backend which links against crossterm 0.28.
@@ -91,6 +94,7 @@ pub struct App {
     pub should_quit: bool,
     pub space_cd_target: Option<PathBuf>,
     pub status_message: Option<String>,
+    pub status_message_set_at: Option<Instant>,
 }
 
 impl App {
@@ -111,6 +115,7 @@ impl App {
             should_quit: false,
             space_cd_target: None,
             status_message: None,
+            status_message_set_at: None,
         };
         app.load_selected_workspace_detail();
         Ok(app)
@@ -129,8 +134,26 @@ impl App {
                 }
                 Err(_e) => {
                     // Keep shallow workspace entry; note error for user
-                    self.status_message = Some(format!("Could not load '{}' detail", name));
+                    self.set_status(format!("Could not load '{}' detail", name));
                 }
+            }
+        }
+    }
+
+    fn set_status(&mut self, msg: impl Into<String>) {
+        self.status_message = Some(msg.into());
+        self.status_message_set_at = Some(Instant::now());
+    }
+
+    fn clear_status(&mut self) {
+        self.status_message = None;
+        self.status_message_set_at = None;
+    }
+
+    fn expire_status_message(&mut self, now: Instant) {
+        if let Some(set_at) = self.status_message_set_at {
+            if now.duration_since(set_at) >= STATUS_MESSAGE_TTL {
+                self.clear_status();
             }
         }
     }
@@ -187,7 +210,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             let repos = crate::core::repo::find_repos_in(&roots, depth);
             let _ = crate::core::repo::save_cache(&SpaceConfig::cache_path(), &repos);
             app.repos_cache = repos;
-            app.status_message = Some(format!("Refreshed: {} repos found", app.repos_cache.len()));
+            app.set_status(format!("Refreshed: {} repos found", app.repos_cache.len()));
             None
         }
         Message::GoToWorkspace => {
@@ -552,7 +575,7 @@ fn handle_create_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
                         app.load_selected_workspace_detail();
                     }
                     if let Some(err) = error_msg {
-                        app.status_message = Some(format!("Create failed: {}", err));
+                        app.set_status(format!("Create failed: {}", err));
                     }
                 }
                 _ => {}
@@ -648,7 +671,7 @@ fn do_create(app: &mut App) {
             app.load_selected_workspace_detail();
         }
         app.screen = Screen::Dashboard;
-        app.status_message = Some(format!("Created workspace '{}'", ws_name));
+        app.set_status(format!("Created workspace '{}'", ws_name));
     }
     // If there was an error, stay on Creating stage so user can see the log
 }
@@ -914,7 +937,7 @@ fn handle_add_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
                     app.load_selected_workspace_detail();
                 }
                 if let Some(err) = error_msg {
-                    app.status_message = Some(format!("Add failed: {}", err));
+                    app.set_status(format!("Add failed: {}", err));
                 }
             }
             _ => {}
@@ -1006,7 +1029,7 @@ fn do_add(app: &mut App) {
             app.load_selected_workspace_detail();
         }
         app.screen = Screen::Dashboard;
-        app.status_message = Some(format!("Added repos to workspace '{}'", ws_name));
+        app.set_status(format!("Added repos to workspace '{}'", ws_name));
     }
     // If there was an error, stay on Creating stage so user can see the log
 }
@@ -1031,11 +1054,11 @@ fn handle_delete_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
                         app.selected_ws = 0;
                     }
                     app.load_selected_workspace_detail();
-                    app.status_message = Some(format!("Deleted workspace '{}'", ws_name));
+                    app.set_status(format!("Deleted workspace '{}'", ws_name));
                 }
                 Err(e) => {
                     app.screen = Screen::Dashboard;
-                    app.status_message = Some(format!("Delete failed: {}", e));
+                    app.set_status(format!("Delete failed: {}", e));
                 }
             }
         }
@@ -1091,8 +1114,7 @@ fn handle_search_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
                     app.selected_repo = 0;
                     app.load_selected_workspace_detail();
                 } else {
-                    app.status_message =
-                        Some("Not in any workspace — use 'c' to create one".to_string());
+                    app.set_status("Not in any workspace — use 'c' to create one");
                 }
             }
         }
@@ -1128,10 +1150,10 @@ fn handle_config_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
         match result {
             Ok(new_config) => {
                 app.config = new_config;
-                app.status_message = Some("Config saved".to_string());
+                app.set_status("Config saved");
             }
             Err(e) => {
-                app.status_message = Some(format!("Save failed: {}", e));
+                app.set_status(format!("Save failed: {}", e));
             }
         }
         app.screen = Screen::Dashboard;
@@ -1226,6 +1248,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()
     }
 
     loop {
+        app.expire_status_message(Instant::now());
         terminal.draw(|frame| crate::tui::ui::view(app, frame))?;
 
         if event::poll(std::time::Duration::from_millis(16))? {
@@ -1316,4 +1339,39 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn app_with_status() -> App {
+        let mut app = App {
+            config: SpaceConfig::default(),
+            workspaces: vec![],
+            repos_cache: vec![],
+            selected_ws: 0,
+            selected_repo: 0,
+            focus: Pane::Left,
+            screen: Screen::Dashboard,
+            should_quit: false,
+            space_cd_target: None,
+            status_message: None,
+            status_message_set_at: None,
+        };
+        app.set_status("Added repos to workspace 'mission-control-ui'");
+        app
+    }
+
+    #[test]
+    fn status_message_expires_after_timeout() {
+        let mut app = app_with_status();
+        app.status_message_set_at =
+            Some(Instant::now() - STATUS_MESSAGE_TTL - Duration::from_millis(1));
+
+        app.expire_status_message(Instant::now());
+
+        assert_eq!(app.status_message, None);
+    }
 }
