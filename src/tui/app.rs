@@ -280,15 +280,13 @@ fn build_branch_picker(
     let items: Vec<PickerItem> = branches
         .into_iter()
         .map(|b| PickerItem {
-            name: if b.is_current {
-                format!("{} *", b.name)
-            } else {
-                b.name
-            },
-            parent: if b.is_remote {
-                "remote".to_string()
-            } else {
-                "local".to_string()
+            // `name` is what gets passed to git — must be the clean branch name.
+            // Indicate the current branch via the `parent` field shown in the picker.
+            name: b.name,
+            parent: match (b.is_remote, b.is_current) {
+                (_, true) => "current".to_string(),
+                (true, false) => "remote".to_string(),
+                (false, false) => "local".to_string(),
             },
             full_path: std::path::PathBuf::new(), // unused for branch picker
         })
