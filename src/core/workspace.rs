@@ -92,6 +92,31 @@ pub fn workspace_detail(ws_dir: &Path, name: &str) -> Result<Workspace> {
 }
 
 /// Create a git worktree for `repo_path` inside `ws_dir/<ws_name>/<repo_name>`.
+/// Run a git command, capturing stdout+stderr. On non-zero exit, returns an
+/// error that includes the first non-empty line of stderr so the TUI can show
+/// the real git message (e.g. "branch already checked out at …").
+fn git_worktree_add(args: &[&str], cwd: &Path) -> Result<()> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .with_context(|| "failed to spawn git")?;
+
+    if out.status.success() {
+        return Ok(());
+    }
+
+    // Prefer stderr; fall back to stdout; fall back to exit code.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let msg = stderr
+        .lines()
+        .map(|l| l.trim_start_matches("fatal: ").trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or("git worktree add failed");
+
+    anyhow::bail!("{}", msg)
+}
+
 /// Returns the path to the created worktree.
 pub fn create_worktree(
     repo_path: &Path,
@@ -105,6 +130,7 @@ pub fn create_worktree(
     std::fs::create_dir_all(wt_path.parent().unwrap())?;
 
     let base_branch = git::detect_base_branch(repo_path);
+    let wt = wt_path.to_string_lossy();
 
     // Auto-fetch — ignore errors for offline use
     let _ = Command::new("git")
@@ -112,7 +138,7 @@ pub fn create_worktree(
         .current_dir(repo_path)
         .status();
 
-    let status = match strategy {
+    match strategy {
         BranchStrategy::NewBranch(branch_name) => {
             // 1. Local branch exists?
             let local_exists = Command::new("git")
@@ -132,76 +158,38 @@ pub fn create_worktree(
                 .unwrap_or(false);
 
             if local_exists {
-                Command::new("git")
-                    .args(["worktree", "add", &wt_path.to_string_lossy(), branch_name])
-                    .current_dir(repo_path)
-                    .status()
+                git_worktree_add(&["worktree", "add", &wt, branch_name], repo_path)?;
             } else if remote_exists {
-                Command::new("git")
-                    .args([
-                        "worktree",
-                        "add",
-                        "--track",
-                        "-b",
-                        branch_name,
-                        &wt_path.to_string_lossy(),
-                        &remote_ref,
-                    ])
-                    .current_dir(repo_path)
-                    .status()
+                git_worktree_add(
+                    &["worktree", "add", "--track", "-b", branch_name, &wt, &remote_ref],
+                    repo_path,
+                )?;
             } else {
-                Command::new("git")
-                    .args([
-                        "worktree",
-                        "add",
-                        "-b",
-                        branch_name,
-                        &wt_path.to_string_lossy(),
-                        &base_branch,
-                    ])
-                    .current_dir(repo_path)
-                    .status()
+                git_worktree_add(
+                    &["worktree", "add", "-b", branch_name, &wt, &base_branch],
+                    repo_path,
+                )?;
             }
         }
 
         BranchStrategy::ExistingBranch(branch_name) => {
             let local = branch_name.strip_prefix("origin/").unwrap_or(branch_name);
             if branch_name.starts_with("origin/") {
-                Command::new("git")
-                    .args([
-                        "worktree",
-                        "add",
-                        "--track",
-                        "-b",
-                        local,
-                        &wt_path.to_string_lossy(),
-                        branch_name,
-                    ])
-                    .current_dir(repo_path)
-                    .status()
+                git_worktree_add(
+                    &["worktree", "add", "--track", "-b", local, &wt, branch_name],
+                    repo_path,
+                )?;
             } else {
-                Command::new("git")
-                    .args(["worktree", "add", &wt_path.to_string_lossy(), local])
-                    .current_dir(repo_path)
-                    .status()
+                git_worktree_add(&["worktree", "add", &wt, local], repo_path)?;
             }
         }
 
-        BranchStrategy::DetachedHead => Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                "--detach",
-                &wt_path.to_string_lossy(),
-                &base_branch,
-            ])
-            .current_dir(repo_path)
-            .status(),
-    };
-
-    let exit = status.with_context(|| "git worktree add failed")?;
-    if !exit.success() {
-        anyhow::bail!("git worktree add exited with {}", exit);
+        BranchStrategy::DetachedHead => {
+            git_worktree_add(
+                &["worktree", "add", "--detach", &wt, &base_branch],
+                repo_path,
+            )?;
+        }
     }
 
     Ok(wt_path)
