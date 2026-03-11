@@ -106,12 +106,19 @@ fn git_worktree_add(args: &[&str], cwd: &Path) -> Result<()> {
         return Ok(());
     }
 
-    // Prefer stderr; fall back to stdout; fall back to exit code.
+    // Git writes progress ("Preparing worktree...") and errors ("fatal: ...") to
+    // stderr. Prefer the fatal line; fall back to any non-empty line.
     let stderr = String::from_utf8_lossy(&out.stderr);
     let msg = stderr
         .lines()
-        .map(|l| l.trim_start_matches("fatal: ").trim())
-        .find(|l| !l.is_empty())
+        .find(|l| l.starts_with("fatal:"))
+        .map(|l| l.trim_start_matches("fatal:").trim())
+        .or_else(|| {
+            stderr
+                .lines()
+                .map(|l| l.trim())
+                .find(|l| !l.is_empty() && !l.starts_with("Preparing worktree") && !l.starts_with("HEAD is now"))
+        })
         .unwrap_or("git worktree add failed");
 
     anyhow::bail!("{}", msg)
