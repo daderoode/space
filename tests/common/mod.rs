@@ -140,6 +140,28 @@ pub fn test_app(workspaces: Vec<Workspace>, repos_cache: Vec<PathBuf>) -> App {
     }
 }
 
+/// Construct an App with a custom config, bypassing `App::new()`.
+/// Used for tests that need real filesystem paths (create/add flows).
+pub fn test_app_with_config(
+    config: SpaceConfig,
+    workspaces: Vec<Workspace>,
+    repos_cache: Vec<PathBuf>,
+) -> App {
+    App {
+        config,
+        workspaces,
+        repos_cache,
+        selected_ws: 0,
+        selected_repo: 0,
+        focus: Pane::Left,
+        screen: Screen::Dashboard,
+        should_quit: false,
+        space_cd_target: None,
+        status_message: None,
+        status_message_set_at: None,
+    }
+}
+
 /// Helper to construct a KeyEvent with NONE modifiers and Press kind.
 pub fn key(code: ratatui::crossterm::event::KeyCode) -> ratatui::crossterm::event::KeyEvent {
     ratatui::crossterm::event::KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE)

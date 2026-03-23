@@ -157,6 +157,102 @@ impl App {
             }
         }
     }
+
+    /// Process a single key press, dispatching to the appropriate screen handler
+    /// or mapping to a Message for the Dashboard.
+    ///
+    /// Extracted from `run_loop()` so tests can drive state transitions without
+    /// a terminal or event loop.
+    pub fn handle_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        use ratatui::crossterm::event::KeyCode;
+
+        // Global: Ctrl-C always quits (raw mode swallows the OS signal)
+        if key.code == KeyCode::Char('c')
+            && key
+                .modifiers
+                .contains(ratatui::crossterm::event::KeyModifiers::CONTROL)
+        {
+            self.should_quit = true;
+            return;
+        }
+
+        // Determine which screen is active without holding a borrow on self.screen,
+        // so we can pass `&mut self` into the handler functions.
+        enum ActiveScreen {
+            Dashboard,
+            Create,
+            Go,
+            Add,
+            Delete,
+            Search,
+            Config,
+        }
+
+        let active = match &self.screen {
+            Screen::Dashboard => ActiveScreen::Dashboard,
+            Screen::CreateWorkspace(_) => ActiveScreen::Create,
+            Screen::GoWorkspace(_) => ActiveScreen::Go,
+            Screen::AddRepos(_) => ActiveScreen::Add,
+            Screen::ConfirmDelete(_) => ActiveScreen::Delete,
+            Screen::RepoSearch(_) => ActiveScreen::Search,
+            Screen::ConfigEditor(_) => ActiveScreen::Config,
+        };
+
+        let msg: Option<Message> = match active {
+            ActiveScreen::Create => {
+                handle_create_key(self, key);
+                None
+            }
+            ActiveScreen::Go => {
+                handle_go_key(self, key);
+                None
+            }
+            ActiveScreen::Add => {
+                handle_add_key(self, key);
+                None
+            }
+            ActiveScreen::Delete => {
+                handle_delete_key(self, key);
+                None
+            }
+            ActiveScreen::Search => {
+                handle_search_key(self, key);
+                None
+            }
+            ActiveScreen::Config => {
+                handle_config_key(self, key);
+                None
+            }
+            ActiveScreen::Dashboard => match (key.code, key.modifiers) {
+                (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => Some(Message::Quit),
+                (KeyCode::Tab, _) => Some(Message::FocusNext),
+                (KeyCode::Enter, _) => Some(Message::GoToWorkspace),
+                (KeyCode::Char('g'), _) => Some(Message::StartGo),
+                (KeyCode::Char('c'), _) => Some(Message::StartCreate),
+                (KeyCode::Char('a'), _) => Some(Message::StartAdd),
+                (KeyCode::Char('d'), _) => Some(Message::StartDelete),
+                (KeyCode::Char('r'), _) => Some(Message::RefreshRepos),
+                (KeyCode::Char('/'), _) => Some(Message::StartSearch),
+                (KeyCode::Char('S'), _) => Some(Message::StartConfig),
+                (KeyCode::Up, _) | (KeyCode::Char('k'), _) => match self.focus {
+                    Pane::Left => Some(Message::SelectWorkspaceUp),
+                    Pane::Right => Some(Message::SelectRepoUp),
+                },
+                (KeyCode::Down, _) | (KeyCode::Char('j'), _) => match self.focus {
+                    Pane::Left => Some(Message::SelectWorkspaceDown),
+                    Pane::Right => Some(Message::SelectRepoDown),
+                },
+                _ => None,
+            },
+        };
+
+        if let Some(m) = msg {
+            let mut next = update(self, m);
+            while let Some(m2) = next {
+                next = update(self, m2);
+            }
+        }
+    }
 }
 
 pub fn update(app: &mut App, msg: Message) -> Option<Message> {
@@ -1227,7 +1323,7 @@ fn handle_config_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
 }
 
 fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
-    use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+    use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
     // Drain any stale input that accumulated before the TUI started —
     // e.g. keystrokes typed during a previous frozen/crashed session that
@@ -1235,16 +1331,6 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()
     // immediately into the first field, corrupting it.
     while event::poll(std::time::Duration::ZERO)? {
         let _ = event::read()?;
-    }
-
-    enum ActiveScreen {
-        Dashboard,
-        Create,
-        Go,
-        Add,
-        Delete,
-        Search,
-        Config,
     }
 
     loop {
@@ -1256,81 +1342,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-
-                // Global: Ctrl-C always quits (raw mode swallows the OS signal)
-                if key.code == KeyCode::Char('c')
-                    && key.modifiers.contains(event::KeyModifiers::CONTROL)
-                {
-                    app.should_quit = true;
-                    continue;
-                }
-
-                // Determine which screen is active without holding a borrow on app.screen,
-                // so we can pass `&mut app` into the handler functions.
-                let active = match &app.screen {
-                    Screen::Dashboard => ActiveScreen::Dashboard,
-                    Screen::CreateWorkspace(_) => ActiveScreen::Create,
-                    Screen::GoWorkspace(_) => ActiveScreen::Go,
-                    Screen::AddRepos(_) => ActiveScreen::Add,
-                    Screen::ConfirmDelete(_) => ActiveScreen::Delete,
-                    Screen::RepoSearch(_) => ActiveScreen::Search,
-                    Screen::ConfigEditor(_) => ActiveScreen::Config,
-                };
-
-                let msg: Option<Message> = match active {
-                    ActiveScreen::Create => {
-                        handle_create_key(app, key);
-                        None
-                    }
-                    ActiveScreen::Go => {
-                        handle_go_key(app, key);
-                        None
-                    }
-                    ActiveScreen::Add => {
-                        handle_add_key(app, key);
-                        None
-                    }
-                    ActiveScreen::Delete => {
-                        handle_delete_key(app, key);
-                        None
-                    }
-                    ActiveScreen::Search => {
-                        handle_search_key(app, key);
-                        None
-                    }
-                    ActiveScreen::Config => {
-                        handle_config_key(app, key);
-                        None
-                    }
-                    ActiveScreen::Dashboard => match (key.code, key.modifiers) {
-                        (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => Some(Message::Quit),
-                        (KeyCode::Tab, _) => Some(Message::FocusNext),
-                        (KeyCode::Enter, _) => Some(Message::GoToWorkspace),
-                        (KeyCode::Char('g'), _) => Some(Message::StartGo),
-                        (KeyCode::Char('c'), _) => Some(Message::StartCreate),
-                        (KeyCode::Char('a'), _) => Some(Message::StartAdd),
-                        (KeyCode::Char('d'), _) => Some(Message::StartDelete),
-                        (KeyCode::Char('r'), _) => Some(Message::RefreshRepos),
-                        (KeyCode::Char('/'), _) => Some(Message::StartSearch),
-                        (KeyCode::Char('S'), _) => Some(Message::StartConfig),
-                        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => match app.focus {
-                            Pane::Left => Some(Message::SelectWorkspaceUp),
-                            Pane::Right => Some(Message::SelectRepoUp),
-                        },
-                        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => match app.focus {
-                            Pane::Left => Some(Message::SelectWorkspaceDown),
-                            Pane::Right => Some(Message::SelectRepoDown),
-                        },
-                        _ => None,
-                    },
-                };
-
-                if let Some(m) = msg {
-                    let mut next = update(app, m);
-                    while let Some(m2) = next {
-                        next = update(app, m2);
-                    }
-                }
+                app.handle_key(key);
             }
         }
 
