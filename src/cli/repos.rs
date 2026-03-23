@@ -21,7 +21,7 @@ pub fn run(refresh: bool) -> Result<()> {
         pb.finish_and_clear();
         found
     } else {
-        repo::load_cache(&cache_path).unwrap_or_default()
+        repo::load_cache(&cache_path, cfg.repos.cache_age_secs).unwrap_or_default()
     };
 
     println!("{}", "Discovered repositories:".bold());

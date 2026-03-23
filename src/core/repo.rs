@@ -75,7 +75,15 @@ pub fn fuzzy_match(query: &str, repos: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 /// Read a newline-delimited cache file of repo paths.
-pub fn load_cache(path: &Path) -> Option<Vec<PathBuf>> {
+///
+/// Returns `None` if the file is missing, unreadable, or older than
+/// `max_age_secs` seconds.
+pub fn load_cache(path: &Path, max_age_secs: u64) -> Option<Vec<PathBuf>> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let age = metadata.modified().ok()?.elapsed().ok()?;
+    if age.as_secs() > max_age_secs {
+        return None;
+    }
     let content = std::fs::read_to_string(path).ok()?;
     Some(
         content

@@ -103,7 +103,8 @@ impl App {
         let workspaces = workspace::list_workspaces(&config.workspaces.dir)?;
         // Load repo cache if available
         let repos_cache =
-            crate::core::repo::load_cache(&SpaceConfig::cache_path()).unwrap_or_default();
+            crate::core::repo::load_cache(&SpaceConfig::cache_path(), config.repos.cache_age_secs)
+                .unwrap_or_default();
         let mut app = Self {
             config,
             workspaces,
