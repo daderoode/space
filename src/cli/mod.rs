@@ -118,5 +118,7 @@ pub fn dispatch(cmd: Commands) -> Result<()> {
         Commands::Rm { name, force: true } => remove::run(&name, true),
 
         Commands::Completions { shell } => crate::shell::print_completions(&shell),
+
+        Commands::Mcp => crate::mcp::run(),
     }
 }

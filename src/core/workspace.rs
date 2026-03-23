@@ -3,14 +3,14 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct Workspace {
     pub name: String,
     pub path: PathBuf,
     pub repos: Vec<WorkspaceRepo>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct WorkspaceRepo {
     pub name: String,
     /// Absolute path to the worktree on disk. Used by the TUI (v0.2.0).

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use git2::{Repository, StatusOptions};
 use std::path::Path;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 pub struct RepoStatus {
     pub modified: usize,
     pub staged: usize,

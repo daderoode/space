@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 
 mod cli;
 mod core;
+mod mcp;
 mod shell;
 mod tui;
 
@@ -67,4 +68,6 @@ pub enum Commands {
         /// Shell name (only 'zsh' is supported)
         shell: String,
     },
+    /// Start the MCP server (stdio transport)
+    Mcp,
 }
