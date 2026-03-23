@@ -8,6 +8,8 @@ work across many repos in a single `space go` command.
 
 Running `space` with no arguments opens the TUI dashboard.
 
+For the full guide, see [docs/GUIDE.md](docs/GUIDE.md).
+
 ## Install
 
 ```sh
@@ -52,11 +54,11 @@ panes:
 
 ```
 ┌─ Workspaces (30%) ──────────┬─ Repos (70%) ─────────────────────────────┐
-│  my-feature                 │  repo-a     main  ✓ clean                 │
-│  hotfix-payment             │  repo-b     main  M 3 staged               │
+│  my-feature                 │  repo-a     main  clean                   │
+│  hotfix-payment             │  repo-b     main  3m 2s                   │
 │  ...                        │  ...                                       │
 └─────────────────────────────┴───────────────────────────────────────────┘
- space v0.2.0                                    [status message]
+ space v0.4.0                                    [status message / hints]
 ```
 
 **Key bindings:**
@@ -66,11 +68,13 @@ panes:
 | `↑` / `↓` or `j` / `k` | Navigate list |
 | `Tab` | Switch panes (workspaces ↔ repos) |
 | `Enter` | Go to selected workspace (cd) |
+| `g` | Go to workspace (fuzzy picker) |
 | `c` | Create a new workspace |
 | `a` | Add repos to selected workspace |
 | `d` | Delete selected workspace |
 | `r` | Refresh repo cache |
 | `/` | Search all repos |
+| `S` | Open config editor |
 | `q` / `Esc` | Quit |
 
 Interactive commands (`go`, `create`, `add`, `config`, `rm` without `--force`)
@@ -88,18 +92,41 @@ space add <workspace> <repos>  # add repos to an existing workspace
 space rm <name> [--force]      # remove a workspace
 space repos [--refresh]        # list / refresh the repo cache
 space config                   # edit configuration interactively
-space completions zsh
+space completions zsh          # print shell completions
+space mcp                      # start MCP server on stdio
 ```
 
-## Development
+## MCP Server
 
-Before pushing changes, run the same local verification sequence used by CI:
+`space mcp` starts a [Model Context Protocol](https://modelcontextprotocol.io)
+server on stdio, exposing workspace management to AI coding agents.
 
-```sh
-cargo fmt --check
-cargo clippy -- -D warnings
-cargo test
+**Tools:**
+
+| Tool | Description |
+|------|-------------|
+| `list_repos` | Discover git repositories from configured roots |
+| `list_workspaces` | List all workspaces with per-repo branch and status |
+| `workspace_status` | Detailed status for a specific workspace |
+| `create_workspace` | Create a workspace with git worktrees for selected repos |
+| `add_repos` | Add repos to an existing workspace |
+| `remove_workspace` | Remove a workspace and all its worktrees |
+
+Add to your agent's MCP config:
+
+```json
+{
+  "mcpServers": {
+    "space": {
+      "command": "space",
+      "args": ["mcp"]
+    }
+  }
+}
 ```
+
+See [docs/GUIDE.md](docs/GUIDE.md#mcp-tools) for the full tool reference with
+parameters, return types, and error handling.
 
 ## Configuration
 
@@ -134,6 +161,18 @@ Each workspace is a directory under `workspaces.dir`. Creating a workspace
 runs `git worktree add` for each selected repo, placing the worktrees at
 `<workspaces_dir>/<workspace>/<repo>`. Removing a workspace runs
 `git worktree remove` and deletes the directory.
+
+There is no metadata database — the filesystem is the state.
+
+## Development
+
+Before pushing changes, run the same local verification sequence used by CI:
+
+```sh
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
+```
 
 ## License
 
