@@ -109,10 +109,15 @@ dir = "{}"
         repo_path
     }
 
-    /// Write a repos.cache file with the given repo paths.
+    /// Write a repos.cache file with the given repo paths (newline-delimited,
+    /// matching the format used by `repo::save_cache` / `repo::load_cache`).
     pub fn write_cache(&self, repos: &[PathBuf]) {
         let cache_path = self.config_dir.join("repos.cache");
-        let content = serde_json::to_string(repos).unwrap();
+        let content = repos
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         std::fs::write(cache_path, content).unwrap();
     }
 }
