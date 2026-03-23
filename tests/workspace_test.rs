@@ -1,29 +1,8 @@
+mod common;
+
 use space::core::workspace::{create_worktree, list_workspaces, BranchStrategy};
 use std::process::Command;
 use tempfile::TempDir;
-
-fn init_repo(dir: &std::path::Path) {
-    Command::new("git")
-        .args(["init", "-b", "main"])
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["config", "user.email", "space@local"])
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["config", "user.name", "T"])
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "init"])
-        .current_dir(dir)
-        .output()
-        .unwrap();
-}
 
 #[test]
 fn list_workspaces_returns_directories() {
@@ -40,7 +19,7 @@ fn list_workspaces_returns_directories() {
 #[test]
 fn create_worktree_new_branch_strategy() {
     let repo_dir = TempDir::new().unwrap();
-    init_repo(repo_dir.path());
+    common::init_repo(repo_dir.path());
     let ws_dir = TempDir::new().unwrap();
 
     let wt_path = create_worktree(
@@ -58,7 +37,7 @@ fn create_worktree_new_branch_strategy() {
 #[test]
 fn create_worktree_detached_head_strategy() {
     let repo_dir = TempDir::new().unwrap();
-    init_repo(repo_dir.path());
+    common::init_repo(repo_dir.path());
     let ws_dir = TempDir::new().unwrap();
 
     let wt_path = create_worktree(
@@ -75,7 +54,7 @@ fn create_worktree_detached_head_strategy() {
 #[test]
 fn create_worktree_reuses_existing_local_branch() {
     let repo_dir = TempDir::new().unwrap();
-    init_repo(repo_dir.path());
+    common::init_repo(repo_dir.path());
     // Create the branch first
     Command::new("git")
         .args(["branch", "my-feature"])
@@ -103,7 +82,7 @@ fn create_worktree_falls_back_to_detached_when_branch_checked_out() {
     // If the branch is already checked out in the main repo,
     // the worktree should fall back to detached HEAD rather than error.
     let repo_dir = TempDir::new().unwrap();
-    init_repo(repo_dir.path());
+    common::init_repo(repo_dir.path());
     // "main" is already checked out in repo_dir — try to create worktree on it
     let ws_dir = TempDir::new().unwrap();
     let result = create_worktree(

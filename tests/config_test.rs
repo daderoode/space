@@ -1,5 +1,6 @@
 use space::core::config::SpaceConfig;
 use std::path::PathBuf;
+use tempfile::TempDir;
 
 #[test]
 fn default_config_has_reasonable_values() {
@@ -41,4 +42,16 @@ fn round_trips_through_toml() {
 fn config_path_is_under_config_dir() {
     let path = SpaceConfig::config_path();
     assert!(path.ends_with("space/config.toml"));
+}
+
+// NOTE: set_var/remove_var are process-global. This test could flake if run
+// concurrently with other tests that depend on config_dir() returning the
+// real path. Currently safe because no other test does this.
+#[test]
+fn config_dir_respects_space_config_dir_env() {
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("SPACE_CONFIG_DIR", tmp.path());
+    let dir = SpaceConfig::config_dir();
+    std::env::remove_var("SPACE_CONFIG_DIR");
+    assert_eq!(dir, tmp.path());
 }
