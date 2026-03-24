@@ -38,15 +38,42 @@ fn dirty_repo_status_counts_correctly() {
 fn lists_branches() {
     let tmp = TempDir::new().unwrap();
     common::init_repo(tmp.path());
-    Command::new("git")
+    let out = Command::new("git")
         .args(["branch", "feature-x"])
         .current_dir(tmp.path())
         .output()
         .unwrap();
+    assert!(
+        out.status.success(),
+        "git branch failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let branches = space::core::git::list_branches(tmp.path()).unwrap();
-    assert!(branches.len() >= 2);
-    assert!(branches.iter().any(|b| b.name == "feature-x"));
+    assert_eq!(branches.len(), 2, "should have main + feature-x");
+
+    let main_branch = branches
+        .iter()
+        .find(|b| b.name == "main")
+        .expect("main branch");
+    assert!(main_branch.is_current, "main should be current");
+    assert!(!main_branch.is_remote, "main should be local");
+
+    let feature_branch = branches
+        .iter()
+        .find(|b| b.name == "feature-x")
+        .expect("feature-x");
+    assert!(
+        !feature_branch.is_current,
+        "feature-x should not be current"
+    );
+    assert!(!feature_branch.is_remote, "feature-x should be local");
+
+    // Verify locals come before remotes in sort order
+    assert!(
+        !branches[0].is_remote,
+        "first branch should be local (sort order: locals before remotes)"
+    );
 }
 
 #[test]

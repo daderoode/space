@@ -116,15 +116,16 @@ fn status_nonexistent_errors() {
 #[test]
 fn repos_lists_from_cache() {
     let env = TestEnv::new();
-
-    let repo_path = env.create_repo("alpha");
-    env.write_cache(&[repo_path]);
+    // Write cache pointing to a path that does NOT exist on disk.
+    // The only way the name appears in output is via the cache.
+    let fake_path = std::path::PathBuf::from("/nonexistent/repos/phantom-repo");
+    env.write_cache(&[fake_path]);
 
     space(&env)
         .arg("repos")
         .assert()
         .success()
-        .stdout(predicate::str::contains("alpha"));
+        .stdout(predicate::str::contains("phantom-repo"));
 }
 
 // ---------------------------------------------------------------------------
@@ -135,11 +136,29 @@ fn repos_refresh_rescans() {
     let env = TestEnv::new();
     env.create_repo("gamma");
 
+    // No cache file exists initially
+    let cache_path = env.config_dir.join("repos.cache");
+    assert!(
+        !cache_path.exists(),
+        "cache should not exist before refresh"
+    );
+
     space(&env)
         .args(["repos", "--refresh"])
         .assert()
         .success()
         .stdout(predicate::str::contains("gamma"));
+
+    // Cache file should now exist and contain the repo
+    assert!(
+        cache_path.exists(),
+        "cache should be written after --refresh"
+    );
+    let content = std::fs::read_to_string(&cache_path).unwrap();
+    assert!(
+        content.contains("gamma"),
+        "cache should contain scanned repo"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -148,7 +167,6 @@ fn repos_refresh_rescans() {
 #[test]
 fn go_existing_emits_cd() {
     let env = TestEnv::new();
-
     let ws_path = env.workspaces_dir.join("jump-ws");
     std::fs::create_dir_all(&ws_path).unwrap();
 
@@ -156,7 +174,10 @@ fn go_existing_emits_cd() {
         .args(["go", "jump-ws"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("__SPACE_CD__:"));
+        .stdout(predicate::str::contains(format!(
+            "__SPACE_CD__:{}",
+            ws_path.display()
+        )));
 }
 
 // ---------------------------------------------------------------------------
