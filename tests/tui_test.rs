@@ -322,3 +322,113 @@ fn add_esc_returns_to_dashboard() {
         "expected Dashboard after Esc from AddRepos"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Delete handler tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn delete_y_removes_workspace() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("del-repo");
+
+    // Create a real workspace with a worktree
+    space::core::workspace::create_worktree(
+        &repo_path,
+        &env.workspaces_dir,
+        "doomed-ws",
+        &space::core::workspace::BranchStrategy::NewBranch("doomed-ws".to_string()),
+    )
+    .unwrap();
+
+    let config = config_from_env(&env);
+    let workspaces = vec![Workspace {
+        name: "doomed-ws".to_string(),
+        path: env.workspaces_dir.join("doomed-ws"),
+        repos: vec![WorkspaceRepo {
+            name: "del-repo".to_string(),
+            path: env.workspaces_dir.join("doomed-ws").join("del-repo"),
+            branch: "doomed-ws".to_string(),
+            status: Default::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    }];
+    let mut app = test_app_with_config(config, workspaces, vec![repo_path]);
+
+    // Press 'd' to open delete confirmation
+    app.handle_key(key(KeyCode::Char('d')));
+    assert!(matches!(app.screen, Screen::ConfirmDelete(_)));
+
+    // Press 'y' to confirm
+    app.handle_key(key(KeyCode::Char('y')));
+    assert!(matches!(app.screen, Screen::Dashboard));
+    assert!(
+        !env.workspaces_dir.join("doomed-ws").exists(),
+        "workspace should be deleted"
+    );
+}
+
+#[test]
+fn delete_n_cancels() {
+    let workspaces = vec![Workspace {
+        name: "keep-me".to_string(),
+        path: PathBuf::from("/tmp/keep-me"),
+        repos: vec![],
+    }];
+    let mut app = test_app(workspaces, vec![]);
+
+    app.handle_key(key(KeyCode::Char('d')));
+    assert!(matches!(app.screen, Screen::ConfirmDelete(_)));
+
+    app.handle_key(key(KeyCode::Char('n')));
+    assert!(matches!(app.screen, Screen::Dashboard));
+    assert_eq!(
+        app.workspaces.len(),
+        1,
+        "workspace list should be preserved"
+    );
+}
+
+#[test]
+fn dashboard_d_no_workspaces_stays_on_dashboard() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('d')));
+    // No workspace selected -> StartDelete produces no ConfirmDelete
+    assert!(matches!(app.screen, Screen::Dashboard));
+}
+
+// ---------------------------------------------------------------------------
+// Go handler tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn go_esc_returns_to_dashboard() {
+    let workspaces = vec![Workspace {
+        name: "alpha".to_string(),
+        path: PathBuf::from("/tmp/alpha"),
+        repos: vec![],
+    }];
+    let mut app = test_app(workspaces, vec![]);
+
+    app.handle_key(key(KeyCode::Char('g')));
+    assert!(matches!(app.screen, Screen::GoWorkspace(_)));
+
+    app.handle_key(key(KeyCode::Esc));
+    assert!(matches!(app.screen, Screen::Dashboard));
+}
+
+// ---------------------------------------------------------------------------
+// Search handler tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn search_esc_returns_to_dashboard() {
+    let mut app = test_app(vec![], vec![PathBuf::from("/tmp/repos/foo")]);
+
+    app.handle_key(key(KeyCode::Char('/')));
+    assert!(matches!(app.screen, Screen::RepoSearch(_)));
+
+    app.handle_key(key(KeyCode::Esc));
+    assert!(matches!(app.screen, Screen::Dashboard));
+}
