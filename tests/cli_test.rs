@@ -199,7 +199,6 @@ fn go_nonexistent_errors() {
 #[test]
 fn rm_force_removes_workspace() {
     let env = TestEnv::new();
-
     let repo_path = env.create_repo("ephemeral");
     let ws_name = "doomed";
 
@@ -220,6 +219,19 @@ fn rm_force_removes_workspace() {
         .success();
 
     assert!(!ws_path.exists(), "workspace dir should be deleted");
+
+    // Verify worktree is unlinked from the main repo
+    let output = std::process::Command::new("git")
+        .args(["worktree", "list"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let wt_list = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !wt_list.contains(ws_name),
+        "worktree should be unlinked after rm --force"
+    );
 }
 
 // ---------------------------------------------------------------------------
