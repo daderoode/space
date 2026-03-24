@@ -249,3 +249,38 @@ fn ahead_behind_with_remote_counts_commits() {
     assert_eq!(ahead, 1, "one unpushed commit");
     assert_eq!(behind, 0, "nothing to pull");
 }
+
+#[test]
+fn repo_status_counts_deletions() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+
+    // Create and commit a file
+    std::fs::write(tmp.path().join("to-delete.txt"), "doomed").unwrap();
+    let out = Command::new("git")
+        .args(["add", "to-delete.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = Command::new("git")
+        .args(["commit", "-m", "add file"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Delete the file from working tree (WT_DELETED)
+    std::fs::remove_file(tmp.path().join("to-delete.txt")).unwrap();
+
+    let status = space::core::git::repo_status(tmp.path()).unwrap();
+    assert_eq!(status.modified, 1, "deleted file should count as modified");
+}

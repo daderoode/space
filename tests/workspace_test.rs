@@ -237,3 +237,35 @@ fn create_worktree_existing_branch_strategy() {
     let branch = space::core::git::current_branch(&wt_path).unwrap();
     assert_eq!(branch, "feature-x");
 }
+
+#[test]
+fn remove_workspace_without_force() {
+    let env = common::TestEnv::new();
+    let repo_path = env.create_repo("my-repo");
+
+    create_worktree(
+        &repo_path,
+        &env.workspaces_dir,
+        "test-ws",
+        &BranchStrategy::NewBranch("test-ws".to_string()),
+    )
+    .unwrap();
+
+    // Remove without force (clean worktree, so should succeed)
+    space::core::workspace::remove_workspace(&env.workspaces_dir, "test-ws", false).unwrap();
+    assert!(
+        !env.workspaces_dir.join("test-ws").exists(),
+        "workspace should be removed"
+    );
+}
+
+#[test]
+fn list_workspaces_nonexistent_dir_returns_empty() {
+    let tmp = TempDir::new().unwrap();
+    let nonexistent = tmp.path().join("does-not-exist");
+    let workspaces = list_workspaces(&nonexistent).unwrap();
+    assert!(
+        workspaces.is_empty(),
+        "nonexistent dir should return empty list"
+    );
+}
