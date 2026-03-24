@@ -246,3 +246,29 @@ fn rm_force_nonexistent_errors() {
         .failure()
         .stderr(predicate::str::contains("not found"));
 }
+
+// ---------------------------------------------------------------------------
+// 12. go – writes cd target to file when __SPACE_CD_FILE__ is set
+// ---------------------------------------------------------------------------
+#[test]
+fn go_writes_cd_file_when_env_set() {
+    let env = TestEnv::new();
+    let ws_path = env.workspaces_dir.join("cd-ws");
+    std::fs::create_dir_all(&ws_path).unwrap();
+
+    let cd_file = env.dir.path().join("cd_target");
+
+    space(&env)
+        .args(["go", "cd-ws"])
+        .env("__SPACE_CD_FILE__", &cd_file)
+        .assert()
+        .success();
+
+    assert!(cd_file.exists(), "cd file should be written");
+    let content = std::fs::read_to_string(&cd_file).unwrap();
+    assert_eq!(
+        content,
+        ws_path.display().to_string(),
+        "cd file should contain workspace path"
+    );
+}

@@ -57,3 +57,32 @@ fn config_dir_respects_space_config_dir_env() {
     std::env::remove_var("SPACE_CONFIG_DIR");
     assert_eq!(dir, tmp.path());
 }
+
+/// Exercises the full save → disk → load round-trip through the filesystem.
+/// Uses the same logic as `save()` and `load()` but with a temp dir path,
+/// avoiding the process-global env var race that `set_var` causes.
+#[test]
+fn config_save_load_round_trip() {
+    let tmp = TempDir::new().unwrap();
+    let config_path = tmp.path().join("config.toml");
+
+    let original = SpaceConfig {
+        repos: space::core::config::RepoConfig {
+            roots: vec![PathBuf::from("/test/repos")],
+            max_depth: 5,
+            cache_age_secs: 1800,
+        },
+        workspaces: space::core::config::WorkspaceConfig {
+            dir: PathBuf::from("/test/workspaces"),
+        },
+    };
+
+    // Same logic as save(): serialize to TOML, write to disk
+    std::fs::write(&config_path, toml::to_string_pretty(&original).unwrap()).unwrap();
+
+    // Same logic as load(): read from disk, deserialize
+    let content = std::fs::read_to_string(&config_path).unwrap();
+    let loaded: SpaceConfig = toml::from_str(&content).unwrap();
+
+    assert_eq!(loaded, original);
+}

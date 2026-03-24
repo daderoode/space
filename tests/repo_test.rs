@@ -113,3 +113,15 @@ fn load_cache_returns_none_for_stale_cache() {
     let result = repo::load_cache(&cache, 3600);
     assert!(result.is_none());
 }
+
+#[test]
+fn fuzzy_match_empty_query_returns_all() {
+    let repos = vec![
+        PathBuf::from("/work/alpha"),
+        PathBuf::from("/work/beta"),
+        PathBuf::from("/work/gamma"),
+    ];
+    let matches = repo::fuzzy_match("", &repos);
+    assert_eq!(matches.len(), 3, "empty query should return all repos");
+    assert_eq!(matches, repos, "order should be preserved");
+}
