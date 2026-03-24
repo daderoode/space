@@ -169,3 +169,83 @@ fn ahead_behind_no_remote_returns_zero() {
     let (ahead, behind) = space::core::git::ahead_behind(tmp.path()).unwrap();
     assert_eq!((ahead, behind), (0, 0), "no remote should yield (0,0)");
 }
+
+#[test]
+fn ahead_behind_with_remote_counts_commits() {
+    // Create a bare repo to act as "origin"
+    let bare_dir = TempDir::new().unwrap();
+    let out = Command::new("git")
+        .args(["init", "--bare", "-b", "main"])
+        .current_dir(bare_dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git init --bare failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Clone it to get a repo with a remote
+    let clone_dir = TempDir::new().unwrap();
+    let out = Command::new("git")
+        .args(["clone", &bare_dir.path().to_string_lossy(), "."])
+        .current_dir(clone_dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git clone failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Configure user
+    for args in [
+        vec!["config", "user.email", "test@local"],
+        vec!["config", "user.name", "Test"],
+    ] {
+        let out = Command::new("git")
+            .args(&args)
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+    }
+
+    // Make initial commit + push to establish tracking
+    let out = Command::new("git")
+        .args(["commit", "--allow-empty", "-m", "init"])
+        .current_dir(clone_dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = Command::new("git")
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(clone_dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git push failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Make a second local commit (not pushed) -> should be ahead=1
+    let out = Command::new("git")
+        .args(["commit", "--allow-empty", "-m", "local only"])
+        .current_dir(clone_dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "second commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let (ahead, behind) = space::core::git::ahead_behind(clone_dir.path()).unwrap();
+    assert_eq!(ahead, 1, "one unpushed commit");
+    assert_eq!(behind, 0, "nothing to pull");
+}
