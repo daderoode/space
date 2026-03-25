@@ -10,7 +10,7 @@ const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(5);
 
 /// Convert a ratatui/crossterm 0.29 KeyEvent into a tui_input InputRequest,
 /// bypassing the tui_input crossterm backend which links against crossterm 0.28.
-fn key_to_input_request(
+pub(crate) fn key_to_input_request(
     key: &ratatui::crossterm::event::KeyEvent,
 ) -> Option<tui_input::InputRequest> {
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
@@ -390,7 +390,7 @@ pub fn run(app: &mut App) -> Result<()> {
 
 /// Build a FuzzyPicker populated with local + remote branches from `repo_path`.
 /// Returns `None` if branch listing fails (not a git repo, etc.).
-fn build_branch_picker(
+pub(crate) fn build_branch_picker(
     repo_path: &std::path::Path,
     repo_name: &str,
 ) -> Option<crate::tui::widgets::fuzzy_picker::FuzzyPicker> {
