@@ -208,9 +208,19 @@ impl App {
                 // Implemented in Task 6
                 todo!()
             }
-            ScreenAction::NavigateToWorkspace(_) => {
-                // Implemented in Task 5
-                todo!()
+            ScreenAction::NavigateToWorkspace(repo_name) => {
+                self.screen = Screen::Dashboard;
+                let found_idx = self
+                    .workspaces
+                    .iter()
+                    .position(|ws| ws.repos.iter().any(|r| r.name == repo_name));
+                if let Some(idx) = found_idx {
+                    self.selected_ws = idx;
+                    self.selected_repo = 0;
+                    self.load_selected_workspace_detail();
+                } else {
+                    self.set_status("Not in any workspace — use 'c' to create one");
+                }
             }
         }
     }
@@ -234,22 +244,18 @@ impl App {
         }
 
         // Build context from split borrows
-        let config = &self.config;
-        let repos_cache: &[PathBuf] = &self.repos_cache;
-        let workspaces: &[Workspace] = &self.workspaces;
-        let selected_ws = self.selected_ws;
+        let ctx = crate::tui::actions::ScreenContext {
+            config: &self.config,
+            repos_cache: &self.repos_cache,
+            workspaces: &self.workspaces,
+            selected_ws: self.selected_ws,
+        };
 
         // Try new-style dispatch first
         let action = match &mut self.screen {
-            Screen::ConfirmDelete(state) => {
-                let ctx = crate::tui::actions::ScreenContext {
-                    config,
-                    repos_cache,
-                    workspaces,
-                    selected_ws,
-                };
-                Some(state.handle_key(key, &ctx))
-            }
+            Screen::ConfirmDelete(state) => Some(state.handle_key(key, &ctx)),
+            Screen::GoWorkspace(state) => Some(state.handle_key(key, &ctx)),
+            Screen::RepoSearch(state) => Some(state.handle_key(key, &ctx)),
             _ => None,
         };
 
@@ -264,19 +270,17 @@ impl App {
         enum ActiveScreen {
             Dashboard,
             Create,
-            Go,
             Add,
-            Search,
             Config,
         }
 
         let active = match &self.screen {
             Screen::Dashboard => ActiveScreen::Dashboard,
             Screen::CreateWorkspace(_) => ActiveScreen::Create,
-            Screen::GoWorkspace(_) => ActiveScreen::Go,
+            Screen::GoWorkspace(_) | Screen::ConfirmDelete(_) | Screen::RepoSearch(_) => {
+                unreachable!("handled above")
+            }
             Screen::AddRepos(_) => ActiveScreen::Add,
-            Screen::ConfirmDelete(_) => unreachable!("handled above"),
-            Screen::RepoSearch(_) => ActiveScreen::Search,
             Screen::ConfigEditor(_) => ActiveScreen::Config,
         };
 
@@ -285,16 +289,8 @@ impl App {
                 handle_create_key(self, key);
                 None
             }
-            ActiveScreen::Go => {
-                handle_go_key(self, key);
-                None
-            }
             ActiveScreen::Add => {
                 handle_add_key(self, key);
-                None
-            }
-            ActiveScreen::Search => {
-                handle_search_key(self, key);
                 None
             }
             ActiveScreen::Config => {
@@ -850,53 +846,6 @@ fn do_create(app: &mut App) {
     // If there was an error, stay on Creating stage so user can see the log
 }
 
-fn handle_go_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
-    use ratatui::crossterm::event::KeyCode;
-
-    match key.code {
-        KeyCode::Esc => {
-            app.screen = Screen::Dashboard;
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            let Screen::GoWorkspace(ref mut st) = app.screen else {
-                return;
-            };
-            st.picker.move_up();
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            let Screen::GoWorkspace(ref mut st) = app.screen else {
-                return;
-            };
-            st.picker.move_down();
-        }
-        KeyCode::Enter => {
-            let target = {
-                let Screen::GoWorkspace(ref st) = app.screen else {
-                    return;
-                };
-                st.picker
-                    .confirmed_items()
-                    .into_iter()
-                    .next()
-                    .map(|i| i.full_path.clone())
-            };
-            if let Some(path) = target {
-                app.space_cd_target = Some(path);
-                app.should_quit = true;
-            }
-        }
-        _ => {
-            let Screen::GoWorkspace(ref mut st) = app.screen else {
-                return;
-            };
-            if let Some(req) = key_to_input_request(&key) {
-                st.picker.input.handle(req);
-            }
-            st.picker.refilter();
-        }
-    }
-}
-
 fn handle_add_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
     use crate::tui::screens::add::AddStage;
     use ratatui::crossterm::event::KeyCode;
@@ -1206,67 +1155,6 @@ fn do_add(app: &mut App) {
         app.set_status(format!("Added repos to workspace '{}'", ws_name));
     }
     // If there was an error, stay on Creating stage so user can see the log
-}
-
-fn handle_search_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
-    use ratatui::crossterm::event::KeyCode;
-
-    match key.code {
-        KeyCode::Esc => {
-            app.screen = Screen::Dashboard;
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            let Screen::RepoSearch(ref mut st) = app.screen else {
-                return;
-            };
-            st.picker.move_up();
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            let Screen::RepoSearch(ref mut st) = app.screen else {
-                return;
-            };
-            st.picker.move_down();
-        }
-        KeyCode::Enter => {
-            // Get the selected repo name before any mutation
-            let selected_name = {
-                let Screen::RepoSearch(ref st) = app.screen else {
-                    return;
-                };
-                st.picker
-                    .confirmed_items()
-                    .into_iter()
-                    .next()
-                    .map(|i| i.name.clone())
-            };
-
-            app.screen = Screen::Dashboard;
-
-            if let Some(repo_name) = selected_name {
-                // Walk workspaces to find one containing this repo
-                let found_idx = app
-                    .workspaces
-                    .iter()
-                    .position(|ws| ws.repos.iter().any(|r| r.name == repo_name));
-                if let Some(idx) = found_idx {
-                    app.selected_ws = idx;
-                    app.selected_repo = 0;
-                    app.load_selected_workspace_detail();
-                } else {
-                    app.set_status("Not in any workspace — use 'c' to create one");
-                }
-            }
-        }
-        _ => {
-            let Screen::RepoSearch(ref mut st) = app.screen else {
-                return;
-            };
-            if let Some(req) = key_to_input_request(&key) {
-                st.picker.input.handle(req);
-            }
-            st.picker.refilter();
-        }
-    }
 }
 
 fn handle_config_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
