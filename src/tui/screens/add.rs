@@ -156,6 +156,8 @@ impl AddState {
                             .unwrap_or_default();
                         match crate::tui::app::build_branch_picker(&repo_path, &repo_name) {
                             Some(picker) => {
+                                self.picked_branch = None;
+                                self.error = None;
                                 self.branch_picker = Some(picker);
                                 self.stage = AddStage::PickBranch;
                             }
@@ -205,9 +207,12 @@ impl AddState {
                     .as_ref()
                     .and_then(|bp| bp.confirmed_items().into_iter().next())
                     .map(|item| item.name.clone());
-                if let Some(branch) = picked {
-                    self.picked_branch = Some(branch);
-                }
+                let Some(branch) = picked else {
+                    self.error = Some("Select a branch".to_string());
+                    return ScreenAction::Continue;
+                };
+                self.error = None;
+                self.picked_branch = Some(branch);
                 self.stage = AddStage::Creating;
                 ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
                     workspace_name: self.workspace_name.clone(),
