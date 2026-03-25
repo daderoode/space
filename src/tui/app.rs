@@ -164,6 +164,57 @@ impl App {
         }
     }
 
+    fn process_action(&mut self, action: crate::tui::actions::ScreenAction) {
+        use crate::tui::actions::ScreenAction;
+        match action {
+            ScreenAction::Continue => {}
+            ScreenAction::Back => {
+                self.screen = Screen::Dashboard;
+            }
+            ScreenAction::BackWithStatus(msg) => {
+                self.screen = Screen::Dashboard;
+                self.set_status(msg);
+            }
+            ScreenAction::CdAndQuit(path) => {
+                self.space_cd_target = Some(path);
+                self.should_quit = true;
+            }
+            ScreenAction::Quit => {
+                self.should_quit = true;
+            }
+            ScreenAction::DeleteWorkspace { name, force } => {
+                let ws_dir = self.config.workspaces.dir.clone();
+                match crate::core::workspace::remove_workspace(&ws_dir, &name, force) {
+                    Ok(()) => {
+                        if let Ok(ws) = crate::core::workspace::list_workspaces(&ws_dir) {
+                            self.workspaces = ws;
+                            self.selected_ws = 0;
+                        }
+                        self.load_selected_workspace_detail();
+                        self.screen = Screen::Dashboard;
+                        self.set_status(format!("Deleted workspace '{}'", name));
+                    }
+                    Err(e) => {
+                        self.screen = Screen::Dashboard;
+                        self.set_status(format!("Delete failed: {}", e));
+                    }
+                }
+            }
+            ScreenAction::ExecuteWorktreeFlow(_) => {
+                // Implemented in Task 7
+                todo!()
+            }
+            ScreenAction::SaveConfig(_) => {
+                // Implemented in Task 6
+                todo!()
+            }
+            ScreenAction::NavigateToWorkspace(_) => {
+                // Implemented in Task 5
+                todo!()
+            }
+        }
+    }
+
     /// Process a single key press, dispatching to the appropriate screen handler
     /// or mapping to a Message for the Dashboard.
     ///
@@ -182,14 +233,39 @@ impl App {
             return;
         }
 
-        // Determine which screen is active without holding a borrow on self.screen,
-        // so we can pass `&mut self` into the handler functions.
+        // Build context from split borrows
+        let config = &self.config;
+        let repos_cache: &[PathBuf] = &self.repos_cache;
+        let workspaces: &[Workspace] = &self.workspaces;
+        let selected_ws = self.selected_ws;
+
+        // Try new-style dispatch first
+        let action = match &mut self.screen {
+            Screen::ConfirmDelete(state) => {
+                let ctx = crate::tui::actions::ScreenContext {
+                    config,
+                    repos_cache,
+                    workspaces,
+                    selected_ws,
+                };
+                Some(state.handle_key(key, &ctx))
+            }
+            _ => None,
+        };
+
+        // NLL: borrows on config/repos_cache/workspaces end after the match above
+
+        if let Some(action) = action {
+            self.process_action(action);
+            return;
+        }
+
+        // Old-style dispatch for remaining screens
         enum ActiveScreen {
             Dashboard,
             Create,
             Go,
             Add,
-            Delete,
             Search,
             Config,
         }
@@ -199,7 +275,7 @@ impl App {
             Screen::CreateWorkspace(_) => ActiveScreen::Create,
             Screen::GoWorkspace(_) => ActiveScreen::Go,
             Screen::AddRepos(_) => ActiveScreen::Add,
-            Screen::ConfirmDelete(_) => ActiveScreen::Delete,
+            Screen::ConfirmDelete(_) => unreachable!("handled above"),
             Screen::RepoSearch(_) => ActiveScreen::Search,
             Screen::ConfigEditor(_) => ActiveScreen::Config,
         };
@@ -215,10 +291,6 @@ impl App {
             }
             ActiveScreen::Add => {
                 handle_add_key(self, key);
-                None
-            }
-            ActiveScreen::Delete => {
-                handle_delete_key(self, key);
                 None
             }
             ActiveScreen::Search => {
@@ -1134,41 +1206,6 @@ fn do_add(app: &mut App) {
         app.set_status(format!("Added repos to workspace '{}'", ws_name));
     }
     // If there was an error, stay on Creating stage so user can see the log
-}
-
-fn handle_delete_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
-    use ratatui::crossterm::event::KeyCode;
-
-    let (ws_name, ws_dir) = {
-        let Screen::ConfirmDelete(ref st) = app.screen else {
-            return;
-        };
-        (st.workspace_name.clone(), app.config.workspaces.dir.clone())
-    };
-
-    match key.code {
-        KeyCode::Char('y') | KeyCode::Enter => {
-            match crate::core::workspace::remove_workspace(&ws_dir, &ws_name, true) {
-                Ok(()) => {
-                    app.screen = Screen::Dashboard;
-                    if let Ok(ws) = crate::core::workspace::list_workspaces(&ws_dir) {
-                        app.workspaces = ws;
-                        app.selected_ws = 0;
-                    }
-                    app.load_selected_workspace_detail();
-                    app.set_status(format!("Deleted workspace '{}'", ws_name));
-                }
-                Err(e) => {
-                    app.screen = Screen::Dashboard;
-                    app.set_status(format!("Delete failed: {}", e));
-                }
-            }
-        }
-        KeyCode::Char('n') | KeyCode::Esc => {
-            app.screen = Screen::Dashboard;
-        }
-        _ => {}
-    }
 }
 
 fn handle_search_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
