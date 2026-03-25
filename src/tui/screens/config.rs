@@ -1,3 +1,5 @@
+use crate::tui::actions::{ScreenAction, ScreenContext};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_input::Input;
 
 /// Replace $HOME prefix with ~ for display
@@ -83,6 +85,53 @@ impl ConfigState {
 
     pub fn cancel_edit(&mut self) {
         self.editing = false;
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
+        // Ctrl-S: commit any active edit, save, exit
+        if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.editing {
+                self.commit_edit();
+            }
+            let base = ctx.config.clone();
+            match self.save_to_config(base) {
+                Ok(new_config) => return ScreenAction::SaveConfig(new_config),
+                Err(e) => return ScreenAction::BackWithStatus(format!("Save failed: {}", e)),
+            }
+        }
+
+        if self.editing {
+            match key.code {
+                KeyCode::Esc => self.cancel_edit(),
+                KeyCode::Enter => {
+                    self.commit_edit();
+                    let next = (self.focused + 1).min(self.fields.len() - 1);
+                    self.focused = next;
+                }
+                _ => {
+                    if let Some(req) = crate::tui::app::key_to_input_request(&key) {
+                        self.input.handle(req);
+                    }
+                }
+            }
+        } else {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => return ScreenAction::Back,
+                KeyCode::Enter => self.start_editing(),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.focused > 0 {
+                        self.focused -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if self.focused + 1 < self.fields.len() {
+                        self.focused += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        ScreenAction::Continue
     }
 
     /// Apply fields back to the provided base config and save to disk.

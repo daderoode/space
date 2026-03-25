@@ -242,13 +242,23 @@ fn render_create_overlay(state: &crate::tui::screens::create::CreateState, frame
             crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
         }
         CreateStage::NameWorkspace => render_name_input(state, frame),
-        CreateStage::PickBranchStrategy => render_branch_strategy(state, frame),
+        CreateStage::PickBranchStrategy => render_branch_strategy_picker(
+            frame,
+            state.ws_name.value(),
+            state.branch_strategy_idx,
+            state.error.as_deref(),
+        ),
         CreateStage::PickBranch => {
             if let Some(ref picker) = state.branch_picker {
                 crate::tui::widgets::fuzzy_picker::render(picker, frame);
             }
         }
-        CreateStage::Creating => render_creating_progress(state, frame),
+        CreateStage::Creating => render_worktree_progress(
+            frame,
+            " Creating Workspace ",
+            &state.progress,
+            state.error.as_deref(),
+        ),
     }
 }
 
@@ -289,9 +299,14 @@ fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &m
     }
 }
 
-fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
+fn render_branch_strategy_picker(
+    frame: &mut Frame,
+    workspace_name: &str,
+    strategy_idx: usize,
+    error: Option<&str>,
+) {
     use ratatui::widgets::Clear;
-    let has_error = state.error.is_some();
+    let has_error = error.is_some();
     // 2 borders + 4 options + 1 padding + (1 sep + 2 error) when error present
     let height: u16 = if has_error { 10 } else { 8 };
     let area = centered_rect_fixed(62, height, frame.area());
@@ -323,8 +338,8 @@ fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, fram
     };
 
     let options = [
-        format!("New branch '{}'", state.ws_name.value()),
-        format!("Existing branch '{}' (if present)", state.ws_name.value()),
+        format!("New branch '{}'", workspace_name),
+        format!("Existing branch '{}' (if present)", workspace_name),
         "Detached HEAD".to_string(),
         "Pick a branch...".to_string(),
     ];
@@ -333,7 +348,7 @@ fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, fram
         .iter()
         .enumerate()
         .map(|(i, opt)| {
-            if i == state.branch_strategy_idx {
+            if i == strategy_idx {
                 ListItem::new(format!("> {}", opt)).style(theme::selected())
             } else {
                 ListItem::new(format!("  {}", opt))
@@ -343,7 +358,7 @@ fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, fram
 
     frame.render_widget(List::new(items), sections[0]);
 
-    if let Some(err) = &state.error {
+    if let Some(err) = error {
         frame.render_widget(
             Paragraph::new(format!("\u{26a0}  {}", err))
                 .style(theme::error())
@@ -353,7 +368,12 @@ fn render_branch_strategy(state: &crate::tui::screens::create::CreateState, fram
     }
 }
 
-fn render_creating_progress(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
+fn render_worktree_progress(
+    frame: &mut Frame,
+    title: &str,
+    progress: &[String],
+    error: Option<&str>,
+) {
     use ratatui::widgets::Clear;
     let area = centered_rect_fixed(60, 15, frame.area());
     frame.render_widget(Clear, area);
@@ -362,12 +382,11 @@ fn render_creating_progress(state: &crate::tui::screens::create::CreateState, fr
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme::border_focused())
-        .title(" Creating Workspace ");
+        .title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let lines: Vec<Line> = state
-        .progress
+    let lines: Vec<Line> = progress
         .iter()
         .map(|l| {
             if l.starts_with("  \u{2713}") {
@@ -384,7 +403,7 @@ fn render_creating_progress(state: &crate::tui::screens::create::CreateState, fr
 
     frame.render_widget(Paragraph::new(lines), sections[0]);
 
-    if let Some(err) = &state.error {
+    if let Some(err) = error {
         frame.render_widget(
             Paragraph::new(format!("Error: {}  [ESC to dismiss]", err)).style(theme::error()),
             sections[1],
@@ -403,119 +422,23 @@ fn render_add_overlay(state: &crate::tui::screens::add::AddState, frame: &mut Fr
         AddStage::PickRepos => {
             crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
         }
-        AddStage::PickBranchStrategy => render_add_branch_strategy(state, frame),
+        AddStage::PickBranchStrategy => render_branch_strategy_picker(
+            frame,
+            &state.workspace_name,
+            state.branch_strategy_idx,
+            state.error.as_deref(),
+        ),
         AddStage::PickBranch => {
             if let Some(ref picker) = state.branch_picker {
                 crate::tui::widgets::fuzzy_picker::render(picker, frame);
             }
         }
-        AddStage::Creating => render_add_progress(state, frame),
-    }
-}
-
-fn render_add_branch_strategy(state: &crate::tui::screens::add::AddState, frame: &mut Frame) {
-    use ratatui::widgets::Clear;
-    let has_error = state.error.is_some();
-    let height: u16 = if has_error { 10 } else { 8 };
-    let area = centered_rect_fixed(62, height, frame.area());
-    frame.render_widget(Clear, area);
-
-    let border_style = if has_error {
-        theme::border_danger()
-    } else {
-        theme::border_focused()
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(border_style)
-        .title(" Branch Strategy ");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let sections = if has_error {
-        Layout::vertical([
-            Constraint::Length(4),
-            Constraint::Length(1),
-            Constraint::Length(2),
-        ])
-        .split(inner)
-    } else {
-        Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).split(inner)
-    };
-
-    let options = [
-        format!("New branch '{}'", state.workspace_name),
-        format!("Existing branch '{}' (if present)", state.workspace_name),
-        "Detached HEAD".to_string(),
-        "Pick a branch...".to_string(),
-    ];
-
-    let items: Vec<ListItem> = options
-        .iter()
-        .enumerate()
-        .map(|(i, opt)| {
-            if i == state.branch_strategy_idx {
-                ListItem::new(format!("> {}", opt)).style(theme::selected())
-            } else {
-                ListItem::new(format!("  {}", opt))
-            }
-        })
-        .collect();
-
-    frame.render_widget(List::new(items), sections[0]);
-
-    if let Some(err) = &state.error {
-        frame.render_widget(
-            Paragraph::new(format!("\u{26a0}  {}", err))
-                .style(theme::error())
-                .wrap(Wrap { trim: false }),
-            sections[2],
-        );
-    }
-}
-
-fn render_add_progress(state: &crate::tui::screens::add::AddState, frame: &mut Frame) {
-    use ratatui::widgets::Clear;
-    let area = centered_rect_fixed(60, 15, frame.area());
-    frame.render_widget(Clear, area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(theme::border_focused())
-        .title(" Adding Repos ");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let lines: Vec<Line> = state
-        .progress
-        .iter()
-        .map(|l| {
-            if l.starts_with("  \u{2713}") {
-                Line::from(Span::styled(l.clone(), theme::success()))
-            } else if l.starts_with("  \u{2717}") {
-                Line::from(Span::styled(l.clone(), theme::error()))
-            } else {
-                Line::from(Span::raw(l.clone()))
-            }
-        })
-        .collect();
-
-    let sections = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(inner);
-
-    frame.render_widget(Paragraph::new(lines), sections[0]);
-
-    if let Some(err) = &state.error {
-        frame.render_widget(
-            Paragraph::new(format!("Error: {}  [ESC to dismiss]", err)).style(theme::error()),
-            sections[1],
-        );
-    } else {
-        frame.render_widget(
-            Paragraph::new("Done! [ENTER to continue]").style(theme::success()),
-            sections[1],
-        );
+        AddStage::Creating => render_worktree_progress(
+            frame,
+            " Adding Repos ",
+            &state.progress,
+            state.error.as_deref(),
+        ),
     }
 }
 

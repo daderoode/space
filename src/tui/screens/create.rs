@@ -64,6 +64,249 @@ impl CreateState {
         }
     }
 
+    pub fn handle_key(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+        ctx: &crate::tui::actions::ScreenContext,
+    ) -> crate::tui::actions::ScreenAction {
+        match self.stage {
+            CreateStage::PickRepos => self.handle_pick_repos(key),
+            CreateStage::NameWorkspace => self.handle_name_workspace(key),
+            CreateStage::PickBranchStrategy => self.handle_branch_strategy(key, ctx),
+            CreateStage::PickBranch => self.handle_pick_branch(key, ctx),
+            CreateStage::Creating => self.handle_creating(key),
+        }
+    }
+
+    fn handle_pick_repos(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> crate::tui::actions::ScreenAction {
+        use crate::tui::actions::ScreenAction;
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+        match key.code {
+            KeyCode::Esc => ScreenAction::Back,
+            KeyCode::Enter => {
+                let confirmed: Vec<PathBuf> = self
+                    .picker
+                    .confirmed_items()
+                    .into_iter()
+                    .map(|i| i.full_path.clone())
+                    .collect();
+                if confirmed.is_empty() {
+                    self.error = Some("Select at least one repo".to_string());
+                    return ScreenAction::Continue;
+                }
+                self.selected_repos = confirmed;
+                self.error = None;
+                self.stage = CreateStage::NameWorkspace;
+                ScreenAction::Continue
+            }
+            KeyCode::Tab => {
+                self.picker.toggle_highlighted();
+                ScreenAction::Continue
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.picker.move_up();
+                ScreenAction::Continue
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.picker.move_down();
+                ScreenAction::Continue
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.picker.cycle_scope();
+                ScreenAction::Continue
+            }
+            _ => {
+                if let Some(req) = crate::tui::app::key_to_input_request(&key) {
+                    self.picker.input.handle(req);
+                }
+                self.picker.refilter();
+                ScreenAction::Continue
+            }
+        }
+    }
+
+    fn handle_name_workspace(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> crate::tui::actions::ScreenAction {
+        use crate::tui::actions::ScreenAction;
+        use ratatui::crossterm::event::KeyCode;
+
+        match key.code {
+            KeyCode::Esc => {
+                self.stage = CreateStage::PickRepos;
+                ScreenAction::Continue
+            }
+            KeyCode::Enter => {
+                let name = self.ws_name.value().trim().to_string();
+                if name.is_empty() {
+                    self.error = Some("Workspace name cannot be empty".to_string());
+                    return ScreenAction::Continue;
+                }
+                // Normalize: write trimmed value back so all downstream uses
+                // (WorktreeParams, branch_strategy) get the clean name.
+                self.ws_name = self.ws_name.clone().with_value(name);
+                self.error = None;
+                self.stage = CreateStage::PickBranchStrategy;
+                ScreenAction::Continue
+            }
+            _ => {
+                if let Some(req) = crate::tui::app::key_to_input_request(&key) {
+                    self.ws_name.handle(req);
+                }
+                ScreenAction::Continue
+            }
+        }
+    }
+
+    fn handle_branch_strategy(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+        ctx: &crate::tui::actions::ScreenContext,
+    ) -> crate::tui::actions::ScreenAction {
+        use crate::tui::actions::{ScreenAction, WorktreeParams};
+        use ratatui::crossterm::event::KeyCode;
+
+        match key.code {
+            KeyCode::Esc => {
+                self.error = None;
+                self.stage = CreateStage::NameWorkspace;
+                ScreenAction::Continue
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.error = None;
+                if self.branch_strategy_idx > 0 {
+                    self.branch_strategy_idx -= 1;
+                }
+                ScreenAction::Continue
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.error = None;
+                if self.branch_strategy_idx < 3 {
+                    self.branch_strategy_idx += 1;
+                }
+                ScreenAction::Continue
+            }
+            KeyCode::Enter => {
+                if self.branch_strategy_idx == 3 {
+                    // Build branch picker from the first selected repo
+                    let repo_path = self.selected_repos.first().cloned();
+                    if let Some(repo_path) = repo_path {
+                        let repo_name = repo_path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        match crate::tui::app::build_branch_picker(&repo_path, &repo_name) {
+                            Some(picker) => {
+                                self.picked_branch = None;
+                                self.error = None;
+                                self.branch_picker = Some(picker);
+                                self.stage = CreateStage::PickBranch;
+                            }
+                            None => {
+                                self.error =
+                                    Some(format!("Could not list branches for {}", repo_name));
+                            }
+                        }
+                    }
+                    ScreenAction::Continue
+                } else {
+                    self.stage = CreateStage::Creating;
+                    ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
+                        workspace_name: self.ws_name.value().to_string(),
+                        workspace_dir: ctx.config.workspaces.dir.clone(),
+                        repos: self.selected_repos.clone(),
+                        branch_strategy: self.branch_strategy(),
+                        is_new: true,
+                    })
+                }
+            }
+            _ => ScreenAction::Continue,
+        }
+    }
+
+    fn handle_pick_branch(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+        ctx: &crate::tui::actions::ScreenContext,
+    ) -> crate::tui::actions::ScreenAction {
+        use crate::tui::actions::{ScreenAction, WorktreeParams};
+        use ratatui::crossterm::event::KeyCode;
+
+        match key.code {
+            KeyCode::Esc => {
+                self.stage = CreateStage::PickBranchStrategy;
+                ScreenAction::Continue
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(ref mut bp) = self.branch_picker {
+                    bp.move_up();
+                }
+                ScreenAction::Continue
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(ref mut bp) = self.branch_picker {
+                    bp.move_down();
+                }
+                ScreenAction::Continue
+            }
+            KeyCode::Enter => {
+                let picked = self
+                    .branch_picker
+                    .as_ref()
+                    .and_then(|bp| bp.confirmed_items().into_iter().next())
+                    .map(|item| item.name.clone());
+                let Some(branch) = picked else {
+                    self.error = Some("Select a branch".to_string());
+                    return ScreenAction::Continue;
+                };
+                self.error = None;
+                self.picked_branch = Some(branch);
+                self.stage = CreateStage::Creating;
+                ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
+                    workspace_name: self.ws_name.value().to_string(),
+                    workspace_dir: ctx.config.workspaces.dir.clone(),
+                    repos: self.selected_repos.clone(),
+                    branch_strategy: self.branch_strategy(),
+                    is_new: true,
+                })
+            }
+            _ => {
+                if let Some(ref mut bp) = self.branch_picker {
+                    if let Some(req) = crate::tui::app::key_to_input_request(&key) {
+                        bp.input.handle(req);
+                    }
+                    bp.refilter();
+                }
+                ScreenAction::Continue
+            }
+        }
+    }
+
+    fn handle_creating(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> crate::tui::actions::ScreenAction {
+        use crate::tui::actions::ScreenAction;
+        use ratatui::crossterm::event::KeyCode;
+
+        match key.code {
+            KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
+                let error_msg = self.error.clone();
+                if let Some(err) = error_msg {
+                    ScreenAction::BackWithStatus(format!("Create failed: {}", err))
+                } else {
+                    ScreenAction::Back
+                }
+            }
+            _ => ScreenAction::Continue,
+        }
+    }
+
     pub fn branch_strategy(&self) -> BranchStrategy {
         match self.branch_strategy_idx {
             1 => BranchStrategy::ExistingBranch(self.ws_name.value().to_string()),
