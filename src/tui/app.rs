@@ -204,9 +204,10 @@ impl App {
                 // Implemented in Task 7
                 todo!()
             }
-            ScreenAction::SaveConfig(_) => {
-                // Implemented in Task 6
-                todo!()
+            ScreenAction::SaveConfig(new_config) => {
+                self.config = new_config;
+                self.screen = Screen::Dashboard;
+                self.set_status("Config saved");
             }
             ScreenAction::NavigateToWorkspace(repo_name) => {
                 self.screen = Screen::Dashboard;
@@ -271,11 +272,7 @@ impl App {
                 handle_add_key(self, key);
                 return;
             }
-            Screen::ConfigEditor(_) => {
-                drop(ctx);
-                handle_config_key(self, key);
-                return;
-            }
+            Screen::ConfigEditor(state) => state.handle_key(key, &ctx),
             Screen::Dashboard => {
                 drop(ctx);
                 // Dashboard key-to-message mapping
@@ -1140,102 +1137,6 @@ fn do_add(app: &mut App) {
         app.set_status(format!("Added repos to workspace '{}'", ws_name));
     }
     // If there was an error, stay on Creating stage so user can see the log
-}
-
-fn handle_config_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
-    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
-
-    // Ctrl-S: commit any active edit, save, exit to dashboard
-    if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        if let Screen::ConfigEditor(ref mut st) = app.screen {
-            if st.editing {
-                st.commit_edit();
-            }
-        }
-        let base_config = app.config.clone();
-        let result = {
-            let Screen::ConfigEditor(ref st) = app.screen else {
-                return;
-            };
-            st.save_to_config(base_config)
-        };
-        match result {
-            Ok(new_config) => {
-                app.config = new_config;
-                app.set_status("Config saved");
-            }
-            Err(e) => {
-                app.set_status(format!("Save failed: {}", e));
-            }
-        }
-        app.screen = Screen::Dashboard;
-        return;
-    }
-
-    let editing = {
-        let Screen::ConfigEditor(ref st) = app.screen else {
-            return;
-        };
-        st.editing
-    };
-
-    if editing {
-        match key.code {
-            KeyCode::Esc => {
-                let Screen::ConfigEditor(ref mut st) = app.screen else {
-                    return;
-                };
-                st.cancel_edit();
-            }
-            KeyCode::Enter => {
-                // Commit and advance to next field
-                let Screen::ConfigEditor(ref mut st) = app.screen else {
-                    return;
-                };
-                st.commit_edit();
-                let next = (st.focused + 1).min(st.fields.len() - 1);
-                st.focused = next;
-            }
-            _ => {
-                let Screen::ConfigEditor(ref mut st) = app.screen else {
-                    return;
-                };
-                if let Some(req) = key_to_input_request(&key) {
-                    st.input.handle(req);
-                }
-            }
-        }
-    } else {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                // Exit without saving
-                app.screen = Screen::Dashboard;
-            }
-            KeyCode::Enter => {
-                let Screen::ConfigEditor(ref mut st) = app.screen else {
-                    return;
-                };
-                st.start_editing();
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                let Screen::ConfigEditor(ref mut st) = app.screen else {
-                    return;
-                };
-                if st.focused > 0 {
-                    st.focused -= 1;
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                let Screen::ConfigEditor(ref mut st) = app.screen else {
-                    return;
-                };
-                if st.focused + 1 < st.fields.len() {
-                    st.focused += 1;
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
