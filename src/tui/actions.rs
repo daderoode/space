@@ -1,11 +1,12 @@
-// Types introduced ahead of use — subsequent tasks wire these into screen handlers.
-#![allow(dead_code)]
-
 use crate::core::config::SpaceConfig;
 use crate::core::workspace::{BranchStrategy, Workspace};
 use std::path::PathBuf;
 
 /// Read-only view of app state passed to screen handlers.
+///
+/// All fields are available for screen handlers to use; some are not yet
+/// referenced but are part of the stable context API.
+#[allow(dead_code)]
 pub struct ScreenContext<'a> {
     pub config: &'a SpaceConfig,
     pub repos_cache: &'a [PathBuf],
@@ -33,6 +34,7 @@ pub enum ScreenAction {
     /// Set cd target and quit (Go, Search).
     CdAndQuit(PathBuf),
     /// Quit without cd.
+    #[allow(dead_code)]
     Quit,
     /// Execute worktree creation/addition.
     ExecuteWorktreeFlow(WorktreeParams),
