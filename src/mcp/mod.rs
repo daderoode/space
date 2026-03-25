@@ -167,7 +167,8 @@ pub fn build_strategy(
 
 fn load_repo_cache(cfg: &SpaceConfig, refresh: bool) -> Vec<PathBuf> {
     if !refresh {
-        if let Some(cached) = repo::load_cache(&SpaceConfig::cache_path(), cfg.repos.cache_age_secs) {
+        if let Some(cached) = repo::load_cache(&SpaceConfig::cache_path(), cfg.repos.cache_age_secs)
+        {
             return cached;
         }
     }
