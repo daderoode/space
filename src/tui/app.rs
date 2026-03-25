@@ -164,6 +164,25 @@ impl App {
         }
     }
 
+    /// Refresh workspace list when leaving the Creating stage.
+    /// Catches partially-created worktrees from error scenarios.
+    fn refresh_if_leaving_creating_stage(&mut self) {
+        let is_creating = matches!(
+            &self.screen,
+            Screen::CreateWorkspace(st) if st.stage == crate::tui::screens::create::CreateStage::Creating
+        ) || matches!(
+            &self.screen,
+            Screen::AddRepos(st) if st.stage == crate::tui::screens::add::AddStage::Creating
+        );
+        if is_creating {
+            if let Ok(ws) = crate::core::workspace::list_workspaces(&self.config.workspaces.dir) {
+                self.workspaces = ws;
+                self.selected_ws = 0;
+                self.load_selected_workspace_detail();
+            }
+        }
+    }
+
     fn execute_worktree_flow(&mut self, params: crate::tui::actions::WorktreeParams) {
         use crate::core::workspace::create_worktree;
 
@@ -290,17 +309,17 @@ impl App {
         match action {
             ScreenAction::Continue => {}
             ScreenAction::Back => {
+                // Refresh workspaces when leaving Creating stage (catches partial creates)
+                self.refresh_if_leaving_creating_stage();
                 self.screen = Screen::Dashboard;
             }
             ScreenAction::BackWithStatus(msg) => {
+                self.refresh_if_leaving_creating_stage();
                 self.screen = Screen::Dashboard;
                 self.set_status(msg);
             }
             ScreenAction::CdAndQuit(path) => {
                 self.space_cd_target = Some(path);
-                self.should_quit = true;
-            }
-            ScreenAction::Quit => {
                 self.should_quit = true;
             }
             ScreenAction::DeleteWorkspace { name, force } => {
@@ -365,16 +384,9 @@ impl App {
             return;
         }
 
-        // Screen handlers (split borrows for ScreenContext)
-        let config = &self.config;
-        let repos_cache: &[PathBuf] = &self.repos_cache;
-        let workspaces: &[Workspace] = &self.workspaces;
-        let selected_ws = self.selected_ws;
+        // Build read-only context from split borrows (disjoint from &mut self.screen)
         let ctx = crate::tui::actions::ScreenContext {
-            config,
-            repos_cache,
-            workspaces,
-            selected_ws,
+            config: &self.config,
         };
 
         let action = match &mut self.screen {

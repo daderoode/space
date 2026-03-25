@@ -1,17 +1,13 @@
 use crate::core::config::SpaceConfig;
-use crate::core::workspace::{BranchStrategy, Workspace};
+use crate::core::workspace::BranchStrategy;
 use std::path::PathBuf;
 
 /// Read-only view of app state passed to screen handlers.
 ///
-/// All fields are available for screen handlers to use; some are not yet
-/// referenced but are part of the stable context API.
-#[allow(dead_code)]
+/// Add fields here as screens need them (e.g. `workspaces`, `repos_cache`).
+/// The split-borrow pattern in `App::handle_key` ensures disjoint access.
 pub struct ScreenContext<'a> {
     pub config: &'a SpaceConfig,
-    pub repos_cache: &'a [PathBuf],
-    pub workspaces: &'a [Workspace],
-    pub selected_ws: usize,
 }
 
 /// Parameters for creating/adding worktrees — shared between Create and Add flows.
@@ -31,17 +27,15 @@ pub enum ScreenAction {
     Back,
     /// Return to Dashboard with a transient status message.
     BackWithStatus(String),
-    /// Set cd target and quit (Go, Search).
+    /// Set cd target and quit (used by Go).
     CdAndQuit(PathBuf),
-    /// Quit without cd.
-    #[allow(dead_code)]
-    Quit,
     /// Execute worktree creation/addition.
     ExecuteWorktreeFlow(WorktreeParams),
     /// Delete a workspace.
     DeleteWorkspace { name: String, force: bool },
     /// Save config and reload.
     SaveConfig(SpaceConfig),
-    /// Navigate to a workspace by name (used by Search to select matching ws).
+    /// Navigate to the workspace containing a repo with the given name
+    /// (repo name from Search, resolved to a workspace in `App::process_action`).
     NavigateToWorkspace(String),
 }
