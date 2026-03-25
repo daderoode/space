@@ -230,6 +230,7 @@ impl App {
     ///
     /// Extracted from `run_loop()` so tests can drive state transitions without
     /// a terminal or event loop.
+    #[allow(clippy::drop_non_drop)] // drop(ctx) releases shared borrows before &mut self
     pub fn handle_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
         use ratatui::crossterm::event::KeyCode;
 
@@ -243,89 +244,73 @@ impl App {
             return;
         }
 
-        // Build context from split borrows
+        // Screen handlers (split borrows for ScreenContext)
+        let config = &self.config;
+        let repos_cache: &[PathBuf] = &self.repos_cache;
+        let workspaces: &[Workspace] = &self.workspaces;
+        let selected_ws = self.selected_ws;
         let ctx = crate::tui::actions::ScreenContext {
-            config: &self.config,
-            repos_cache: &self.repos_cache,
-            workspaces: &self.workspaces,
-            selected_ws: self.selected_ws,
+            config,
+            repos_cache,
+            workspaces,
+            selected_ws,
         };
 
-        // Try new-style dispatch first
         let action = match &mut self.screen {
-            Screen::ConfirmDelete(state) => Some(state.handle_key(key, &ctx)),
-            Screen::GoWorkspace(state) => Some(state.handle_key(key, &ctx)),
-            Screen::RepoSearch(state) => Some(state.handle_key(key, &ctx)),
-            _ => None,
-        };
-
-        // NLL: borrows on config/repos_cache/workspaces end after the match above
-
-        if let Some(action) = action {
-            self.process_action(action);
-            return;
-        }
-
-        // Old-style dispatch for remaining screens
-        enum ActiveScreen {
-            Dashboard,
-            Create,
-            Add,
-            Config,
-        }
-
-        let active = match &self.screen {
-            Screen::Dashboard => ActiveScreen::Dashboard,
-            Screen::CreateWorkspace(_) => ActiveScreen::Create,
-            Screen::GoWorkspace(_) | Screen::ConfirmDelete(_) | Screen::RepoSearch(_) => {
-                unreachable!("handled above")
-            }
-            Screen::AddRepos(_) => ActiveScreen::Add,
-            Screen::ConfigEditor(_) => ActiveScreen::Config,
-        };
-
-        let msg: Option<Message> = match active {
-            ActiveScreen::Create => {
+            Screen::ConfirmDelete(state) => state.handle_key(key, &ctx),
+            Screen::GoWorkspace(state) => state.handle_key(key, &ctx),
+            Screen::RepoSearch(state) => state.handle_key(key, &ctx),
+            // Remaining screens still use old pattern — delegate to free functions
+            Screen::CreateWorkspace(_) => {
+                drop(ctx);
                 handle_create_key(self, key);
-                None
+                return;
             }
-            ActiveScreen::Add => {
+            Screen::AddRepos(_) => {
+                drop(ctx);
                 handle_add_key(self, key);
-                None
+                return;
             }
-            ActiveScreen::Config => {
+            Screen::ConfigEditor(_) => {
+                drop(ctx);
                 handle_config_key(self, key);
-                None
+                return;
             }
-            ActiveScreen::Dashboard => match (key.code, key.modifiers) {
-                (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => Some(Message::Quit),
-                (KeyCode::Tab, _) => Some(Message::FocusNext),
-                (KeyCode::Enter, _) => Some(Message::GoToWorkspace),
-                (KeyCode::Char('g'), _) => Some(Message::StartGo),
-                (KeyCode::Char('c'), _) => Some(Message::StartCreate),
-                (KeyCode::Char('a'), _) => Some(Message::StartAdd),
-                (KeyCode::Char('d'), _) => Some(Message::StartDelete),
-                (KeyCode::Char('r'), _) => Some(Message::RefreshRepos),
-                (KeyCode::Char('/'), _) => Some(Message::StartSearch),
-                (KeyCode::Char('S'), _) => Some(Message::StartConfig),
-                (KeyCode::Up, _) | (KeyCode::Char('k'), _) => match self.focus {
-                    Pane::Left => Some(Message::SelectWorkspaceUp),
-                    Pane::Right => Some(Message::SelectRepoUp),
-                },
-                (KeyCode::Down, _) | (KeyCode::Char('j'), _) => match self.focus {
-                    Pane::Left => Some(Message::SelectWorkspaceDown),
-                    Pane::Right => Some(Message::SelectRepoDown),
-                },
-                _ => None,
-            },
+            Screen::Dashboard => {
+                drop(ctx);
+                // Dashboard key-to-message mapping
+                let msg: Option<Message> = match (key.code, key.modifiers) {
+                    (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => Some(Message::Quit),
+                    (KeyCode::Tab, _) => Some(Message::FocusNext),
+                    (KeyCode::Enter, _) => Some(Message::GoToWorkspace),
+                    (KeyCode::Char('g'), _) => Some(Message::StartGo),
+                    (KeyCode::Char('c'), _) => Some(Message::StartCreate),
+                    (KeyCode::Char('a'), _) => Some(Message::StartAdd),
+                    (KeyCode::Char('d'), _) => Some(Message::StartDelete),
+                    (KeyCode::Char('r'), _) => Some(Message::RefreshRepos),
+                    (KeyCode::Char('/'), _) => Some(Message::StartSearch),
+                    (KeyCode::Char('S'), _) => Some(Message::StartConfig),
+                    (KeyCode::Up, _) | (KeyCode::Char('k'), _) => match self.focus {
+                        Pane::Left => Some(Message::SelectWorkspaceUp),
+                        Pane::Right => Some(Message::SelectRepoUp),
+                    },
+                    (KeyCode::Down, _) | (KeyCode::Char('j'), _) => match self.focus {
+                        Pane::Left => Some(Message::SelectWorkspaceDown),
+                        Pane::Right => Some(Message::SelectRepoDown),
+                    },
+                    _ => None,
+                };
+                if let Some(m) = msg {
+                    let mut next = update(self, m);
+                    while let Some(m2) = next {
+                        next = update(self, m2);
+                    }
+                }
+                return;
+            }
         };
 
-        if let Some(m) = msg {
-            let mut next = update(self, m);
-            while let Some(m2) = next {
-                next = update(self, m2);
-            }
-        }
+        self.process_action(action);
     }
 }
 
