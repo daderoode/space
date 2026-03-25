@@ -101,10 +101,15 @@ impl App {
     pub fn new() -> Result<Self> {
         let config = SpaceConfig::load()?;
         let workspaces = workspace::list_workspaces(&config.workspaces.dir)?;
-        // Load repo cache if available
-        let repos_cache =
-            crate::core::repo::load_cache(&SpaceConfig::cache_path(), config.repos.cache_age_secs)
-                .unwrap_or_default();
+        // Load repo cache; rescan if missing or stale
+        let cache_path = SpaceConfig::cache_path();
+        let repos_cache = crate::core::repo::load_cache(&cache_path, config.repos.cache_age_secs)
+            .unwrap_or_else(|| {
+                let found =
+                    crate::core::repo::find_repos_in(&config.repos.roots, config.repos.max_depth);
+                crate::core::repo::save_cache(&cache_path, &found).ok();
+                found
+            });
         let mut app = Self {
             config,
             workspaces,

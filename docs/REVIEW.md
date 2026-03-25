@@ -56,7 +56,8 @@ Three interfaces sharing one core:
 
 ### Engineering
 
-- **Zero `unsafe` code.**
+- **No `unsafe` in production code** (tests use `unsafe` for env var manipulation
+  where required by Rust 2024 edition).
 - **CI enforces `clippy -D warnings` and `cargo fmt --check`.**
 - **Release pipeline** cross-compiles for Apple Silicon + Intel, generates checksums,
   publishes to GitHub Releases and Homebrew.

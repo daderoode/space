@@ -35,9 +35,9 @@ fn config_path_is_under_config_dir() {
     assert!(path.ends_with("space/config.toml"));
 }
 
-// NOTE: set_var/remove_var are process-global. This test could flake if run
-// concurrently with other tests that depend on config_dir() returning the
-// real path. Currently safe because no other test does this.
+// NOTE: set_var/remove_var are process-global. Safe here because config_test
+// runs as its own test binary (separate from mcp_test which also touches this
+// env var). Tests within this binary don't read SPACE_CONFIG_DIR concurrently.
 #[test]
 fn config_dir_respects_space_config_dir_env() {
     let tmp = TempDir::new().unwrap();
