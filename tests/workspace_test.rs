@@ -49,6 +49,12 @@ fn create_worktree_detached_head_strategy() {
     .unwrap();
 
     assert!(wt_path.exists());
+    let branch = space::core::git::current_branch(&wt_path).unwrap();
+    assert!(
+        branch.starts_with('(') && branch.ends_with(')'),
+        "worktree should be in detached HEAD, got: {}",
+        branch
+    );
 }
 
 #[test]
@@ -74,7 +80,13 @@ fn create_worktree_reuses_existing_local_branch() {
         "should reuse existing local branch: {:?}",
         result
     );
-    assert!(result.unwrap().join(".git").exists());
+    let wt_path = result.unwrap();
+    assert!(wt_path.join(".git").exists());
+    let branch = space::core::git::current_branch(&wt_path).unwrap();
+    assert_eq!(
+        branch, "my-feature",
+        "worktree should be on the reused branch"
+    );
 }
 
 #[test]

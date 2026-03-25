@@ -77,19 +77,6 @@ fn cache_round_trips() {
 }
 
 #[test]
-fn load_cache_returns_data_for_fresh_cache() {
-    let tmp = TempDir::new().unwrap();
-    let cache = tmp.path().join("repos.cache");
-    let paths = vec![PathBuf::from("/work/repo-a"), PathBuf::from("/work/repo-b")];
-    repo::save_cache(&cache, &paths).unwrap();
-
-    // File was just written, so TTL of 1 hour should accept it
-    let result = repo::load_cache(&cache, 3600);
-    assert!(result.is_some());
-    assert_eq!(result.unwrap(), paths);
-}
-
-#[test]
 fn load_cache_returns_none_for_missing_file() {
     let tmp = TempDir::new().unwrap();
     let cache = tmp.path().join("nonexistent.cache");

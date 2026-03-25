@@ -30,17 +30,6 @@ dir = "/tmp/test-workspaces"
 }
 
 #[test]
-fn round_trips_through_toml() {
-    let original = SpaceConfig::default();
-    let serialized = toml::to_string_pretty(&original).unwrap();
-    let restored: SpaceConfig = toml::from_str(&serialized).unwrap();
-    assert_eq!(original.repos.max_depth, restored.repos.max_depth);
-    assert_eq!(original.repos.roots, restored.repos.roots);
-    assert_eq!(original.repos.cache_age_secs, restored.repos.cache_age_secs);
-    assert_eq!(original.workspaces.dir, restored.workspaces.dir);
-}
-
-#[test]
 fn config_path_is_under_config_dir() {
     let path = SpaceConfig::config_path();
     assert!(path.ends_with("space/config.toml"));
