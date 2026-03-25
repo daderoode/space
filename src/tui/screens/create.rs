@@ -147,6 +147,9 @@ impl CreateState {
                     self.error = Some("Workspace name cannot be empty".to_string());
                     return ScreenAction::Continue;
                 }
+                // Normalize: write trimmed value back so all downstream uses
+                // (WorktreeParams, branch_strategy) get the clean name.
+                self.ws_name = self.ws_name.clone().with_value(name);
                 self.error = None;
                 self.stage = CreateStage::PickBranchStrategy;
                 ScreenAction::Continue
