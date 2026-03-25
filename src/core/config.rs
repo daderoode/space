@@ -38,6 +38,9 @@ impl Default for SpaceConfig {
 
 impl SpaceConfig {
     pub fn config_dir() -> PathBuf {
+        if let Ok(dir) = std::env::var("SPACE_CONFIG_DIR") {
+            return PathBuf::from(dir);
+        }
         dirs::config_dir()
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
             .join("space")

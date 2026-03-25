@@ -295,7 +295,7 @@ Used in: repo picker, workspace picker, branch picker, and repo search.
 - Cache stored at `~/.config/space/repos.cache` (newline-delimited paths)
 - Refresh with `space repos --refresh`, the `r` key in the TUI, or `list_repos(refresh: true)` via MCP
 
-> **Note:** Cache age is not enforced. The config has `cache_age_secs = 3600` but the cache TTL is not currently checked automatically. Refreshing is always manual.
+> **Note:** The cache is automatically invalidated when older than `cache_age_secs` (default: 1 hour). A stale cache triggers a rescan on next use. You can also force a refresh with `space repos --refresh`, the `r` key in the TUI, or `list_repos(refresh: true)` via MCP.
 
 ---
 
@@ -759,7 +759,7 @@ Edit interactively with `space config` (or press `S` in the TUI), or edit the fi
 |---------|-----|------|---------|-------------|
 | `[repos]` | `roots` | Array of paths | `["~/projects"]` | Directories to scan for git repositories |
 | `[repos]` | `max_depth` | Integer | `3` | Maximum directory depth when scanning for repos |
-| `[repos]` | `cache_age_secs` | Integer | `3600` | Cache TTL in seconds (not currently enforced -- refresh is manual) |
+| `[repos]` | `cache_age_secs` | Integer | `3600` | Cache TTL in seconds; stale caches are automatically discarded |
 | `[workspaces]` | `dir` | Path | `~/workspaces` | Root directory where workspaces are created |
 
 > **Tip:** Multiple repo roots are supported. Separate with commas in the TUI config editor, or use TOML array syntax in the file: `roots = ["~/projects", "~/work", "~/oss"]`

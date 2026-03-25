@@ -1,5 +1,6 @@
 use space::core::config::SpaceConfig;
 use std::path::PathBuf;
+use tempfile::TempDir;
 
 #[test]
 fn default_config_has_reasonable_values() {
@@ -29,16 +30,48 @@ dir = "/tmp/test-workspaces"
 }
 
 #[test]
-fn round_trips_through_toml() {
-    let original = SpaceConfig::default();
-    let serialized = toml::to_string_pretty(&original).unwrap();
-    let restored: SpaceConfig = toml::from_str(&serialized).unwrap();
-    assert_eq!(original.repos.max_depth, restored.repos.max_depth);
-    assert_eq!(original.repos.roots, restored.repos.roots);
-}
-
-#[test]
 fn config_path_is_under_config_dir() {
     let path = SpaceConfig::config_path();
     assert!(path.ends_with("space/config.toml"));
+}
+
+// NOTE: set_var/remove_var are process-global. Safe here because config_test
+// runs as its own test binary (separate from mcp_test which also touches this
+// env var). Tests within this binary don't read SPACE_CONFIG_DIR concurrently.
+#[test]
+fn config_dir_respects_space_config_dir_env() {
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("SPACE_CONFIG_DIR", tmp.path());
+    let dir = SpaceConfig::config_dir();
+    std::env::remove_var("SPACE_CONFIG_DIR");
+    assert_eq!(dir, tmp.path());
+}
+
+/// Exercises the full save → disk → load round-trip through the filesystem.
+/// Uses the same logic as `save()` and `load()` but with a temp dir path,
+/// avoiding the process-global env var race that `set_var` causes.
+#[test]
+fn config_save_load_round_trip() {
+    let tmp = TempDir::new().unwrap();
+    let config_path = tmp.path().join("config.toml");
+
+    let original = SpaceConfig {
+        repos: space::core::config::RepoConfig {
+            roots: vec![PathBuf::from("/test/repos")],
+            max_depth: 5,
+            cache_age_secs: 1800,
+        },
+        workspaces: space::core::config::WorkspaceConfig {
+            dir: PathBuf::from("/test/workspaces"),
+        },
+    };
+
+    // Same logic as save(): serialize to TOML, write to disk
+    std::fs::write(&config_path, toml::to_string_pretty(&original).unwrap()).unwrap();
+
+    // Same logic as load(): read from disk, deserialize
+    let content = std::fs::read_to_string(&config_path).unwrap();
+    let loaded: SpaceConfig = toml::from_str(&content).unwrap();
+
+    assert_eq!(loaded, original);
 }

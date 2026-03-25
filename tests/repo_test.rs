@@ -1,3 +1,4 @@
+use filetime::FileTime;
 use space::core::repo;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -71,6 +72,43 @@ fn cache_round_trips() {
     let cache_path = tmp.path().join("repos.cache");
     let paths = vec![PathBuf::from("/work/repo-a"), PathBuf::from("/work/repo-b")];
     repo::save_cache(&cache_path, &paths).unwrap();
-    let loaded = repo::load_cache(&cache_path).unwrap();
+    let loaded = repo::load_cache(&cache_path, 3600).unwrap();
     assert_eq!(loaded, paths);
+}
+
+#[test]
+fn load_cache_returns_none_for_missing_file() {
+    let tmp = TempDir::new().unwrap();
+    let cache = tmp.path().join("nonexistent.cache");
+    let result = repo::load_cache(&cache, 3600);
+    assert!(result.is_none());
+}
+
+#[test]
+fn load_cache_returns_none_for_stale_cache() {
+    let tmp = TempDir::new().unwrap();
+    let cache = tmp.path().join("repos.cache");
+    repo::save_cache(&cache, &[PathBuf::from("/a")]).unwrap();
+
+    // Backdate the file's mtime by 2 hours
+    let two_hours_ago = FileTime::from_system_time(
+        std::time::SystemTime::now() - std::time::Duration::from_secs(7200),
+    );
+    filetime::set_file_mtime(&cache, two_hours_ago).unwrap();
+
+    // TTL of 1 hour should reject this cache
+    let result = repo::load_cache(&cache, 3600);
+    assert!(result.is_none());
+}
+
+#[test]
+fn fuzzy_match_empty_query_returns_all() {
+    let repos = vec![
+        PathBuf::from("/work/alpha"),
+        PathBuf::from("/work/beta"),
+        PathBuf::from("/work/gamma"),
+    ];
+    let matches = repo::fuzzy_match("", &repos);
+    assert_eq!(matches.len(), 3, "empty query should return all repos");
+    assert_eq!(matches, repos, "order should be preserved");
 }

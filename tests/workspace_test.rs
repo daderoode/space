@@ -1,29 +1,8 @@
+mod common;
+
 use space::core::workspace::{create_worktree, list_workspaces, BranchStrategy};
 use std::process::Command;
 use tempfile::TempDir;
-
-fn init_repo(dir: &std::path::Path) {
-    Command::new("git")
-        .args(["init", "-b", "main"])
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["config", "user.email", "space@local"])
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["config", "user.name", "T"])
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "init"])
-        .current_dir(dir)
-        .output()
-        .unwrap();
-}
 
 #[test]
 fn list_workspaces_returns_directories() {
@@ -40,7 +19,7 @@ fn list_workspaces_returns_directories() {
 #[test]
 fn create_worktree_new_branch_strategy() {
     let repo_dir = TempDir::new().unwrap();
-    init_repo(repo_dir.path());
+    common::init_repo(repo_dir.path());
     let ws_dir = TempDir::new().unwrap();
 
     let wt_path = create_worktree(
@@ -58,7 +37,7 @@ fn create_worktree_new_branch_strategy() {
 #[test]
 fn create_worktree_detached_head_strategy() {
     let repo_dir = TempDir::new().unwrap();
-    init_repo(repo_dir.path());
+    common::init_repo(repo_dir.path());
     let ws_dir = TempDir::new().unwrap();
 
     let wt_path = create_worktree(
@@ -70,12 +49,18 @@ fn create_worktree_detached_head_strategy() {
     .unwrap();
 
     assert!(wt_path.exists());
+    let branch = space::core::git::current_branch(&wt_path).unwrap();
+    assert!(
+        branch.starts_with('(') && branch.ends_with(')'),
+        "worktree should be in detached HEAD, got: {}",
+        branch
+    );
 }
 
 #[test]
 fn create_worktree_reuses_existing_local_branch() {
     let repo_dir = TempDir::new().unwrap();
-    init_repo(repo_dir.path());
+    common::init_repo(repo_dir.path());
     // Create the branch first
     Command::new("git")
         .args(["branch", "my-feature"])
@@ -95,15 +80,19 @@ fn create_worktree_reuses_existing_local_branch() {
         "should reuse existing local branch: {:?}",
         result
     );
-    assert!(result.unwrap().join(".git").exists());
+    let wt_path = result.unwrap();
+    assert!(wt_path.join(".git").exists());
+    let branch = space::core::git::current_branch(&wt_path).unwrap();
+    assert_eq!(
+        branch, "my-feature",
+        "worktree should be on the reused branch"
+    );
 }
 
 #[test]
-fn create_worktree_falls_back_to_detached_when_branch_checked_out() {
-    // If the branch is already checked out in the main repo,
-    // the worktree should fall back to detached HEAD rather than error.
+fn create_worktree_errors_when_branch_already_checked_out() {
     let repo_dir = TempDir::new().unwrap();
-    init_repo(repo_dir.path());
+    common::init_repo(repo_dir.path());
     // "main" is already checked out in repo_dir — try to create worktree on it
     let ws_dir = TempDir::new().unwrap();
     let result = create_worktree(
@@ -112,7 +101,183 @@ fn create_worktree_falls_back_to_detached_when_branch_checked_out() {
         "test-ws",
         &BranchStrategy::ExistingBranch("main".to_string()),
     );
-    // Should not panic — either succeeds with detached or returns an error we can handle
-    // (git itself errors here; we just verify we don't panic)
-    let _ = result; // result may be Err; that's acceptable for this edge case
+    assert!(
+        result.is_err(),
+        "should error when branch is already checked out"
+    );
+}
+
+#[test]
+fn workspace_detail_returns_repo_info() {
+    let env = common::TestEnv::new();
+    let repo_path = env.create_repo("my-repo");
+
+    create_worktree(
+        &repo_path,
+        &env.workspaces_dir,
+        "test-ws",
+        &BranchStrategy::NewBranch("test-ws".to_string()),
+    )
+    .unwrap();
+
+    let ws = space::core::workspace::workspace_detail(&env.workspaces_dir, "test-ws").unwrap();
+    assert_eq!(ws.name, "test-ws");
+    assert_eq!(ws.repos.len(), 1);
+    assert_eq!(ws.repos[0].name, "my-repo");
+    assert_eq!(ws.repos[0].branch, "test-ws");
+    assert_eq!(ws.repos[0].status.modified, 0);
+    assert_eq!(ws.repos[0].status.staged, 0);
+    assert_eq!(ws.repos[0].status.untracked, 0);
+}
+
+#[test]
+fn workspace_detail_skips_non_repo_entries() {
+    let env = common::TestEnv::new();
+    let repo_path = env.create_repo("real-repo");
+
+    create_worktree(
+        &repo_path,
+        &env.workspaces_dir,
+        "test-ws",
+        &BranchStrategy::NewBranch("test-ws".to_string()),
+    )
+    .unwrap();
+
+    // Add a directory without .git (should be skipped)
+    std::fs::create_dir_all(env.workspaces_dir.join("test-ws").join("not-a-repo")).unwrap();
+    // Add a regular file (should be skipped)
+    std::fs::write(env.workspaces_dir.join("test-ws").join("README.md"), "hi").unwrap();
+
+    let ws = space::core::workspace::workspace_detail(&env.workspaces_dir, "test-ws").unwrap();
+    assert_eq!(ws.repos.len(), 1, "should only find the real repo");
+    assert_eq!(ws.repos[0].name, "real-repo");
+}
+
+#[test]
+fn workspace_detail_not_found_errors() {
+    let env = common::TestEnv::new();
+    let result = space::core::workspace::workspace_detail(&env.workspaces_dir, "ghost");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("not found"));
+}
+
+#[test]
+fn remove_workspace_unlinks_worktrees() {
+    let env = common::TestEnv::new();
+    let repo_path = env.create_repo("my-repo");
+
+    create_worktree(
+        &repo_path,
+        &env.workspaces_dir,
+        "test-ws",
+        &BranchStrategy::NewBranch("test-ws".to_string()),
+    )
+    .unwrap();
+
+    // Verify worktree is registered
+    let output = Command::new("git")
+        .args(["worktree", "list"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git worktree list failed");
+    let before = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        before.contains("test-ws"),
+        "worktree should be registered before removal"
+    );
+
+    // Remove
+    space::core::workspace::remove_workspace(&env.workspaces_dir, "test-ws", true).unwrap();
+
+    // Directory gone
+    assert!(!env.workspaces_dir.join("test-ws").exists());
+
+    // Worktree unlinked from main repo
+    let output = Command::new("git")
+        .args(["worktree", "list"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git worktree list failed after removal"
+    );
+    let after = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !after.contains("test-ws"),
+        "worktree should be unlinked after removal"
+    );
+}
+
+#[test]
+fn remove_workspace_not_found_errors() {
+    let env = common::TestEnv::new();
+    let result = space::core::workspace::remove_workspace(&env.workspaces_dir, "ghost", true);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("not found"));
+}
+
+#[test]
+fn create_worktree_existing_branch_strategy() {
+    let repo_dir = TempDir::new().unwrap();
+    common::init_repo(repo_dir.path());
+
+    let out = Command::new("git")
+        .args(["branch", "feature-x"])
+        .current_dir(repo_dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git branch failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let ws_dir = TempDir::new().unwrap();
+    let wt_path = create_worktree(
+        repo_dir.path(),
+        ws_dir.path(),
+        "test-ws",
+        &BranchStrategy::ExistingBranch("feature-x".to_string()),
+    )
+    .unwrap();
+
+    assert!(wt_path.exists());
+    assert!(wt_path.join(".git").exists());
+
+    let branch = space::core::git::current_branch(&wt_path).unwrap();
+    assert_eq!(branch, "feature-x");
+}
+
+#[test]
+fn remove_workspace_without_force() {
+    let env = common::TestEnv::new();
+    let repo_path = env.create_repo("my-repo");
+
+    create_worktree(
+        &repo_path,
+        &env.workspaces_dir,
+        "test-ws",
+        &BranchStrategy::NewBranch("test-ws".to_string()),
+    )
+    .unwrap();
+
+    // Remove without force (clean worktree, so should succeed)
+    space::core::workspace::remove_workspace(&env.workspaces_dir, "test-ws", false).unwrap();
+    assert!(
+        !env.workspaces_dir.join("test-ws").exists(),
+        "workspace should be removed"
+    );
+}
+
+#[test]
+fn list_workspaces_nonexistent_dir_returns_empty() {
+    let tmp = TempDir::new().unwrap();
+    let nonexistent = tmp.path().join("does-not-exist");
+    let workspaces = list_workspaces(&nonexistent).unwrap();
+    assert!(
+        workspaces.is_empty(),
+        "nonexistent dir should return empty list"
+    );
 }

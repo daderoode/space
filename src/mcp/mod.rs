@@ -167,7 +167,8 @@ pub fn build_strategy(
 
 fn load_repo_cache(cfg: &SpaceConfig, refresh: bool) -> Vec<PathBuf> {
     if !refresh {
-        if let Some(cached) = repo::load_cache(&SpaceConfig::cache_path()) {
+        if let Some(cached) = repo::load_cache(&SpaceConfig::cache_path(), cfg.repos.cache_age_secs)
+        {
             return cached;
         }
     }
@@ -192,7 +193,7 @@ impl SpaceServer {
 
     /// List all workspaces with their repo status.
     #[tool(description = "List all workspaces with per-repo branch and status information")]
-    fn list_workspaces(&self) -> Result<CallToolResult, McpError> {
+    pub fn list_workspaces(&self) -> Result<CallToolResult, McpError> {
         let cfg = SpaceConfig::load().map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let ws_dir = &cfg.workspaces.dir;
         let names = workspace::list_workspaces(ws_dir)
@@ -219,7 +220,7 @@ impl SpaceServer {
     #[tool(
         description = "Get detailed repo status for a named workspace (branches, modified/staged/untracked counts, ahead/behind)"
     )]
-    fn workspace_status(
+    pub fn workspace_status(
         &self,
         Parameters(params): Parameters<WorkspaceStatusParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -235,7 +236,7 @@ impl SpaceServer {
     #[tool(
         description = "List discoverable git repositories from configured roots. Set refresh=true to rescan the filesystem."
     )]
-    fn list_repos(
+    pub fn list_repos(
         &self,
         Parameters(params): Parameters<ListReposParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -260,7 +261,7 @@ impl SpaceServer {
     #[tool(
         description = "Create a new workspace with git worktrees for selected repos. Strategy: 'new' (create branch, default), 'existing' (checkout existing branch), or 'detached' (detached HEAD)."
     )]
-    fn create_workspace(
+    pub fn create_workspace(
         &self,
         Parameters(params): Parameters<CreateWorkspaceParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -305,7 +306,7 @@ impl SpaceServer {
 
     /// Add repos to an existing workspace.
     #[tool(description = "Add git worktrees for additional repos to an existing workspace")]
-    fn add_repos(
+    pub fn add_repos(
         &self,
         Parameters(params): Parameters<AddReposParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -358,7 +359,7 @@ impl SpaceServer {
 
     /// Remove a workspace and all its worktrees.
     #[tool(description = "Remove a workspace and all its git worktrees")]
-    fn remove_workspace(
+    pub fn remove_workspace(
         &self,
         Parameters(params): Parameters<RemoveWorkspaceParams>,
     ) -> Result<CallToolResult, McpError> {
