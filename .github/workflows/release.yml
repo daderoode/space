@@ -45,3 +45,119 @@ jobs:
             ${{ env.ARCHIVE }}
             ${{ env.ARCHIVE }}.sha256
           generate_release_notes: true
+
+  update-tap:
+    name: Update Homebrew tap
+    needs: build
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Download SHA256 checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # Retry up to 5 times — release assets may take a moment to propagate
+          for i in 1 2 3 4 5; do
+            if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.sha256'; then
+              break
+            fi
+            echo "Attempt $i failed, retrying in 15s..."
+            sleep 15
+          done
+
+      - name: Generate formula
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+
+          SHA_ARM=$(awk '{print $1}' "space-${TAG}-aarch64-apple-darwin.tar.gz.sha256")
+          SHA_INTEL=$(awk '{print $1}' "space-${TAG}-x86_64-apple-darwin.tar.gz.sha256")
+
+          # Validate SHA256 format (64 hex chars)
+          if ! echo "$SHA_ARM" | grep -qE '^[0-9a-f]{64}$'; then
+            echo "::error::Invalid SHA256 for arm64: $SHA_ARM"
+            exit 1
+          fi
+          if ! echo "$SHA_INTEL" | grep -qE '^[0-9a-f]{64}$'; then
+            echo "::error::Invalid SHA256 for x86_64: $SHA_INTEL"
+            exit 1
+          fi
+
+          # Generate the formula — no secrets in this step
+          cat > space.rb <<FORMULA
+          class Space < Formula
+            desc "Workspace manager for multi-repo git worktrees"
+            homepage "https://github.com/daderoode/space"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/daderoode/space/releases/download/${TAG}/space-${TAG}-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_ARM}"
+              end
+
+              on_intel do
+                url "https://github.com/daderoode/space/releases/download/${TAG}/space-${TAG}-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_INTEL}"
+              end
+            end
+
+            def install
+              bin.install "space"
+            end
+
+            def caveats
+              <<~EOS
+                Add the shell wrapper to your ~/.zshrc so \`space go\` can change directories
+                and TUI commands (space, space config, space create, etc.) render correctly:
+
+                  space() {
+                    case "\${1:-}" in
+                      ls|list|status|st|repos|completions|--version|--help|-h|-V)
+                        command space "\$@"
+                        ;;
+                      *)
+                        local cdfile="\${TMPDIR:-/tmp}/.space_cd_\$\$"
+                        __SPACE_CD_FILE__="\$cdfile" command space "\$@"
+                        local ret=\$?
+                        if [[ -s "\$cdfile" ]]; then
+                          cd -- "\$(<"\$cdfile")"
+                        fi
+                        rm -f "\$cdfile" 2>/dev/null
+                        return \$ret
+                        ;;
+                    esac
+                  }
+
+                Then generate completions:
+
+                  space completions zsh > ~/.zfunc/_space
+
+                NOTE: If you have an older wrapper in your ~/.zshrc, replace it with the above.
+              EOS
+            end
+
+            test do
+              system "\#{bin}/space", "--version"
+            end
+          end
+          FORMULA
+
+          sed -i 's/^          //' space.rb
+
+      - name: Push formula to homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          CONTENT=$(base64 -w 0 space.rb)
+          FILE_SHA=$(gh api repos/daderoode/homebrew-tap/contents/Formula/space.rb --jq '.sha')
+
+          gh api repos/daderoode/homebrew-tap/contents/Formula/space.rb \
+            --method PUT \
+            --field message="space ${VERSION}" \
+            --field content="$CONTENT" \
+            --field sha="$FILE_SHA" \
+            --field branch="master"
