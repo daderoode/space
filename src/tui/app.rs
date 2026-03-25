@@ -164,6 +164,127 @@ impl App {
         }
     }
 
+    fn execute_worktree_flow(&mut self, params: crate::tui::actions::WorktreeParams) {
+        use crate::core::workspace::create_worktree;
+
+        // Clear progress/error on whichever screen is active
+        match &mut self.screen {
+            Screen::CreateWorkspace(st) => {
+                st.progress.clear();
+                st.error = None;
+            }
+            Screen::AddRepos(st) => {
+                st.progress.clear();
+                st.error = None;
+            }
+            _ => return,
+        }
+
+        let verb = if params.is_new { "Creating" } else { "Adding" };
+
+        for repo_path in &params.repos {
+            let repo_name = repo_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "?".to_string());
+
+            // Push progress message
+            match &mut self.screen {
+                Screen::CreateWorkspace(st) => {
+                    st.progress
+                        .push(format!("{} worktree for {}...", verb, repo_name));
+                }
+                Screen::AddRepos(st) => {
+                    st.progress
+                        .push(format!("{} worktree for {}...", verb, repo_name));
+                }
+                _ => return,
+            }
+
+            match create_worktree(
+                repo_path,
+                &params.workspace_dir,
+                &params.workspace_name,
+                &params.branch_strategy,
+            ) {
+                Ok(_) => match &mut self.screen {
+                    Screen::CreateWorkspace(st) => {
+                        st.progress.push(format!("  \u{2713} {}", repo_name));
+                    }
+                    Screen::AddRepos(st) => {
+                        st.progress.push(format!("  \u{2713} {}", repo_name));
+                    }
+                    _ => return,
+                },
+                Err(e) => {
+                    if e.to_string().contains("already checked out") {
+                        match &mut self.screen {
+                            Screen::CreateWorkspace(st) => {
+                                st.stage =
+                                    crate::tui::screens::create::CreateStage::PickBranchStrategy;
+                                st.progress.clear();
+                                st.error = Some(format!(
+                                    "'{}' is already checked out — pick a different strategy",
+                                    repo_name
+                                ));
+                            }
+                            Screen::AddRepos(st) => {
+                                st.stage = crate::tui::screens::add::AddStage::PickBranchStrategy;
+                                st.progress.clear();
+                                st.error = Some(format!(
+                                    "'{}' is already checked out — pick a different strategy",
+                                    repo_name
+                                ));
+                            }
+                            _ => {}
+                        }
+                        return;
+                    }
+                    match &mut self.screen {
+                        Screen::CreateWorkspace(st) => {
+                            st.progress.push(format!("  \u{2717} {}: {}", repo_name, e));
+                            st.error = Some(format!("Failed: {}", e));
+                        }
+                        Screen::AddRepos(st) => {
+                            st.progress.push(format!("  \u{2717} {}: {}", repo_name, e));
+                            st.error = Some(format!("Failed: {}", e));
+                        }
+                        _ => return,
+                    }
+                }
+            }
+        }
+
+        // Check result — need fresh borrow after the loop
+        let had_error = match &self.screen {
+            Screen::CreateWorkspace(st) => st.error.is_some(),
+            Screen::AddRepos(st) => st.error.is_some(),
+            _ => false,
+        };
+
+        if !had_error {
+            if let Ok(ws_list) = crate::core::workspace::list_workspaces(&params.workspace_dir) {
+                self.workspaces = ws_list;
+                if let Some(idx) = self
+                    .workspaces
+                    .iter()
+                    .position(|w| w.name == params.workspace_name)
+                {
+                    self.selected_ws = idx;
+                }
+                self.load_selected_workspace_detail();
+            }
+            let verb = if params.is_new {
+                "Created"
+            } else {
+                "Added repos to"
+            };
+            self.screen = Screen::Dashboard;
+            self.set_status(format!("{} workspace '{}'", verb, params.workspace_name));
+        }
+        // If error, stay on Creating stage so user can see the log
+    }
+
     fn process_action(&mut self, action: crate::tui::actions::ScreenAction) {
         use crate::tui::actions::ScreenAction;
         match action {
@@ -200,9 +321,8 @@ impl App {
                     }
                 }
             }
-            ScreenAction::ExecuteWorktreeFlow(_) => {
-                // Implemented in Task 7
-                todo!()
+            ScreenAction::ExecuteWorktreeFlow(params) => {
+                self.execute_worktree_flow(params);
             }
             ScreenAction::SaveConfig(new_config) => {
                 self.config = new_config;
@@ -261,12 +381,7 @@ impl App {
             Screen::ConfirmDelete(state) => state.handle_key(key, &ctx),
             Screen::GoWorkspace(state) => state.handle_key(key, &ctx),
             Screen::RepoSearch(state) => state.handle_key(key, &ctx),
-            // Remaining screens still use old pattern — delegate to free functions
-            Screen::CreateWorkspace(_) => {
-                drop(ctx);
-                handle_create_key(self, key);
-                return;
-            }
+            Screen::CreateWorkspace(state) => state.handle_key(key, &ctx),
             Screen::AddRepos(_) => {
                 drop(ctx);
                 handle_add_key(self, key);
@@ -472,360 +587,6 @@ pub(crate) fn build_branch_picker(
         items,
         false,
     ))
-}
-
-fn handle_create_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
-    use crate::tui::screens::create::CreateStage;
-    use ratatui::crossterm::event::KeyCode;
-
-    // Extract the stage as a value so we don't hold a borrow on app.screen
-    // while the match arms need to mutate it.
-    let stage = {
-        let Screen::CreateWorkspace(ref st) = app.screen else {
-            return;
-        };
-        st.stage.clone()
-    };
-
-    match stage {
-        CreateStage::PickRepos => {
-            match key.code {
-                KeyCode::Esc => {
-                    app.screen = Screen::Dashboard;
-                }
-                KeyCode::Enter => {
-                    let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                        return;
-                    };
-                    let confirmed: Vec<PathBuf> = st
-                        .picker
-                        .confirmed_items()
-                        .into_iter()
-                        .map(|i| i.full_path.clone())
-                        .collect();
-                    if confirmed.is_empty() {
-                        st.error = Some("Select at least one repo".to_string());
-                        return;
-                    }
-                    st.selected_repos = confirmed;
-                    st.error = None;
-                    st.stage = CreateStage::NameWorkspace;
-                }
-                KeyCode::Tab => {
-                    let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                        return;
-                    };
-                    st.picker.toggle_highlighted();
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                        return;
-                    };
-                    st.picker.move_up();
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                        return;
-                    };
-                    st.picker.move_down();
-                }
-                KeyCode::Char('s')
-                    if key
-                        .modifiers
-                        .contains(ratatui::crossterm::event::KeyModifiers::CONTROL) =>
-                {
-                    let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                        return;
-                    };
-                    st.picker.cycle_scope();
-                }
-                _ => {
-                    // All other keys (including plain 's') feed the picker input
-                    let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                        return;
-                    };
-                    if let Some(req) = key_to_input_request(&key) {
-                        st.picker.input.handle(req);
-                    }
-                    st.picker.refilter();
-                }
-            }
-        }
-
-        CreateStage::NameWorkspace => match key.code {
-            KeyCode::Esc => {
-                let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                    return;
-                };
-                st.stage = CreateStage::PickRepos;
-            }
-            KeyCode::Enter => {
-                let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                    return;
-                };
-                let name = st.ws_name.value().trim().to_string();
-                if name.is_empty() {
-                    st.error = Some("Workspace name cannot be empty".to_string());
-                    return;
-                }
-                st.error = None;
-                st.stage = CreateStage::PickBranchStrategy;
-            }
-            _ => {
-                let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                    return;
-                };
-                if let Some(req) = key_to_input_request(&key) {
-                    st.ws_name.handle(req);
-                }
-            }
-        },
-
-        CreateStage::PickBranchStrategy => match key.code {
-            KeyCode::Esc => {
-                let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                    return;
-                };
-                st.error = None;
-                st.stage = CreateStage::NameWorkspace;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                    return;
-                };
-                st.error = None;
-                if st.branch_strategy_idx > 0 {
-                    st.branch_strategy_idx -= 1;
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                    return;
-                };
-                st.error = None;
-                if st.branch_strategy_idx < 3 {
-                    st.branch_strategy_idx += 1;
-                }
-            }
-            KeyCode::Enter => {
-                // If "Pick a branch..." selected, open branch picker
-                let idx = {
-                    let Screen::CreateWorkspace(ref st) = app.screen else {
-                        return;
-                    };
-                    st.branch_strategy_idx
-                };
-                if idx == 3 {
-                    // Build branch picker from the first selected repo
-                    let (repo_path, repo_name) = {
-                        let Screen::CreateWorkspace(ref st) = app.screen else {
-                            return;
-                        };
-                        let path = st.selected_repos.first().cloned();
-                        let name = path
-                            .as_ref()
-                            .and_then(|p| p.file_name())
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        (path, name)
-                    };
-                    if let Some(repo_path) = repo_path {
-                        match build_branch_picker(&repo_path, &repo_name) {
-                            Some(picker) => {
-                                let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                                    return;
-                                };
-                                st.branch_picker = Some(picker);
-                                st.stage = CreateStage::PickBranch;
-                            }
-                            None => {
-                                let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                                    return;
-                                };
-                                st.error =
-                                    Some(format!("Could not list branches for {}", repo_name));
-                            }
-                        }
-                    }
-                } else {
-                    do_create(app);
-                }
-            }
-            _ => {}
-        },
-
-        CreateStage::PickBranch => match key.code {
-            KeyCode::Esc => {
-                let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                    return;
-                };
-                st.stage = CreateStage::PickBranchStrategy;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                    return;
-                };
-                if let Some(ref mut bp) = st.branch_picker {
-                    bp.move_up();
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                    return;
-                };
-                if let Some(ref mut bp) = st.branch_picker {
-                    bp.move_down();
-                }
-            }
-            KeyCode::Enter => {
-                let picked = {
-                    let Screen::CreateWorkspace(ref st) = app.screen else {
-                        return;
-                    };
-                    st.branch_picker
-                        .as_ref()
-                        .and_then(|bp| bp.confirmed_items().into_iter().next())
-                        .map(|item| item.name.clone())
-                };
-                if let Some(branch) = picked {
-                    let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                        return;
-                    };
-                    st.picked_branch = Some(branch);
-                }
-                do_create(app);
-            }
-            _ => {
-                let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                    return;
-                };
-                if let Some(ref mut bp) = st.branch_picker {
-                    if let Some(req) = key_to_input_request(&key) {
-                        bp.input.handle(req);
-                    }
-                    bp.refilter();
-                }
-            }
-        },
-
-        CreateStage::Creating => {
-            match key.code {
-                KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
-                    // Capture error message before switching screens
-                    let error_msg = {
-                        let Screen::CreateWorkspace(ref st) = app.screen else {
-                            return;
-                        };
-                        st.error.clone()
-                    };
-                    app.screen = Screen::Dashboard;
-                    if let Ok(ws) =
-                        crate::core::workspace::list_workspaces(&app.config.workspaces.dir)
-                    {
-                        app.workspaces = ws;
-                        app.selected_ws = 0;
-                        app.load_selected_workspace_detail();
-                    }
-                    if let Some(err) = error_msg {
-                        app.set_status(format!("Create failed: {}", err));
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-fn do_create(app: &mut App) {
-    use crate::core::workspace::create_worktree;
-
-    // Extract all needed data before mutating state, to satisfy borrow checker
-    let (ws_name, strategy, repos, ws_dir) = {
-        let Screen::CreateWorkspace(ref st) = app.screen else {
-            return;
-        };
-        (
-            st.ws_name.value().to_string(),
-            st.branch_strategy(),
-            st.selected_repos.clone(),
-            app.config.workspaces.dir.clone(),
-        )
-    };
-
-    // Transition to Creating stage
-    {
-        let Screen::CreateWorkspace(ref mut st) = app.screen else {
-            return;
-        };
-        st.stage = crate::tui::screens::create::CreateStage::Creating;
-        st.progress.clear();
-        st.error = None;
-    }
-
-    for repo_path in &repos {
-        let repo_name = repo_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "?".to_string());
-
-        {
-            let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                return;
-            };
-            st.progress
-                .push(format!("Creating worktree for {}...", repo_name));
-        }
-
-        match create_worktree(repo_path, &ws_dir, &ws_name, &strategy) {
-            Ok(_) => {
-                let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                    return;
-                };
-                st.progress.push(format!("  \u{2713} {}", repo_name));
-            }
-            Err(e) => {
-                if e.to_string().contains("already checked out") {
-                    // Route the user back to the strategy picker with a clear explanation
-                    let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                        return;
-                    };
-                    st.stage = crate::tui::screens::create::CreateStage::PickBranchStrategy;
-                    st.progress.clear();
-                    st.error = Some(format!(
-                        "'{}' is already checked out — pick a different strategy",
-                        repo_name
-                    ));
-                    return;
-                }
-                let Screen::CreateWorkspace(ref mut st) = app.screen else {
-                    return;
-                };
-                st.progress.push(format!("  \u{2717} {}: {}", repo_name, e));
-                st.error = Some(format!("Failed: {}", e));
-            }
-        }
-    }
-
-    // Check if there were errors
-    let had_error = {
-        let Screen::CreateWorkspace(ref st) = app.screen else {
-            return;
-        };
-        st.error.is_some()
-    };
-
-    if !had_error {
-        if let Ok(ws_list) = crate::core::workspace::list_workspaces(&ws_dir) {
-            app.workspaces = ws_list;
-            if let Some(idx) = app.workspaces.iter().position(|w| w.name == ws_name) {
-                app.selected_ws = idx;
-            }
-            app.load_selected_workspace_detail();
-        }
-        app.screen = Screen::Dashboard;
-        app.set_status(format!("Created workspace '{}'", ws_name));
-    }
-    // If there was an error, stay on Creating stage so user can see the log
 }
 
 fn handle_add_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) {
