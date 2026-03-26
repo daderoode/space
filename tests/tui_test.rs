@@ -258,6 +258,64 @@ fn create_empty_name_rejected() {
     }
 }
 
+#[test]
+fn create_populates_recent_branches_on_strategy_entry() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("branchy-repo");
+
+    // Create a second branch with a commit so there are 2 branches
+    let out = std::process::Command::new("git")
+        .args(["checkout", "-b", "feature-recent"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let out = std::process::Command::new("git")
+        .args(["commit", "--allow-empty", "-m", "feature commit"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    // Go back to main
+    let out = std::process::Command::new("git")
+        .args(["checkout", "main"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.stage = space::tui::screens::create::CreateStage::NameWorkspace;
+        st.ws_name = tui_input::Input::default().with_value("test-ws".to_string());
+    }
+
+    // Press Enter to advance to PickBranchStrategy — should populate recent_branches
+    app.handle_key(key(KeyCode::Enter));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::PickBranchStrategy
+        );
+        assert!(
+            !st.recent_branches.is_empty(),
+            "recent_branches should be populated, got empty"
+        );
+        // Should be sorted by commit time descending (feature-recent committed later)
+        assert_eq!(
+            st.recent_branches[0].name, "feature-recent",
+            "most recent branch should be first"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Add flow tests
 // ---------------------------------------------------------------------------

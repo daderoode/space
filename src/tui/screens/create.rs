@@ -20,7 +20,8 @@ pub struct CreateState {
     pub branch_strategy_idx: usize, // 0=new branch, 1=existing, 2=detached, 3=pick branch
     pub branch_picker: Option<FuzzyPicker>, // populated when entering PickBranch stage
     pub picked_branch: Option<String>, // branch name chosen via branch_picker
-    pub progress: Vec<String>,      // log lines shown during Creating stage
+    pub recent_branches: Vec<crate::core::git::BranchInfo>,
+    pub progress: Vec<String>, // log lines shown during Creating stage
     pub error: Option<String>,
 }
 
@@ -59,6 +60,7 @@ impl CreateState {
             branch_strategy_idx: 0,
             branch_picker: None,
             picked_branch: None,
+            recent_branches: vec![],
             progress: vec![],
             error: None,
         }
@@ -152,6 +154,14 @@ impl CreateState {
                 self.ws_name = self.ws_name.clone().with_value(name);
                 self.error = None;
                 self.stage = CreateStage::PickBranchStrategy;
+                // Fetch recent branches from first selected repo
+                if let Some(repo_path) = self.selected_repos.first() {
+                    if let Ok(mut branches) = crate::core::git::list_branches(repo_path) {
+                        branches.sort_by(|a, b| b.last_commit_time.cmp(&a.last_commit_time));
+                        branches.truncate(5);
+                        self.recent_branches = branches;
+                    }
+                }
                 ScreenAction::Continue
             }
             _ => {

@@ -20,6 +20,7 @@ pub struct AddState {
     pub branch_strategy_idx: usize,
     pub branch_picker: Option<FuzzyPicker>,
     pub picked_branch: Option<String>,
+    pub recent_branches: Vec<crate::core::git::BranchInfo>,
     pub progress: Vec<String>,
     pub error: Option<String>,
 }
@@ -52,6 +53,7 @@ impl AddState {
             branch_strategy_idx: 0,
             branch_picker: None,
             picked_branch: None,
+            recent_branches: vec![],
             progress: vec![],
             error: None,
         }
@@ -96,6 +98,13 @@ impl AddState {
                 self.selected_repos = confirmed;
                 self.error = None;
                 self.stage = AddStage::PickBranchStrategy;
+                if let Some(repo_path) = self.selected_repos.first() {
+                    if let Ok(mut branches) = crate::core::git::list_branches(repo_path) {
+                        branches.sort_by(|a, b| b.last_commit_time.cmp(&a.last_commit_time));
+                        branches.truncate(5);
+                        self.recent_branches = branches;
+                    }
+                }
                 ScreenAction::Continue
             }
             KeyCode::Tab => {
