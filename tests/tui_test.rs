@@ -263,7 +263,7 @@ fn create_populates_recent_branches_on_strategy_entry() {
     let env = TestEnv::new();
     let repo_path = env.create_repo("branchy-repo");
 
-    // Create a second branch with a commit so there are 2 branches
+    // Create a second branch with a commit that has a guaranteed later timestamp
     let out = std::process::Command::new("git")
         .args(["checkout", "-b", "feature-recent"])
         .current_dir(&repo_path)
@@ -272,6 +272,8 @@ fn create_populates_recent_branches_on_strategy_entry() {
     assert!(out.status.success());
     let out = std::process::Command::new("git")
         .args(["commit", "--allow-empty", "-m", "feature commit"])
+        .env("GIT_COMMITTER_DATE", "2099-01-01T00:00:00Z")
+        .env("GIT_AUTHOR_DATE", "2099-01-01T00:00:00Z")
         .current_dir(&repo_path)
         .output()
         .unwrap();
@@ -640,7 +642,7 @@ fn add_select_recent_branch_creates_worktree() {
 }
 
 #[test]
-fn create_show_more_resets_idx_for_picker() {
+fn create_show_more_preserves_idx_and_esc_returns_to_show_more() {
     let env = TestEnv::new();
     let repo_path = env.create_repo("picker-repo");
 
@@ -668,20 +670,37 @@ fn create_show_more_resets_idx_for_picker() {
         st.branch_strategy_idx = 4; // "Show more..." (3 + 1 recent branch)
     }
 
+    // Enter opens the fuzzy picker
     app.handle_key(key(KeyCode::Enter));
-
     if let Screen::CreateWorkspace(ref st) = app.screen {
         assert_eq!(
             st.stage,
             space::tui::screens::create::CreateStage::PickBranch,
             "should transition to PickBranch"
         );
+        // idx should stay at max_idx (4) so Esc returns to "Show more..."
         assert_eq!(
-            st.branch_strategy_idx, 3,
-            "branch_strategy_idx should be reset to 3 for picker compatibility"
+            st.branch_strategy_idx, 4,
+            "branch_strategy_idx should stay at max_idx for Show more position"
         );
     } else {
-        panic!("expected CreateWorkspace screen");
+        panic!("expected CreateWorkspace screen after Enter");
+    }
+
+    // Esc from picker returns to PickBranchStrategy with cursor on "Show more..."
+    app.handle_key(key(KeyCode::Esc));
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::PickBranchStrategy,
+            "Esc should return to PickBranchStrategy"
+        );
+        assert_eq!(
+            st.branch_strategy_idx, 4,
+            "cursor should be back on Show more after Esc"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen after Esc");
     }
 }
 

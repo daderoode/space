@@ -168,7 +168,6 @@ impl AddState {
                                 self.picked_branch = None;
                                 self.error = None;
                                 self.branch_picker = Some(picker);
-                                self.branch_strategy_idx = 3;
                                 self.stage = AddStage::PickBranch;
                             }
                             None => {
@@ -236,13 +235,13 @@ impl AddState {
                     return ScreenAction::Continue;
                 };
                 self.error = None;
-                self.picked_branch = Some(branch);
+                self.picked_branch = Some(branch.clone());
                 self.stage = AddStage::Creating;
                 ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
                     workspace_name: self.workspace_name.clone(),
                     workspace_dir: ctx.config.workspaces.dir.clone(),
                     repos: self.selected_repos.clone(),
-                    branch_strategy: self.branch_strategy(),
+                    branch_strategy: BranchStrategy::ExistingBranch(branch),
                     is_new: false,
                 })
             }
