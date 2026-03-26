@@ -490,3 +490,99 @@ fn search_esc_returns_to_dashboard() {
     app.handle_key(key(KeyCode::Esc));
     assert!(matches!(app.screen, Screen::Dashboard));
 }
+
+// ---------------------------------------------------------------------------
+// Branch strategy navigation with recent branches
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create_select_recent_branch_creates_worktree() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("branch-select-repo");
+
+    // Create a feature branch
+    let out = std::process::Command::new("git")
+        .args(["branch", "feature-pick-me"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.ws_name = tui_input::Input::default().with_value("ws-branch".to_string());
+        st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
+        st.recent_branches = vec![space::core::git::BranchInfo {
+            name: "feature-pick-me".to_string(),
+            is_remote: false,
+            is_current: false,
+            last_commit_time: 1000,
+        }];
+        st.branch_strategy_idx = 3; // First recent branch
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "expected Dashboard after selecting recent branch, got {:?}",
+        std::mem::discriminant(&app.screen)
+    );
+    assert!(env
+        .workspaces_dir
+        .join("ws-branch")
+        .join("branch-select-repo")
+        .exists());
+}
+
+#[test]
+fn create_branch_strategy_navigation_with_recent_branches() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![PathBuf::from("/tmp/repos/foo")];
+        st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
+        st.recent_branches = vec![
+            space::core::git::BranchInfo {
+                name: "branch-a".to_string(),
+                is_remote: false,
+                is_current: false,
+                last_commit_time: 2000,
+            },
+            space::core::git::BranchInfo {
+                name: "branch-b".to_string(),
+                is_remote: false,
+                is_current: false,
+                last_commit_time: 1000,
+            },
+        ];
+        st.branch_strategy_idx = 0;
+    }
+
+    // Navigate down through all items: 0,1,2,3,4,5 (3 fixed + 2 branches + show more)
+    for _ in 0..10 {
+        app.handle_key(key(KeyCode::Down));
+    }
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.branch_strategy_idx, 5,
+            "should clamp at max_idx (3 + 2 branches)"
+        );
+    } else {
+        panic!("expected CreateWorkspace");
+    }
+
+    // Navigate back up past 0
+    for _ in 0..10 {
+        app.handle_key(key(KeyCode::Up));
+    }
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(st.branch_strategy_idx, 0, "should clamp at 0");
+    } else {
+        panic!("expected CreateWorkspace");
+    }
+}
