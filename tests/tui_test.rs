@@ -586,3 +586,55 @@ fn create_branch_strategy_navigation_with_recent_branches() {
         panic!("expected CreateWorkspace");
     }
 }
+
+#[test]
+fn add_select_recent_branch_creates_worktree() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("add-branch-repo");
+
+    // Create a feature branch
+    let out = std::process::Command::new("git")
+        .args(["branch", "feature-add-pick"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Create the workspace directory (add expects it to exist)
+    let ws_name = "add-ws";
+    std::fs::create_dir_all(env.workspaces_dir.join(ws_name)).unwrap();
+
+    let config = config_from_env(&env);
+    let workspaces = vec![Workspace {
+        name: ws_name.to_string(),
+        path: env.workspaces_dir.join(ws_name),
+        repos: vec![],
+    }];
+    let mut app = test_app_with_config(config, workspaces, vec![repo_path.clone()]);
+
+    // Open add screen and skip to PickBranchStrategy
+    app.handle_key(key(KeyCode::Char('a')));
+    if let Screen::AddRepos(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.stage = space::tui::screens::add::AddStage::PickBranchStrategy;
+        st.recent_branches = vec![space::core::git::BranchInfo {
+            name: "feature-add-pick".to_string(),
+            is_remote: false,
+            is_current: false,
+            last_commit_time: 1000,
+        }];
+        st.branch_strategy_idx = 3; // First recent branch
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "expected Dashboard after selecting recent branch in add flow"
+    );
+    assert!(env
+        .workspaces_dir
+        .join(ws_name)
+        .join("add-branch-repo")
+        .exists());
+}

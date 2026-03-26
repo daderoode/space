@@ -14,7 +14,6 @@ pub struct BranchInfo {
     pub name: String,
     pub is_remote: bool,
     pub is_current: bool,
-    #[allow(dead_code)] // used by upcoming branch-recency sorting
     pub last_commit_time: i64,
 }
 
@@ -105,6 +104,17 @@ pub fn list_branches(repo_path: &Path) -> Result<Vec<BranchInfo>> {
     Ok(branches)
 }
 
+/// Return the N most recently committed-to branches for a repo.
+pub fn recent_branches(repo_path: &std::path::Path, limit: usize) -> Vec<BranchInfo> {
+    list_branches(repo_path)
+        .map(|mut branches| {
+            branches.sort_by(|a, b| b.last_commit_time.cmp(&a.last_commit_time));
+            branches.truncate(limit);
+            branches
+        })
+        .unwrap_or_default()
+}
+
 /// Return the current checked-out branch name (or short hash for detached HEAD).
 pub fn current_branch(repo_path: &Path) -> Result<String> {
     let repo = Repository::open(repo_path)?;
@@ -143,7 +153,6 @@ pub fn ahead_behind(repo_path: &Path) -> Result<(usize, usize)> {
 }
 
 /// Human-readable relative time string from a unix timestamp.
-#[allow(dead_code)] // used by upcoming branch-strategy dialog rendering
 pub fn relative_time(unix_ts: i64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -99,11 +99,7 @@ impl AddState {
                 self.error = None;
                 self.stage = AddStage::PickBranchStrategy;
                 if let Some(repo_path) = self.selected_repos.first() {
-                    if let Ok(mut branches) = crate::core::git::list_branches(repo_path) {
-                        branches.sort_by(|a, b| b.last_commit_time.cmp(&a.last_commit_time));
-                        branches.truncate(5);
-                        self.recent_branches = branches;
-                    }
+                    self.recent_branches = crate::core::git::recent_branches(repo_path, 5);
                 }
                 ScreenAction::Continue
             }
