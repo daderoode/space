@@ -14,6 +14,8 @@ pub struct BranchInfo {
     pub name: String,
     pub is_remote: bool,
     pub is_current: bool,
+    #[allow(dead_code)] // used by upcoming branch-recency sorting
+    pub last_commit_time: i64,
 }
 
 /// Return the default branch name (main/master/etc.) by checking HEAD.
@@ -86,10 +88,16 @@ pub fn list_branches(repo_path: &Path) -> Result<Vec<BranchInfo>> {
         }
         let is_remote = branch_type == git2::BranchType::Remote;
         let is_current = head_name.as_deref() == Some(&name);
+        let last_commit_time = branch
+            .get()
+            .peel_to_commit()
+            .map(|c| c.time().seconds())
+            .unwrap_or(0);
         branches.push(BranchInfo {
             name,
             is_remote,
             is_current,
+            last_commit_time,
         });
     }
 

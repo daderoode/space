@@ -69,6 +69,16 @@ fn lists_branches() {
     );
     assert!(!feature_branch.is_remote, "feature-x should be local");
 
+    // Both branches should have a commit time (from init_repo's initial commit)
+    assert!(
+        main_branch.last_commit_time > 0,
+        "main branch should have a commit time"
+    );
+    assert!(
+        feature_branch.last_commit_time > 0,
+        "feature-x branch should have a commit time (inherited from main)"
+    );
+
     // Verify locals come before remotes in sort order
     assert!(
         !branches[0].is_remote,
