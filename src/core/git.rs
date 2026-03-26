@@ -141,3 +141,120 @@ pub fn ahead_behind(repo_path: &Path) -> Result<(usize, usize)> {
     let (ahead, behind) = repo.graph_ahead_behind(local_oid, upstream_oid)?;
     Ok((ahead, behind))
 }
+
+/// Human-readable relative time string from a unix timestamp.
+#[allow(dead_code)] // used by upcoming branch-strategy dialog rendering
+pub fn relative_time(unix_ts: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    format_delta(now - unix_ts)
+}
+
+/// Format a time delta (in seconds) as a human-readable string.
+/// Negative deltas (future timestamps / clock skew) are treated as "just now".
+fn format_delta(delta: i64) -> String {
+    if delta < 60 {
+        "just now".to_string()
+    } else if delta < 3600 {
+        let m = delta / 60;
+        if m == 1 {
+            "1 minute ago".to_string()
+        } else {
+            format!("{} minutes ago", m)
+        }
+    } else if delta < 86400 {
+        let h = delta / 3600;
+        if h == 1 {
+            "1 hour ago".to_string()
+        } else {
+            format!("{} hours ago", h)
+        }
+    } else if delta < 604800 {
+        let d = delta / 86400;
+        if d == 1 {
+            "1 day ago".to_string()
+        } else {
+            format!("{} days ago", d)
+        }
+    } else if delta < 2592000 {
+        let w = delta / 604800;
+        if w == 1 {
+            "1 week ago".to_string()
+        } else {
+            format!("{} weeks ago", w)
+        }
+    } else if delta < 31536000 {
+        let m = delta / 2592000;
+        if m == 1 {
+            "1 month ago".to_string()
+        } else {
+            format!("{} months ago", m)
+        }
+    } else {
+        let y = delta / 31536000;
+        if y == 1 {
+            "1 year ago".to_string()
+        } else {
+            format!("{} years ago", y)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_delta_just_now() {
+        assert_eq!(format_delta(30), "just now");
+    }
+
+    #[test]
+    fn format_delta_negative_is_just_now() {
+        assert_eq!(format_delta(-100), "just now");
+    }
+
+    #[test]
+    fn format_delta_minutes() {
+        assert_eq!(format_delta(300), "5 minutes ago");
+    }
+
+    #[test]
+    fn format_delta_singular_minute() {
+        assert_eq!(format_delta(90), "1 minute ago");
+    }
+
+    #[test]
+    fn format_delta_hours() {
+        assert_eq!(format_delta(7200), "2 hours ago");
+    }
+
+    #[test]
+    fn format_delta_days() {
+        assert_eq!(format_delta(259200), "3 days ago");
+    }
+
+    #[test]
+    fn format_delta_weeks() {
+        assert_eq!(format_delta(1209600), "2 weeks ago");
+    }
+
+    #[test]
+    fn format_delta_months() {
+        assert_eq!(format_delta(7776000), "3 months ago");
+    }
+
+    #[test]
+    fn format_delta_years() {
+        assert_eq!(format_delta(63072000), "2 years ago");
+    }
+
+    #[test]
+    fn relative_time_zero_timestamp() {
+        // Epoch 0 should produce a "years ago" result
+        let result = relative_time(0);
+        assert!(result.contains("years ago"), "got: {}", result);
+    }
+}
