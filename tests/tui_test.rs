@@ -638,3 +638,49 @@ fn add_select_recent_branch_creates_worktree() {
         .join("add-branch-repo")
         .exists());
 }
+
+#[test]
+fn create_show_more_resets_idx_for_picker() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("picker-repo");
+
+    let out = std::process::Command::new("git")
+        .args(["branch", "feature-picker"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.ws_name = tui_input::Input::default().with_value("ws-picker".to_string());
+        st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
+        st.recent_branches = vec![space::core::git::BranchInfo {
+            name: "some-branch".to_string(),
+            is_remote: false,
+            is_current: false,
+            last_commit_time: 1000,
+        }];
+        st.branch_strategy_idx = 4; // "Show more..." (3 + 1 recent branch)
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::PickBranch,
+            "should transition to PickBranch"
+        );
+        assert_eq!(
+            st.branch_strategy_idx, 3,
+            "branch_strategy_idx should be reset to 3 for picker compatibility"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}

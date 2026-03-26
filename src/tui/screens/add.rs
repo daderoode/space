@@ -167,6 +167,7 @@ impl AddState {
                                 self.picked_branch = None;
                                 self.error = None;
                                 self.branch_picker = Some(picker);
+                                self.branch_strategy_idx = 3;
                                 self.stage = AddStage::PickBranch;
                             }
                             None => {
