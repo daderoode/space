@@ -684,3 +684,40 @@ fn create_show_more_resets_idx_for_picker() {
         panic!("expected CreateWorkspace screen");
     }
 }
+
+#[test]
+fn create_reentry_resets_branch_strategy_idx() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("reentry-repo");
+
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.stage = space::tui::screens::create::CreateStage::NameWorkspace;
+        st.ws_name = tui_input::Input::default().with_value("ws-reentry".to_string());
+        // Simulate stale idx from a previous PickBranchStrategy visit
+        st.branch_strategy_idx = 7;
+    }
+
+    // Press Enter to advance to PickBranchStrategy
+    app.handle_key(key(KeyCode::Enter));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::PickBranchStrategy,
+        );
+        let max_valid = 3 + st.recent_branches.len();
+        assert!(
+            st.branch_strategy_idx <= max_valid,
+            "branch_strategy_idx ({}) exceeds valid range (0..={}), would panic on Enter",
+            st.branch_strategy_idx,
+            max_valid,
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}

@@ -158,6 +158,7 @@ impl CreateState {
                 if let Some(repo_path) = self.selected_repos.first() {
                     self.recent_branches = crate::core::git::recent_branches(repo_path, 5);
                 }
+                self.branch_strategy_idx = 0;
                 ScreenAction::Continue
             }
             _ => {
