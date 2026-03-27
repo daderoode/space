@@ -153,7 +153,11 @@ pub fn ahead_behind(repo_path: &Path) -> Result<(usize, usize)> {
 }
 
 /// Human-readable relative time string from a unix timestamp.
+/// Returns "unknown" for timestamps <= 0 (failed peel, unset field).
 pub fn relative_time(unix_ts: i64) -> String {
+    if unix_ts <= 0 {
+        return "unknown".to_string();
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -262,8 +266,13 @@ mod tests {
 
     #[test]
     fn relative_time_zero_timestamp() {
-        // Epoch 0 should produce a "years ago" result
-        let result = relative_time(0);
-        assert!(result.contains("years ago"), "got: {}", result);
+        // Epoch 0 (failed peel) should return "unknown", not "55 years ago"
+        assert_eq!(relative_time(0), "unknown");
+    }
+
+    #[test]
+    fn relative_time_negative_timestamp() {
+        // Negative timestamps (future commits / clock skew) also return "unknown"
+        assert_eq!(relative_time(-1), "unknown");
     }
 }
