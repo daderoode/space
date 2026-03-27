@@ -247,6 +247,7 @@ fn render_create_overlay(state: &crate::tui::screens::create::CreateState, frame
             state.ws_name.value(),
             state.branch_strategy_idx,
             state.error.as_deref(),
+            &state.recent_branches,
         ),
         CreateStage::PickBranch => {
             if let Some(ref picker) = state.branch_picker {
@@ -304,11 +305,14 @@ fn render_branch_strategy_picker(
     workspace_name: &str,
     strategy_idx: usize,
     error: Option<&str>,
+    recent_branches: &[crate::core::git::BranchInfo],
 ) {
     use ratatui::widgets::Clear;
     let has_error = error.is_some();
-    // 2 borders + 4 options + 1 padding + (1 sep + 2 error) when error present
-    let height: u16 = if has_error { 10 } else { 8 };
+    let n = recent_branches.len();
+    let branch_rows = if n > 0 { 1 + n as u16 + 1 } else { 1 };
+    let content_rows = 3 + branch_rows;
+    let height: u16 = content_rows + 2 + if has_error { 3 } else { 1 };
     let area = centered_rect_fixed(62, height, frame.area());
     frame.render_widget(Clear, area);
 
@@ -325,36 +329,76 @@ fn render_branch_strategy_picker(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Layout: 4 option rows, then separator + error only when there's an error
     let sections = if has_error {
         Layout::vertical([
-            Constraint::Length(4), // options
-            Constraint::Length(1), // separator
-            Constraint::Length(2), // error (wraps to 2 lines)
+            Constraint::Length(content_rows),
+            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(inner)
     } else {
-        Layout::vertical([Constraint::Length(4), Constraint::Min(0)]).split(inner)
+        Layout::vertical([Constraint::Length(content_rows), Constraint::Min(0)]).split(inner)
     };
 
-    let options = [
+    let mut items: Vec<ListItem> = Vec::new();
+
+    // Fixed options (selectable indices 0, 1, 2)
+    let fixed = [
         format!("New branch '{}'", workspace_name),
         format!("Existing branch '{}' (if present)", workspace_name),
         "Detached HEAD".to_string(),
-        "Pick a branch...".to_string(),
     ];
+    for (i, opt) in fixed.iter().enumerate() {
+        if i == strategy_idx {
+            items.push(ListItem::new(format!("> {}", opt)).style(theme::selected()));
+        } else {
+            items.push(ListItem::new(format!("  {}", opt)));
+        }
+    }
 
-    let items: Vec<ListItem> = options
-        .iter()
-        .enumerate()
-        .map(|(i, opt)| {
-            if i == strategy_idx {
-                ListItem::new(format!("> {}", opt)).style(theme::selected())
+    if n > 0 {
+        // "Pick a branch..." header (non-selectable, dimmed)
+        items.push(ListItem::new("  Pick a branch...").style(theme::muted()));
+
+        // Recent branches (selectable indices 3..3+n)
+        for (i, branch) in recent_branches.iter().enumerate() {
+            let sel_idx = 3 + i;
+            let time_str = crate::core::git::relative_time(branch.last_commit_time);
+            let max_name = 56_usize.saturating_sub(time_str.len() + 2);
+            let display_name = if branch.name.len() > max_name {
+                let truncated: String = branch
+                    .name
+                    .chars()
+                    .take(max_name.saturating_sub(3))
+                    .collect();
+                format!("{}...", truncated)
             } else {
-                ListItem::new(format!("  {}", opt))
+                branch.name.clone()
+            };
+            let padding = 56_usize.saturating_sub(display_name.len() + time_str.len());
+            let line = format!("{}{}{}", display_name, " ".repeat(padding), time_str);
+            if sel_idx == strategy_idx {
+                items.push(ListItem::new(format!("  > {}", line)).style(theme::selected()));
+            } else {
+                items.push(ListItem::new(format!("    {}", line)));
             }
-        })
-        .collect();
+        }
+
+        // "Show more..." (selectable index 3+n)
+        let show_more_idx = 3 + n;
+        if show_more_idx == strategy_idx {
+            items.push(ListItem::new("  > Show more...").style(theme::selected()));
+        } else {
+            items.push(ListItem::new("    Show more..."));
+        }
+    } else {
+        // No recent branches — "Pick a branch..." as selectable (idx 3)
+        if 3 == strategy_idx {
+            items.push(ListItem::new("> Pick a branch...").style(theme::selected()));
+        } else {
+            items.push(ListItem::new("  Pick a branch..."));
+        }
+    }
 
     frame.render_widget(List::new(items), sections[0]);
 
@@ -427,6 +471,7 @@ fn render_add_overlay(state: &crate::tui::screens::add::AddState, frame: &mut Fr
             &state.workspace_name,
             state.branch_strategy_idx,
             state.error.as_deref(),
+            &state.recent_branches,
         ),
         AddStage::PickBranch => {
             if let Some(ref picker) = state.branch_picker {

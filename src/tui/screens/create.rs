@@ -20,7 +20,8 @@ pub struct CreateState {
     pub branch_strategy_idx: usize, // 0=new branch, 1=existing, 2=detached, 3=pick branch
     pub branch_picker: Option<FuzzyPicker>, // populated when entering PickBranch stage
     pub picked_branch: Option<String>, // branch name chosen via branch_picker
-    pub progress: Vec<String>,      // log lines shown during Creating stage
+    pub recent_branches: Vec<crate::core::git::BranchInfo>,
+    pub progress: Vec<String>, // log lines shown during Creating stage
     pub error: Option<String>,
 }
 
@@ -59,6 +60,7 @@ impl CreateState {
             branch_strategy_idx: 0,
             branch_picker: None,
             picked_branch: None,
+            recent_branches: vec![],
             progress: vec![],
             error: None,
         }
@@ -152,6 +154,11 @@ impl CreateState {
                 self.ws_name = self.ws_name.clone().with_value(name);
                 self.error = None;
                 self.stage = CreateStage::PickBranchStrategy;
+                // Fetch recent branches from first selected repo
+                if let Some(repo_path) = self.selected_repos.first() {
+                    self.recent_branches = crate::core::git::recent_branches(repo_path, 5);
+                }
+                self.branch_strategy_idx = 0;
                 ScreenAction::Continue
             }
             _ => {
@@ -171,6 +178,9 @@ impl CreateState {
         use crate::tui::actions::{ScreenAction, WorktreeParams};
         use ratatui::crossterm::event::KeyCode;
 
+        let n = self.recent_branches.len();
+        let max_idx = 3 + n;
+
         match key.code {
             KeyCode::Esc => {
                 self.error = None;
@@ -186,14 +196,14 @@ impl CreateState {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.error = None;
-                if self.branch_strategy_idx < 3 {
+                if self.branch_strategy_idx < max_idx {
                     self.branch_strategy_idx += 1;
                 }
                 ScreenAction::Continue
             }
             KeyCode::Enter => {
-                if self.branch_strategy_idx == 3 {
-                    // Build branch picker from the first selected repo
+                if self.branch_strategy_idx == max_idx {
+                    // "Show more..." / "Pick a branch..." — open fuzzy picker
                     let repo_path = self.selected_repos.first().cloned();
                     if let Some(repo_path) = repo_path {
                         let repo_name = repo_path
@@ -214,7 +224,21 @@ impl CreateState {
                         }
                     }
                     ScreenAction::Continue
+                } else if self.branch_strategy_idx >= 3 && n > 0 {
+                    // Selected a recent branch directly
+                    let branch_name = self.recent_branches[self.branch_strategy_idx - 3]
+                        .name
+                        .clone();
+                    self.stage = CreateStage::Creating;
+                    ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
+                        workspace_name: self.ws_name.value().to_string(),
+                        workspace_dir: ctx.config.workspaces.dir.clone(),
+                        repos: self.selected_repos.clone(),
+                        branch_strategy: BranchStrategy::ExistingBranch(branch_name),
+                        is_new: true,
+                    })
                 } else {
+                    // idx 0, 1, or 2 — fixed options
                     self.stage = CreateStage::Creating;
                     ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
                         workspace_name: self.ws_name.value().to_string(),
@@ -265,13 +289,13 @@ impl CreateState {
                     return ScreenAction::Continue;
                 };
                 self.error = None;
-                self.picked_branch = Some(branch);
+                self.picked_branch = Some(branch.clone());
                 self.stage = CreateStage::Creating;
                 ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
                     workspace_name: self.ws_name.value().to_string(),
                     workspace_dir: ctx.config.workspaces.dir.clone(),
                     repos: self.selected_repos.clone(),
-                    branch_strategy: self.branch_strategy(),
+                    branch_strategy: BranchStrategy::ExistingBranch(branch),
                     is_new: true,
                 })
             }

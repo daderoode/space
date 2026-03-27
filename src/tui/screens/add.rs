@@ -20,6 +20,7 @@ pub struct AddState {
     pub branch_strategy_idx: usize,
     pub branch_picker: Option<FuzzyPicker>,
     pub picked_branch: Option<String>,
+    pub recent_branches: Vec<crate::core::git::BranchInfo>,
     pub progress: Vec<String>,
     pub error: Option<String>,
 }
@@ -52,6 +53,7 @@ impl AddState {
             branch_strategy_idx: 0,
             branch_picker: None,
             picked_branch: None,
+            recent_branches: vec![],
             progress: vec![],
             error: None,
         }
@@ -96,6 +98,10 @@ impl AddState {
                 self.selected_repos = confirmed;
                 self.error = None;
                 self.stage = AddStage::PickBranchStrategy;
+                if let Some(repo_path) = self.selected_repos.first() {
+                    self.recent_branches = crate::core::git::recent_branches(repo_path, 5);
+                }
+                self.branch_strategy_idx = 0;
                 ScreenAction::Continue
             }
             KeyCode::Tab => {
@@ -125,6 +131,9 @@ impl AddState {
     }
 
     fn handle_branch_strategy(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
+        let n = self.recent_branches.len();
+        let max_idx = 3 + n;
+
         match key.code {
             KeyCode::Esc => {
                 self.error = None;
@@ -140,14 +149,14 @@ impl AddState {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.error = None;
-                if self.branch_strategy_idx < 3 {
+                if self.branch_strategy_idx < max_idx {
                     self.branch_strategy_idx += 1;
                 }
                 ScreenAction::Continue
             }
             KeyCode::Enter => {
-                if self.branch_strategy_idx == 3 {
-                    // Build branch picker from the first selected repo
+                if self.branch_strategy_idx == max_idx {
+                    // "Show more..." / "Pick a branch..." — open fuzzy picker
                     let repo_path = self.selected_repos.first().cloned();
                     if let Some(repo_path) = repo_path {
                         let repo_name = repo_path
@@ -168,7 +177,21 @@ impl AddState {
                         }
                     }
                     ScreenAction::Continue
+                } else if self.branch_strategy_idx >= 3 && n > 0 {
+                    // Selected a recent branch directly
+                    let branch_name = self.recent_branches[self.branch_strategy_idx - 3]
+                        .name
+                        .clone();
+                    self.stage = AddStage::Creating;
+                    ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
+                        workspace_name: self.workspace_name.clone(),
+                        workspace_dir: ctx.config.workspaces.dir.clone(),
+                        repos: self.selected_repos.clone(),
+                        branch_strategy: BranchStrategy::ExistingBranch(branch_name),
+                        is_new: false,
+                    })
                 } else {
+                    // idx 0, 1, or 2 — fixed options
                     self.stage = AddStage::Creating;
                     ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
                         workspace_name: self.workspace_name.clone(),
@@ -212,13 +235,13 @@ impl AddState {
                     return ScreenAction::Continue;
                 };
                 self.error = None;
-                self.picked_branch = Some(branch);
+                self.picked_branch = Some(branch.clone());
                 self.stage = AddStage::Creating;
                 ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
                     workspace_name: self.workspace_name.clone(),
                     workspace_dir: ctx.config.workspaces.dir.clone(),
                     repos: self.selected_repos.clone(),
-                    branch_strategy: self.branch_strategy(),
+                    branch_strategy: BranchStrategy::ExistingBranch(branch),
                     is_new: false,
                 })
             }

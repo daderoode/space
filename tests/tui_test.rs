@@ -258,6 +258,66 @@ fn create_empty_name_rejected() {
     }
 }
 
+#[test]
+fn create_populates_recent_branches_on_strategy_entry() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("branchy-repo");
+
+    // Create a second branch with a commit that has a guaranteed later timestamp
+    let out = std::process::Command::new("git")
+        .args(["checkout", "-b", "feature-recent"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let out = std::process::Command::new("git")
+        .args(["commit", "--allow-empty", "-m", "feature commit"])
+        .env("GIT_COMMITTER_DATE", "2099-01-01T00:00:00Z")
+        .env("GIT_AUTHOR_DATE", "2099-01-01T00:00:00Z")
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    // Go back to main
+    let out = std::process::Command::new("git")
+        .args(["checkout", "main"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.stage = space::tui::screens::create::CreateStage::NameWorkspace;
+        st.ws_name = tui_input::Input::default().with_value("test-ws".to_string());
+    }
+
+    // Press Enter to advance to PickBranchStrategy — should populate recent_branches
+    app.handle_key(key(KeyCode::Enter));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::PickBranchStrategy
+        );
+        assert!(
+            !st.recent_branches.is_empty(),
+            "recent_branches should be populated, got empty"
+        );
+        // Should be sorted by commit time descending (feature-recent committed later)
+        assert_eq!(
+            st.recent_branches[0].name, "feature-recent",
+            "most recent branch should be first"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Add flow tests
 // ---------------------------------------------------------------------------
@@ -431,4 +491,252 @@ fn search_esc_returns_to_dashboard() {
 
     app.handle_key(key(KeyCode::Esc));
     assert!(matches!(app.screen, Screen::Dashboard));
+}
+
+// ---------------------------------------------------------------------------
+// Branch strategy navigation with recent branches
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create_select_recent_branch_creates_worktree() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("branch-select-repo");
+
+    // Create a feature branch
+    let out = std::process::Command::new("git")
+        .args(["branch", "feature-pick-me"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.ws_name = tui_input::Input::default().with_value("ws-branch".to_string());
+        st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
+        st.recent_branches = vec![space::core::git::BranchInfo {
+            name: "feature-pick-me".to_string(),
+            is_remote: false,
+            is_current: false,
+            last_commit_time: 1000,
+        }];
+        st.branch_strategy_idx = 3; // First recent branch
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "expected Dashboard after selecting recent branch, got {:?}",
+        std::mem::discriminant(&app.screen)
+    );
+    assert!(env
+        .workspaces_dir
+        .join("ws-branch")
+        .join("branch-select-repo")
+        .exists());
+}
+
+#[test]
+fn create_branch_strategy_navigation_with_recent_branches() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![PathBuf::from("/tmp/repos/foo")];
+        st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
+        st.recent_branches = vec![
+            space::core::git::BranchInfo {
+                name: "branch-a".to_string(),
+                is_remote: false,
+                is_current: false,
+                last_commit_time: 2000,
+            },
+            space::core::git::BranchInfo {
+                name: "branch-b".to_string(),
+                is_remote: false,
+                is_current: false,
+                last_commit_time: 1000,
+            },
+        ];
+        st.branch_strategy_idx = 0;
+    }
+
+    // Navigate down through all items: 0,1,2,3,4,5 (3 fixed + 2 branches + show more)
+    for _ in 0..10 {
+        app.handle_key(key(KeyCode::Down));
+    }
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.branch_strategy_idx, 5,
+            "should clamp at max_idx (3 + 2 branches)"
+        );
+    } else {
+        panic!("expected CreateWorkspace");
+    }
+
+    // Navigate back up past 0
+    for _ in 0..10 {
+        app.handle_key(key(KeyCode::Up));
+    }
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(st.branch_strategy_idx, 0, "should clamp at 0");
+    } else {
+        panic!("expected CreateWorkspace");
+    }
+}
+
+#[test]
+fn add_select_recent_branch_creates_worktree() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("add-branch-repo");
+
+    // Create a feature branch
+    let out = std::process::Command::new("git")
+        .args(["branch", "feature-add-pick"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Create the workspace directory (add expects it to exist)
+    let ws_name = "add-ws";
+    std::fs::create_dir_all(env.workspaces_dir.join(ws_name)).unwrap();
+
+    let config = config_from_env(&env);
+    let workspaces = vec![Workspace {
+        name: ws_name.to_string(),
+        path: env.workspaces_dir.join(ws_name),
+        repos: vec![],
+    }];
+    let mut app = test_app_with_config(config, workspaces, vec![repo_path.clone()]);
+
+    // Open add screen and skip to PickBranchStrategy
+    app.handle_key(key(KeyCode::Char('a')));
+    if let Screen::AddRepos(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.stage = space::tui::screens::add::AddStage::PickBranchStrategy;
+        st.recent_branches = vec![space::core::git::BranchInfo {
+            name: "feature-add-pick".to_string(),
+            is_remote: false,
+            is_current: false,
+            last_commit_time: 1000,
+        }];
+        st.branch_strategy_idx = 3; // First recent branch
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "expected Dashboard after selecting recent branch in add flow"
+    );
+    assert!(env
+        .workspaces_dir
+        .join(ws_name)
+        .join("add-branch-repo")
+        .exists());
+}
+
+#[test]
+fn create_show_more_preserves_idx_and_esc_returns_to_show_more() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("picker-repo");
+
+    let out = std::process::Command::new("git")
+        .args(["branch", "feature-picker"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.ws_name = tui_input::Input::default().with_value("ws-picker".to_string());
+        st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
+        st.recent_branches = vec![space::core::git::BranchInfo {
+            name: "some-branch".to_string(),
+            is_remote: false,
+            is_current: false,
+            last_commit_time: 1000,
+        }];
+        st.branch_strategy_idx = 4; // "Show more..." (3 + 1 recent branch)
+    }
+
+    // Enter opens the fuzzy picker
+    app.handle_key(key(KeyCode::Enter));
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::PickBranch,
+            "should transition to PickBranch"
+        );
+        // idx should stay at max_idx (4) so Esc returns to "Show more..."
+        assert_eq!(
+            st.branch_strategy_idx, 4,
+            "branch_strategy_idx should stay at max_idx for Show more position"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen after Enter");
+    }
+
+    // Esc from picker returns to PickBranchStrategy with cursor on "Show more..."
+    app.handle_key(key(KeyCode::Esc));
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::PickBranchStrategy,
+            "Esc should return to PickBranchStrategy"
+        );
+        assert_eq!(
+            st.branch_strategy_idx, 4,
+            "cursor should be back on Show more after Esc"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen after Esc");
+    }
+}
+
+#[test]
+fn create_reentry_resets_branch_strategy_idx() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("reentry-repo");
+
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.stage = space::tui::screens::create::CreateStage::NameWorkspace;
+        st.ws_name = tui_input::Input::default().with_value("ws-reentry".to_string());
+        // Simulate stale idx from a previous PickBranchStrategy visit
+        st.branch_strategy_idx = 7;
+    }
+
+    // Press Enter to advance to PickBranchStrategy
+    app.handle_key(key(KeyCode::Enter));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::PickBranchStrategy,
+        );
+        let max_valid = 3 + st.recent_branches.len();
+        assert!(
+            st.branch_strategy_idx <= max_valid,
+            "branch_strategy_idx ({}) exceeds valid range (0..={}), would panic on Enter",
+            st.branch_strategy_idx,
+            max_valid,
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
 }
