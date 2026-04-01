@@ -912,3 +912,124 @@ fn cursor_row_resets_on_workspace_switch() {
     app.handle_key(key(KeyCode::Down)); // select workspace 2
     assert_eq!(app.cursor_row, 0, "cursor should reset on workspace switch");
 }
+
+// ---------------------------------------------------------------------------
+// Expand/collapse key handling (Task 4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn enter_on_repo_row_expands_it() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("expandable");
+    // Write an untracked file so file_diff has something to find
+    std::fs::write(repo_path.join("x.txt"), "change").unwrap();
+
+    let ws_path = env.workspaces_dir.join("my-ws");
+    std::fs::create_dir_all(&ws_path).unwrap();
+    let ws = space::core::workspace::Workspace {
+        name: "my-ws".into(),
+        path: ws_path,
+        repos: vec![space::core::workspace::WorkspaceRepo {
+            name: "expandable".into(),
+            path: repo_path.clone(),
+            branch: "main".into(),
+            status: space::core::git::RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        app.expanded_repos.contains(&0),
+        "repo 0 should be expanded after Enter"
+    );
+    assert!(
+        app.repo_file_cache.contains_key(&0),
+        "cache should be populated"
+    );
+}
+
+#[test]
+fn enter_on_expanded_repo_collapses_it() {
+    use space::core::git::{FileEntry, FileStatus};
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    // Pre-expand manually
+    app.expanded_repos.insert(0);
+    app.repo_file_cache.insert(
+        0,
+        vec![FileEntry {
+            path: "x.rs".into(),
+            status: FileStatus::Modified,
+            staged: false,
+            insertions: 1,
+            deletions: 0,
+        }],
+    );
+    app.cursor_row = 0;
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        !app.expanded_repos.contains(&0),
+        "should collapse on second Enter"
+    );
+    assert_eq!(app.cursor_row, 0, "cursor should snap to repo row");
+}
+
+#[test]
+fn esc_collapses_expanded_repos_without_refocusing() {
+    let ws = common::workspace_with_repos(&["repo-a", "repo-b"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.expanded_repos.insert(0);
+    app.expanded_repos.insert(1);
+    app.handle_key(key(KeyCode::Esc));
+    assert!(
+        app.expanded_repos.is_empty(),
+        "Esc should collapse all expanded repos"
+    );
+    assert_eq!(
+        app.focus,
+        Pane::Right,
+        "focus stays on right pane after collapse"
+    );
+}
+
+#[test]
+fn esc_with_nothing_expanded_refocuses_left_pane() {
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(
+        app.focus,
+        Pane::Left,
+        "Esc with nothing expanded should refocus left pane"
+    );
+}
+
+#[test]
+fn esc_on_left_pane_quits() {
+    let mut app = test_app(vec![], vec![]);
+    assert_eq!(app.focus, Pane::Left);
+    app.handle_key(key(KeyCode::Esc));
+    assert!(app.should_quit, "Esc on left pane should quit");
+}
+
+#[test]
+fn workspace_switch_clears_expand_state() {
+    let ws1 = common::workspace_with_repos(&["repo-a"]);
+    let ws2 = common::workspace_with_repos(&["repo-b"]);
+    let mut app = test_app(vec![ws1, ws2], vec![]);
+    app.expanded_repos.insert(0);
+    app.focus = Pane::Left;
+    app.handle_key(key(KeyCode::Down)); // select workspace 2
+    assert!(
+        app.expanded_repos.is_empty(),
+        "workspace switch should clear expanded state"
+    );
+    assert_eq!(app.cursor_row, 0);
+}

@@ -83,9 +83,13 @@ pub enum Message {
     StartSearch,
     StartConfig,
     RefreshRepos,
+    ToggleRepoExpand,
+    CollapseAllRepos,
+    ToggleDiffTarget, // wired up fully in Task 6, just declare it here
 }
 
 /// A row in the flattened repo table (repo header or file entry).
+#[allow(dead_code)] // fields consumed by renderer (Task 5) and tests
 pub enum RepoRow<'a> {
     Repo {
         index: usize,
@@ -460,14 +464,19 @@ impl App {
                 drop(ctx);
                 // Dashboard key-to-message mapping
                 let msg: Option<Message> = match (key.code, key.modifiers) {
-                    (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => Some(Message::Quit),
+                    (KeyCode::Char('q'), _) => Some(Message::Quit),
                     (KeyCode::Tab, _) => Some(Message::FocusNext),
-                    (KeyCode::Enter, _) => Some(Message::GoToWorkspace),
+                    // Enter: context-sensitive
+                    (KeyCode::Enter, _) => match self.focus {
+                        Pane::Left => Some(Message::GoToWorkspace),
+                        Pane::Right => Some(Message::ToggleRepoExpand),
+                    },
                     (KeyCode::Char('g'), _) => Some(Message::StartGo),
                     (KeyCode::Char('c'), _) => Some(Message::StartCreate),
                     (KeyCode::Char('a'), _) => Some(Message::StartAdd),
                     (KeyCode::Char('d'), _) => Some(Message::StartDelete),
                     (KeyCode::Char('r'), _) => Some(Message::RefreshRepos),
+                    (KeyCode::Char('t'), _) => Some(Message::ToggleDiffTarget),
                     (KeyCode::Char('/'), _) => Some(Message::StartSearch),
                     (KeyCode::Char('S'), _) => Some(Message::StartConfig),
                     (KeyCode::Up, _) | (KeyCode::Char('k'), _) => match self.focus {
@@ -478,13 +487,31 @@ impl App {
                         Pane::Left => Some(Message::SelectWorkspaceDown),
                         Pane::Right => Some(Message::SelectRepoDown),
                     },
+                    // Right arrow: context-sensitive
                     (KeyCode::Right, _) => match self.focus {
                         Pane::Left => Some(Message::FocusNext),
-                        Pane::Right => None, // ToggleRepoExpand will be added in Task 4
+                        Pane::Right => Some(Message::ToggleRepoExpand),
                     },
+                    // Left arrow and Esc: collapse-first on right pane
                     (KeyCode::Left, _) => match self.focus {
                         Pane::Left => None,
-                        Pane::Right => Some(Message::FocusNext), // Task 4 refines this to collapse-first
+                        Pane::Right => {
+                            if self.expanded_repos.is_empty() {
+                                Some(Message::FocusNext)
+                            } else {
+                                Some(Message::CollapseAllRepos)
+                            }
+                        }
+                    },
+                    (KeyCode::Esc, _) => match self.focus {
+                        Pane::Left => Some(Message::Quit),
+                        Pane::Right => {
+                            if self.expanded_repos.is_empty() {
+                                Some(Message::FocusNext)
+                            } else {
+                                Some(Message::CollapseAllRepos)
+                            }
+                        }
                     },
                     _ => None,
                 };
@@ -620,6 +647,48 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
         Message::StartConfig => {
             let state = crate::tui::screens::config::ConfigState::from_config(&app.config);
             app.screen = Screen::ConfigEditor(state);
+            None
+        }
+        Message::ToggleRepoExpand => {
+            if let Some(idx) = app.repo_index_for_cursor() {
+                if app.expanded_repos.contains(&idx) {
+                    // Collapsing: remove from expanded, snap cursor to the repo row
+                    app.expanded_repos.remove(&idx);
+                    let snap_pos = app
+                        .flattened_rows()
+                        .iter()
+                        .position(|r| matches!(r, crate::tui::app::RepoRow::Repo { index, .. } if *index == idx))
+                        .unwrap_or(0);
+                    app.cursor_row = snap_pos;
+                } else {
+                    // Expanding: fetch diffs and cache
+                    if let Some(repo_path) = app
+                        .selected_workspace()
+                        .and_then(|ws| ws.repos.get(idx))
+                        .map(|r| r.path.clone())
+                    {
+                        let entries = crate::core::git::file_diff(&repo_path, &app.diff_target)
+                            .unwrap_or_default();
+                        app.repo_file_cache.insert(idx, entries);
+                    }
+                    app.expanded_repos.insert(idx);
+                }
+            }
+            None
+        }
+        Message::CollapseAllRepos => {
+            let current_repo_idx = app.repo_index_for_cursor().unwrap_or(0);
+            app.expanded_repos.clear();
+            // Snap cursor to the repo row it was in
+            let repos_len = app
+                .selected_workspace()
+                .map(|ws| ws.repos.len())
+                .unwrap_or(0);
+            app.cursor_row = current_repo_idx.min(repos_len.saturating_sub(1));
+            None
+        }
+        Message::ToggleDiffTarget => {
+            // Full implementation in Task 6 -- stub for now
             None
         }
     }
