@@ -166,3 +166,8 @@ pub fn test_app_with_config(
 pub fn key(code: ratatui::crossterm::event::KeyCode) -> ratatui::crossterm::event::KeyEvent {
     ratatui::crossterm::event::KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE)
 }
+
+/// Construct a KeyEvent for Shift+<key> (e.g. Shift+T = Char('T')).
+pub fn shift_key(code: ratatui::crossterm::event::KeyCode) -> ratatui::crossterm::event::KeyEvent {
+    ratatui::crossterm::event::KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::SHIFT)
+}

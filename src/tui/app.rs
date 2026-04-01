@@ -418,6 +418,14 @@ impl App {
                         Pane::Left => Some(Message::SelectWorkspaceDown),
                         Pane::Right => Some(Message::SelectRepoDown),
                     },
+                    (KeyCode::Right, _) => match self.focus {
+                        Pane::Left => Some(Message::FocusNext),
+                        Pane::Right => None, // ToggleRepoExpand will be added in Task 4
+                    },
+                    (KeyCode::Left, _) => match self.focus {
+                        Pane::Left => None,
+                        Pane::Right => Some(Message::FocusNext), // Task 4 refines this to collapse-first
+                    },
                     _ => None,
                 };
                 if let Some(m) = msg {

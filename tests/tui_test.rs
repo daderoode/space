@@ -52,6 +52,39 @@ fn dashboard_tab_toggles_focus() {
 }
 
 #[test]
+fn right_arrow_focuses_repo_pane() {
+    let mut app = test_app(vec![], vec![]);
+    assert_eq!(app.focus, Pane::Left);
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.focus, Pane::Right);
+}
+
+#[test]
+fn left_arrow_refocuses_workspace_pane_when_nothing_expanded() {
+    let mut app = test_app(vec![], vec![]);
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.focus, Pane::Left);
+}
+
+#[test]
+fn left_arrow_noop_when_already_on_left_pane() {
+    let mut app = test_app(vec![], vec![]);
+    assert_eq!(app.focus, Pane::Left);
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.focus, Pane::Left);
+}
+
+#[test]
+fn right_arrow_on_repo_pane_is_noop_for_now() {
+    // Right arrow on repos pane will trigger ToggleRepoExpand in Task 4.
+    // For now it is a noop -- just confirm it doesn't crash.
+    let mut app = test_app(vec![], vec![]);
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Right)); // should not panic
+}
+
+#[test]
 fn dashboard_j_moves_ws_down() {
     let workspaces = vec![
         Workspace {
