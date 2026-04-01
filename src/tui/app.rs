@@ -476,7 +476,7 @@ impl App {
                     (KeyCode::Char('a'), _) => Some(Message::StartAdd),
                     (KeyCode::Char('d'), _) => Some(Message::StartDelete),
                     (KeyCode::Char('r'), _) => Some(Message::RefreshRepos),
-                    (KeyCode::Char('t'), _) => Some(Message::ToggleDiffTarget),
+                    (KeyCode::Char('T'), _) => Some(Message::ToggleDiffTarget),
                     (KeyCode::Char('/'), _) => Some(Message::StartSearch),
                     (KeyCode::Char('S'), _) => Some(Message::StartConfig),
                     (KeyCode::Up, _) | (KeyCode::Char('k'), _) => match self.focus {
