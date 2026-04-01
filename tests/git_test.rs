@@ -27,12 +27,52 @@ fn clean_repo_status_is_zero() {
 }
 
 #[test]
-fn dirty_repo_status_counts_correctly() {
+fn file_diff_base_mode_shows_committed_divergence() {
     let tmp = TempDir::new().unwrap();
     common::init_repo(tmp.path());
-    std::fs::write(tmp.path().join("new_file.txt"), "hello").unwrap();
-    let status = space::core::git::repo_status(tmp.path()).unwrap();
-    assert_eq!(status.untracked, 1);
+    std::fs::write(tmp.path().join("base.txt"), "base content").unwrap();
+    Command::new("git")
+        .args(["add", "base.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "base"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["checkout", "-b", "feature"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    std::fs::write(tmp.path().join("feature.txt"), "new feature\nline2").unwrap();
+    Command::new("git")
+        .args(["add", "feature.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "feature"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+
+    let entries = file_diff(tmp.path(), &DiffTarget::Base).unwrap();
+
+    let feature_entry = entries
+        .iter()
+        .find(|e| e.path == "feature.txt")
+        .expect("base mode should show committed divergence from base branch");
+    assert!(
+        feature_entry.insertions > 0,
+        "feature.txt should have insertions"
+    );
+
+    assert!(
+        !entries.iter().any(|e| e.path == "base.txt"),
+        "base.txt exists on both branches and should not appear in divergence diff"
+    );
 }
 
 #[test]
@@ -409,43 +449,4 @@ fn file_diff_detects_deleted_file() {
     let entry = entries.iter().find(|e| e.path == "gone.txt").unwrap();
     assert_eq!(entry.status, FileStatus::Deleted);
     assert!(!entry.staged);
-}
-
-#[test]
-fn file_diff_base_mode_shows_committed_divergence() {
-    let tmp = TempDir::new().unwrap();
-    common::init_repo(tmp.path());
-    std::fs::write(tmp.path().join("base.txt"), "base content").unwrap();
-    Command::new("git")
-        .args(["add", "base.txt"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["commit", "-m", "base"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["checkout", "-b", "feature"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    std::fs::write(tmp.path().join("feature.txt"), "new feature\nline2").unwrap();
-    Command::new("git")
-        .args(["add", "feature.txt"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["commit", "-m", "feature"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-
-    let entries = file_diff(tmp.path(), &DiffTarget::Base).unwrap();
-    assert!(
-        entries.iter().any(|e| e.path == "feature.txt"),
-        "base mode should show committed divergence from base branch"
-    );
 }

@@ -279,25 +279,17 @@ fn file_diff_vs_head(repo: &Repository) -> Result<Vec<FileEntry>> {
 
 #[allow(dead_code)]
 fn file_diff_vs_base(repo: &Repository, repo_path: &Path) -> Result<Vec<FileEntry>> {
-    // Try canonical default branch names first, then fall back to detect_base_branch.
-    // detect_base_branch returns the *current* HEAD branch which is wrong when on a
-    // feature branch — we want to diff against the integration branch (main/master).
-    let candidate_branches = ["main", "master"];
-    let base_oid = candidate_branches
-        .iter()
-        .find_map(|b| {
-            repo.refname_to_id(&format!("refs/heads/{}", b))
-                .or_else(|_| repo.refname_to_id(&format!("refs/remotes/origin/{}", b)))
-                .ok()
-        })
-        .or_else(|| {
-            // Last resort: use detect_base_branch (handles unusual default names)
-            let branch = detect_base_branch(repo_path);
-            repo.refname_to_id(&format!("refs/heads/{}", branch))
-                .or_else(|_| repo.refname_to_id(&format!("refs/remotes/origin/{}", branch)))
-                .ok()
-        })
-        .ok_or_else(|| anyhow::anyhow!("could not resolve base branch"))?;
+    let base_oid = repo
+        .refname_to_id("refs/heads/main")
+        .or_else(|_| repo.refname_to_id("refs/heads/master"))
+        .or_else(|_| repo.refname_to_id("refs/remotes/origin/main"))
+        .or_else(|_| repo.refname_to_id("refs/remotes/origin/master"))
+        .with_context(|| {
+            format!(
+                "could not find base branch (tried main/master/origin/main/origin/master) in {}",
+                repo_path.display()
+            )
+        })?;
 
     let base_commit = repo.find_commit(base_oid)?;
     let base_tree = base_commit.tree()?;
