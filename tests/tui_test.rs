@@ -773,3 +773,142 @@ fn create_reentry_resets_branch_strategy_idx() {
         panic!("expected CreateWorkspace screen");
     }
 }
+
+// ---------------------------------------------------------------------------
+// flattened_rows + cursor navigation (Task 3)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn flattened_rows_all_collapsed() {
+    let ws = common::workspace_with_repos(&["repo-a", "repo-b", "repo-c"]);
+    let app = test_app(vec![ws], vec![]);
+    let rows = app.flattened_rows();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|r| matches!(
+        r,
+        space::tui::app::RepoRow::Repo {
+            expanded: false,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn flattened_rows_one_expanded_with_files() {
+    use space::core::git::{FileEntry, FileStatus};
+    let ws = common::workspace_with_repos(&["repo-a", "repo-b"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.expanded_repos.insert(1);
+    app.repo_file_cache.insert(
+        1,
+        vec![
+            FileEntry {
+                path: "foo.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 3,
+                deletions: 1,
+            },
+            FileEntry {
+                path: "bar.rs".into(),
+                status: FileStatus::Added,
+                staged: true,
+                insertions: 10,
+                deletions: 0,
+            },
+        ],
+    );
+    let rows = app.flattened_rows();
+    assert_eq!(rows.len(), 4); // repo-a, repo-b, foo.rs, bar.rs
+    assert!(matches!(
+        rows[0],
+        space::tui::app::RepoRow::Repo {
+            index: 0,
+            expanded: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        rows[1],
+        space::tui::app::RepoRow::Repo {
+            index: 1,
+            expanded: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        rows[2],
+        space::tui::app::RepoRow::File { repo_index: 1, .. }
+    ));
+    assert!(matches!(
+        rows[3],
+        space::tui::app::RepoRow::File { repo_index: 1, .. }
+    ));
+}
+
+#[test]
+fn repo_index_for_cursor_on_file_row() {
+    use space::core::git::{FileEntry, FileStatus};
+    let ws = common::workspace_with_repos(&["repo-a", "repo-b"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.expanded_repos.insert(1);
+    app.repo_file_cache.insert(
+        1,
+        vec![FileEntry {
+            path: "x.rs".into(),
+            status: FileStatus::Modified,
+            staged: false,
+            insertions: 1,
+            deletions: 0,
+        }],
+    );
+    app.cursor_row = 2; // repo-a=0, repo-b=1, x.rs=2
+    assert_eq!(app.repo_index_for_cursor(), Some(1));
+}
+
+#[test]
+fn cursor_row_navigates_through_file_rows() {
+    use space::core::git::{FileEntry, FileStatus};
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.expanded_repos.insert(0);
+    app.repo_file_cache.insert(
+        0,
+        vec![
+            FileEntry {
+                path: "a.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 1,
+                deletions: 0,
+            },
+            FileEntry {
+                path: "b.rs".into(),
+                status: FileStatus::Modified,
+                staged: true,
+                insertions: 2,
+                deletions: 0,
+            },
+        ],
+    );
+    // rows: [Repo(0), File(a.rs), File(b.rs)]
+    assert_eq!(app.cursor_row, 0);
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.cursor_row, 1);
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.cursor_row, 2);
+    app.handle_key(key(KeyCode::Down)); // clamp at end
+    assert_eq!(app.cursor_row, 2);
+}
+
+#[test]
+fn cursor_row_resets_on_workspace_switch() {
+    let ws1 = common::workspace_with_repos(&["repo-a"]);
+    let ws2 = common::workspace_with_repos(&["repo-b"]);
+    let mut app = test_app(vec![ws1, ws2], vec![]);
+    app.cursor_row = 5;
+    app.focus = Pane::Left;
+    app.handle_key(key(KeyCode::Down)); // select workspace 2
+    assert_eq!(app.cursor_row, 0, "cursor should reset on workspace switch");
+}

@@ -1,8 +1,10 @@
 use crate::core::{
     config::SpaceConfig,
+    git::{DiffTarget, FileEntry},
     workspace::{self, Workspace},
 };
 use anyhow::Result;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -83,12 +85,29 @@ pub enum Message {
     RefreshRepos,
 }
 
+/// A row in the flattened repo table (repo header or file entry).
+pub enum RepoRow<'a> {
+    Repo {
+        index: usize,
+        repo: &'a crate::core::workspace::WorkspaceRepo,
+        expanded: bool,
+    },
+    File {
+        repo_index: usize,
+        entry: &'a FileEntry,
+    },
+}
+
 pub struct App {
     pub config: SpaceConfig,
     pub workspaces: Vec<Workspace>,
     pub repos_cache: Vec<PathBuf>,
     pub selected_ws: usize,
     pub selected_repo: usize,
+    pub expanded_repos: HashSet<usize>,
+    pub repo_file_cache: HashMap<usize, Vec<FileEntry>>,
+    pub cursor_row: usize,
+    pub diff_target: DiffTarget,
     pub focus: Pane,
     pub screen: Screen,
     pub should_quit: bool,
@@ -116,6 +135,10 @@ impl App {
             repos_cache,
             selected_ws: 0,
             selected_repo: 0,
+            expanded_repos: HashSet::new(),
+            repo_file_cache: HashMap::new(),
+            cursor_row: 0,
+            diff_target: DiffTarget::Head,
             focus: Pane::Left,
             screen: Screen::Dashboard,
             should_quit: false,
@@ -129,6 +152,43 @@ impl App {
 
     pub fn selected_workspace(&self) -> Option<&Workspace> {
         self.workspaces.get(self.selected_ws)
+    }
+
+    /// Build the flat list of rows for the repo table.
+    pub fn flattened_rows(&self) -> Vec<RepoRow<'_>> {
+        let repos = match self.selected_workspace() {
+            Some(ws) => &ws.repos,
+            None => return vec![],
+        };
+        let mut rows = Vec::new();
+        for (i, repo) in repos.iter().enumerate() {
+            let expanded = self.expanded_repos.contains(&i);
+            rows.push(RepoRow::Repo {
+                index: i,
+                repo,
+                expanded,
+            });
+            if expanded {
+                if let Some(entries) = self.repo_file_cache.get(&i) {
+                    for entry in entries {
+                        rows.push(RepoRow::File {
+                            repo_index: i,
+                            entry,
+                        });
+                    }
+                }
+            }
+        }
+        rows
+    }
+
+    /// Return the repo index the cursor is on (whether on a Repo or File row).
+    pub fn repo_index_for_cursor(&self) -> Option<usize> {
+        match self.flattened_rows().get(self.cursor_row) {
+            Some(RepoRow::Repo { index, .. }) => Some(*index),
+            Some(RepoRow::File { repo_index, .. }) => Some(*repo_index),
+            None => None,
+        }
     }
 
     pub fn load_selected_workspace_detail(&mut self) {
@@ -459,6 +519,9 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             if app.selected_ws > 0 {
                 app.selected_ws -= 1;
                 app.selected_repo = 0;
+                app.cursor_row = 0;
+                app.expanded_repos.clear();
+                app.repo_file_cache.clear();
                 app.load_selected_workspace_detail();
             }
             None
@@ -467,23 +530,23 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             if app.selected_ws + 1 < app.workspaces.len() {
                 app.selected_ws += 1;
                 app.selected_repo = 0;
+                app.cursor_row = 0;
+                app.expanded_repos.clear();
+                app.repo_file_cache.clear();
                 app.load_selected_workspace_detail();
             }
             None
         }
         Message::SelectRepoUp => {
-            if app.selected_repo > 0 {
-                app.selected_repo -= 1;
+            if app.cursor_row > 0 {
+                app.cursor_row -= 1;
             }
             None
         }
         Message::SelectRepoDown => {
-            let max = app
-                .selected_workspace()
-                .map(|ws| ws.repos.len().saturating_sub(1))
-                .unwrap_or(0);
-            if app.selected_repo < max {
-                app.selected_repo += 1;
+            let max = app.flattened_rows().len().saturating_sub(1);
+            if app.cursor_row < max {
+                app.cursor_row += 1;
             }
             None
         }
@@ -493,6 +556,9 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             let repos = crate::core::repo::find_repos_in(&roots, depth);
             let _ = crate::core::repo::save_cache(&SpaceConfig::cache_path(), &repos);
             app.repos_cache = repos;
+            app.cursor_row = 0;
+            app.expanded_repos.clear();
+            app.repo_file_cache.clear();
             app.set_status(format!("Refreshed: {} repos found", app.repos_cache.len()));
             None
         }
@@ -648,6 +714,10 @@ mod tests {
             repos_cache: vec![],
             selected_ws: 0,
             selected_repo: 0,
+            expanded_repos: HashSet::new(),
+            repo_file_cache: HashMap::new(),
+            cursor_row: 0,
+            diff_target: DiffTarget::Head,
             focus: Pane::Left,
             screen: Screen::Dashboard,
             should_quit: false,
