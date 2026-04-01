@@ -85,7 +85,7 @@ pub enum Message {
     RefreshRepos,
     ToggleRepoExpand,
     CollapseAllRepos,
-    ToggleDiffTarget, // wired up fully in Task 6, just declare it here
+    ToggleDiffTarget,
 }
 
 /// A row in the flattened repo table (repo header or file entry).
@@ -667,9 +667,15 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                         .and_then(|ws| ws.repos.get(idx))
                         .map(|r| r.path.clone())
                     {
-                        let entries = crate::core::git::file_diff(&repo_path, &app.diff_target)
-                            .unwrap_or_default();
-                        app.repo_file_cache.insert(idx, entries);
+                        match crate::core::git::file_diff(&repo_path, &app.diff_target) {
+                            Ok(entries) => {
+                                app.repo_file_cache.insert(idx, entries);
+                            }
+                            Err(err) => {
+                                app.set_status(format!("Diff failed: {}", err));
+                                return None;
+                            }
+                        }
                     }
                     app.expanded_repos.insert(idx);
                 }
@@ -700,11 +706,18 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                     .and_then(|ws| ws.repos.get(idx))
                     .map(|r| r.path.clone())
                 {
-                    let entries = crate::core::git::file_diff(&repo_path, &app.diff_target)
-                        .unwrap_or_default();
-                    app.repo_file_cache.insert(idx, entries);
+                    match crate::core::git::file_diff(&repo_path, &app.diff_target) {
+                        Ok(entries) => {
+                            app.repo_file_cache.insert(idx, entries);
+                        }
+                        Err(err) => {
+                            app.set_status(format!("Diff failed: {}", err));
+                        }
+                    }
                 }
             }
+            let max_row = app.flattened_rows().len().saturating_sub(1);
+            app.cursor_row = app.cursor_row.min(max_row);
             let label = match app.diff_target {
                 DiffTarget::Head => "HEAD (uncommitted changes)",
                 DiffTarget::Base => "base branch (total divergence)",

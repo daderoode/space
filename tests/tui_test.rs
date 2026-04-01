@@ -76,9 +76,9 @@ fn left_arrow_noop_when_already_on_left_pane() {
 }
 
 #[test]
-fn right_arrow_on_repo_pane_is_noop_for_now() {
-    // Right arrow on repos pane will trigger ToggleRepoExpand in Task 4.
-    // For now it is a noop -- just confirm it doesn't crash.
+fn right_arrow_on_repo_pane_triggers_expand() {
+    // Right arrow on repos pane dispatches ToggleRepoExpand.
+    // With no workspace/repos, this is effectively a no-op but must not panic.
     let mut app = test_app(vec![], vec![]);
     app.focus = Pane::Right;
     app.handle_key(key(KeyCode::Right)); // should not panic

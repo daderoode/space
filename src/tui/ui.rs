@@ -170,13 +170,17 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
             } => {
                 let indicator = if *expanded { "▼ " } else { "▶ " };
                 let name = format!("{}{}", indicator, r.name);
-                let status_style = if r.status.modified + r.status.staged > 0 {
+                let dirty = r.status.modified + r.status.staged + r.status.untracked > 0;
+                let status_style = if dirty {
                     theme::warn()
                 } else {
                     theme::status_clean()
                 };
-                let status_str = if r.status.modified + r.status.staged > 0 {
-                    format!("{}m {}s", r.status.modified, r.status.staged)
+                let status_str = if dirty {
+                    format!(
+                        "{}m {}s {}u",
+                        r.status.modified, r.status.staged, r.status.untracked
+                    )
                 } else {
                     "clean".to_string()
                 };
@@ -193,15 +197,17 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
                 ])
             }
             RepoRow::File { entry, .. } => {
-                let staged_label = if entry.staged {
-                    "[staged]"
-                } else {
-                    "[unstaged]"
-                };
-                let staged_style = if entry.staged {
-                    theme::staged()
-                } else {
-                    theme::unstaged()
+                // In Base mode all entries have staged=false (committed divergence has
+                // no staging context), so the badge would always show "[unstaged]" which
+                // is misleading. Hide it entirely in Base mode.
+                let staged_badge = match app.diff_target {
+                    crate::core::git::DiffTarget::Head if entry.staged => {
+                        ratatui::text::Span::styled("[staged]", theme::staged())
+                    }
+                    crate::core::git::DiffTarget::Head => {
+                        ratatui::text::Span::styled("[unstaged]", theme::unstaged())
+                    }
+                    crate::core::git::DiffTarget::Base => ratatui::text::Span::raw(""),
                 };
                 let path_col = format!("  {} {}", status_char(&entry.status), entry.path);
                 let counts = format!("+{} -{}", entry.insertions, entry.deletions);
@@ -209,7 +215,7 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
                     ratatui::text::Span::styled(path_col, theme::file_path()),
                     ratatui::text::Span::raw(""),
                     ratatui::text::Span::styled(counts, theme::file_path()),
-                    ratatui::text::Span::styled(staged_label, staged_style),
+                    staged_badge,
                 ])
             }
         })

@@ -247,6 +247,17 @@ fn format_delta(delta: i64) -> String {
 ///
 /// Head mode: uncommitted changes (staged and unstaged separately).
 /// Base mode: total divergence from the base branch (detect_base_branch()).
+/// Return per-file diff entries for a repo.
+///
+/// `Head` mode returns uncommitted changes: staged entries (tree→index) and
+/// unstaged entries (index→workdir), each with the correct `staged` flag.
+///
+/// `Base` mode returns total divergence from the base branch. The base branch
+/// is resolved by probing `refs/heads/main`, `refs/heads/master`,
+/// `refs/remotes/origin/main`, and `refs/remotes/origin/master` in order.
+/// Returns an error if none of those refs exist. All entries have `staged: false`
+/// in Base mode (the staged/unstaged distinction is not meaningful for
+/// committed divergence).
 #[allow(dead_code)]
 pub fn file_diff(repo_path: &Path, target: &DiffTarget) -> Result<Vec<FileEntry>> {
     let repo = Repository::open(repo_path)
@@ -295,7 +306,7 @@ fn file_diff_vs_base(repo: &Repository, repo_path: &Path) -> Result<Vec<FileEntr
     let base_tree = base_commit.tree()?;
 
     let mut opts = git2::DiffOptions::new();
-    opts.include_untracked(true);
+    opts.include_untracked(true).recurse_untracked_dirs(true);
     let diff = repo.diff_tree_to_workdir_with_index(Some(&base_tree), Some(&mut opts))?;
     collect_entries(&diff, false)
 }
@@ -317,7 +328,9 @@ fn collect_entries(diff: &git2::Diff, staged: bool) -> Result<Vec<FileEntry>> {
         })
         .collect();
 
-    // Second pass: count +/- lines per file via foreach line callback
+    // Second pass: count +/- lines per file via foreach line callback.
+    // TODO: O(n²) path lookup — replace with HashMap<&str, usize> if diffs
+    // with 500+ files cause noticeable latency in the TUI.
     let mut line_counts: Vec<(usize, usize)> = vec![(0, 0); file_stats.len()];
     {
         let file_stats_ref = &file_stats;
