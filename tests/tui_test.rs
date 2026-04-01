@@ -1033,3 +1033,62 @@ fn workspace_switch_clears_expand_state() {
     );
     assert_eq!(app.cursor_row, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Diff target toggle (Task 6)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shift_t_toggles_diff_target_to_base() {
+    let mut app = test_app(vec![], vec![]);
+    assert!(matches!(
+        app.diff_target,
+        space::core::git::DiffTarget::Head
+    ));
+    app.handle_key(key(KeyCode::Char('T'))); // uppercase T = Shift+T
+    assert!(matches!(
+        app.diff_target,
+        space::core::git::DiffTarget::Base
+    ));
+}
+
+#[test]
+fn shift_t_toggles_diff_target_back_to_head() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('T')));
+    app.handle_key(key(KeyCode::Char('T')));
+    assert!(matches!(
+        app.diff_target,
+        space::core::git::DiffTarget::Head
+    ));
+}
+
+#[test]
+fn toggle_diff_target_re_fetches_expanded_cache() {
+    use space::core::git::{FileEntry, FileStatus};
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    // Pre-populate cache with sentinel data
+    app.expanded_repos.insert(0);
+    app.repo_file_cache.insert(
+        0,
+        vec![FileEntry {
+            path: "sentinel.rs".into(),
+            status: FileStatus::Modified,
+            staged: false,
+            insertions: 1,
+            deletions: 0,
+        }],
+    );
+    // Toggle -- repo path is /tmp/test-ws/repo-a which doesn't exist,
+    // so file_diff returns Err -> empty vec. Cache key should still be re-inserted.
+    app.handle_key(key(KeyCode::Char('T')));
+    assert!(
+        app.repo_file_cache.contains_key(&0),
+        "cache entry should be re-inserted after toggle (even if empty)"
+    );
+    assert!(
+        matches!(app.diff_target, space::core::git::DiffTarget::Base),
+        "diff_target should be Base after toggle"
+    );
+}

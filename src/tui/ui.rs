@@ -271,6 +271,9 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         key("S"),
         act(" config"),
         sep(),
+        key("T"),
+        act(" diff target"),
+        sep(),
         key("q"),
         act(" quit"),
     ]);

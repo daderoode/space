@@ -688,7 +688,28 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             None
         }
         Message::ToggleDiffTarget => {
-            // Full implementation in Task 6 -- stub for now
+            app.diff_target = match app.diff_target {
+                DiffTarget::Head => DiffTarget::Base,
+                DiffTarget::Base => DiffTarget::Head,
+            };
+            // Re-fetch diffs for all currently expanded repos
+            let expanded: Vec<usize> = app.expanded_repos.iter().copied().collect();
+            for idx in expanded {
+                if let Some(repo_path) = app
+                    .selected_workspace()
+                    .and_then(|ws| ws.repos.get(idx))
+                    .map(|r| r.path.clone())
+                {
+                    let entries = crate::core::git::file_diff(&repo_path, &app.diff_target)
+                        .unwrap_or_default();
+                    app.repo_file_cache.insert(idx, entries);
+                }
+            }
+            let label = match app.diff_target {
+                DiffTarget::Head => "HEAD (uncommitted changes)",
+                DiffTarget::Base => "base branch (total divergence)",
+            };
+            app.set_status(format!("Diff target: {}", label));
             None
         }
     }
