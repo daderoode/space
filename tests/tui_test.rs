@@ -1092,3 +1092,269 @@ fn toggle_diff_target_re_fetches_expanded_cache() {
         "diff_target should be Base after toggle"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Integration smoke tests for Phase 1 feature (Task manual test equivalent)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phase1_expand_dirty_repo_shows_file_entries() {
+    // Tests the full stack: real git repo with staged/unstaged changes,
+    // WorkspaceRepo pointing at it, expand via Enter, verify file entries appear.
+    use space::core::git::{FileStatus, RepoStatus};
+    use space::core::workspace::{Workspace, WorkspaceRepo};
+
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("dirty-repo");
+
+    // Commit existing.rs first so it becomes a tracked file
+    std::fs::write(repo_path.join("existing.rs"), "line1\n").unwrap();
+    std::process::Command::new("git")
+        .args(["add", "existing.rs"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "add existing"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+
+    // NOW stage a new file (after the commit, so it won't be swept in)
+    std::fs::write(
+        repo_path.join("staged.rs"),
+        "pub fn hello() {}\npub fn world() {}\n",
+    )
+    .unwrap();
+    std::process::Command::new("git")
+        .args(["add", "staged.rs"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+
+    // Unstaged modification to the committed file
+    std::fs::write(repo_path.join("existing.rs"), "line1\nline2\nline3\n").unwrap();
+
+    // Untracked file
+    std::fs::write(repo_path.join("untracked.txt"), "untracked\n").unwrap();
+
+    let ws = Workspace {
+        name: "test-ws".into(),
+        path: env.workspaces_dir.join("test-ws"),
+        repos: vec![WorkspaceRepo {
+            name: "dirty-repo".into(),
+            path: repo_path.clone(),
+            branch: "main".into(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![ws], vec![]);
+    app.focus = Pane::Right;
+
+    // Pre-expand: should have 1 repo row (collapsed)
+    assert_eq!(app.flattened_rows().len(), 1);
+
+    // Expand with Enter
+    app.handle_key(key(KeyCode::Enter));
+
+    // Should now have > 1 row (repo + file entries)
+    let rows = app.flattened_rows();
+    assert!(
+        rows.len() > 1,
+        "expanded repo should show file rows, got {} rows",
+        rows.len()
+    );
+
+    // First row is still the repo header, now expanded
+    assert!(matches!(
+        rows[0],
+        space::tui::app::RepoRow::Repo { expanded: true, .. }
+    ));
+
+    // File rows should follow
+    let file_rows: Vec<_> = rows
+        .iter()
+        .filter(|r| matches!(r, space::tui::app::RepoRow::File { .. }))
+        .collect();
+    assert!(
+        !file_rows.is_empty(),
+        "should have file rows after expansion"
+    );
+
+    // staged.rs should appear as staged=true, Added
+    let staged_entry = app
+        .repo_file_cache
+        .get(&0)
+        .unwrap()
+        .iter()
+        .find(|e| e.path == "staged.rs")
+        .expect("staged.rs should be in cache");
+    assert!(staged_entry.staged, "staged.rs should be staged=true");
+    assert_eq!(staged_entry.status, FileStatus::Added);
+    assert_eq!(staged_entry.insertions, 2, "staged.rs has 2 lines");
+
+    // existing.rs should appear as unstaged modification
+    let unstaged_entry = app
+        .repo_file_cache
+        .get(&0)
+        .unwrap()
+        .iter()
+        .find(|e| e.path == "existing.rs")
+        .expect("existing.rs should be in cache");
+    assert!(
+        !unstaged_entry.staged,
+        "existing.rs modification is unstaged"
+    );
+    assert_eq!(unstaged_entry.status, FileStatus::Modified);
+    assert!(unstaged_entry.insertions > 0, "existing.rs has new lines");
+}
+
+#[test]
+fn phase1_collapse_snaps_cursor_to_repo_row() {
+    use space::core::git::{FileEntry, FileStatus};
+
+    let ws = common::workspace_with_repos(&["repo-a", "repo-b"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+
+    // Expand repo-b (index 1), inject 3 fake file entries
+    app.expanded_repos.insert(1);
+    app.repo_file_cache.insert(
+        1,
+        vec![
+            FileEntry {
+                path: "a.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 1,
+                deletions: 0,
+            },
+            FileEntry {
+                path: "b.rs".into(),
+                status: FileStatus::Added,
+                staged: true,
+                insertions: 5,
+                deletions: 0,
+            },
+            FileEntry {
+                path: "c.rs".into(),
+                status: FileStatus::Deleted,
+                staged: false,
+                insertions: 0,
+                deletions: 3,
+            },
+        ],
+    );
+
+    // Navigate cursor to the last file row (index 4: repo-a=0, repo-b=1, a=2, b=3, c=4)
+    app.cursor_row = 4;
+    assert_eq!(app.repo_index_for_cursor(), Some(1));
+
+    // Collapse via Enter
+    app.handle_key(key(KeyCode::Enter));
+
+    // repo-b should be collapsed
+    assert!(!app.expanded_repos.contains(&1));
+    // cursor should snap to repo-b's row (index 1 in collapsed list: repo-a=0, repo-b=1)
+    assert_eq!(
+        app.cursor_row, 1,
+        "cursor should snap to repo-b row after collapse"
+    );
+    assert_eq!(
+        app.flattened_rows().len(),
+        2,
+        "only 2 rows after full collapse"
+    );
+}
+
+#[test]
+fn phase1_toggle_diff_target_updates_title_label() {
+    // Verify diff_target state changes when T is pressed -- the title label
+    // in render_repo_table reads app.diff_target, so this covers that path.
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+
+    assert!(matches!(
+        app.diff_target,
+        space::core::git::DiffTarget::Head
+    ));
+
+    app.handle_key(key(KeyCode::Char('T')));
+    assert!(matches!(
+        app.diff_target,
+        space::core::git::DiffTarget::Base
+    ));
+
+    // Status message should be set
+    assert!(
+        app.status_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("base branch"),
+        "status message should mention base branch"
+    );
+
+    app.handle_key(key(KeyCode::Char('T')));
+    assert!(matches!(
+        app.diff_target,
+        space::core::git::DiffTarget::Head
+    ));
+    assert!(
+        app.status_message.as_deref().unwrap_or("").contains("HEAD"),
+        "status message should mention HEAD"
+    );
+}
+
+#[test]
+fn phase1_right_arrow_on_workspace_pane_then_enter_expands_repo() {
+    // Full navigation flow: start on left pane, arrow right, expand with Enter
+    use space::core::git::RepoStatus;
+    use space::core::workspace::{Workspace, WorkspaceRepo};
+
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("nav-repo");
+    std::fs::write(repo_path.join("changed.rs"), "new line\n").unwrap();
+
+    let ws = Workspace {
+        name: "nav-ws".into(),
+        path: env.workspaces_dir.join("nav-ws"),
+        repos: vec![WorkspaceRepo {
+            name: "nav-repo".into(),
+            path: repo_path.clone(),
+            branch: "main".into(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![ws], vec![]);
+
+    // Start on left (workspaces) pane
+    assert_eq!(app.focus, Pane::Left);
+
+    // Right arrow moves focus to repos pane
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.focus, Pane::Right);
+
+    // Enter expands the repo
+    app.handle_key(key(KeyCode::Enter));
+    assert!(app.expanded_repos.contains(&0), "repo should expand");
+
+    // Esc collapses (nothing expanded check: first Esc collapses, second refocuses)
+    app.handle_key(key(KeyCode::Esc));
+    assert!(app.expanded_repos.is_empty(), "Esc should collapse");
+    assert_eq!(
+        app.focus,
+        Pane::Right,
+        "focus still on right after collapse"
+    );
+
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.focus, Pane::Left, "second Esc refocuses left pane");
+}
