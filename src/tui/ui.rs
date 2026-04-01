@@ -11,6 +11,18 @@ use ratatui::{
     Frame,
 };
 
+fn status_char(status: &crate::core::git::FileStatus) -> &'static str {
+    use crate::core::git::FileStatus;
+    match status {
+        FileStatus::Modified => "M",
+        FileStatus::Added => "A",
+        FileStatus::Deleted => "D",
+        FileStatus::Renamed => "R",
+        FileStatus::Copied => "C",
+        FileStatus::Untracked => "?",
+    }
+}
+
 pub fn view(app: &App, frame: &mut Frame) {
     match &app.screen {
         Screen::Dashboard => render_dashboard(app, frame),
@@ -118,6 +130,8 @@ fn render_workspace_list(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
+    use crate::tui::app::RepoRow;
+
     let focused = app.focus == Pane::Right;
     let border_style = if focused {
         theme::border_focused()
@@ -129,47 +143,75 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
         .selected_workspace()
         .map(|ws| ws.name.as_str())
         .unwrap_or("");
+    let target_label = match app.diff_target {
+        crate::core::git::DiffTarget::Head => "HEAD",
+        crate::core::git::DiffTarget::Base => "base",
+    };
+    let title = format!(" {} (vs {}) ", ws_name, target_label);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
-        .title(format!(" {} ", ws_name));
+        .title(title);
 
-    let repos = app
-        .selected_workspace()
-        .map(|ws| ws.repos.as_slice())
-        .unwrap_or(&[]);
+    let rows_data = app.flattened_rows();
 
-    if repos.is_empty() {
+    if rows_data.is_empty() {
         frame.render_widget(Paragraph::new("  No repos").block(block), area);
         return;
     }
 
-    let rows: Vec<Row> = repos
+    let rows: Vec<Row> = rows_data
         .iter()
-        .map(|r| {
-            let status_style = if r.status.modified + r.status.staged > 0 {
-                theme::warn()
-            } else {
-                theme::status_clean()
-            };
-            let status_str = if r.status.modified + r.status.staged > 0 {
-                format!("{}m {}s", r.status.modified, r.status.staged)
-            } else {
-                "clean".to_string()
-            };
-            let ab = if r.ahead + r.behind > 0 {
-                format!("+{} -{}", r.ahead, r.behind)
-            } else {
-                String::new()
-            };
-            Row::new(vec![
-                ratatui::text::Span::raw(r.name.clone()),
-                ratatui::text::Span::styled(r.branch.clone(), theme::branch()),
-                ratatui::text::Span::styled(status_str, status_style),
-                ratatui::text::Span::styled(ab, theme::warn()),
-            ])
+        .map(|row| match row {
+            RepoRow::Repo {
+                repo: r, expanded, ..
+            } => {
+                let indicator = if *expanded { "▼ " } else { "▶ " };
+                let name = format!("{}{}", indicator, r.name);
+                let status_style = if r.status.modified + r.status.staged > 0 {
+                    theme::warn()
+                } else {
+                    theme::status_clean()
+                };
+                let status_str = if r.status.modified + r.status.staged > 0 {
+                    format!("{}m {}s", r.status.modified, r.status.staged)
+                } else {
+                    "clean".to_string()
+                };
+                let ab = if r.ahead + r.behind > 0 {
+                    format!("+{} -{}", r.ahead, r.behind)
+                } else {
+                    String::new()
+                };
+                Row::new(vec![
+                    ratatui::text::Span::raw(name),
+                    ratatui::text::Span::styled(r.branch.clone(), theme::branch()),
+                    ratatui::text::Span::styled(status_str, status_style),
+                    ratatui::text::Span::styled(ab, theme::warn()),
+                ])
+            }
+            RepoRow::File { entry, .. } => {
+                let staged_label = if entry.staged {
+                    "[staged]"
+                } else {
+                    "[unstaged]"
+                };
+                let staged_style = if entry.staged {
+                    theme::staged()
+                } else {
+                    theme::unstaged()
+                };
+                let path_col = format!("  {} {}", status_char(&entry.status), entry.path);
+                let counts = format!("+{} -{}", entry.insertions, entry.deletions);
+                Row::new(vec![
+                    ratatui::text::Span::styled(path_col, theme::file_path()),
+                    ratatui::text::Span::raw(""),
+                    ratatui::text::Span::styled(counts, theme::file_path()),
+                    ratatui::text::Span::styled(staged_label, staged_style),
+                ])
+            }
         })
         .collect();
 
@@ -191,8 +233,8 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
     .row_highlight_style(theme::highlight_row());
 
     let mut state = TableState::default();
-    if !repos.is_empty() && focused {
-        state.select(Some(app.selected_repo));
+    if !rows_data.is_empty() && focused {
+        state.select(Some(app.cursor_row));
     }
     frame.render_stateful_widget(table, area, &mut state);
 }
