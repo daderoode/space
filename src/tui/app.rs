@@ -142,7 +142,7 @@ impl App {
             expanded_repos: HashSet::new(),
             repo_file_cache: HashMap::new(),
             cursor_row: 0,
-            diff_target: DiffTarget::Head,
+            diff_target: DiffTarget::Base,
             focus: Pane::Left,
             screen: Screen::Dashboard,
             should_quit: false,
@@ -206,6 +206,30 @@ impl App {
                     // Keep shallow workspace entry; note error for user
                     self.set_status(format!("Could not load '{}' detail", name));
                 }
+            }
+        }
+        self.refresh_file_diff_cache();
+    }
+
+    /// Fetch file diffs for all repos in the selected workspace and populate
+    /// `repo_file_cache`. Called on workspace load/switch so the `+/-` column
+    /// shows file line totals even on collapsed rows.
+    pub fn refresh_file_diff_cache(&mut self) {
+        self.repo_file_cache.clear();
+        let repo_paths: Vec<(usize, std::path::PathBuf)> = self
+            .selected_workspace()
+            .map(|ws| {
+                ws.repos
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| (i, r.path.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for (idx, path) in repo_paths {
+            if let Ok(entries) = crate::core::git::file_diff(&path, &self.diff_target) {
+                self.repo_file_cache.insert(idx, entries);
             }
         }
     }
@@ -548,8 +572,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 app.selected_repo = 0;
                 app.cursor_row = 0;
                 app.expanded_repos.clear();
-                app.repo_file_cache.clear();
-                app.load_selected_workspace_detail();
+                app.load_selected_workspace_detail(); // also calls refresh_file_diff_cache
             }
             None
         }
@@ -559,8 +582,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 app.selected_repo = 0;
                 app.cursor_row = 0;
                 app.expanded_repos.clear();
-                app.repo_file_cache.clear();
-                app.load_selected_workspace_detail();
+                app.load_selected_workspace_detail(); // also calls refresh_file_diff_cache
             }
             None
         }
@@ -585,7 +607,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             app.repos_cache = repos;
             app.cursor_row = 0;
             app.expanded_repos.clear();
-            app.repo_file_cache.clear();
+            app.refresh_file_diff_cache();
             app.set_status(format!("Refreshed: {} repos found", app.repos_cache.len()));
             None
         }
@@ -698,24 +720,9 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 DiffTarget::Head => DiffTarget::Base,
                 DiffTarget::Base => DiffTarget::Head,
             };
-            // Re-fetch diffs for all currently expanded repos
-            let expanded: Vec<usize> = app.expanded_repos.iter().copied().collect();
-            for idx in expanded {
-                if let Some(repo_path) = app
-                    .selected_workspace()
-                    .and_then(|ws| ws.repos.get(idx))
-                    .map(|r| r.path.clone())
-                {
-                    match crate::core::git::file_diff(&repo_path, &app.diff_target) {
-                        Ok(entries) => {
-                            app.repo_file_cache.insert(idx, entries);
-                        }
-                        Err(err) => {
-                            app.set_status(format!("Diff failed: {}", err));
-                        }
-                    }
-                }
-            }
+            // Re-fetch diffs for ALL repos (not just expanded) so +/- totals
+            // on collapsed rows also update immediately.
+            app.refresh_file_diff_cache();
             let max_row = app.flattened_rows().len().saturating_sub(1);
             app.cursor_row = app.cursor_row.min(max_row);
             let label = match app.diff_target {
@@ -820,7 +827,7 @@ mod tests {
             expanded_repos: HashSet::new(),
             repo_file_cache: HashMap::new(),
             cursor_row: 0,
-            diff_target: DiffTarget::Head,
+            diff_target: DiffTarget::Base,
             focus: Pane::Left,
             screen: Screen::Dashboard,
             should_quit: false,

@@ -5,11 +5,23 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Row, Table, TableState,
-        Wrap,
+        Block, BorderType, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table,
+        TableState, Wrap,
     },
     Frame,
 };
+
+/// Build a table cell showing "+N -M" with green additions and red deletions.
+fn diff_cell(insertions: usize, deletions: usize) -> Cell<'static> {
+    if insertions == 0 && deletions == 0 {
+        return Cell::from("");
+    }
+    Cell::from(Line::from(vec![
+        Span::styled(format!("+{}", insertions), theme::additions()),
+        Span::raw(" "),
+        Span::styled(format!("-{}", deletions), theme::deletions()),
+    ]))
+}
 
 fn status_char(status: &crate::core::git::FileStatus) -> &'static str {
     use crate::core::git::FileStatus;
@@ -166,7 +178,9 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
         .iter()
         .map(|row| match row {
             RepoRow::Repo {
-                repo: r, expanded, ..
+                index,
+                repo: r,
+                expanded,
             } => {
                 let indicator = if *expanded { "▼ " } else { "▶ " };
                 let name = format!("{}{}", indicator, r.name);
@@ -184,16 +198,22 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
                 } else {
                     "clean".to_string()
                 };
-                let ab = if r.ahead + r.behind > 0 {
-                    format!("+{} -{}", r.ahead, r.behind)
-                } else {
-                    String::new()
-                };
+                // +/- column: file line totals from cache (filled in Change 3)
+                // Fall back to commit ahead/behind if cache not yet populated.
+                let (ins, del) = app
+                    .repo_file_cache
+                    .get(index)
+                    .map(|entries| {
+                        entries.iter().fold((0usize, 0usize), |(i, d), e| {
+                            (i + e.insertions, d + e.deletions)
+                        })
+                    })
+                    .unwrap_or((r.ahead, r.behind));
                 Row::new(vec![
-                    ratatui::text::Span::raw(name),
-                    ratatui::text::Span::styled(r.branch.clone(), theme::branch()),
-                    ratatui::text::Span::styled(status_str, status_style),
-                    ratatui::text::Span::styled(ab, theme::warn()),
+                    Cell::from(Span::raw(name)),
+                    Cell::from(Span::styled(r.branch.clone(), theme::branch())),
+                    Cell::from(Span::styled(status_str, status_style)),
+                    diff_cell(ins, del),
                 ])
             }
             RepoRow::File { entry, .. } => {
@@ -210,12 +230,11 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
                     crate::core::git::DiffTarget::Base => ratatui::text::Span::raw(""),
                 };
                 let path_col = format!("  {} {}", status_char(&entry.status), entry.path);
-                let counts = format!("+{} -{}", entry.insertions, entry.deletions);
                 Row::new(vec![
-                    ratatui::text::Span::styled(path_col, theme::file_path()),
-                    ratatui::text::Span::raw(""),
-                    ratatui::text::Span::styled(counts, theme::file_path()),
-                    staged_badge,
+                    Cell::from(Span::styled(path_col, theme::file_path())),
+                    Cell::from(""),
+                    diff_cell(entry.insertions, entry.deletions),
+                    Cell::from(staged_badge),
                 ])
             }
         })
@@ -255,34 +274,62 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     let key = |k: &'static str| Span::styled(k, theme::text());
     let act = |a: &'static str| Span::styled(a, theme::muted());
 
-    let bar = Line::from(vec![
-        key("enter"),
-        act(" go"),
-        sep(),
-        key("c"),
-        act(" create"),
-        sep(),
-        key("a"),
-        act(" add"),
-        sep(),
-        key("d"),
-        act(" delete"),
-        sep(),
-        key("r"),
-        act(" refresh"),
-        sep(),
-        key("/"),
-        act(" search"),
-        sep(),
-        key("S"),
-        act(" config"),
-        sep(),
-        key("T"),
-        act(" diff target"),
-        sep(),
-        key("q"),
-        act(" quit"),
-    ]);
+    let bar = match app.focus {
+        Pane::Left => Line::from(vec![
+            key("enter"),
+            act(" go"),
+            sep(),
+            key("→"),
+            act(" repos"),
+            sep(),
+            key("c"),
+            act(" create"),
+            sep(),
+            key("a"),
+            act(" add"),
+            sep(),
+            key("d"),
+            act(" delete"),
+            sep(),
+            key("r"),
+            act(" refresh"),
+            sep(),
+            key("/"),
+            act(" search"),
+            sep(),
+            key("S"),
+            act(" config"),
+            sep(),
+            key("?"),
+            act(" help"),
+            sep(),
+            key("q"),
+            act(" quit"),
+        ]),
+        Pane::Right => {
+            // Show what T will switch TO so it's self-explanatory
+            let toggle_label = match app.diff_target {
+                crate::core::git::DiffTarget::Base => " switch to HEAD",
+                crate::core::git::DiffTarget::Head => " switch to base",
+            };
+            Line::from(vec![
+                key("enter"),
+                act(" expand"),
+                sep(),
+                key("←/esc"),
+                act(" back"),
+                sep(),
+                key("T"),
+                act(toggle_label),
+                sep(),
+                key("?"),
+                act(" help"),
+                sep(),
+                key("q"),
+                act(" quit"),
+            ])
+        }
+    };
     frame.render_widget(Paragraph::new(bar), area);
 }
 

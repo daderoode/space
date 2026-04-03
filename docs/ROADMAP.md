@@ -55,7 +55,28 @@ and base mode works, navigation through flattened rows is smooth.
 
 ---
 
-### 4. File-level diff viewer (Phase 2)
+### 4. Keybinding help overlay (`?`)
+
+**Problem:** Users can't discover available keys without reading source code or
+docs. Context-sensitive status bar hints help, but there's no single place to
+see everything at once.
+
+**Approach:**
+
+- `?` opens a full-screen overlay listing all keybindings grouped by context
+  (Navigation, Workspace pane, Repo pane, General).
+- Each entry shows the key, a one-line description of what it does.
+- Pattern follows other overlays: new `Screen::Help` variant, `handle_key`
+  dispatch, render function.
+- `Esc`/`q`/`?` closes the overlay.
+
+**Files:** `src/tui/app.rs` (new Message + Screen variant), `src/tui/ui.rs`
+(new render function)
+**Done when:** `?` opens a readable help overlay from any dashboard state.
+
+---
+
+### 5. File-level diff viewer (Phase 2)
 
 **Problem:** After seeing which files changed, users want to view the actual diff
 content without leaving the TUI.
@@ -76,7 +97,7 @@ expanded repo view.
 
 ---
 
-### 5. Git operations menu (Phase 3)
+### 6. Git operations menu (Phase 3)
 
 **Problem:** Users must leave `space` to perform routine git operations on
 individual repos within a workspace.
@@ -97,7 +118,7 @@ without leaving the TUI.
 
 ---
 
-### 6. Safe rebase flow (Phase 4)
+### 7. Safe rebase flow (Phase 4)
 
 **Problem:** Rebasing a worktree branch is risky without visibility into the
 current state (dirty files, divergence, conflicts).
@@ -122,7 +143,7 @@ checks and clean abort on conflict.
 
 ## Tier 3 -- Core Features
 
-### 7. Repo groups / templates
+### 8. Repo groups / templates
 
 **Problem:** Users repeatedly create workspaces with the same repo combinations.
 Every time they must re-select the same repos.
@@ -147,7 +168,7 @@ Every time they must re-select the same repos.
 
 ---
 
-### 8. Post-create hooks
+### 9. Post-create hooks
 
 **Problem:** After creating worktrees, users manually run setup commands
 (`npm install`, `make setup`, copy `.env`, etc.) in every repo.
@@ -174,7 +195,7 @@ are reported without aborting the workspace creation.
 
 ---
 
-### 9. space sync
+### 10. space sync
 
 **Problem:** After working in a multi-repo workspace, repos can drift -- different
 branches, unpushed commits, unfetched changes.
@@ -199,7 +220,7 @@ all repos in a workspace.
 
 ## Tier 4 -- Power Features
 
-### 10. space diff
+### 11. space diff
 
 **Problem:** Before creating PRs for a multi-repo feature, there's no way to see the
 total change footprint across all repos at once.
@@ -219,7 +240,7 @@ total change footprint across all repos at once.
 
 ---
 
-### 11. Stale worktree cleanup
+### 12. Stale worktree cleanup
 
 **Problem:** Worktrees accumulate as features finish. Branches get merged or deleted
 upstream, but the local worktrees remain.
@@ -241,7 +262,7 @@ CLI and TUI.
 
 ---
 
-### 12. Bash and fish completions
+### 13. Bash and fish completions
 
 **Problem:** Only zsh has completion support. Bash and fish users get nothing.
 

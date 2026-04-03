@@ -70,3 +70,9 @@ pub fn unstaged() -> Style {
 pub fn file_path() -> Style {
     Style::default().fg(DIM_TEXT)
 }
+pub fn additions() -> Style {
+    Style::default().fg(STAGED_GREEN)
+}
+pub fn deletions() -> Style {
+    Style::default().fg(ERROR)
+}
