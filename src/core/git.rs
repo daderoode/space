@@ -295,9 +295,18 @@ fn file_diff_vs_base(repo: &Repository, repo_path: &Path) -> Result<Vec<FileEntr
         .or_else(|_| repo.refname_to_id("refs/heads/master"))
         .or_else(|_| repo.refname_to_id("refs/remotes/origin/main"))
         .or_else(|_| repo.refname_to_id("refs/remotes/origin/master"))
+        .or_else(|_| {
+            // Follow origin/HEAD symbolic ref -- covers non-main/master defaults
+            // such as trunk, develop, etc.
+            repo.find_reference("refs/remotes/origin/HEAD")
+                .ok()
+                .and_then(|r| r.resolve().ok())
+                .and_then(|r| r.target())
+                .ok_or_else(|| git2::Error::from_str("origin/HEAD not found"))
+        })
         .with_context(|| {
             format!(
-                "could not find base branch (tried main/master/origin/main/origin/master) in {}",
+                "could not find base branch (tried main/master/origin/main/origin/master/origin/HEAD) in {}",
                 repo_path.display()
             )
         })?;

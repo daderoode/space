@@ -211,6 +211,15 @@ impl App {
         self.refresh_file_diff_cache();
     }
 
+    /// Reset all repo-pane state that is keyed to the current workspace.
+    /// Must be called whenever `selected_ws` changes so stale rows/cursor
+    /// positions from the previous workspace are never visible.
+    pub fn reset_repo_pane_state(&mut self) {
+        self.cursor_row = 0;
+        self.expanded_repos.clear();
+        self.repo_file_cache.clear();
+    }
+
     /// Fetch file diffs for all repos in the selected workspace and populate
     /// `repo_file_cache`. Called on workspace load/switch so the `+/-` column
     /// shows file line totals even on collapsed rows.
@@ -266,6 +275,7 @@ impl App {
             if let Ok(ws) = crate::core::workspace::list_workspaces(&self.config.workspaces.dir) {
                 self.workspaces = ws;
                 self.selected_ws = 0;
+                self.reset_repo_pane_state();
                 self.load_selected_workspace_detail();
             }
         }
@@ -379,6 +389,7 @@ impl App {
                 {
                     self.selected_ws = idx;
                 }
+                self.reset_repo_pane_state();
                 self.load_selected_workspace_detail();
             }
             let verb = if params.is_new {
@@ -418,6 +429,7 @@ impl App {
                             self.workspaces = ws;
                             self.selected_ws = 0;
                         }
+                        self.reset_repo_pane_state();
                         self.load_selected_workspace_detail();
                         self.screen = Screen::Dashboard;
                         self.set_status(format!("Deleted workspace '{}'", name));
@@ -570,9 +582,8 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             if app.selected_ws > 0 {
                 app.selected_ws -= 1;
                 app.selected_repo = 0;
-                app.cursor_row = 0;
-                app.expanded_repos.clear();
-                app.load_selected_workspace_detail(); // also calls refresh_file_diff_cache
+                app.reset_repo_pane_state();
+                app.load_selected_workspace_detail();
             }
             None
         }
@@ -580,9 +591,8 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             if app.selected_ws + 1 < app.workspaces.len() {
                 app.selected_ws += 1;
                 app.selected_repo = 0;
-                app.cursor_row = 0;
-                app.expanded_repos.clear();
-                app.load_selected_workspace_detail(); // also calls refresh_file_diff_cache
+                app.reset_repo_pane_state();
+                app.load_selected_workspace_detail();
             }
             None
         }

@@ -233,8 +233,8 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
                 Row::new(vec![
                     Cell::from(Span::styled(path_col, theme::file_path())),
                     Cell::from(""),
-                    diff_cell(entry.insertions, entry.deletions),
-                    Cell::from(staged_badge),
+                    Cell::from(staged_badge), // col 3 = STATUS header
+                    diff_cell(entry.insertions, entry.deletions), // col 4 = +/- header
                 ])
             }
         })
