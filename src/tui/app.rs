@@ -1,8 +1,10 @@
 use crate::core::{
     config::SpaceConfig,
+    git::{DiffTarget, FileEntry},
     workspace::{self, Workspace},
 };
 use anyhow::Result;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -81,6 +83,23 @@ pub enum Message {
     StartSearch,
     StartConfig,
     RefreshRepos,
+    ToggleRepoExpand,
+    CollapseAllRepos,
+    ToggleDiffTarget,
+}
+
+/// A row in the flattened repo table (repo header or file entry).
+#[allow(dead_code)] // fields consumed by renderer (Task 5) and tests
+pub enum RepoRow<'a> {
+    Repo {
+        index: usize,
+        repo: &'a crate::core::workspace::WorkspaceRepo,
+        expanded: bool,
+    },
+    File {
+        repo_index: usize,
+        entry: &'a FileEntry,
+    },
 }
 
 pub struct App {
@@ -89,6 +108,10 @@ pub struct App {
     pub repos_cache: Vec<PathBuf>,
     pub selected_ws: usize,
     pub selected_repo: usize,
+    pub expanded_repos: HashSet<usize>,
+    pub repo_file_cache: HashMap<usize, Vec<FileEntry>>,
+    pub cursor_row: usize,
+    pub diff_target: DiffTarget,
     pub focus: Pane,
     pub screen: Screen,
     pub should_quit: bool,
@@ -116,6 +139,10 @@ impl App {
             repos_cache,
             selected_ws: 0,
             selected_repo: 0,
+            expanded_repos: HashSet::new(),
+            repo_file_cache: HashMap::new(),
+            cursor_row: 0,
+            diff_target: DiffTarget::Base,
             focus: Pane::Left,
             screen: Screen::Dashboard,
             should_quit: false,
@@ -131,6 +158,43 @@ impl App {
         self.workspaces.get(self.selected_ws)
     }
 
+    /// Build the flat list of rows for the repo table.
+    pub fn flattened_rows(&self) -> Vec<RepoRow<'_>> {
+        let repos = match self.selected_workspace() {
+            Some(ws) => &ws.repos,
+            None => return vec![],
+        };
+        let mut rows = Vec::new();
+        for (i, repo) in repos.iter().enumerate() {
+            let expanded = self.expanded_repos.contains(&i);
+            rows.push(RepoRow::Repo {
+                index: i,
+                repo,
+                expanded,
+            });
+            if expanded {
+                if let Some(entries) = self.repo_file_cache.get(&i) {
+                    for entry in entries {
+                        rows.push(RepoRow::File {
+                            repo_index: i,
+                            entry,
+                        });
+                    }
+                }
+            }
+        }
+        rows
+    }
+
+    /// Return the repo index the cursor is on (whether on a Repo or File row).
+    pub fn repo_index_for_cursor(&self) -> Option<usize> {
+        match self.flattened_rows().get(self.cursor_row) {
+            Some(RepoRow::Repo { index, .. }) => Some(*index),
+            Some(RepoRow::File { repo_index, .. }) => Some(*repo_index),
+            None => None,
+        }
+    }
+
     pub fn load_selected_workspace_detail(&mut self) {
         if let Some(ws) = self.workspaces.get(self.selected_ws) {
             let name = ws.name.clone();
@@ -143,6 +207,48 @@ impl App {
                     self.set_status(format!("Could not load '{}' detail", name));
                 }
             }
+        }
+        self.refresh_file_diff_cache();
+    }
+
+    /// Reset all repo-pane state that is keyed to the current workspace.
+    /// Must be called whenever `selected_ws` changes so stale rows/cursor
+    /// positions from the previous workspace are never visible.
+    pub fn reset_repo_pane_state(&mut self) {
+        self.cursor_row = 0;
+        self.expanded_repos.clear();
+        self.repo_file_cache.clear();
+    }
+
+    /// Fetch file diffs for all repos in the selected workspace and populate
+    /// `repo_file_cache`. Called on workspace load/switch so the `+/-` column
+    /// shows file line totals even on collapsed rows.
+    pub fn refresh_file_diff_cache(&mut self) {
+        self.repo_file_cache.clear();
+        let repo_paths: Vec<(usize, std::path::PathBuf)> = self
+            .selected_workspace()
+            .map(|ws| {
+                ws.repos
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| (i, r.path.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut failures = 0usize;
+        for (idx, path) in repo_paths {
+            match crate::core::git::file_diff(&path, &self.diff_target) {
+                Ok(entries) => {
+                    self.repo_file_cache.insert(idx, entries);
+                }
+                Err(_) => {
+                    failures += 1;
+                }
+            }
+        }
+        if failures > 0 {
+            self.set_status(format!("Diff failed for {} repo(s)", failures));
         }
     }
 
@@ -178,6 +284,7 @@ impl App {
             if let Ok(ws) = crate::core::workspace::list_workspaces(&self.config.workspaces.dir) {
                 self.workspaces = ws;
                 self.selected_ws = 0;
+                self.reset_repo_pane_state();
                 self.load_selected_workspace_detail();
             }
         }
@@ -291,6 +398,7 @@ impl App {
                 {
                     self.selected_ws = idx;
                 }
+                self.reset_repo_pane_state();
                 self.load_selected_workspace_detail();
             }
             let verb = if params.is_new {
@@ -330,6 +438,7 @@ impl App {
                             self.workspaces = ws;
                             self.selected_ws = 0;
                         }
+                        self.reset_repo_pane_state();
                         self.load_selected_workspace_detail();
                         self.screen = Screen::Dashboard;
                         self.set_status(format!("Deleted workspace '{}'", name));
@@ -400,14 +509,19 @@ impl App {
                 drop(ctx);
                 // Dashboard key-to-message mapping
                 let msg: Option<Message> = match (key.code, key.modifiers) {
-                    (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => Some(Message::Quit),
+                    (KeyCode::Char('q'), _) => Some(Message::Quit),
                     (KeyCode::Tab, _) => Some(Message::FocusNext),
-                    (KeyCode::Enter, _) => Some(Message::GoToWorkspace),
+                    // Enter: context-sensitive
+                    (KeyCode::Enter, _) => match self.focus {
+                        Pane::Left => Some(Message::GoToWorkspace),
+                        Pane::Right => Some(Message::ToggleRepoExpand),
+                    },
                     (KeyCode::Char('g'), _) => Some(Message::StartGo),
                     (KeyCode::Char('c'), _) => Some(Message::StartCreate),
                     (KeyCode::Char('a'), _) => Some(Message::StartAdd),
                     (KeyCode::Char('d'), _) => Some(Message::StartDelete),
                     (KeyCode::Char('r'), _) => Some(Message::RefreshRepos),
+                    (KeyCode::Char('T'), _) => Some(Message::ToggleDiffTarget),
                     (KeyCode::Char('/'), _) => Some(Message::StartSearch),
                     (KeyCode::Char('S'), _) => Some(Message::StartConfig),
                     (KeyCode::Up, _) | (KeyCode::Char('k'), _) => match self.focus {
@@ -417,6 +531,32 @@ impl App {
                     (KeyCode::Down, _) | (KeyCode::Char('j'), _) => match self.focus {
                         Pane::Left => Some(Message::SelectWorkspaceDown),
                         Pane::Right => Some(Message::SelectRepoDown),
+                    },
+                    // Right arrow: context-sensitive
+                    (KeyCode::Right, _) => match self.focus {
+                        Pane::Left => Some(Message::FocusNext),
+                        Pane::Right => Some(Message::ToggleRepoExpand),
+                    },
+                    // Left arrow and Esc: collapse-first on right pane
+                    (KeyCode::Left, _) => match self.focus {
+                        Pane::Left => None,
+                        Pane::Right => {
+                            if self.expanded_repos.is_empty() {
+                                Some(Message::FocusNext)
+                            } else {
+                                Some(Message::CollapseAllRepos)
+                            }
+                        }
+                    },
+                    (KeyCode::Esc, _) => match self.focus {
+                        Pane::Left => Some(Message::Quit),
+                        Pane::Right => {
+                            if self.expanded_repos.is_empty() {
+                                Some(Message::FocusNext)
+                            } else {
+                                Some(Message::CollapseAllRepos)
+                            }
+                        }
                     },
                     _ => None,
                 };
@@ -451,6 +591,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             if app.selected_ws > 0 {
                 app.selected_ws -= 1;
                 app.selected_repo = 0;
+                app.reset_repo_pane_state();
                 app.load_selected_workspace_detail();
             }
             None
@@ -459,23 +600,21 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             if app.selected_ws + 1 < app.workspaces.len() {
                 app.selected_ws += 1;
                 app.selected_repo = 0;
+                app.reset_repo_pane_state();
                 app.load_selected_workspace_detail();
             }
             None
         }
         Message::SelectRepoUp => {
-            if app.selected_repo > 0 {
-                app.selected_repo -= 1;
+            if app.cursor_row > 0 {
+                app.cursor_row -= 1;
             }
             None
         }
         Message::SelectRepoDown => {
-            let max = app
-                .selected_workspace()
-                .map(|ws| ws.repos.len().saturating_sub(1))
-                .unwrap_or(0);
-            if app.selected_repo < max {
-                app.selected_repo += 1;
+            let max = app.flattened_rows().len().saturating_sub(1);
+            if app.cursor_row < max {
+                app.cursor_row += 1;
             }
             None
         }
@@ -485,6 +624,9 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             let repos = crate::core::repo::find_repos_in(&roots, depth);
             let _ = crate::core::repo::save_cache(&SpaceConfig::cache_path(), &repos);
             app.repos_cache = repos;
+            app.cursor_row = 0;
+            app.expanded_repos.clear();
+            app.refresh_file_diff_cache();
             app.set_status(format!("Refreshed: {} repos found", app.repos_cache.len()));
             None
         }
@@ -546,6 +688,67 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
         Message::StartConfig => {
             let state = crate::tui::screens::config::ConfigState::from_config(&app.config);
             app.screen = Screen::ConfigEditor(state);
+            None
+        }
+        Message::ToggleRepoExpand => {
+            if let Some(idx) = app.repo_index_for_cursor() {
+                if app.expanded_repos.contains(&idx) {
+                    // Collapsing: remove from expanded, snap cursor to the repo row
+                    app.expanded_repos.remove(&idx);
+                    let snap_pos = app
+                        .flattened_rows()
+                        .iter()
+                        .position(|r| matches!(r, crate::tui::app::RepoRow::Repo { index, .. } if *index == idx))
+                        .unwrap_or(0);
+                    app.cursor_row = snap_pos;
+                } else {
+                    // Expanding: fetch diffs and cache
+                    if let Some(repo_path) = app
+                        .selected_workspace()
+                        .and_then(|ws| ws.repos.get(idx))
+                        .map(|r| r.path.clone())
+                    {
+                        match crate::core::git::file_diff(&repo_path, &app.diff_target) {
+                            Ok(entries) => {
+                                app.repo_file_cache.insert(idx, entries);
+                            }
+                            Err(err) => {
+                                app.set_status(format!("Diff failed: {}", err));
+                                return None;
+                            }
+                        }
+                    }
+                    app.expanded_repos.insert(idx);
+                }
+            }
+            None
+        }
+        Message::CollapseAllRepos => {
+            let current_repo_idx = app.repo_index_for_cursor().unwrap_or(0);
+            app.expanded_repos.clear();
+            // Snap cursor to the repo row it was in
+            let repos_len = app
+                .selected_workspace()
+                .map(|ws| ws.repos.len())
+                .unwrap_or(0);
+            app.cursor_row = current_repo_idx.min(repos_len.saturating_sub(1));
+            None
+        }
+        Message::ToggleDiffTarget => {
+            app.diff_target = match app.diff_target {
+                DiffTarget::Head => DiffTarget::Base,
+                DiffTarget::Base => DiffTarget::Head,
+            };
+            // Re-fetch diffs for ALL repos (not just expanded) so +/- totals
+            // on collapsed rows also update immediately.
+            app.refresh_file_diff_cache();
+            let max_row = app.flattened_rows().len().saturating_sub(1);
+            app.cursor_row = app.cursor_row.min(max_row);
+            let label = match app.diff_target {
+                DiffTarget::Head => "HEAD (uncommitted changes)",
+                DiffTarget::Base => "base branch (total divergence)",
+            };
+            app.set_status(format!("Diff target: {}", label));
             None
         }
     }
@@ -640,6 +843,10 @@ mod tests {
             repos_cache: vec![],
             selected_ws: 0,
             selected_repo: 0,
+            expanded_repos: HashSet::new(),
+            repo_file_cache: HashMap::new(),
+            cursor_row: 0,
+            diff_target: DiffTarget::Base,
             focus: Pane::Left,
             screen: Screen::Dashboard,
             should_quit: false,

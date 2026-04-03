@@ -5,11 +5,35 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Row, Table, TableState,
-        Wrap,
+        Block, BorderType, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table,
+        TableState, Wrap,
     },
     Frame,
 };
+
+/// Build a table cell showing "+N -M" with green additions and red deletions.
+fn diff_cell(insertions: usize, deletions: usize) -> Cell<'static> {
+    if insertions == 0 && deletions == 0 {
+        return Cell::from("");
+    }
+    Cell::from(Line::from(vec![
+        Span::styled(format!("+{}", insertions), theme::additions()),
+        Span::raw(" "),
+        Span::styled(format!("-{}", deletions), theme::deletions()),
+    ]))
+}
+
+fn status_char(status: &crate::core::git::FileStatus) -> &'static str {
+    use crate::core::git::FileStatus;
+    match status {
+        FileStatus::Modified => "M",
+        FileStatus::Added => "A",
+        FileStatus::Deleted => "D",
+        FileStatus::Renamed => "R",
+        FileStatus::Copied => "C",
+        FileStatus::Untracked => "?",
+    }
+}
 
 pub fn view(app: &App, frame: &mut Frame) {
     match &app.screen {
@@ -118,6 +142,8 @@ fn render_workspace_list(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
+    use crate::tui::app::RepoRow;
+
     let focused = app.focus == Pane::Right;
     let border_style = if focused {
         theme::border_focused()
@@ -129,47 +155,89 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
         .selected_workspace()
         .map(|ws| ws.name.as_str())
         .unwrap_or("");
+    let target_label = match app.diff_target {
+        crate::core::git::DiffTarget::Head => "HEAD",
+        crate::core::git::DiffTarget::Base => "base",
+    };
+    let title = format!(" {} (vs {}) ", ws_name, target_label);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
-        .title(format!(" {} ", ws_name));
+        .title(title);
 
-    let repos = app
-        .selected_workspace()
-        .map(|ws| ws.repos.as_slice())
-        .unwrap_or(&[]);
+    let rows_data = app.flattened_rows();
 
-    if repos.is_empty() {
+    if rows_data.is_empty() {
         frame.render_widget(Paragraph::new("  No repos").block(block), area);
         return;
     }
 
-    let rows: Vec<Row> = repos
+    let rows: Vec<Row> = rows_data
         .iter()
-        .map(|r| {
-            let status_style = if r.status.modified + r.status.staged > 0 {
-                theme::warn()
-            } else {
-                theme::status_clean()
-            };
-            let status_str = if r.status.modified + r.status.staged > 0 {
-                format!("{}m {}s", r.status.modified, r.status.staged)
-            } else {
-                "clean".to_string()
-            };
-            let ab = if r.ahead + r.behind > 0 {
-                format!("+{} -{}", r.ahead, r.behind)
-            } else {
-                String::new()
-            };
-            Row::new(vec![
-                ratatui::text::Span::raw(r.name.clone()),
-                ratatui::text::Span::styled(r.branch.clone(), theme::branch()),
-                ratatui::text::Span::styled(status_str, status_style),
-                ratatui::text::Span::styled(ab, theme::warn()),
-            ])
+        .map(|row| match row {
+            RepoRow::Repo {
+                index,
+                repo: r,
+                expanded,
+            } => {
+                let indicator = if *expanded { "▼ " } else { "▶ " };
+                let name = format!("{}{}", indicator, r.name);
+                let dirty = r.status.modified + r.status.staged + r.status.untracked > 0;
+                let status_style = if dirty {
+                    theme::warn()
+                } else {
+                    theme::status_clean()
+                };
+                let status_str = if dirty {
+                    format!(
+                        "{}m {}s {}u",
+                        r.status.modified, r.status.staged, r.status.untracked
+                    )
+                } else {
+                    "clean".to_string()
+                };
+                // +/- column: file line totals from cache. Show zeros when the
+                // cache isn't populated yet rather than falling back to commit
+                // counts (ahead/behind), which would mix different metrics.
+                let (ins, del) = app
+                    .repo_file_cache
+                    .get(index)
+                    .map(|entries| {
+                        entries.iter().fold((0usize, 0usize), |(i, d), e| {
+                            (i + e.insertions, d + e.deletions)
+                        })
+                    })
+                    .unwrap_or((0, 0));
+                Row::new(vec![
+                    Cell::from(Span::raw(name)),
+                    Cell::from(Span::styled(r.branch.clone(), theme::branch())),
+                    Cell::from(Span::styled(status_str, status_style)),
+                    diff_cell(ins, del),
+                ])
+            }
+            RepoRow::File { entry, .. } => {
+                // In Base mode all entries have staged=false (committed divergence has
+                // no staging context), so the badge would always show "[unstaged]" which
+                // is misleading. Hide it entirely in Base mode.
+                let staged_badge = match app.diff_target {
+                    crate::core::git::DiffTarget::Head if entry.staged => {
+                        ratatui::text::Span::styled("[staged]", theme::staged())
+                    }
+                    crate::core::git::DiffTarget::Head => {
+                        ratatui::text::Span::styled("[unstaged]", theme::unstaged())
+                    }
+                    crate::core::git::DiffTarget::Base => ratatui::text::Span::raw(""),
+                };
+                let path_col = format!("  {} {}", status_char(&entry.status), entry.path);
+                Row::new(vec![
+                    Cell::from(Span::styled(path_col, theme::file_path())),
+                    Cell::from(""),
+                    Cell::from(staged_badge), // col 3 = STATUS header
+                    diff_cell(entry.insertions, entry.deletions), // col 4 = +/- header
+                ])
+            }
         })
         .collect();
 
@@ -191,8 +259,8 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
     .row_highlight_style(theme::highlight_row());
 
     let mut state = TableState::default();
-    if !repos.is_empty() && focused {
-        state.select(Some(app.selected_repo));
+    if !rows_data.is_empty() && focused {
+        state.select(Some(app.cursor_row));
     }
     frame.render_stateful_widget(table, area, &mut state);
 }
@@ -207,31 +275,56 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
     let key = |k: &'static str| Span::styled(k, theme::text());
     let act = |a: &'static str| Span::styled(a, theme::muted());
 
-    let bar = Line::from(vec![
-        key("enter"),
-        act(" go"),
-        sep(),
-        key("c"),
-        act(" create"),
-        sep(),
-        key("a"),
-        act(" add"),
-        sep(),
-        key("d"),
-        act(" delete"),
-        sep(),
-        key("r"),
-        act(" refresh"),
-        sep(),
-        key("/"),
-        act(" search"),
-        sep(),
-        key("S"),
-        act(" config"),
-        sep(),
-        key("q"),
-        act(" quit"),
-    ]);
+    let bar = match app.focus {
+        Pane::Left => Line::from(vec![
+            key("enter"),
+            act(" go"),
+            sep(),
+            key("→"),
+            act(" repos"),
+            sep(),
+            key("c"),
+            act(" create"),
+            sep(),
+            key("a"),
+            act(" add"),
+            sep(),
+            key("d"),
+            act(" delete"),
+            sep(),
+            key("r"),
+            act(" refresh"),
+            sep(),
+            key("/"),
+            act(" search"),
+            sep(),
+            key("S"),
+            act(" config"),
+            sep(),
+            key("q"),
+            act(" quit"),
+        ]),
+        Pane::Right => {
+            // Show what T will switch TO so it's self-explanatory
+            let toggle_label = match app.diff_target {
+                crate::core::git::DiffTarget::Base => " switch to HEAD",
+                crate::core::git::DiffTarget::Head => " switch to base",
+            };
+            Line::from(vec![
+                key("enter"),
+                act(" expand"),
+                sep(),
+                key("←/esc"),
+                act(" back"),
+                sep(),
+                key("T"),
+                act(toggle_label),
+                sep(),
+                key("q"),
+                act(" quit"),
+            ])
+        }
+    };
     frame.render_widget(Paragraph::new(bar), area);
 }
 

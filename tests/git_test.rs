@@ -1,5 +1,6 @@
 mod common;
 
+use space::core::git::{file_diff, DiffTarget, FileStatus};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -26,12 +27,52 @@ fn clean_repo_status_is_zero() {
 }
 
 #[test]
-fn dirty_repo_status_counts_correctly() {
+fn file_diff_base_mode_shows_committed_divergence() {
     let tmp = TempDir::new().unwrap();
     common::init_repo(tmp.path());
-    std::fs::write(tmp.path().join("new_file.txt"), "hello").unwrap();
-    let status = space::core::git::repo_status(tmp.path()).unwrap();
-    assert_eq!(status.untracked, 1);
+    std::fs::write(tmp.path().join("base.txt"), "base content").unwrap();
+    Command::new("git")
+        .args(["add", "base.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "base"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["checkout", "-b", "feature"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    std::fs::write(tmp.path().join("feature.txt"), "new feature\nline2").unwrap();
+    Command::new("git")
+        .args(["add", "feature.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "feature"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+
+    let entries = file_diff(tmp.path(), &DiffTarget::Base).unwrap();
+
+    let feature_entry = entries
+        .iter()
+        .find(|e| e.path == "feature.txt")
+        .expect("base mode should show committed divergence from base branch");
+    assert!(
+        feature_entry.insertions > 0,
+        "feature.txt should have insertions"
+    );
+
+    assert!(
+        !entries.iter().any(|e| e.path == "base.txt"),
+        "base.txt exists on both branches and should not appear in divergence diff"
+    );
 }
 
 #[test]
@@ -293,4 +334,119 @@ fn repo_status_counts_deletions() {
 
     let status = space::core::git::repo_status(tmp.path()).unwrap();
     assert_eq!(status.modified, 1, "deleted file should count as modified");
+}
+
+#[test]
+fn file_diff_clean_repo_returns_empty() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    let result = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    assert!(result.is_empty(), "clean repo should have no diffs");
+}
+
+#[test]
+fn file_diff_detects_unstaged_modification() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    std::fs::write(tmp.path().join("foo.txt"), "v1").unwrap();
+    Command::new("git")
+        .args(["add", "foo.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "add foo"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    std::fs::write(tmp.path().join("foo.txt"), "v1\nv2\nv3").unwrap();
+
+    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path, "foo.txt");
+    assert_eq!(entries[0].status, FileStatus::Modified);
+    assert!(
+        !entries[0].staged,
+        "unstaged change should have staged=false"
+    );
+    assert!(entries[0].insertions > 0 || entries[0].deletions > 0);
+}
+
+#[test]
+fn file_diff_detects_staged_file() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    std::fs::write(tmp.path().join("new.txt"), "hello\nworld").unwrap();
+    Command::new("git")
+        .args(["add", "new.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+
+    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let staged_entry = entries.iter().find(|e| e.path == "new.txt").unwrap();
+    assert!(
+        staged_entry.staged,
+        "staged new file should have staged=true"
+    );
+    assert_eq!(staged_entry.status, FileStatus::Added);
+    assert_eq!(staged_entry.insertions, 2);
+    assert_eq!(staged_entry.deletions, 0);
+}
+
+#[test]
+fn file_diff_detects_staged_and_unstaged_separately() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    std::fs::write(tmp.path().join("a.txt"), "original").unwrap();
+    Command::new("git")
+        .args(["add", "a.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "add a"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "staged change").unwrap();
+    Command::new("git")
+        .args(["add", "a.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    std::fs::write(tmp.path().join("b.txt"), "unstaged").unwrap();
+
+    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let a_entry = entries.iter().find(|e| e.path == "a.txt").unwrap();
+    assert!(a_entry.staged);
+    let b_entry = entries.iter().find(|e| e.path == "b.txt").unwrap();
+    assert!(!b_entry.staged);
+    assert!(matches!(
+        b_entry.status,
+        FileStatus::Added | FileStatus::Untracked
+    ));
+}
+
+#[test]
+fn file_diff_detects_deleted_file() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    std::fs::write(tmp.path().join("gone.txt"), "bye").unwrap();
+    Command::new("git")
+        .args(["add", "gone.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "add gone"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    std::fs::remove_file(tmp.path().join("gone.txt")).unwrap();
+
+    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entry = entries.iter().find(|e| e.path == "gone.txt").unwrap();
+    assert_eq!(entry.status, FileStatus::Deleted);
+    assert!(!entry.staged);
 }

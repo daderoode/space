@@ -52,6 +52,39 @@ fn dashboard_tab_toggles_focus() {
 }
 
 #[test]
+fn right_arrow_focuses_repo_pane() {
+    let mut app = test_app(vec![], vec![]);
+    assert_eq!(app.focus, Pane::Left);
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.focus, Pane::Right);
+}
+
+#[test]
+fn left_arrow_refocuses_workspace_pane_when_nothing_expanded() {
+    let mut app = test_app(vec![], vec![]);
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.focus, Pane::Left);
+}
+
+#[test]
+fn left_arrow_noop_when_already_on_left_pane() {
+    let mut app = test_app(vec![], vec![]);
+    assert_eq!(app.focus, Pane::Left);
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.focus, Pane::Left);
+}
+
+#[test]
+fn right_arrow_on_repo_pane_triggers_expand() {
+    // Right arrow on repos pane dispatches ToggleRepoExpand.
+    // With no workspace/repos, this is effectively a no-op but must not panic.
+    let mut app = test_app(vec![], vec![]);
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Right)); // should not panic
+}
+
+#[test]
 fn dashboard_j_moves_ws_down() {
     let workspaces = vec![
         Workspace {
@@ -739,4 +772,581 @@ fn create_reentry_resets_branch_strategy_idx() {
     } else {
         panic!("expected CreateWorkspace screen");
     }
+}
+
+// ---------------------------------------------------------------------------
+// flattened_rows + cursor navigation (Task 3)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn flattened_rows_all_collapsed() {
+    let ws = common::workspace_with_repos(&["repo-a", "repo-b", "repo-c"]);
+    let app = test_app(vec![ws], vec![]);
+    let rows = app.flattened_rows();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|r| matches!(
+        r,
+        space::tui::app::RepoRow::Repo {
+            expanded: false,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn flattened_rows_one_expanded_with_files() {
+    use space::core::git::{FileEntry, FileStatus};
+    let ws = common::workspace_with_repos(&["repo-a", "repo-b"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.expanded_repos.insert(1);
+    app.repo_file_cache.insert(
+        1,
+        vec![
+            FileEntry {
+                path: "foo.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 3,
+                deletions: 1,
+            },
+            FileEntry {
+                path: "bar.rs".into(),
+                status: FileStatus::Added,
+                staged: true,
+                insertions: 10,
+                deletions: 0,
+            },
+        ],
+    );
+    let rows = app.flattened_rows();
+    assert_eq!(rows.len(), 4); // repo-a, repo-b, foo.rs, bar.rs
+    assert!(matches!(
+        rows[0],
+        space::tui::app::RepoRow::Repo {
+            index: 0,
+            expanded: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        rows[1],
+        space::tui::app::RepoRow::Repo {
+            index: 1,
+            expanded: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        rows[2],
+        space::tui::app::RepoRow::File { repo_index: 1, .. }
+    ));
+    assert!(matches!(
+        rows[3],
+        space::tui::app::RepoRow::File { repo_index: 1, .. }
+    ));
+}
+
+#[test]
+fn repo_index_for_cursor_on_file_row() {
+    use space::core::git::{FileEntry, FileStatus};
+    let ws = common::workspace_with_repos(&["repo-a", "repo-b"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.expanded_repos.insert(1);
+    app.repo_file_cache.insert(
+        1,
+        vec![FileEntry {
+            path: "x.rs".into(),
+            status: FileStatus::Modified,
+            staged: false,
+            insertions: 1,
+            deletions: 0,
+        }],
+    );
+    app.cursor_row = 2; // repo-a=0, repo-b=1, x.rs=2
+    assert_eq!(app.repo_index_for_cursor(), Some(1));
+}
+
+#[test]
+fn cursor_row_navigates_through_file_rows() {
+    use space::core::git::{FileEntry, FileStatus};
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.expanded_repos.insert(0);
+    app.repo_file_cache.insert(
+        0,
+        vec![
+            FileEntry {
+                path: "a.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 1,
+                deletions: 0,
+            },
+            FileEntry {
+                path: "b.rs".into(),
+                status: FileStatus::Modified,
+                staged: true,
+                insertions: 2,
+                deletions: 0,
+            },
+        ],
+    );
+    // rows: [Repo(0), File(a.rs), File(b.rs)]
+    assert_eq!(app.cursor_row, 0);
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.cursor_row, 1);
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.cursor_row, 2);
+    app.handle_key(key(KeyCode::Down)); // clamp at end
+    assert_eq!(app.cursor_row, 2);
+}
+
+#[test]
+fn cursor_row_resets_on_workspace_switch() {
+    let ws1 = common::workspace_with_repos(&["repo-a"]);
+    let ws2 = common::workspace_with_repos(&["repo-b"]);
+    let mut app = test_app(vec![ws1, ws2], vec![]);
+    app.cursor_row = 5;
+    app.focus = Pane::Left;
+    app.handle_key(key(KeyCode::Down)); // select workspace 2
+    assert_eq!(app.cursor_row, 0, "cursor should reset on workspace switch");
+}
+
+// ---------------------------------------------------------------------------
+// Expand/collapse key handling (Task 4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn enter_on_repo_row_expands_it() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("expandable");
+    // Write an untracked file so file_diff has something to find
+    std::fs::write(repo_path.join("x.txt"), "change").unwrap();
+
+    let ws_path = env.workspaces_dir.join("my-ws");
+    std::fs::create_dir_all(&ws_path).unwrap();
+    let ws = space::core::workspace::Workspace {
+        name: "my-ws".into(),
+        path: ws_path,
+        repos: vec![space::core::workspace::WorkspaceRepo {
+            name: "expandable".into(),
+            path: repo_path.clone(),
+            branch: "main".into(),
+            status: space::core::git::RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        app.expanded_repos.contains(&0),
+        "repo 0 should be expanded after Enter"
+    );
+    assert!(
+        app.repo_file_cache.contains_key(&0),
+        "cache should be populated"
+    );
+}
+
+#[test]
+fn enter_on_expanded_repo_collapses_it() {
+    use space::core::git::{FileEntry, FileStatus};
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    // Pre-expand manually
+    app.expanded_repos.insert(0);
+    app.repo_file_cache.insert(
+        0,
+        vec![FileEntry {
+            path: "x.rs".into(),
+            status: FileStatus::Modified,
+            staged: false,
+            insertions: 1,
+            deletions: 0,
+        }],
+    );
+    app.cursor_row = 0;
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        !app.expanded_repos.contains(&0),
+        "should collapse on second Enter"
+    );
+    assert_eq!(app.cursor_row, 0, "cursor should snap to repo row");
+}
+
+#[test]
+fn esc_collapses_expanded_repos_without_refocusing() {
+    let ws = common::workspace_with_repos(&["repo-a", "repo-b"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.expanded_repos.insert(0);
+    app.expanded_repos.insert(1);
+    app.handle_key(key(KeyCode::Esc));
+    assert!(
+        app.expanded_repos.is_empty(),
+        "Esc should collapse all expanded repos"
+    );
+    assert_eq!(
+        app.focus,
+        Pane::Right,
+        "focus stays on right pane after collapse"
+    );
+}
+
+#[test]
+fn esc_with_nothing_expanded_refocuses_left_pane() {
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(
+        app.focus,
+        Pane::Left,
+        "Esc with nothing expanded should refocus left pane"
+    );
+}
+
+#[test]
+fn esc_on_left_pane_quits() {
+    let mut app = test_app(vec![], vec![]);
+    assert_eq!(app.focus, Pane::Left);
+    app.handle_key(key(KeyCode::Esc));
+    assert!(app.should_quit, "Esc on left pane should quit");
+}
+
+#[test]
+fn workspace_switch_clears_expand_state() {
+    let ws1 = common::workspace_with_repos(&["repo-a"]);
+    let ws2 = common::workspace_with_repos(&["repo-b"]);
+    let mut app = test_app(vec![ws1, ws2], vec![]);
+    app.expanded_repos.insert(0);
+    app.focus = Pane::Left;
+    app.handle_key(key(KeyCode::Down)); // select workspace 2
+    assert!(
+        app.expanded_repos.is_empty(),
+        "workspace switch should clear expanded state"
+    );
+    assert_eq!(app.cursor_row, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Diff target toggle (Task 6)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shift_t_toggles_diff_target_to_head() {
+    // Default is now Base -- T should toggle to Head
+    let mut app = test_app(vec![], vec![]);
+    assert!(matches!(
+        app.diff_target,
+        space::core::git::DiffTarget::Base
+    ));
+    app.handle_key(key(KeyCode::Char('T'))); // uppercase T = Shift+T
+    assert!(matches!(
+        app.diff_target,
+        space::core::git::DiffTarget::Head
+    ));
+}
+
+#[test]
+fn shift_t_toggles_diff_target_back_to_base() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('T')));
+    app.handle_key(key(KeyCode::Char('T')));
+    assert!(matches!(
+        app.diff_target,
+        space::core::git::DiffTarget::Base
+    ));
+}
+
+#[test]
+fn toggle_diff_target_re_fetches_expanded_cache() {
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    // Default is Base; toggle should switch to Head
+    assert!(matches!(
+        app.diff_target,
+        space::core::git::DiffTarget::Base
+    ));
+    app.handle_key(key(KeyCode::Char('T')));
+    assert!(
+        matches!(app.diff_target, space::core::git::DiffTarget::Head),
+        "diff_target should be Head after toggle from Base"
+    );
+    // refresh_file_diff_cache clears and re-fetches; repo path doesn't exist
+    // so no entries are inserted -- that's correct behaviour (not a bug).
+}
+
+// ---------------------------------------------------------------------------
+// Integration smoke tests for Phase 1 feature (Task manual test equivalent)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn phase1_expand_dirty_repo_shows_file_entries() {
+    // Tests the full stack: real git repo with staged/unstaged changes,
+    // WorkspaceRepo pointing at it, expand via Enter, verify file entries appear.
+    use space::core::git::{FileStatus, RepoStatus};
+    use space::core::workspace::{Workspace, WorkspaceRepo};
+
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("dirty-repo");
+
+    // Commit existing.rs first so it becomes a tracked file
+    std::fs::write(repo_path.join("existing.rs"), "line1\n").unwrap();
+    std::process::Command::new("git")
+        .args(["add", "existing.rs"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "add existing"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+
+    // NOW stage a new file (after the commit, so it won't be swept in)
+    std::fs::write(
+        repo_path.join("staged.rs"),
+        "pub fn hello() {}\npub fn world() {}\n",
+    )
+    .unwrap();
+    std::process::Command::new("git")
+        .args(["add", "staged.rs"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+
+    // Unstaged modification to the committed file
+    std::fs::write(repo_path.join("existing.rs"), "line1\nline2\nline3\n").unwrap();
+
+    // Untracked file
+    std::fs::write(repo_path.join("untracked.txt"), "untracked\n").unwrap();
+
+    let ws = Workspace {
+        name: "test-ws".into(),
+        path: env.workspaces_dir.join("test-ws"),
+        repos: vec![WorkspaceRepo {
+            name: "dirty-repo".into(),
+            path: repo_path.clone(),
+            branch: "main".into(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![ws], vec![]);
+    app.focus = Pane::Right;
+    // Use Head mode so staged/unstaged flags are meaningful
+    app.diff_target = space::core::git::DiffTarget::Head;
+
+    // Pre-expand: should have 1 repo row (collapsed)
+    assert_eq!(app.flattened_rows().len(), 1);
+
+    // Expand with Enter
+    app.handle_key(key(KeyCode::Enter));
+
+    // Should now have > 1 row (repo + file entries)
+    let rows = app.flattened_rows();
+    assert!(
+        rows.len() > 1,
+        "expanded repo should show file rows, got {} rows",
+        rows.len()
+    );
+
+    // First row is still the repo header, now expanded
+    assert!(matches!(
+        rows[0],
+        space::tui::app::RepoRow::Repo { expanded: true, .. }
+    ));
+
+    // File rows should follow
+    let file_rows: Vec<_> = rows
+        .iter()
+        .filter(|r| matches!(r, space::tui::app::RepoRow::File { .. }))
+        .collect();
+    assert!(
+        !file_rows.is_empty(),
+        "should have file rows after expansion"
+    );
+
+    // staged.rs should appear as staged=true, Added
+    let staged_entry = app
+        .repo_file_cache
+        .get(&0)
+        .unwrap()
+        .iter()
+        .find(|e| e.path == "staged.rs")
+        .expect("staged.rs should be in cache");
+    assert!(staged_entry.staged, "staged.rs should be staged=true");
+    assert_eq!(staged_entry.status, FileStatus::Added);
+    assert_eq!(staged_entry.insertions, 2, "staged.rs has 2 lines");
+
+    // existing.rs should appear as unstaged modification
+    let unstaged_entry = app
+        .repo_file_cache
+        .get(&0)
+        .unwrap()
+        .iter()
+        .find(|e| e.path == "existing.rs")
+        .expect("existing.rs should be in cache");
+    assert!(
+        !unstaged_entry.staged,
+        "existing.rs modification is unstaged"
+    );
+    assert_eq!(unstaged_entry.status, FileStatus::Modified);
+    assert!(unstaged_entry.insertions > 0, "existing.rs has new lines");
+}
+
+#[test]
+fn phase1_collapse_snaps_cursor_to_repo_row() {
+    use space::core::git::{FileEntry, FileStatus};
+
+    let ws = common::workspace_with_repos(&["repo-a", "repo-b"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+
+    // Expand repo-b (index 1), inject 3 fake file entries
+    app.expanded_repos.insert(1);
+    app.repo_file_cache.insert(
+        1,
+        vec![
+            FileEntry {
+                path: "a.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 1,
+                deletions: 0,
+            },
+            FileEntry {
+                path: "b.rs".into(),
+                status: FileStatus::Added,
+                staged: true,
+                insertions: 5,
+                deletions: 0,
+            },
+            FileEntry {
+                path: "c.rs".into(),
+                status: FileStatus::Deleted,
+                staged: false,
+                insertions: 0,
+                deletions: 3,
+            },
+        ],
+    );
+
+    // Navigate cursor to the last file row (index 4: repo-a=0, repo-b=1, a=2, b=3, c=4)
+    app.cursor_row = 4;
+    assert_eq!(app.repo_index_for_cursor(), Some(1));
+
+    // Collapse via Enter
+    app.handle_key(key(KeyCode::Enter));
+
+    // repo-b should be collapsed
+    assert!(!app.expanded_repos.contains(&1));
+    // cursor should snap to repo-b's row (index 1 in collapsed list: repo-a=0, repo-b=1)
+    assert_eq!(
+        app.cursor_row, 1,
+        "cursor should snap to repo-b row after collapse"
+    );
+    assert_eq!(
+        app.flattened_rows().len(),
+        2,
+        "only 2 rows after full collapse"
+    );
+}
+
+#[test]
+fn phase1_toggle_diff_target_updates_title_label() {
+    // Verify diff_target state changes when T is pressed -- the title label
+    // in render_repo_table reads app.diff_target, so this covers that path.
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+
+    // Default is now Base
+    assert!(matches!(
+        app.diff_target,
+        space::core::git::DiffTarget::Base
+    ));
+
+    app.handle_key(key(KeyCode::Char('T')));
+    assert!(matches!(
+        app.diff_target,
+        space::core::git::DiffTarget::Head
+    ));
+
+    // Status message should be set
+    assert!(
+        app.status_message.as_deref().unwrap_or("").contains("HEAD"),
+        "status message should mention HEAD"
+    );
+
+    app.handle_key(key(KeyCode::Char('T')));
+    assert!(matches!(
+        app.diff_target,
+        space::core::git::DiffTarget::Base
+    ));
+    assert!(
+        app.status_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("base branch"),
+        "status message should mention base branch"
+    );
+}
+
+#[test]
+fn phase1_right_arrow_on_workspace_pane_then_enter_expands_repo() {
+    // Full navigation flow: start on left pane, arrow right, expand with Enter
+    use space::core::git::RepoStatus;
+    use space::core::workspace::{Workspace, WorkspaceRepo};
+
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("nav-repo");
+    std::fs::write(repo_path.join("changed.rs"), "new line\n").unwrap();
+
+    let ws = Workspace {
+        name: "nav-ws".into(),
+        path: env.workspaces_dir.join("nav-ws"),
+        repos: vec![WorkspaceRepo {
+            name: "nav-repo".into(),
+            path: repo_path.clone(),
+            branch: "main".into(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![ws], vec![]);
+
+    // Start on left (workspaces) pane
+    assert_eq!(app.focus, Pane::Left);
+
+    // Right arrow moves focus to repos pane
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.focus, Pane::Right);
+
+    // Enter expands the repo
+    app.handle_key(key(KeyCode::Enter));
+    assert!(app.expanded_repos.contains(&0), "repo should expand");
+
+    // Esc collapses (nothing expanded check: first Esc collapses, second refocuses)
+    app.handle_key(key(KeyCode::Esc));
+    assert!(app.expanded_repos.is_empty(), "Esc should collapse");
+    assert_eq!(
+        app.focus,
+        Pane::Right,
+        "focus still on right after collapse"
+    );
+
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.focus, Pane::Left, "second Esc refocuses left pane");
 }

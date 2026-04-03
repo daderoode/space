@@ -131,6 +131,10 @@ pub fn test_app(workspaces: Vec<Workspace>, repos_cache: Vec<PathBuf>) -> App {
         repos_cache,
         selected_ws: 0,
         selected_repo: 0,
+        expanded_repos: std::collections::HashSet::new(),
+        repo_file_cache: std::collections::HashMap::new(),
+        cursor_row: 0,
+        diff_target: space::core::git::DiffTarget::Base,
         focus: Pane::Left,
         screen: Screen::Dashboard,
         should_quit: false,
@@ -153,6 +157,10 @@ pub fn test_app_with_config(
         repos_cache,
         selected_ws: 0,
         selected_repo: 0,
+        expanded_repos: std::collections::HashSet::new(),
+        repo_file_cache: std::collections::HashMap::new(),
+        cursor_row: 0,
+        diff_target: space::core::git::DiffTarget::Base,
         focus: Pane::Left,
         screen: Screen::Dashboard,
         should_quit: false,
@@ -162,7 +170,34 @@ pub fn test_app_with_config(
     }
 }
 
+/// Build a Workspace with named repos, all pointing at `/tmp/test-ws/<name>`.
+/// Used for testing flattened_rows, cursor navigation, and expand/collapse.
+pub fn workspace_with_repos(names: &[&str]) -> space::core::workspace::Workspace {
+    use space::core::git::RepoStatus;
+    use space::core::workspace::{Workspace, WorkspaceRepo};
+    Workspace {
+        name: "test-ws".into(),
+        path: std::path::PathBuf::from("/tmp/test-ws"),
+        repos: names
+            .iter()
+            .map(|&name| WorkspaceRepo {
+                name: name.into(),
+                path: std::path::PathBuf::from(format!("/tmp/test-ws/{}", name)),
+                branch: "main".into(),
+                status: RepoStatus::default(),
+                ahead: 0,
+                behind: 0,
+            })
+            .collect(),
+    }
+}
+
 /// Helper to construct a KeyEvent with NONE modifiers and Press kind.
 pub fn key(code: ratatui::crossterm::event::KeyCode) -> ratatui::crossterm::event::KeyEvent {
     ratatui::crossterm::event::KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE)
+}
+
+/// Construct a KeyEvent for Shift+<key> (e.g. Shift+T = Char('T')).
+pub fn shift_key(code: ratatui::crossterm::event::KeyCode) -> ratatui::crossterm::event::KeyEvent {
+    ratatui::crossterm::event::KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::SHIFT)
 }

@@ -9,6 +9,34 @@ pub struct RepoStatus {
     pub untracked: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub enum DiffTarget {
+    Head,
+    Base,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub enum FileStatus {
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Copied,
+    Untracked,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct FileEntry {
+    pub path: String,
+    pub status: FileStatus,
+    pub staged: bool,
+    pub insertions: usize,
+    pub deletions: usize,
+}
+
 #[derive(Debug)]
 pub struct BranchInfo {
     pub name: String,
@@ -212,6 +240,153 @@ fn format_delta(delta: i64) -> String {
         } else {
             format!("{} years ago", y)
         }
+    }
+}
+
+/// Return per-file diff entries for a repo.
+///
+/// `Head` mode returns uncommitted changes: staged entries (tree→index) and
+/// unstaged entries (index→workdir), each with the correct `staged` flag.
+///
+/// `Base` mode returns total divergence from the base branch. The base branch
+/// is resolved by probing `refs/heads/main`, `refs/heads/master`,
+/// `refs/remotes/origin/main`, and `refs/remotes/origin/master` in order.
+/// Returns an error if none of those refs exist. All entries have `staged: false`
+/// in Base mode (the staged/unstaged distinction is not meaningful for
+/// committed divergence).
+#[allow(dead_code)]
+pub fn file_diff(repo_path: &Path, target: &DiffTarget) -> Result<Vec<FileEntry>> {
+    let repo = Repository::open(repo_path)
+        .with_context(|| format!("opening repo at {}", repo_path.display()))?;
+
+    match target {
+        DiffTarget::Head => file_diff_vs_head(&repo),
+        DiffTarget::Base => file_diff_vs_base(&repo, repo_path),
+    }
+}
+
+#[allow(dead_code)]
+fn file_diff_vs_head(repo: &Repository) -> Result<Vec<FileEntry>> {
+    let mut entries: Vec<FileEntry> = Vec::new();
+
+    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+
+    // 1. Staged: tree -> index
+    let staged_diff = repo.diff_tree_to_index(head_tree.as_ref(), None, None)?;
+    entries.extend(collect_entries(&staged_diff, true)?);
+
+    // 2. Unstaged: index -> workdir (include untracked)
+    let mut opts = git2::DiffOptions::new();
+    opts.include_untracked(true).recurse_untracked_dirs(true);
+    let unstaged_diff = repo.diff_index_to_workdir(None, Some(&mut opts))?;
+    entries.extend(collect_entries(&unstaged_diff, false)?);
+
+    Ok(entries)
+}
+
+#[allow(dead_code)]
+fn file_diff_vs_base(repo: &Repository, repo_path: &Path) -> Result<Vec<FileEntry>> {
+    let base_oid = repo
+        .refname_to_id("refs/heads/main")
+        .or_else(|_| repo.refname_to_id("refs/heads/master"))
+        .or_else(|_| repo.refname_to_id("refs/remotes/origin/main"))
+        .or_else(|_| repo.refname_to_id("refs/remotes/origin/master"))
+        .or_else(|_| {
+            // Follow origin/HEAD symbolic ref -- covers non-main/master defaults
+            // such as trunk, develop, etc.
+            repo.find_reference("refs/remotes/origin/HEAD")
+                .ok()
+                .and_then(|r| r.resolve().ok())
+                .and_then(|r| r.target())
+                .ok_or_else(|| git2::Error::from_str("origin/HEAD not found"))
+        })
+        .with_context(|| {
+            format!(
+                "could not find base branch (tried main/master/origin/main/origin/master/origin/HEAD) in {}",
+                repo_path.display()
+            )
+        })?;
+
+    let base_commit = repo.find_commit(base_oid)?;
+    let base_tree = base_commit.tree()?;
+
+    let mut opts = git2::DiffOptions::new();
+    opts.include_untracked(true).recurse_untracked_dirs(true);
+    let diff = repo.diff_tree_to_workdir_with_index(Some(&base_tree), Some(&mut opts))?;
+    collect_entries(&diff, false)
+}
+
+#[allow(dead_code)]
+fn collect_entries(diff: &git2::Diff, staged: bool) -> Result<Vec<FileEntry>> {
+    // First pass: collect file paths and statuses from deltas
+    let file_stats: Vec<(String, FileStatus)> = diff
+        .deltas()
+        .filter_map(|delta| {
+            let path = delta
+                .new_file()
+                .path()
+                .or_else(|| delta.old_file().path())
+                .and_then(|p| p.to_str())
+                .map(String::from)?;
+            let status = delta_to_file_status(delta.status())?;
+            Some((path, status))
+        })
+        .collect();
+
+    // Second pass: count +/- lines per file via foreach line callback.
+    // TODO: O(n²) path lookup — replace with HashMap<&str, usize> if diffs
+    // with 500+ files cause noticeable latency in the TUI.
+    let mut line_counts: Vec<(usize, usize)> = vec![(0, 0); file_stats.len()];
+    {
+        let file_stats_ref = &file_stats;
+        let counts_ref = std::cell::RefCell::new(&mut line_counts);
+        diff.foreach(
+            &mut |_, _| true,
+            None,
+            None,
+            Some(&mut |delta, _, line| {
+                let path = delta
+                    .new_file()
+                    .path()
+                    .or_else(|| delta.old_file().path())
+                    .and_then(|p| p.to_str());
+                if let Some(path) = path {
+                    if let Some(pos) = file_stats_ref.iter().position(|(p, _)| p == path) {
+                        match line.origin() {
+                            '+' => counts_ref.borrow_mut()[pos].0 += 1,
+                            '-' => counts_ref.borrow_mut()[pos].1 += 1,
+                            _ => {}
+                        }
+                    }
+                }
+                true
+            }),
+        )?;
+    }
+
+    Ok(file_stats
+        .into_iter()
+        .zip(line_counts)
+        .map(|((path, status), (insertions, deletions))| FileEntry {
+            path,
+            status,
+            staged,
+            insertions,
+            deletions,
+        })
+        .collect())
+}
+
+#[allow(dead_code)]
+fn delta_to_file_status(delta: git2::Delta) -> Option<FileStatus> {
+    match delta {
+        git2::Delta::Modified => Some(FileStatus::Modified),
+        git2::Delta::Added => Some(FileStatus::Added),
+        git2::Delta::Deleted => Some(FileStatus::Deleted),
+        git2::Delta::Renamed => Some(FileStatus::Renamed),
+        git2::Delta::Copied => Some(FileStatus::Copied),
+        git2::Delta::Untracked => Some(FileStatus::Untracked),
+        _ => None,
     }
 }
 

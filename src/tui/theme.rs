@@ -58,3 +58,21 @@ pub fn warn() -> Style {
 pub fn status_clean() -> Style {
     Style::default().fg(MINT)
 }
+
+pub const STAGED_GREEN: Color = Color::Rgb(100, 220, 130);
+
+pub fn staged() -> Style {
+    Style::default().fg(STAGED_GREEN)
+}
+pub fn unstaged() -> Style {
+    Style::default().fg(WARN)
+}
+pub fn file_path() -> Style {
+    Style::default().fg(DIM_TEXT)
+}
+pub fn additions() -> Style {
+    Style::default().fg(STAGED_GREEN)
+}
+pub fn deletions() -> Style {
+    Style::default().fg(ERROR)
+}
