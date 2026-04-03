@@ -198,8 +198,9 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
                 } else {
                     "clean".to_string()
                 };
-                // +/- column: file line totals from cache (filled in Change 3)
-                // Fall back to commit ahead/behind if cache not yet populated.
+                // +/- column: file line totals from cache. Show zeros when the
+                // cache isn't populated yet rather than falling back to commit
+                // counts (ahead/behind), which would mix different metrics.
                 let (ins, del) = app
                     .repo_file_cache
                     .get(index)
@@ -208,7 +209,7 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
                             (i + e.insertions, d + e.deletions)
                         })
                     })
-                    .unwrap_or((r.ahead, r.behind));
+                    .unwrap_or((0, 0));
                 Row::new(vec![
                     Cell::from(Span::raw(name)),
                     Cell::from(Span::styled(r.branch.clone(), theme::branch())),
@@ -300,9 +301,6 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
             key("S"),
             act(" config"),
             sep(),
-            key("?"),
-            act(" help"),
-            sep(),
             key("q"),
             act(" quit"),
         ]),
@@ -321,9 +319,6 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
                 sep(),
                 key("T"),
                 act(toggle_label),
-                sep(),
-                key("?"),
-                act(" help"),
                 sep(),
                 key("q"),
                 act(" quit"),

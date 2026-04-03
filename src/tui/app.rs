@@ -236,10 +236,19 @@ impl App {
             })
             .unwrap_or_default();
 
+        let mut failures = 0usize;
         for (idx, path) in repo_paths {
-            if let Ok(entries) = crate::core::git::file_diff(&path, &self.diff_target) {
-                self.repo_file_cache.insert(idx, entries);
+            match crate::core::git::file_diff(&path, &self.diff_target) {
+                Ok(entries) => {
+                    self.repo_file_cache.insert(idx, entries);
+                }
+                Err(_) => {
+                    failures += 1;
+                }
             }
+        }
+        if failures > 0 {
+            self.set_status(format!("Diff failed for {} repo(s)", failures));
         }
     }
 

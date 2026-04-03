@@ -245,10 +245,6 @@ fn format_delta(delta: i64) -> String {
 
 /// Return per-file diff entries for a repo.
 ///
-/// Head mode: uncommitted changes (staged and unstaged separately).
-/// Base mode: total divergence from the base branch (detect_base_branch()).
-/// Return per-file diff entries for a repo.
-///
 /// `Head` mode returns uncommitted changes: staged entries (tree→index) and
 /// unstaged entries (index→workdir), each with the correct `staged` flag.
 ///
