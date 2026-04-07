@@ -59,6 +59,10 @@ pub fn view(app: &App, frame: &mut Frame) {
             crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
         }
         Screen::ConfigEditor(state) => render_config_editor(state, frame),
+        Screen::Help => {
+            render_dashboard(app, frame);
+            // placeholder: full render_help_overlay added in Task 4
+        }
     }
 }
 
