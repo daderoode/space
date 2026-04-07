@@ -3,10 +3,10 @@
 A CLI workspace manager for multi-repo git worktrees.
 
 **Repository:** [github.com/daderoode/space](https://github.com/daderoode/space)
-**Version:** 0.4.0
+**Version:** 0.6.0
 **Install:** `brew install daderoode/tap/space`
 
-Last updated: 2026-03-23
+Last updated: 2026-04-07
 
 ## Contents
 
@@ -131,27 +131,42 @@ graph TD
 Running `space` with no arguments opens an interactive terminal dashboard:
 
 ```
-┌─ Workspaces (30%) ──────────┬─ Repos (70%) ─────────────────────────────┐
-│  my-feature                 │  repo-a     main  clean                   │
-│  hotfix-payment             │  repo-b     main  3m 2s                   │
-│  ...                        │  ...                                       │
+┌─ Workspaces (30%) ──────────┬─ my-feature (vs base) ────────────────────┐
+│  my-feature                 │  ▶ api-service  feat/x  clean   +142 -20  │
+│  hotfix-payment             │  ▼ sak          feat/x  3m 2s    +38  -4  │
+│  ...                        │    M src/main.rs          [staged]  +12 -4 │
+│                             │    A src/new.rs            [staged]  +26 -0│
+│                             │    ? untracked.txt                   +3  -0│
 └─────────────────────────────┴───────────────────────────────────────────┘
- space v0.4.0                                    [status message / hints]
+ enter expand · ←/esc back · T switch to HEAD · q quit
 ```
 
 ### Layout
 
-- **Left pane (30%):** Workspace list showing name and repo count. Highlight with `> ` marker. Empty state shows "No workspaces yet / Press c to create one"
-- **Right pane (70%):** Repo table with columns: REPO, BRANCH, STATUS, +/-. Status shows "clean" (green) or counts like "3m 2s" (yellow for modified/staged). +/- shows ahead/behind remote
-- **Status bar:** Shows timed messages (5-second TTL) or key binding hints
+- **Left pane (30%):** Workspace list. Empty state shows "No workspaces yet".
+- **Right pane (70%):** Repo table with columns: REPO, BRANCH, STATUS, +/-.
+  - STATUS shows "clean" (green) or file counts like "3m 2s 1u" (modified/staged/untracked).
+  - +/- shows total file insertions/deletions vs the base branch in green/red.
+  - Repos can be expanded (`→` or `Enter`) to show per-file diff rows beneath them. File rows show a status letter (M/A/D/R/?), file path, staged/unstaged indicator, and per-file +/- counts.
+  - Pane title shows the active diff target: `(vs base)` or `(vs HEAD)`.
+- **Status bar:** Context-sensitive key hints. Shows timed status messages (5-second TTL) when actions complete or fail.
 
-### Key Bindings
+### Diff Targets
+
+The right pane can show two views, toggled with `T`:
+
+| Mode | Shows |
+|------|-------|
+| **vs base** (default) | Total divergence from main/master — all committed + uncommitted changes |
+| **vs HEAD** | Uncommitted changes only — staged and unstaged, with `[staged]`/`[unstaged]` badges |
+
+### Key Bindings — Workspaces Pane
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` or arrows | Navigate list |
-| `Tab` | Switch pane focus (workspaces / repos) |
-| `Enter` | Go to selected workspace (cd) |
+| `j` / `k` or `↑` / `↓` | Navigate workspaces |
+| `→` or `Tab` | Focus repos pane |
+| `Enter` | Go to selected workspace (cd into it) |
 | `c` | Create new workspace |
 | `a` | Add repos to selected workspace |
 | `d` | Delete selected workspace |
@@ -162,6 +177,16 @@ Running `space` with no arguments opens an interactive terminal dashboard:
 | `q` / `Esc` | Quit |
 | `Ctrl-C` | Force quit (works on all screens) |
 
+### Key Bindings — Repos Pane
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` or `↑` / `↓` | Navigate through repo rows and expanded file rows |
+| `→` or `Enter` | Expand / collapse repo to show per-file diffs |
+| `←` or `Esc` | Collapse all expanded repos; second press refocuses workspaces pane |
+| `T` | Toggle diff target: base branch ↔ HEAD |
+| `q` | Quit |
+
 ### Theme
 
 Custom color palette:
@@ -169,11 +194,12 @@ Custom color palette:
 | Color | Hex | Usage |
 |-------|-----|-------|
 | Teal | `#00BCB4` | Focused borders, title, accents |
-| Mint | `#64DCB4` | Selected items, success indicators |
+| Mint | `#64DCB4` | Selected items, success indicators, clean status |
 | Light Blue | `#82BEFF` | Branch names |
-| Muted | `#646E78` | Dim text, separators |
-| Error | `#FF6464` | Errors, danger borders |
-| Warn | `#F0C850` | Modified status, ahead/behind |
+| Muted | `#646E78` | Dim text, separators, file paths |
+| Error | `#FF6464` | Errors, danger borders, deletion counts |
+| Warn | `#F0C850` | Modified status, unstaged file indicators |
+| Staged Green | `#64DC82` | Insertion counts, staged file indicators |
 
 ---
 
@@ -439,7 +465,7 @@ The agent skill at `~/.config/opencode/skills/superpowers/using-space/` teaches 
 space ls -v
 ```
 
-Shows each workspace with per-repo branch, modified/staged counts, and ahead/behind. Or open the TUI dashboard (`space`) for an interactive overview -- select a workspace on the left, see all its repo details on the right.
+Shows each workspace with per-repo branch, modified/staged counts, and ahead/behind. Or open the TUI dashboard (`space`) for an interactive overview -- select a workspace on the left, see repo details on the right with green/red `+/-` line counts vs the base branch. Press `→` or `Enter` on any repo to expand it and see exactly which files changed.
 
 Via MCP: `list_workspaces` returns the same information as JSON.
 

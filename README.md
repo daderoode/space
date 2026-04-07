@@ -53,22 +53,25 @@ Running `space` (no arguments) opens an interactive terminal dashboard with two
 panes:
 
 ```
-┌─ Workspaces (30%) ──────────┬─ Repos (70%) ─────────────────────────────┐
-│  my-feature                 │  repo-a     main  clean                   │
-│  hotfix-payment             │  repo-b     main  3m 2s                   │
-│  ...                        │  ...                                       │
+┌─ Workspaces (30%) ──────────┬─ my-feature (vs base) ────────────────────┐
+│  my-feature                 │  ▶ api-service  feat/x  clean  +142 -20   │
+│  hotfix-payment             │  ▼ sak          feat/x  3m 2s   +38 -4    │
+│  ...                        │    M src/main.rs          [staged]  +12 -4 │
+│                             │    A src/new.rs            [staged]  +26 -0 │
 └─────────────────────────────┴───────────────────────────────────────────┘
- space v0.4.0                                    [status message / hints]
+ enter expand · ←/esc back · T switch to HEAD · q quit
 ```
 
-**Key bindings:**
+Repos show total line divergence from the base branch (`+N -M` in green/red).
+Press `→` or `Enter` on a repo to expand it and see per-file diffs.
+
+**Key bindings — Workspaces pane:**
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` or `j` / `k` | Navigate list |
-| `Tab` | Switch panes (workspaces ↔ repos) |
+| `↑` / `↓` or `j` / `k` | Navigate workspaces |
+| `→` | Focus repos pane |
 | `Enter` | Go to selected workspace (cd) |
-| `g` | Go to workspace (fuzzy picker) |
 | `c` | Create a new workspace |
 | `a` | Add repos to selected workspace |
 | `d` | Delete selected workspace |
@@ -76,6 +79,16 @@ panes:
 | `/` | Search all repos |
 | `S` | Open config editor |
 | `q` / `Esc` | Quit |
+
+**Key bindings — Repos pane:**
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` or `j` / `k` | Navigate repos and file rows |
+| `→` or `Enter` | Expand / collapse repo to show file-level diffs |
+| `←` or `Esc` | Collapse all expanded repos, then refocus workspaces pane |
+| `T` | Toggle diff target: base branch ↔ HEAD (uncommitted changes) |
+| `q` | Quit |
 
 Interactive commands (`go`, `create`, `add`, `config`, `rm` without `--force`)
 also launch TUI flows when invoked from the command line.
