@@ -275,61 +275,35 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let sep = || Span::styled("  ·  ", theme::muted());
-    let key = |k: &'static str| Span::styled(k, theme::text());
-    let act = |a: &'static str| Span::styled(a, theme::muted());
+    let bindings = crate::tui::keybindings::status_bar_bindings(app.focus);
+    let sep = Span::styled("  ·  ", theme::muted());
+    let mut spans: Vec<Span> = Vec::new();
 
-    let bar = match app.focus {
-        Pane::Left => Line::from(vec![
-            key("enter"),
-            act(" go"),
-            sep(),
-            key("→"),
-            act(" repos"),
-            sep(),
-            key("c"),
-            act(" create"),
-            sep(),
-            key("a"),
-            act(" add"),
-            sep(),
-            key("d"),
-            act(" delete"),
-            sep(),
-            key("r"),
-            act(" refresh"),
-            sep(),
-            key("/"),
-            act(" search"),
-            sep(),
-            key("S"),
-            act(" config"),
-            sep(),
-            key("q"),
-            act(" quit"),
-        ]),
-        Pane::Right => {
-            // Show what T will switch TO so it's self-explanatory
-            let toggle_label = match app.diff_target {
-                crate::core::git::DiffTarget::Base => " switch to HEAD",
-                crate::core::git::DiffTarget::Head => " switch to base",
-            };
-            Line::from(vec![
-                key("enter"),
-                act(" expand"),
-                sep(),
-                key("←/esc"),
-                act(" back"),
-                sep(),
-                key("T"),
-                act(toggle_label),
-                sep(),
-                key("q"),
-                act(" quit"),
-            ])
-        }
+    // Dynamic T-label for right pane: tell user which direction T will go
+    let t_override: Option<&'static str> = if app.focus == crate::tui::app::Pane::Right {
+        Some(match app.diff_target {
+            crate::core::git::DiffTarget::Base => "switch to HEAD",
+            crate::core::git::DiffTarget::Head => "switch to base",
+        })
+    } else {
+        None
     };
-    frame.render_widget(Paragraph::new(bar), area);
+
+    for (i, binding) in bindings.iter().enumerate() {
+        if i > 0 {
+            spans.push(sep.clone());
+        }
+        spans.push(Span::styled(binding.key, theme::text()));
+        // Use dynamic label for T on right pane, static label otherwise
+        let desc = if binding.key == "T" {
+            t_override.unwrap_or(binding.desc)
+        } else {
+            binding.desc
+        };
+        spans.push(Span::styled(format!(" {}", desc), theme::muted()));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_create_overlay(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {

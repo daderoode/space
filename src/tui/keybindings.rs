@@ -1,4 +1,4 @@
-/// Shared keybinding definitions consumed by the help overlay and status bar.
+//! Shared keybinding definitions consumed by the help overlay and status bar.
 
 pub struct Binding {
     pub key: &'static str,
@@ -114,4 +114,77 @@ const GENERAL: BindingGroup = BindingGroup {
 pub fn all_groups() -> &'static [BindingGroup] {
     static GROUPS: [BindingGroup; 4] = [NAVIGATION, WORKSPACE_PANE, REPO_PANE, GENERAL];
     &GROUPS
+}
+
+/// Bindings to show in the status bar for a given pane.
+/// Short labels suited for a single condensed line.
+pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
+    static LEFT: [Binding; 10] = [
+        Binding {
+            key: "enter",
+            desc: "go",
+        },
+        Binding {
+            key: "→",
+            desc: "repos",
+        },
+        Binding {
+            key: "c",
+            desc: "create",
+        },
+        Binding {
+            key: "a",
+            desc: "add",
+        },
+        Binding {
+            key: "d",
+            desc: "delete",
+        },
+        Binding {
+            key: "r",
+            desc: "refresh",
+        },
+        Binding {
+            key: "/",
+            desc: "search",
+        },
+        Binding {
+            key: "S",
+            desc: "config",
+        },
+        Binding {
+            key: "?",
+            desc: "help",
+        },
+        Binding {
+            key: "q",
+            desc: "quit",
+        },
+    ];
+    static RIGHT: [Binding; 5] = [
+        Binding {
+            key: "enter",
+            desc: "expand",
+        },
+        Binding {
+            key: "←/esc",
+            desc: "back",
+        },
+        Binding {
+            key: "T",
+            desc: "toggle diff",
+        },
+        Binding {
+            key: "?",
+            desc: "help",
+        },
+        Binding {
+            key: "q",
+            desc: "quit",
+        },
+    ];
+    match pane {
+        crate::tui::app::Pane::Left => &LEFT,
+        crate::tui::app::Pane::Right => &RIGHT,
+    }
 }
