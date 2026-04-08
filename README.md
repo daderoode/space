@@ -53,9 +53,9 @@ Running `space` (no arguments) opens an interactive terminal dashboard with two
 panes:
 
 ```
-┌─ Workspaces (30%) ──────────┬─ my-feature (vs base) ────────────────────┐
+┌─ Workspaces (25%) ──────────┬─ my-feature (vs base) ────────────────────┐
 │  my-feature                 │  ▶ api-service  feat/x  clean  +142 -20   │
-│  hotfix-payment             │  ▼ sak          feat/x  3 modified, 2 staged  +38 -4 │
+│  hotfix-payment             │  ▼ sak          feat/x  2 modified  +38 -4 │
 │  ...                        │    M src/main.rs          [staged]  +12 -4 │
 │                             │    A src/new.rs            [staged]  +26 -0 │
 └─────────────────────────────┴───────────────────────────────────────────┘

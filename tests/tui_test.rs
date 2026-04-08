@@ -9,6 +9,7 @@ use space::core::git::RepoStatus;
 use space::core::workspace::{Workspace, WorkspaceRepo};
 use space::tui::app::{App, Pane, Screen};
 use std::path::PathBuf;
+use unicode_width::UnicodeWidthStr;
 
 /// Build a SpaceConfig pointing at a TestEnv's directories.
 fn config_from_env(env: &TestEnv) -> SpaceConfig {
@@ -43,6 +44,14 @@ fn render_text(app: &App, width: u16, height: u16) -> String {
     }
 
     lines.join("\n")
+}
+
+fn max_rendered_width(rendered: &str) -> usize {
+    rendered
+        .lines()
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -574,6 +583,35 @@ fn dashboard_status_fits_common_80_col_terminal() {
 }
 
 #[test]
+fn dashboard_three_part_status_fits_common_80_col_terminal() {
+    let workspaces = vec![Workspace {
+        name: "env-reset-redesign".to_string(),
+        path: PathBuf::from("/tmp/env-reset-redesign"),
+        repos: vec![WorkspaceRepo {
+            name: "omari-zw-vsuite-env".to_string(),
+            path: PathBuf::from("/tmp/env-reset-redesign/omari-zw-vsuite-env"),
+            branch: "env-reset-redesign".to_string(),
+            status: RepoStatus {
+                modified: 14,
+                staged: 3,
+                untracked: 2,
+            },
+            ahead: 0,
+            behind: 0,
+        }],
+    }];
+    let app = test_app(workspaces, vec![]);
+
+    let rendered = render_text(&app, 80, 12);
+
+    assert!(
+        rendered.contains("17 changed, 2 new"),
+        "expected compact plain-language status in an 80-column terminal, got:\n{}",
+        rendered
+    );
+}
+
+#[test]
 fn delete_confirm_handles_long_workspace_name() {
     let workspaces = vec![Workspace {
         name: "I079696-omari-bundles-failure-recovery".to_string(),
@@ -619,8 +657,45 @@ fn delete_confirm_keeps_footer_visible_for_long_repo_lists() {
         rendered
     );
     assert!(
+        rendered.contains("Esc/n cancel"),
+        "expected cancel action to remain visible in rendered popup, got:\n{}",
+        rendered
+    );
+    assert!(
         rendered.contains("... and"),
         "expected repo overflow summary in rendered popup, got:\n{}",
+        rendered
+    );
+}
+
+#[test]
+fn delete_confirm_wraps_footer_on_narrow_terminals() {
+    let workspaces = vec![Workspace {
+        name: "tight-layout".to_string(),
+        path: PathBuf::from("/tmp/tight-layout"),
+        repos: vec![],
+    }];
+    let mut app = test_app(workspaces, vec![]);
+    app.screen = Screen::ConfirmDelete(space::tui::screens::delete::DeleteState {
+        workspace_name: "tight-layout".to_string(),
+        repo_names: vec!["repo-with-a-very-long-name".to_string()],
+    });
+
+    let rendered = render_text(&app, 24, 10);
+
+    assert!(
+        rendered.contains("Enter/y delete"),
+        "expected delete action on a wrapped footer line, got:\n{}",
+        rendered
+    );
+    assert!(
+        rendered.contains("Esc/n cancel"),
+        "expected cancel action on a wrapped footer line, got:\n{}",
+        rendered
+    );
+    assert!(
+        max_rendered_width(&rendered) <= 24,
+        "expected wrapped delete footer to stay within the terminal width, got:\n{}",
         rendered
     );
 }
