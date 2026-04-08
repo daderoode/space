@@ -1350,3 +1350,72 @@ fn phase1_right_arrow_on_workspace_pane_then_enter_expands_repo() {
     app.handle_key(key(KeyCode::Esc));
     assert_eq!(app.focus, Pane::Left, "second Esc refocuses left pane");
 }
+
+// ---------------------------------------------------------------------------
+// Help overlay tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dashboard_question_mark_opens_help() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('?')));
+    assert!(
+        matches!(app.screen, Screen::Help),
+        "expected Help screen, got {:?}",
+        std::mem::discriminant(&app.screen)
+    );
+}
+
+#[test]
+fn help_esc_returns_to_dashboard() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('?')));
+    assert!(matches!(app.screen, Screen::Help));
+
+    app.handle_key(key(KeyCode::Esc));
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "expected Dashboard after Esc from Help"
+    );
+}
+
+#[test]
+fn help_q_returns_to_dashboard() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('?')));
+    app.handle_key(key(KeyCode::Char('q')));
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "expected Dashboard after q from Help"
+    );
+}
+
+#[test]
+fn help_question_mark_returns_to_dashboard() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('?')));
+    app.handle_key(key(KeyCode::Char('?')));
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "expected Dashboard after ? toggles Help off"
+    );
+}
+
+#[test]
+fn help_other_keys_are_noop() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('?')));
+
+    // Press various keys that should not close help
+    app.handle_key(key(KeyCode::Char('j')));
+    app.handle_key(key(KeyCode::Char('k')));
+    app.handle_key(key(KeyCode::Char('c')));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Up));
+    app.handle_key(key(KeyCode::Enter));
+
+    assert!(
+        matches!(app.screen, Screen::Help),
+        "Help should remain open after non-close keys"
+    );
+}

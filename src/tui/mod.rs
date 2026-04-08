@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod app;
+pub mod keybindings;
 pub mod screens;
 pub mod theme;
 pub mod ui;

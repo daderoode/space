@@ -65,6 +65,7 @@ pub enum Screen {
     ConfirmDelete(crate::tui::screens::delete::DeleteState),
     RepoSearch(crate::tui::screens::search::SearchState),
     ConfigEditor(crate::tui::screens::config::ConfigState),
+    Help,
 }
 
 #[derive(Debug)]
@@ -85,6 +86,7 @@ pub enum Message {
     RefreshRepos,
     ToggleRepoExpand,
     CollapseAllRepos,
+    StartHelp,
     ToggleDiffTarget,
 }
 
@@ -499,6 +501,7 @@ impl App {
         };
 
         let action = match &mut self.screen {
+            Screen::Help => crate::tui::screens::help::handle_key(key, &ctx),
             Screen::ConfirmDelete(state) => state.handle_key(key, &ctx),
             Screen::GoWorkspace(state) => state.handle_key(key, &ctx),
             Screen::RepoSearch(state) => state.handle_key(key, &ctx),
@@ -524,6 +527,7 @@ impl App {
                     (KeyCode::Char('T'), _) => Some(Message::ToggleDiffTarget),
                     (KeyCode::Char('/'), _) => Some(Message::StartSearch),
                     (KeyCode::Char('S'), _) => Some(Message::StartConfig),
+                    (KeyCode::Char('?'), _) => Some(Message::StartHelp),
                     (KeyCode::Up, _) | (KeyCode::Char('k'), _) => match self.focus {
                         Pane::Left => Some(Message::SelectWorkspaceUp),
                         Pane::Right => Some(Message::SelectRepoUp),
@@ -721,6 +725,10 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                     app.expanded_repos.insert(idx);
                 }
             }
+            None
+        }
+        Message::StartHelp => {
+            app.screen = Screen::Help;
             None
         }
         Message::CollapseAllRepos => {

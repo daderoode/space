@@ -59,6 +59,10 @@ pub fn view(app: &App, frame: &mut Frame) {
             crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
         }
         Screen::ConfigEditor(state) => render_config_editor(state, frame),
+        Screen::Help => {
+            render_dashboard(app, frame);
+            render_help_overlay(frame);
+        }
     }
 }
 
@@ -271,61 +275,35 @@ fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let sep = || Span::styled("  ·  ", theme::muted());
-    let key = |k: &'static str| Span::styled(k, theme::text());
-    let act = |a: &'static str| Span::styled(a, theme::muted());
+    let bindings = crate::tui::keybindings::status_bar_bindings(app.focus);
+    let sep = Span::styled("  ·  ", theme::muted());
+    let mut spans: Vec<Span> = Vec::new();
 
-    let bar = match app.focus {
-        Pane::Left => Line::from(vec![
-            key("enter"),
-            act(" go"),
-            sep(),
-            key("→"),
-            act(" repos"),
-            sep(),
-            key("c"),
-            act(" create"),
-            sep(),
-            key("a"),
-            act(" add"),
-            sep(),
-            key("d"),
-            act(" delete"),
-            sep(),
-            key("r"),
-            act(" refresh"),
-            sep(),
-            key("/"),
-            act(" search"),
-            sep(),
-            key("S"),
-            act(" config"),
-            sep(),
-            key("q"),
-            act(" quit"),
-        ]),
-        Pane::Right => {
-            // Show what T will switch TO so it's self-explanatory
-            let toggle_label = match app.diff_target {
-                crate::core::git::DiffTarget::Base => " switch to HEAD",
-                crate::core::git::DiffTarget::Head => " switch to base",
-            };
-            Line::from(vec![
-                key("enter"),
-                act(" expand"),
-                sep(),
-                key("←/esc"),
-                act(" back"),
-                sep(),
-                key("T"),
-                act(toggle_label),
-                sep(),
-                key("q"),
-                act(" quit"),
-            ])
-        }
+    // Dynamic T-label for right pane: tell user which direction T will go
+    let t_override: Option<&'static str> = if app.focus == crate::tui::app::Pane::Right {
+        Some(match app.diff_target {
+            crate::core::git::DiffTarget::Base => "switch to HEAD",
+            crate::core::git::DiffTarget::Head => "switch to base",
+        })
+    } else {
+        None
     };
-    frame.render_widget(Paragraph::new(bar), area);
+
+    for (i, binding) in bindings.iter().enumerate() {
+        if i > 0 {
+            spans.push(sep.clone());
+        }
+        spans.push(Span::styled(binding.key, theme::text()));
+        // Use dynamic label for T on right pane, static label otherwise
+        let desc = if binding.key == "T" {
+            t_override.unwrap_or(binding.desc)
+        } else {
+            binding.desc
+        };
+        spans.push(Span::styled(format!(" {}", desc), theme::muted()));
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_create_overlay(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
@@ -713,6 +691,62 @@ fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame:
         Paragraph::new("↑↓ navigate  ·  Enter edit  ·  Esc cancel  ·  Ctrl-S save")
             .style(theme::muted()),
         sections[hint_idx],
+    );
+}
+
+fn render_help_overlay(frame: &mut Frame) {
+    use ratatui::widgets::Clear;
+
+    let groups = crate::tui::keybindings::all_groups();
+
+    // Calculate height: 1 header + N bindings per group + 1 gap between groups + 1 bottom hint
+    let content_rows: u16 = groups
+        .iter()
+        .map(|g| 1 + g.bindings.len() as u16)
+        .sum::<u16>()
+        + (groups.len() as u16).saturating_sub(1) // gaps between groups
+        + 1; // bottom hint line
+    let height = (content_rows + 2).min(frame.area().height); // +2 for border
+                                                              // Height is clamped to terminal height — content clips on very short terminals
+                                                              // (< 27 rows). Acceptable: 24+ rows is the practical minimum for a terminal.
+    let area = centered_rect_fixed(50, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border_focused())
+        .title(" Help ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (i, group) in groups.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::from("")); // gap between groups
+        }
+        lines.push(Line::from(Span::styled(group.name, theme::title())));
+        for binding in group.bindings {
+            let padding = 12_usize.saturating_sub(binding.key.chars().count());
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {}{}", binding.key, " ".repeat(padding)),
+                    theme::text().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(binding.desc, theme::muted()),
+            ]));
+        }
+    }
+
+    let sections = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+
+    frame.render_widget(Paragraph::new(lines), sections[0]);
+    frame.render_widget(
+        Paragraph::new("Esc / q / ? to close")
+            .style(theme::muted())
+            .alignment(Alignment::Center),
+        sections[1],
     );
 }
 
