@@ -23,14 +23,29 @@ returned `ScreenAction` values. Borrow-checker gymnastics eliminated.
 
 ---
 
-## Tier 2 -- Git Manager
+## Keybinding Help Overlay ✓ Complete
 
-LazyGit does not handle worktrees well. This tier turns `space` from a workspace
-navigator into a workspace-aware git manager, delivered incrementally across 4
-phases. See `docs/plans/2026-03-31-git-manager-design.md` for the full Phase 1
-design.
+Standalone UX feature — not gated on any git manager work, low effort.
 
-### 3. Fold/unfold repos with file-level diffs (Phase 1)
+### 3. Help overlay ✓
+
+Users can now press `?` from the dashboard to open a full-screen help overlay
+listing keybindings grouped by context. The overlay closes with `Esc`, `q`, or
+`?`, and the status bar consumes the same shared keybinding registry so hints
+stay aligned.
+
+**Files:** `src/tui/keybindings.rs`, `src/tui/screens/help.rs`,
+`src/tui/app.rs`, `src/tui/ui.rs`, `tests/tui_test.rs`
+
+---
+
+## Tier 2 -- Git Visibility
+
+Turn `space` from a workspace navigator into a workspace-aware git viewer.
+Users can see exactly what changed, at every level of detail, without leaving
+the TUI.
+
+### 4. Fold/unfold repos with file-level diffs (Phase 1) ✓
 
 **Problem:** The repo pane shows aggregate status counts (e.g. `2m 1s`) but no
 file-level detail. Users must leave `space` to see what actually changed.
@@ -55,33 +70,13 @@ and base mode works, navigation through flattened rows is smooth.
 
 ---
 
-### 4. Keybinding help overlay (`?`)
-
-**Problem:** Users can't discover available keys without reading source code or
-docs. Context-sensitive status bar hints help, but there's no single place to
-see everything at once.
-
-**Approach:**
-
-- `?` opens a full-screen overlay listing all keybindings grouped by context
-  (Navigation, Workspace pane, Repo pane, General).
-- Each entry shows the key, a one-line description of what it does.
-- Pattern follows other overlays: new `Screen::Help` variant, `handle_key`
-  dispatch, render function.
-- `Esc`/`q`/`?` closes the overlay.
-
-**Files:** `src/tui/app.rs` (new Message + Screen variant), `src/tui/ui.rs`
-(new render function)
-**Done when:** `?` opens a readable help overlay from any dashboard state.
-
----
-
-### 5. File-level diff viewer (Phase 2)
+### 5. File-level diff viewer with staging (Phase 2)
 
 **Problem:** After seeing which files changed, users want to view the actual diff
-content without leaving the TUI.
+content and act on it — stage or unstage individual files — without leaving the
+TUI.
 
-**Approach:**
+**Approach — Diff viewer:**
 
 - `Enter` on a file row opens a scrollable diff overlay showing the full
   unified diff for that file (hunks with context lines).
@@ -90,14 +85,29 @@ content without leaving the TUI.
   context.
 - `↑`/`↓`/`j`/`k` scrolls within the diff. `Esc` returns to the repo list.
 
-**Files:** `src/core/git.rs` (new diff content function), `src/tui/app.rs`,
-`src/tui/ui.rs`, `src/tui/screens/diff.rs` (new)
-**Done when:** Users can view full file diffs in a scrollable overlay from the
-expanded repo view.
+**Approach — Stage/unstage:**
+
+- `s` on a file row in the expanded repo view toggles staging for that file.
+  Staged files become unstaged, unstaged files become staged.
+- Uses `git2::Index::add_path()` to stage and `git2::Repository::reset_default()`
+  (or equivalent) to unstage.
+- `[staged]`/`[unstaged]` indicator updates immediately. Diff cache is
+  invalidated for that repo.
+- `S` (Shift+S) on a repo row stages/unstages all files in that repo.
+
+**Files:** `src/core/git.rs` (new diff content + stage/unstage functions),
+`src/tui/app.rs`, `src/tui/ui.rs`, `src/tui/screens/diff.rs` (new)
+**Done when:** Users can view full file diffs in a scrollable overlay and
+stage/unstage individual files or all files in a repo from the expanded view.
 
 ---
 
-### 6. Git operations menu (Phase 3)
+## Tier 3 -- Git Operations
+
+Perform routine git operations without leaving the TUI. Each operation is a
+self-contained sub-flow within a git operations overlay.
+
+### 6. Git operations menu
 
 **Problem:** Users must leave `space` to perform routine git operations on
 individual repos within a workspace.
@@ -105,20 +115,23 @@ individual repos within a workspace.
 **Approach:**
 
 - `b` on a repo (folded or unfolded) opens a git operations overlay.
-- Available actions: `f` fetch, `p` pull, `P` push, `r` rebase, `d` view diff,
+- Available actions: `f` fetch, `p` pull, `P` push, `c` commit, `r` rebase,
   `l` log (recent commits).
-- Each action is a self-contained sub-flow within the overlay.
+- **Commit flow:** Opens a text input for the commit message. Shows a summary
+  of staged files above the input. Commits on Enter, aborts on Esc. Only
+  available when there are staged changes.
+- Each other action is a self-contained sub-flow within the overlay.
 - Operations shell out to git (matching the existing pattern for write ops).
 - Results shown in a progress/output panel within the overlay.
 
 **Files:** `src/core/git.rs` (new git operation functions), `src/tui/app.rs`,
 `src/tui/ui.rs`, `src/tui/screens/gitops.rs` (new)
-**Done when:** Users can fetch, pull, push, and view logs for individual repos
-without leaving the TUI.
+**Done when:** Users can fetch, pull, push, commit, and view logs for individual
+repos without leaving the TUI.
 
 ---
 
-### 7. Safe rebase flow (Phase 4)
+### 7. Safe rebase flow
 
 **Problem:** Rebasing a worktree branch is risky without visibility into the
 current state (dirty files, divergence, conflicts).
@@ -141,7 +154,9 @@ checks and clean abort on conflict.
 
 ---
 
-## Tier 3 -- Core Features
+## Tier 4 -- Workflow
+
+Multi-repo productivity features — templates, automation, and sync.
 
 ### 8. Repo groups / templates
 
@@ -218,24 +233,27 @@ all repos in a workspace.
 
 ---
 
-## Tier 4 -- Power Features
+## Tier 5 -- Polish
 
-### 11. space diff
+Refinements and quality-of-life improvements. Low effort individually, can be
+picked off opportunistically between larger features.
+
+### 11. space diff (CLI)
 
 **Problem:** Before creating PRs for a multi-repo feature, there's no way to see the
-total change footprint across all repos at once.
+total change footprint across all repos at once from the command line.
 
 **Approach:**
 
 - New CLI command: `space diff [name]`
-  - For each repo: run `git diff --stat` (or use libgit2 diff APIs).
+  - For each repo: reuse existing `file_diff()` from `core/git.rs`.
   - Output aggregate summary: files changed, insertions, deletions per repo.
   - Optional `--name-only` for file list only.
-- TUI: Keybind on dashboard (e.g., `d`) to show diff summary overlay.
 - MCP: New `workspace_diff` tool returning structured diff stats.
+- Note: TUI already shows this via fold/unfold (item 4). This adds the CLI and
+  MCP interfaces.
 
-**Files:** `src/core/git.rs` (new diff stat function), `src/cli/diff.rs` (new),
-`src/tui/app.rs`, `src/tui/ui.rs`, `src/mcp/mod.rs`
+**Files:** `src/cli/diff.rs` (new), `src/mcp/mod.rs`
 **Done when:** `space diff` shows per-repo and total change stats for a workspace.
 
 ---
