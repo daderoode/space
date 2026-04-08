@@ -131,9 +131,9 @@ graph TD
 Running `space` with no arguments opens an interactive terminal dashboard:
 
 ```
-┌─ Workspaces (30%) ──────────┬─ my-feature (vs base) ────────────────────┐
+┌─ Workspaces (25%) ──────────┬─ my-feature (vs base) ────────────────────┐
 │  my-feature                 │  ▶ api-service  feat/x  clean   +142 -20  │
-│  hotfix-payment             │  ▼ sak          feat/x  3m 2s    +38  -4  │
+│  hotfix-payment             │  ▼ sak          feat/x  2 modified  +38  -4 │
 │  ...                        │    M src/main.rs          [staged]  +12 -4 │
 │                             │    A src/new.rs            [staged]  +26 -0│
 │                             │    ? untracked.txt                   +3  -0│
@@ -143,9 +143,9 @@ Running `space` with no arguments opens an interactive terminal dashboard:
 
 ### Layout
 
-- **Left pane (30%):** Workspace list. Empty state shows "No workspaces yet".
-- **Right pane (70%):** Repo table with columns: REPO, BRANCH, STATUS, +/-.
-  - STATUS shows "clean" (green) or file counts like "3m 2s 1u" (modified/staged/untracked).
+- **Left pane (25%):** Workspace list. Empty state shows "No workspaces yet".
+- **Right pane (75%):** Repo table with columns: REPO, BRANCH, STATUS, +/-.
+  - STATUS shows `clean` (green) or plain-language summaries like `3 modified, 1 new`.
   - +/- shows total file insertions/deletions vs the base branch in green/red.
   - Repos can be expanded (`→` or `Enter`) to show per-file diff rows beneath them. File rows show a status letter (M/A/D/R/?), file path, staged/unstaged indicator, and per-file +/- counts.
   - Pane title shows the active diff target: `(vs base)` or `(vs HEAD)`.
@@ -250,7 +250,7 @@ Progress log showing each repo with a checkmark or error. If a "branch already c
 
 ## Delete Workspace
 
-Confirmation dialog showing the workspace name and all repos that will be removed. Press `y` to confirm, `n` or `Esc` to cancel. With `space rm --force`, skips the dialog entirely.
+Confirmation dialog showing `Delete workspace?`, the workspace name on its own line, and the worktrees that will be removed. Press `Enter` or `y` to delete, `n` or `Esc` to cancel. Long names are truncated with `...`, and long repo lists keep the footer visible by showing `... and N more` when needed. With `space rm --force`, skips the dialog entirely.
 
 ---
 
