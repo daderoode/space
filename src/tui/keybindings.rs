@@ -31,7 +31,7 @@ const NAVIGATION: BindingGroup = BindingGroup {
         },
         Binding {
             key: "←/Esc",
-            desc: "Collapse / focus workspaces",
+            desc: "Right pane: collapse / focus workspaces",
         },
     ],
 };

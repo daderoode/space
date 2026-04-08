@@ -743,7 +743,7 @@ fn render_help_overlay(frame: &mut Frame) {
 
     frame.render_widget(Paragraph::new(lines), sections[0]);
     frame.render_widget(
-        Paragraph::new("Esc to close")
+        Paragraph::new("Esc / q / ? to close")
             .style(theme::muted())
             .alignment(Alignment::Center),
         sections[1],
