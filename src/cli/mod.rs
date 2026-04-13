@@ -4,6 +4,7 @@ use crate::tui::screens;
 use crate::Commands;
 use anyhow::Result;
 
+pub mod complete;
 pub mod go;
 pub mod list;
 pub mod remove;
@@ -120,5 +121,9 @@ pub fn dispatch(cmd: Commands) -> Result<()> {
         Commands::Completions { shell } => crate::shell::print_completions(&shell),
 
         Commands::Mcp => crate::mcp::run(),
+
+        Commands::Init { shell } => crate::shell::print_init(&shell),
+
+        Commands::Complete { what } => crate::cli::complete::run(what),
     }
 }

@@ -70,4 +70,25 @@ pub enum Commands {
     },
     /// Start the MCP server (stdio transport)
     Mcp,
+    /// Output shell init script (wrapper + completions)
+    Init {
+        /// Shell name (only 'zsh' is supported)
+        shell: String,
+    },
+    /// Internal: emit completion data for the shell
+    #[command(name = "__complete", hide = true)]
+    Complete {
+        #[command(subcommand)]
+        what: CompleteTarget,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum CompleteTarget {
+    /// Workspace names with context
+    Workspaces,
+    /// Repo basenames with paths
+    Repos,
+    /// Repos not yet in a workspace
+    AvailableRepos { workspace: String },
 }
