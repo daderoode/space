@@ -10,11 +10,22 @@ fn zsh_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace(':', "\\:")
 }
 
+/// Replace the home directory prefix with `~` for display purposes.
+fn tilde_path(p: &std::path::Path) -> String {
+    let s = p.display().to_string();
+    match dirs::home_dir() {
+        Some(h) => s.replacen(&h.display().to_string(), "~", 1),
+        None => s,
+    }
+}
+
 pub fn run(what: CompleteTarget) -> Result<()> {
     let cfg = SpaceConfig::load()?;
 
     match what {
         CompleteTarget::Workspaces => {
+            // workspace_detail runs git-rev-parse per repo — acceptable for completion
+            // latency but will be slow for workspaces with many repos.
             let workspaces = workspace::list_workspaces(&cfg.workspaces.dir)?;
             for ws in &workspaces {
                 let detail = workspace::workspace_detail(&cfg.workspaces.dir, &ws.name)
@@ -46,13 +57,7 @@ pub fn run(what: CompleteTarget) -> Result<()> {
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    let display_path = r.display().to_string().replace(
-                        &dirs::home_dir()
-                            .map(|h| h.display().to_string())
-                            .unwrap_or_default(),
-                        "~",
-                    );
-                    println!("{}:{}", zsh_escape(&name), display_path);
+                    println!("{}:{}", zsh_escape(&name), tilde_path(r));
                 }
             }
         }
@@ -76,13 +81,7 @@ pub fn run(what: CompleteTarget) -> Result<()> {
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
                     if !existing.contains(&name) {
-                        let display_path = r.display().to_string().replace(
-                            &dirs::home_dir()
-                                .map(|h| h.display().to_string())
-                                .unwrap_or_default(),
-                            "~",
-                        );
-                        println!("{}:{}", zsh_escape(&name), display_path);
+                        println!("{}:{}", zsh_escape(&name), tilde_path(r));
                     }
                 }
             }
