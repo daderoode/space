@@ -63,14 +63,14 @@ pub enum Commands {
     },
     /// Edit configuration interactively
     Config,
-    /// Generate shell completions
+    /// Generate shell completions (completion function only, for manual install)
     Completions {
         /// Shell name (only 'zsh' is supported)
         shell: String,
     },
     /// Start the MCP server (stdio transport)
     Mcp,
-    /// Output shell init script (wrapper + completions)
+    /// Output shell init script (wrapper function + completions) for eval in .zshrc
     Init {
         /// Shell name (only 'zsh' is supported)
         shell: String,
@@ -83,6 +83,7 @@ pub enum Commands {
     },
 }
 
+#[doc(hidden)]
 #[derive(Subcommand)]
 pub enum CompleteTarget {
     /// Workspace names with context
