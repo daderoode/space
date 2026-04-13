@@ -24,10 +24,12 @@ _space() {
   subcmds=(
     'ls:List workspaces'
     'status:Show workspace detail'
+    'st:Show workspace detail'
     'go:cd into a workspace'
     'create:Create a new workspace'
     'add:Add repos to an existing workspace'
     'rm:Remove a workspace'
+    'remove:Remove a workspace'
     'repos:List discoverable repos'
     'config:Edit configuration interactively'
     'completions:Generate shell completions'
@@ -45,10 +47,7 @@ _space() {
     ls|list)
       _arguments '(-v --verbose)'{-v,--verbose}'[Show detailed information]'
       ;;
-    status|st)
-      _arguments '1:workspace:_space_workspace_names'
-      ;;
-    go)
+    status|st|go)
       _arguments '1:workspace:_space_workspace_names'
       ;;
     rm|remove)
