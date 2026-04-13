@@ -351,3 +351,36 @@ fn complete_available_repos_filters_existing() {
         .stdout(predicate::str::contains("beta"))
         .stdout(predicate::str::contains("alpha").not());
 }
+
+// ---------------------------------------------------------------------------
+// init zsh -- outputs wrapper function and completions
+// ---------------------------------------------------------------------------
+#[test]
+fn init_zsh_outputs_wrapper_and_completions() {
+    let env = TestEnv::new();
+    let output = space(&env).args(["init", "zsh"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Contains shell wrapper
+    assert!(
+        stdout.contains("__SPACE_CD_FILE__"),
+        "init output should contain the shell wrapper"
+    );
+    // Contains completion function
+    assert!(
+        stdout.contains("compdef _space space"),
+        "init output should contain the completion registration"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// init -- unsupported shell returns error
+// ---------------------------------------------------------------------------
+#[test]
+fn init_unsupported_shell_errors() {
+    let env = TestEnv::new();
+    space(&env)
+        .args(["init", "fish"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unsupported"));
+}
