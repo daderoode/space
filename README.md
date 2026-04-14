@@ -36,9 +36,9 @@ Running `space` (no arguments) opens an interactive terminal dashboard with two
 panes:
 
 ```
-┌─ Workspaces (30%) ──────────┬─ my-feature (vs base) ────────────────────┐
+┌─ Workspaces (25%) ──────────┬─ my-feature (vs base) ────────────────────┐
 │  my-feature                 │  ▶ api-service  feat/x  clean  +142 -20   │
-│  hotfix-payment             │  ▼ sak          feat/x  3m 2s   +38 -4    │
+│  hotfix-payment             │  ▼ sak          feat/x  2 modified  +38 -4 │
 │  ...                        │    M src/main.rs          [staged]  +12 -4 │
 │                             │    A src/new.rs            [staged]  +26 -0 │
 └─────────────────────────────┴───────────────────────────────────────────┘
@@ -46,6 +46,8 @@ panes:
 ```
 
 Repos show total line divergence from the base branch (`+N -M` in green/red).
+The `STATUS` column uses plain-language summaries like `2 modified` or
+`14 modified, 3 new`.
 Press `→` or `Enter` on a repo to expand it and see per-file diffs.
 
 **Key bindings — Workspaces pane:**

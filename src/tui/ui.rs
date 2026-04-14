@@ -10,6 +10,7 @@ use ratatui::{
     },
     Frame,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Build a table cell showing "+N -M" with green additions and red deletions.
 fn diff_cell(insertions: usize, deletions: usize) -> Cell<'static> {
@@ -33,6 +34,109 @@ fn status_char(status: &crate::core::git::FileStatus) -> &'static str {
         FileStatus::Copied => "C",
         FileStatus::Untracked => "?",
     }
+}
+
+fn format_repo_status(status: &crate::core::git::RepoStatus, max_width: usize) -> String {
+    let mut parts = Vec::new();
+
+    if status.modified > 0 {
+        parts.push(format!("{} modified", status.modified));
+    }
+    if status.staged > 0 {
+        parts.push(format!("{} staged", status.staged));
+    }
+    if status.untracked > 0 {
+        parts.push(format!("{} new", status.untracked));
+    }
+
+    if parts.is_empty() {
+        return "clean".to_string();
+    }
+
+    let full = parts.join(", ");
+    if line_width(&full) <= max_width {
+        return full;
+    }
+
+    let changed_count = status.modified + status.staged;
+    if changed_count > 0 && status.untracked > 0 {
+        let grouped = format!("{} changed, {} new", changed_count, status.untracked);
+        if line_width(&grouped) <= max_width {
+            return grouped;
+        }
+    }
+
+    if changed_count > 0 {
+        let changed = format!("{} changed", changed_count);
+        if line_width(&changed) <= max_width {
+            return changed;
+        }
+    }
+
+    if line_width(&parts[0]) <= max_width {
+        return parts[0].clone();
+    }
+
+    truncate_for_width(&full, max_width)
+}
+
+fn line_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
+
+fn truncate_for_width(text: &str, max_width: usize) -> String {
+    if line_width(text) <= max_width {
+        return text.to_string();
+    }
+
+    let ellipsis = "...";
+    let ellipsis_width = UnicodeWidthStr::width(ellipsis);
+    if max_width <= ellipsis_width {
+        return ".".repeat(max_width);
+    }
+
+    let keep_width = max_width - ellipsis_width;
+    let mut width = 0;
+    let mut truncated = String::new();
+
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > keep_width {
+            break;
+        }
+        truncated.push(ch);
+        width += ch_width;
+    }
+
+    format!("{}{}", truncated, ellipsis)
+}
+
+fn render_delete_footer(
+    inner_width: usize,
+    footer_delete: &str,
+    footer_spacing: &str,
+    footer_cancel: &str,
+) -> Vec<Line<'static>> {
+    let combined_width =
+        line_width(footer_delete) + line_width(footer_spacing) + line_width(footer_cancel);
+    if combined_width <= inner_width {
+        return vec![Line::from(vec![
+            Span::styled(footer_delete.to_string(), theme::error()),
+            Span::raw(footer_spacing.to_string()),
+            Span::styled(footer_cancel.to_string(), theme::muted()),
+        ])];
+    }
+
+    vec![
+        Line::from(Span::styled(
+            truncate_for_width(footer_delete, inner_width),
+            theme::error(),
+        )),
+        Line::from(Span::styled(
+            truncate_for_width(footer_cancel, inner_width),
+            theme::muted(),
+        )),
+    ]
 }
 
 pub fn view(app: &App, frame: &mut Frame) {
@@ -92,7 +196,7 @@ fn render_title(frame: &mut Frame, area: Rect) {
 
 fn render_main(app: &App, frame: &mut Frame, area: Rect) {
     let panes =
-        Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)]).split(area);
+        Layout::horizontal([Constraint::Percentage(25), Constraint::Percentage(75)]).split(area);
 
     render_workspace_list(app, frame, panes[0]);
     render_repo_table(app, frame, panes[1]);
@@ -164,6 +268,7 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
         crate::core::git::DiffTarget::Base => "base",
     };
     let title = format!(" {} (vs {}) ", ws_name, target_label);
+    let status_width = area.width.saturating_sub(2) as usize * 36 / 100;
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -194,14 +299,7 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
                 } else {
                     theme::status_clean()
                 };
-                let status_str = if dirty {
-                    format!(
-                        "{}m {}s {}u",
-                        r.status.modified, r.status.staged, r.status.untracked
-                    )
-                } else {
-                    "clean".to_string()
-                };
+                let status_str = format_repo_status(&r.status, status_width);
                 // +/- column: file line totals from cache. Show zeros when the
                 // cache isn't populated yet rather than falling back to commit
                 // counts (ahead/behind), which would mix different metrics.
@@ -252,9 +350,9 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(40),
-            Constraint::Percentage(30),
-            Constraint::Percentage(20),
+            Constraint::Percentage(32),
+            Constraint::Percentage(22),
+            Constraint::Percentage(36),
             Constraint::Percentage(10),
         ],
     )
@@ -560,41 +658,134 @@ fn render_add_overlay(state: &crate::tui::screens::add::AddState, frame: &mut Fr
 
 fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame: &mut Frame) {
     use ratatui::widgets::Clear;
-    let height = (5 + state.repo_names.len()).min(20) as u16;
-    let area = centered_rect_fixed(44, height, frame.area());
+    let title = " Delete Workspace ";
+    let heading = "Delete workspace?";
+    let repo_heading = "This removes these worktrees:";
+    let footer_delete = "Enter/y delete";
+    let footer_cancel = "Esc/n cancel";
+    let footer_spacing = "   ";
+    let footer_text = format!("{}{}{}", footer_delete, footer_spacing, footer_cancel);
+
+    let max_outer_width = frame.area().width.saturating_sub(4).max(20);
+    let max_inner_width = max_outer_width.saturating_sub(2) as usize;
+    let desired_inner_width = [
+        line_width(heading),
+        line_width(&state.workspace_name),
+        line_width(repo_heading),
+        line_width(&footer_text),
+        state
+            .repo_names
+            .iter()
+            .map(|name| line_width(name) + 2)
+            .max()
+            .unwrap_or(0),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    let inner_width = desired_inner_width
+        .min(max_inner_width)
+        .max(18)
+        .min(frame.area().width.saturating_sub(2) as usize);
+    let footer_line_count =
+        render_delete_footer(inner_width, footer_delete, footer_spacing, footer_cancel).len();
+
+    let max_outer_height = frame.area().height.saturating_sub(2).max(8);
+    let max_inner_height = max_outer_height.saturating_sub(2) as usize;
+    let static_line_count = 5usize + footer_line_count;
+    let available_repo_lines = max_inner_height.saturating_sub(static_line_count);
+
+    let mut visible_repo_names = Vec::new();
+    let mut overflow_count = 0usize;
+    if state.repo_names.len() <= available_repo_lines {
+        visible_repo_names.extend(state.repo_names.iter().cloned());
+    } else if available_repo_lines > 0 {
+        let visible_count = available_repo_lines.saturating_sub(1);
+        visible_repo_names.extend(state.repo_names.iter().take(visible_count).cloned());
+        overflow_count = state.repo_names.len().saturating_sub(visible_count);
+    } else {
+        overflow_count = state.repo_names.len();
+    }
+
+    let content_line_count =
+        static_line_count + visible_repo_names.len() + usize::from(overflow_count > 0);
+    let outer_width = (inner_width as u16)
+        .saturating_add(2)
+        .min(frame.area().width);
+    let outer_height = (content_line_count as u16 + 2).min(frame.area().height);
+    let area = centered_rect_fixed(outer_width, outer_height, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme::border_danger())
-        .title(" Confirm Delete ");
+        .title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
-            format!("Remove workspace '{}'?", state.workspace_name),
+            truncate_for_width(heading, inner.width as usize),
             theme::text().add_modifier(Modifier::BOLD),
         )),
+        Line::from(Span::styled(
+            truncate_for_width(&state.workspace_name, inner.width as usize),
+            theme::text(),
+        )),
         Line::from(""),
+        Line::from(Span::styled(
+            truncate_for_width(repo_heading, inner.width as usize),
+            theme::muted(),
+        )),
     ];
 
-    for name in &state.repo_names {
+    for name in &visible_repo_names {
         lines.push(Line::from(Span::styled(
-            format!("  {}  (clean)", name),
+            truncate_for_width(&format!("  {}", name), inner.width as usize),
             theme::dim_text(),
         )));
     }
 
+    if overflow_count > 0 {
+        lines.push(Line::from(Span::styled(
+            truncate_for_width(
+                &format!("  ... and {} more", overflow_count),
+                inner.width as usize,
+            ),
+            theme::muted(),
+        )));
+    }
+
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("  [y] confirm", theme::success()),
-        Span::raw("   "),
-        Span::styled("[n/ESC] cancel", theme::muted()),
-    ]));
+    lines.extend(render_delete_footer(
+        inner.width as usize,
+        footer_delete,
+        footer_spacing,
+        footer_cancel,
+    ));
 
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_for_width_uses_display_width() {
+        assert_eq!(line_width("界界"), 4);
+        assert_eq!(truncate_for_width("界界abc", 5), "界...");
+    }
+
+    #[test]
+    fn delete_footer_wraps_when_it_cannot_fit_on_one_line() {
+        let lines = render_delete_footer(18, "Enter/y delete", "   ", "Esc/n cancel");
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].width(), 14);
+        assert_eq!(lines[1].width(), 12);
+    }
 }
 
 fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame: &mut Frame) {
@@ -743,7 +934,7 @@ fn render_help_overlay(frame: &mut Frame) {
 
     frame.render_widget(Paragraph::new(lines), sections[0]);
     frame.render_widget(
-        Paragraph::new("Esc to close")
+        Paragraph::new("Esc / q / ? to close")
             .style(theme::muted())
             .alignment(Alignment::Center),
         sections[1],
