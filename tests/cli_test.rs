@@ -359,6 +359,7 @@ fn complete_available_repos_filters_existing() {
 fn init_zsh_outputs_wrapper_and_completions() {
     let env = TestEnv::new();
     let output = space(&env).args(["init", "zsh"]).output().unwrap();
+    assert!(output.status.success(), "init zsh should exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Contains shell wrapper
     assert!(

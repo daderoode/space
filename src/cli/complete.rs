@@ -56,10 +56,11 @@ pub fn run(what: CompleteTarget) -> Result<()> {
             let cache_path = SpaceConfig::cache_path();
             if let Some(repos) = repo::load_cache(&cache_path, u64::MAX) {
                 for r in &repos {
-                    let name = r
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
+                    let Some(n) = r.file_name() else { continue };
+                    let name = n.to_string_lossy();
+                    if name.is_empty() {
+                        continue;
+                    }
                     println!("{}:{}", zsh_escape(&name), zsh_escape(&tilde_path(r)));
                 }
             }
@@ -79,13 +80,12 @@ pub fn run(what: CompleteTarget) -> Result<()> {
             let cache_path = SpaceConfig::cache_path();
             if let Some(repos) = repo::load_cache(&cache_path, u64::MAX) {
                 for r in &repos {
-                    let name = r
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    if !existing.contains(&name) {
-                        println!("{}:{}", zsh_escape(&name), zsh_escape(&tilde_path(r)));
+                    let Some(n) = r.file_name() else { continue };
+                    let name = n.to_string_lossy();
+                    if name.is_empty() || existing.contains(name.as_ref()) {
+                        continue;
                     }
+                    println!("{}:{}", zsh_escape(&name), zsh_escape(&tilde_path(r)));
                 }
             }
         }
