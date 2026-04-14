@@ -11,11 +11,14 @@ fn zsh_escape(s: &str) -> String {
 }
 
 /// Replace the home directory prefix with `~` for display purposes.
+/// Uses `Path::strip_prefix` to ensure only an actual prefix match is replaced.
 fn tilde_path(p: &std::path::Path) -> String {
-    let s = p.display().to_string();
     match dirs::home_dir() {
-        Some(h) => s.replacen(&h.display().to_string(), "~", 1),
-        None => s,
+        Some(h) => match p.strip_prefix(&h) {
+            Ok(rest) => format!("~/{}", rest.display()),
+            Err(_) => p.display().to_string(),
+        },
+        None => p.display().to_string(),
     }
 }
 
@@ -57,7 +60,7 @@ pub fn run(what: CompleteTarget) -> Result<()> {
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
-                    println!("{}:{}", zsh_escape(&name), tilde_path(r));
+                    println!("{}:{}", zsh_escape(&name), zsh_escape(&tilde_path(r)));
                 }
             }
         }
@@ -81,7 +84,7 @@ pub fn run(what: CompleteTarget) -> Result<()> {
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default();
                     if !existing.contains(&name) {
-                        println!("{}:{}", zsh_escape(&name), tilde_path(r));
+                        println!("{}:{}", zsh_escape(&name), zsh_escape(&tilde_path(r)));
                     }
                 }
             }

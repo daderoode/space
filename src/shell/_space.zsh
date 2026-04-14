@@ -47,8 +47,11 @@ _space() {
     ls|list)
       _arguments '(-v --verbose)'{-v,--verbose}'[Show detailed information]'
       ;;
-    status|st|go)
+    status|st)
       _arguments '1:workspace:_space_workspace_names'
+      ;;
+    go)
+      _arguments '1::workspace:_space_workspace_names'
       ;;
     rm|remove)
       _arguments \
