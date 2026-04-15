@@ -71,7 +71,8 @@ pub fn run(what: CompleteTarget) -> Result<()> {
             if ws_path.is_dir() {
                 if let Ok(rd) = std::fs::read_dir(&ws_path) {
                     for entry in rd.flatten() {
-                        if entry.path().is_dir() {
+                        let path = entry.path();
+                        if path.is_dir() && path.join(".git").exists() {
                             existing.insert(entry.file_name().to_string_lossy().to_string());
                         }
                     }
