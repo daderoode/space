@@ -5,9 +5,13 @@ use crate::CompleteTarget;
 use anyhow::Result;
 use std::collections::HashSet;
 
-/// Escape colons for zsh _describe format (colon is the delimiter).
+/// Escape a string for use in zsh `_describe` format (`value:description`).
+/// Escapes backslashes and colons (the field delimiter), and strips newlines
+/// and carriage returns that would break the line-based output protocol.
 fn zsh_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace(':', "\\:")
+    s.replace('\\', "\\\\")
+        .replace(':', "\\:")
+        .replace(['\n', '\r'], " ")
 }
 
 /// Replace the home directory prefix with `~` for display purposes.
