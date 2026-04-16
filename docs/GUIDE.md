@@ -294,6 +294,7 @@ Navigation: `j`/`k` between fields, `Enter` to edit, `Esc` to cancel edit, `Ctrl
 | `space repos` | -- | `-r`/`--refresh` | List discovered repos. Refresh rescans filesystem |
 | `space config` | -- | -- | Open TUI config editor |
 | `space completions` | -- | `zsh` | Print shell completions |
+| `space init` | -- | `zsh` | Output shell init script (wrapper + completions) for eval |
 | `space mcp` | -- | -- | Start MCP server on stdio |
 
 ---
@@ -711,55 +712,40 @@ macOS only (aarch64 and x86_64). Release binaries are published to GitHub Releas
 
 ## Shell Integration
 
-### Zsh Wrapper (Required)
-
-space needs a shell wrapper to change your working directory. The binary can't cd your shell directly, so the wrapper reads a temp file written by the binary.
-
-Add to `~/.zshrc`:
+Add to your `~/.zshrc`:
 
 ```zsh
-space() {
-  case "${1:-}" in
-    ls|list|status|st|repos|completions|--version|--help|-h|-V)
-      command space "$@"
-      ;;
-    *)
-      local cdfile="${TMPDIR:-/tmp}/.space_cd_$$"
-      __SPACE_CD_FILE__="$cdfile" command space "$@"
-      local ret=$?
-      if [[ -s "$cdfile" ]]; then
-        cd -- "$(<"$cdfile")"
-      fi
-      rm -f "$cdfile" 2>/dev/null
-      return $ret
-      ;;
-  esac
-}
+eval "$(space init zsh)"
 ```
 
-**How it works:**
+This sets up two things:
 
-1. For "simple" commands (`ls`, `status`, `repos`, etc.), the wrapper passes through directly -- no temp file needed since these don't change directories
-2. For everything else, it creates a temp file and sets `__SPACE_CD_FILE__`
-3. The binary writes the target path to that file (keeping stdout free for TUI rendering)
-4. The wrapper reads the file and `cd`s if it's non-empty
-5. Temp file is cleaned up
+1. **Shell wrapper** — intercepts TUI/cd commands so `space go` can change your working directory and TUI commands render correctly
+2. **Tab completions** — registers the zsh completion function for all subcommands
 
-> **Note:** CD-target protocol -- There's also a legacy fallback: if `__SPACE_CD_FILE__` is not set, the binary prints `__SPACE_CD__:<path>` to stdout. The wrapper above always uses the temp file method.
+If you installed via Homebrew, completions are also installed to
+`$(brew --prefix)/share/zsh/site-functions/_space` — they work without
+the `eval` line if that directory is on your `$fpath`.
 
-### Completions
+### How the wrapper works
 
-Generate and install zsh completions:
+The binary can't `cd` your shell directly. The wrapper creates a temp file,
+sets `__SPACE_CD_FILE__` in the environment, runs the binary, then `cd`s to
+whatever path the binary wrote to that file.
+
+For read-only commands (`ls`, `status`, `repos`, etc.) the wrapper passes
+through directly — no temp file needed.
+
+### Manual completions install
+
+If you prefer to install completions to a custom location:
 
 ```sh
 space completions zsh > ~/.zfunc/_space
 ```
 
-The completion script provides:
-- Subcommand completion
-- Workspace name completion for `go`, `status`, `rm`
-- Available repo completion for `add` (filters out repos already in the workspace)
-- Flag completion (`--verbose`, `--refresh`, `--force`)
+Ensure `~/.zfunc` is on your `$fpath` (add `fpath=(~/.zfunc $fpath)` before
+`compinit` in `~/.zshrc`).
 
 ---
 
