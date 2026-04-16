@@ -272,3 +272,116 @@ fn go_writes_cd_file_when_env_set() {
         "cd file should contain workspace path"
     );
 }
+
+// ---------------------------------------------------------------------------
+// __complete workspaces -- lists workspace names with context
+// ---------------------------------------------------------------------------
+#[test]
+fn complete_workspaces_lists_names() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("alpha");
+    create_worktree(
+        &repo_path,
+        &env.workspaces_dir,
+        "my-feature",
+        &BranchStrategy::NewBranch("feat-x".to_string()),
+    )
+    .unwrap();
+
+    space(&env)
+        .args(["__complete", "workspaces"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("my-feature"))
+        .stdout(predicate::str::contains("feat-x"));
+}
+
+// ---------------------------------------------------------------------------
+// __complete workspaces -- empty when none exist
+// ---------------------------------------------------------------------------
+#[test]
+fn complete_workspaces_empty() {
+    let env = TestEnv::new();
+    space(&env)
+        .args(["__complete", "workspaces"])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// __complete repos -- lists from cache
+// ---------------------------------------------------------------------------
+#[test]
+fn complete_repos_lists_cached() {
+    let env = TestEnv::new();
+    let repo_path = env.repos_dir.join("my-service");
+    std::fs::create_dir_all(&repo_path).unwrap();
+    env.write_cache(&[repo_path.clone()]);
+
+    space(&env)
+        .args(["__complete", "repos"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("my-service"));
+}
+
+// ---------------------------------------------------------------------------
+// __complete available-repos -- filters out existing repos
+// ---------------------------------------------------------------------------
+#[test]
+fn complete_available_repos_filters_existing() {
+    let env = TestEnv::new();
+    let alpha = env.create_repo("alpha");
+    let beta = env.create_repo("beta");
+    env.write_cache(&[alpha.clone(), beta.clone()]);
+
+    create_worktree(
+        &alpha,
+        &env.workspaces_dir,
+        "test-ws",
+        &BranchStrategy::NewBranch("feat".to_string()),
+    )
+    .unwrap();
+
+    space(&env)
+        .args(["__complete", "available-repos", "test-ws"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("beta"))
+        .stdout(predicate::str::contains("alpha").not());
+}
+
+// ---------------------------------------------------------------------------
+// init zsh -- outputs wrapper function and completions
+// ---------------------------------------------------------------------------
+#[test]
+fn init_zsh_outputs_wrapper_and_completions() {
+    let env = TestEnv::new();
+    let output = space(&env).args(["init", "zsh"]).output().unwrap();
+    assert!(output.status.success(), "init zsh should exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Contains shell wrapper
+    assert!(
+        stdout.contains("__SPACE_CD_FILE__"),
+        "init output should contain the shell wrapper"
+    );
+    // Contains completion function
+    assert!(
+        stdout.contains("compdef _space space"),
+        "init output should contain the completion registration"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// init -- unsupported shell returns error
+// ---------------------------------------------------------------------------
+#[test]
+fn init_unsupported_shell_errors() {
+    let env = TestEnv::new();
+    space(&env)
+        .args(["init", "fish"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unsupported"));
+}

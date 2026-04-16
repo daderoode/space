@@ -63,11 +63,33 @@ pub enum Commands {
     },
     /// Edit configuration interactively
     Config,
-    /// Generate shell completions
+    /// Generate shell completions (completion function only, for manual install)
     Completions {
         /// Shell name (only 'zsh' is supported)
         shell: String,
     },
     /// Start the MCP server (stdio transport)
     Mcp,
+    /// Output shell init script (wrapper function + completions) for eval in .zshrc
+    Init {
+        /// Shell name (only 'zsh' is supported)
+        shell: String,
+    },
+    /// Internal: emit completion data for the shell
+    #[command(name = "__complete", hide = true)]
+    Complete {
+        #[command(subcommand)]
+        what: CompleteTarget,
+    },
+}
+
+#[doc(hidden)]
+#[derive(Subcommand)]
+pub enum CompleteTarget {
+    /// Workspace names with context
+    Workspaces,
+    /// Repo basenames with paths
+    Repos,
+    /// Repos not yet in a workspace
+    AvailableRepos { workspace: String },
 }

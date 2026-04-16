@@ -1,116 +1,84 @@
 #compdef space
 
 _space_workspace_names() {
-  local workspaces_dir
-  local ws_path
-
-  workspaces_dir="$(_space_workspaces_dir)"
-
-  [[ -d "$workspaces_dir" ]] || return 0
-
-  for ws_path in "$workspaces_dir"/*(/N); do
-    print -r -- "${ws_path:t}"
-  done
+  local -a workspaces
+  workspaces=("${(@f)$(command space __complete workspaces 2>/dev/null)}")
+  (( ${#workspaces} )) && _describe 'workspace' workspaces
 }
 
-_space_workspaces_dir() {
-  local config_file="${XDG_CONFIG_HOME:-$HOME/.config}/space/config.toml"
-  local workspaces_dir="$HOME/workspaces"
-  local parsed
-
-  if [[ -r "$config_file" ]]; then
-    parsed="$(sed -n '/^\[workspaces\]/,/^\[/{/^\s*dir\s*=/p}' "$config_file" | sed 's/.*=\s*"\(.*\)"/\1/')"
-    [[ -n "$parsed" ]] && workspaces_dir="${parsed/#\~/$HOME}"
-  fi
-
-  print -r -- "$workspaces_dir"
+_space_repo_names() {
+  local -a repos
+  repos=("${(@f)$(command space __complete repos 2>/dev/null)}")
+  (( ${#repos} )) && _describe 'repo' repos
 }
 
-_space_repo_basenames() {
-  local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/space"
-  local repo_cache="$config_dir/repos.cache"
-  local repo_path
-
-  [[ -r "$repo_cache" ]] || return 0
-
-  while IFS= read -r repo_path; do
-    [[ -n "$repo_path" ]] && print -r -- "${repo_path:t}"
-  done < "$repo_cache"
-}
-
-_space_available_workspace_repos() {
-  local workspace_name="$1"
-  local workspace_dir="$(_space_workspaces_dir)/$workspace_name"
-  local repo_name repo_dir
-  local -A existing_repos
-
-  if [[ -d "$workspace_dir" ]]; then
-    for repo_dir in "$workspace_dir"/*(/N); do
-      existing_repos[${repo_dir:t}]=1
-    done
-  fi
-
-  while IFS= read -r repo_name; do
-    [[ -n "$repo_name" && -z "${existing_repos[$repo_name]-}" ]] && print -r -- "$repo_name"
-  done < <(_space_repo_basenames)
+_space_available_repos() {
+  local workspace="$words[3]"
+  local -a repos
+  repos=("${(@f)$(command space __complete available-repos "$workspace" 2>/dev/null)}")
+  (( ${#repos} )) && _describe 'repo' repos
 }
 
 _space() {
-  local cmd="${words[2]-}"
-  local -a candidates
+  local -a subcmds
+  subcmds=(
+    'ls:List workspaces'
+    'status:Show workspace detail'
+    'st:Show workspace detail'
+    'go:cd into a workspace'
+    'create:Create a new workspace'
+    'add:Add repos to an existing workspace'
+    'rm:Remove a workspace'
+    'remove:Remove a workspace'
+    'repos:List discoverable repos'
+    'config:Edit configuration interactively'
+    'completions:Generate shell completions'
+    'init:Output shell init script'
+    'mcp:Start MCP server on stdio'
+  )
 
   if (( CURRENT == 2 )); then
-    candidates=(ls list status st add rm remove go repos create config completions)
-    compadd -- "${candidates[@]}"
+    _describe 'command' subcmds
     return 0
   fi
 
+  local cmd="${words[2]}"
   case "$cmd" in
     ls|list)
-      if (( CURRENT == 3 )); then
-        compadd -- -v --verbose
-      fi
+      _arguments '(-v --verbose)'{-v,--verbose}'[Show detailed information]'
       ;;
-    status|st|go)
-      if (( CURRENT == 3 )); then
-        candidates=("${(@f)$(_space_workspace_names)}")
-        (( ${#candidates[@]} > 0 )) && compadd -- "${candidates[@]}"
-      fi
+    status|st)
+      _arguments '1:workspace:_space_workspace_names'
+      ;;
+    go)
+      _arguments '1::workspace:_space_workspace_names'
       ;;
     rm|remove)
-      if (( CURRENT == 3 )); then
-        candidates=("${(@f)$(_space_workspace_names)}")
-        (( ${#candidates[@]} > 0 )) && compadd -- "${candidates[@]}"
-      elif (( CURRENT == 4 )); then
-        compadd -- -f --force
-      fi
+      _arguments \
+        '1:workspace:_space_workspace_names' \
+        '(-f --force)'{-f,--force}'[Skip confirmation]'
       ;;
     add)
       if (( CURRENT == 3 )); then
-        candidates=("${(@f)$(_space_workspace_names)}")
-        (( ${#candidates[@]} > 0 )) && compadd -- "${candidates[@]}"
-      elif (( CURRENT >= 4 )); then
-        candidates=("${(@f)$(_space_available_workspace_repos "$words[3]")}")
-        (( ${#candidates[@]} > 0 )) && compadd -- "${candidates[@]}"
-      fi
-      ;;
-    repos)
-      if (( CURRENT == 3 )); then
-        compadd -- -r --refresh
+        _space_workspace_names
+      else
+        _space_available_repos
       fi
       ;;
     create)
-      # Takes free-form repo queries — no meaningful completions
-      return 0
+      _space_repo_names
       ;;
-    config)
-      # No arguments
-      return 0
+    repos)
+      _arguments '(-r --refresh)'{-r,--refresh}'[Rescan repo roots]'
       ;;
     completions)
-      if (( CURRENT == 3 )); then
-        compadd -- zsh
-      fi
+      compadd -- zsh
+      ;;
+    init)
+      compadd -- zsh
+      ;;
+    config|mcp)
+      # No arguments
       ;;
   esac
 }

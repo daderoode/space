@@ -18,34 +18,17 @@ brew install daderoode/tap/space
 
 ## Setup (zsh)
 
-Add the shell wrapper to your `.zshrc`. This is required for `space go` to
-change directories and for TUI commands to render correctly:
+Add to your `~/.zshrc`:
 
 ```zsh
-space() {
-  case "${1:-}" in
-    ls|list|status|st|repos|completions|--version|--help|-h|-V)
-      command space "$@"
-      ;;
-    *)
-      local cdfile="${TMPDIR:-/tmp}/.space_cd_$$"
-      __SPACE_CD_FILE__="$cdfile" command space "$@"
-      local ret=$?
-      if [[ -s "$cdfile" ]]; then
-        cd -- "$(<"$cdfile")"
-      fi
-      rm -f "$cdfile" 2>/dev/null
-      return $ret
-      ;;
-  esac
-}
+eval "$(space init zsh)"
 ```
 
-Then generate completions:
+This sets up the shell wrapper (required for `space go` and TUI commands to
+work correctly) and registers completions.
 
-```sh
-space completions zsh > ~/.zfunc/_space
-```
+If you installed via Homebrew, completions are already available system-wide —
+the `eval` line is only needed for the shell wrapper.
 
 ## TUI Dashboard
 
@@ -107,7 +90,8 @@ space add <workspace> <repos>  # add repos to an existing workspace
 space rm <name> [--force]      # remove a workspace
 space repos [--refresh]        # list / refresh the repo cache
 space config                   # edit configuration interactively
-space completions zsh          # print shell completions
+space init zsh                 # output shell init script (wrapper + completions)
+space completions zsh          # print shell completions only
 space mcp                      # start MCP server on stdio
 ```
 
