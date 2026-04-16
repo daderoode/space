@@ -106,36 +106,18 @@ jobs:
 
             def install
               bin.install "space"
+              output = Utils.safe_popen_read(bin/"space", "completions", "zsh")
+              (zsh_completion/"_space").write output
             end
 
             def caveats
               <<~EOS
-                Add the shell wrapper to your ~/.zshrc so \`space go\` can change directories
-                and TUI commands (space, space config, space create, etc.) render correctly:
+                Add to your ~/.zshrc to enable \`space go\` directory changing and TUI rendering:
 
-                  space() {
-                    case "\${1:-}" in
-                      ls|list|status|st|repos|completions|--version|--help|-h|-V)
-                        command space "\$@"
-                        ;;
-                      *)
-                        local cdfile="\${TMPDIR:-/tmp}/.space_cd_\$\$"
-                        __SPACE_CD_FILE__="\$cdfile" command space "\$@"
-                        local ret=\$?
-                        if [[ -s "\$cdfile" ]]; then
-                          cd -- "\$(<"\$cdfile")"
-                        fi
-                        rm -f "\$cdfile" 2>/dev/null
-                        return \$ret
-                        ;;
-                    esac
-                  }
+                  eval "\$(space init zsh)"
 
-                Then generate completions:
-
-                  space completions zsh > ~/.zfunc/_space
-
-                NOTE: If you have an older wrapper in your ~/.zshrc, replace it with the above.
+                Completions are already installed to Homebrew's site-functions — tab completion
+                works immediately without any extra steps.
               EOS
             end
 
