@@ -27,8 +27,9 @@ eval "$(space init zsh)"
 This sets up the shell wrapper (required for `space go` and TUI commands to
 work correctly) and registers completions.
 
-If you installed via Homebrew, completions are already available system-wide —
-the `eval` line is only needed for the shell wrapper.
+If you installed via Homebrew, completions are installed to Homebrew's zsh
+site-functions directory. The `eval` line adds the shell wrapper needed for
+`space go` and TUI commands, and also works as a fallback for completions.
 
 ## TUI Dashboard
 
