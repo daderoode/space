@@ -107,6 +107,7 @@ jobs:
             def install
               bin.install "space"
               output = Utils.safe_popen_read(bin/"space", "completions", "zsh")
+              odie "space completions zsh produced no output" if output.strip.empty?
               (zsh_completion/"_space").write output
             end
 
@@ -116,8 +117,9 @@ jobs:
 
                   eval "\$(space init zsh)"
 
-                Completions are already installed to Homebrew's site-functions — tab completion
-                works immediately without any extra steps.
+                Completions are installed to Homebrew's zsh site-functions directory.
+                If you use Homebrew's zsh or have configured \$fpath to include it,
+                tab completion works without any extra steps.
               EOS
             end
 
