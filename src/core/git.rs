@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use git2::{Repository, StatusOptions};
+use std::cmp::Reverse;
 use std::path::Path;
 
 #[derive(Debug, Default, serde::Serialize)]
@@ -136,7 +137,7 @@ pub fn list_branches(repo_path: &Path) -> Result<Vec<BranchInfo>> {
 pub fn recent_branches(repo_path: &std::path::Path, limit: usize) -> Vec<BranchInfo> {
     list_branches(repo_path)
         .map(|mut branches| {
-            branches.sort_by(|a, b| b.last_commit_time.cmp(&a.last_commit_time));
+            branches.sort_by_key(|b| Reverse(b.last_commit_time));
             branches.truncate(limit);
             branches
         })

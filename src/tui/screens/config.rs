@@ -118,15 +118,11 @@ impl ConfigState {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => return ScreenAction::Back,
                 KeyCode::Enter => self.start_editing(),
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if self.focused > 0 {
-                        self.focused -= 1;
-                    }
+                KeyCode::Up | KeyCode::Char('k') if self.focused > 0 => {
+                    self.focused -= 1;
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if self.focused + 1 < self.fields.len() {
-                        self.focused += 1;
-                    }
+                KeyCode::Down | KeyCode::Char('j') if self.focused + 1 < self.fields.len() => {
+                    self.focused += 1;
                 }
                 _ => {}
             }

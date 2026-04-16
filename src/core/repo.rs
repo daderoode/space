@@ -1,5 +1,6 @@
 use anyhow::Result;
 use nucleo::{Config as NucleoConfig, Utf32Str};
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -70,7 +71,7 @@ pub fn fuzzy_match(query: &str, repos: &[PathBuf]) -> Vec<PathBuf> {
         })
         .collect();
 
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|b| Reverse(b.0));
     scored.into_iter().map(|(_, p)| p).collect()
 }
 

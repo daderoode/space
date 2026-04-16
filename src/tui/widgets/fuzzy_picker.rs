@@ -1,5 +1,6 @@
 use nucleo::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo::{Config as NucleoConfig, Utf32Str};
+use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use tui_input::Input;
@@ -156,7 +157,7 @@ impl FuzzyPicker {
                 })
                 .collect();
 
-            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            scored.sort_by_key(|b| Reverse(b.0));
             self.filtered = scored.iter().map(|(_, i, _)| *i).collect();
             self.match_indices = scored.into_iter().map(|(_, _, idx)| idx).collect();
         }
