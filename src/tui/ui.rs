@@ -163,6 +163,10 @@ pub fn view(app: &App, frame: &mut Frame) {
             crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
         }
         Screen::ConfigEditor(state) => render_config_editor(state, frame),
+        Screen::DiffViewer(state) => {
+            render_dashboard(app, frame);
+            render_diff_overlay(state, frame);
+        }
         Screen::Help => {
             render_dashboard(app, frame);
             render_help_overlay(frame);
@@ -882,6 +886,86 @@ fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame:
         Paragraph::new("↑↓ navigate  ·  Enter edit  ·  Esc cancel  ·  Ctrl-S save")
             .style(theme::muted()),
         sections[hint_idx],
+    );
+}
+
+fn centered_rect_percent(width_pct: u16, height_pct: u16, area: Rect) -> Rect {
+    let width = (area.width as u32 * width_pct as u32 / 100) as u16;
+    let height = (area.height as u32 * height_pct as u32 / 100) as u16;
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    Rect {
+        x,
+        y,
+        width: width.min(area.width),
+        height: height.min(area.height),
+    }
+}
+
+fn render_diff_overlay(state: &crate::tui::screens::diff::DiffViewerState, frame: &mut Frame) {
+    use crate::core::git::DiffLineKind;
+    use ratatui::widgets::Clear;
+
+    let area = centered_rect_percent(90, 80, frame.area());
+    frame.render_widget(Clear, area);
+
+    let target_label = match state.target {
+        crate::core::git::DiffTarget::Head => "HEAD",
+        crate::core::git::DiffTarget::Base => "base",
+    };
+    let staged_label = if state.staged { "staged" } else { "unstaged" };
+    let title = format!(
+        " {}/{} \u{00b7} {} \u{00b7} {} ",
+        state.repo_name, state.file_path, target_label, staged_label
+    );
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border_focused())
+        .title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Split inner into body + footer
+    let sections = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+
+    match &state.diff {
+        Ok(file_diff) => {
+            let styled_lines: Vec<Line> = file_diff
+                .lines
+                .iter()
+                .map(|dl| {
+                    let style = match dl.kind {
+                        DiffLineKind::Addition => theme::additions(),
+                        DiffLineKind::Deletion => theme::deletions(),
+                        DiffLineKind::HunkHeader => {
+                            Style::default().fg(ratatui::style::Color::Cyan)
+                        }
+                        DiffLineKind::FileHeader => theme::muted(),
+                        DiffLineKind::Context => Style::default(),
+                        DiffLineKind::Binary => theme::muted(),
+                    };
+                    Line::from(Span::styled(dl.content.clone(), style))
+                })
+                .collect();
+            let paragraph = Paragraph::new(styled_lines).scroll((state.scroll_offset, 0));
+            frame.render_widget(paragraph, sections[0]);
+        }
+        Err(msg) => {
+            frame.render_widget(
+                Paragraph::new(msg.as_str()).style(theme::error()),
+                sections[0],
+            );
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(
+            "  \u{2191}\u{2193} scroll \u{00b7} PgUp/PgDn page \u{00b7} s stage \u{00b7} Esc close",
+        )
+        .style(theme::muted()),
+        sections[1],
     );
 }
 

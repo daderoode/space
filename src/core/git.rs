@@ -35,29 +35,30 @@ pub struct FileEntry {
     pub deletions: usize,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum DiffLineKind {
     Context,
     Addition,
     Deletion,
     HunkHeader,
+    #[allow(dead_code)] // matched in render_diff_overlay, not yet constructed
     FileHeader,
     Binary,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DiffLine {
     pub kind: DiffLineKind,
     pub content: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct FileDiff {
+    #[allow(dead_code)] // used in diff overlay title (Step D)
     pub path: String,
+    #[allow(dead_code)] // used in diff overlay for renamed files (Step D)
     pub old_path: Option<String>,
+    #[allow(dead_code)] // used in diff overlay rendering
     pub is_binary: bool,
     pub lines: Vec<DiffLine>,
 }
@@ -424,7 +425,6 @@ fn delta_to_file_status(delta: git2::Delta) -> Option<FileStatus> {
 ///
 /// When `target` is `Base`, the diff is computed against the base branch tree
 /// and the `staged` flag is ignored.
-#[allow(dead_code)]
 pub fn file_content_diff(
     repo_path: &Path,
     target: &DiffTarget,

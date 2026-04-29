@@ -1450,11 +1450,11 @@ fn phase1_collapse_snaps_cursor_to_repo_row() {
         ],
     );
 
-    // Navigate cursor to the last file row (index 4: repo-a=0, repo-b=1, a=2, b=3, c=4)
-    app.cursor_row = 4;
+    // Navigate cursor to repo-b's header row (index 1: repo-a=0, repo-b=1, then files)
+    app.cursor_row = 1;
     assert_eq!(app.repo_index_for_cursor(), Some(1));
 
-    // Collapse via Enter
+    // Collapse via Enter on the repo header row
     app.handle_key(key(KeyCode::Enter));
 
     // repo-b should be collapsed

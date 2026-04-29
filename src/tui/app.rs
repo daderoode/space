@@ -73,6 +73,7 @@ pub enum Screen {
     ConfirmDelete(crate::tui::screens::delete::DeleteState),
     RepoSearch(crate::tui::screens::search::SearchState),
     ConfigEditor(crate::tui::screens::config::ConfigState),
+    DiffViewer(crate::tui::screens::diff::DiffViewerState),
     Help,
 }
 
@@ -104,6 +105,11 @@ pub enum Message {
     StageBulk {
         repo_index: usize,
         stage: bool, // true = stage all, false = unstage all
+    },
+    OpenDiffViewer {
+        repo_index: usize,
+        path: String,
+        staged: bool,
     },
 }
 
@@ -532,6 +538,7 @@ impl App {
             Screen::CreateWorkspace(state) => state.handle_key(key, &ctx),
             Screen::AddRepos(state) => state.handle_key(key, &ctx),
             Screen::ConfigEditor(state) => state.handle_key(key, &ctx),
+            Screen::DiffViewer(state) => state.handle_key(key, &ctx),
             Screen::Dashboard => {
                 drop(ctx);
                 // Dashboard key-to-message mapping
@@ -541,7 +548,20 @@ impl App {
                     // Enter: context-sensitive
                     (KeyCode::Enter, _) => match self.focus {
                         Pane::Left => Some(Message::GoToWorkspace),
-                        Pane::Right => Some(Message::ToggleRepoExpand),
+                        Pane::Right => {
+                            let rows = self.flattened_rows();
+                            match rows.get(self.cursor_row) {
+                                Some(RepoRow::Repo { .. }) => Some(Message::ToggleRepoExpand),
+                                Some(RepoRow::File {
+                                    repo_index, entry, ..
+                                }) => Some(Message::OpenDiffViewer {
+                                    repo_index: *repo_index,
+                                    path: entry.path.clone(),
+                                    staged: entry.staged,
+                                }),
+                                None => None,
+                            }
+                        }
                     },
                     (KeyCode::Char('g'), _) => Some(Message::StartGo),
                     (KeyCode::Char('c'), _) => Some(Message::StartCreate),
@@ -609,7 +629,13 @@ impl App {
                     // Right arrow: context-sensitive
                     (KeyCode::Right, _) => match self.focus {
                         Pane::Left => Some(Message::FocusNext),
-                        Pane::Right => Some(Message::ToggleRepoExpand),
+                        Pane::Right => {
+                            let rows = self.flattened_rows();
+                            match rows.get(self.cursor_row) {
+                                Some(RepoRow::Repo { .. }) => Some(Message::ToggleRepoExpand),
+                                _ => None,
+                            }
+                        }
                     },
                     // Left arrow and Esc: collapse-first on right pane
                     (KeyCode::Left, _) => match self.focus {
@@ -907,6 +933,59 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                     app.set_status(format!("Stage failed: {}", err));
                 }
             }
+            None
+        }
+        Message::OpenDiffViewer {
+            repo_index,
+            path,
+            staged,
+        } => {
+            let (repo_path, repo_name) = match app
+                .selected_workspace()
+                .and_then(|ws| ws.repos.get(repo_index))
+            {
+                Some(r) => (r.path.clone(), r.name.clone()),
+                None => {
+                    app.set_status("Diff viewer: repo not found");
+                    return None;
+                }
+            };
+
+            let cache_key = DiffCacheKey {
+                repo_index,
+                path: path.clone(),
+                target: app.diff_target.clone(),
+                staged,
+            };
+
+            let diff = if let Some(cached) = app.diff_content_cache.get(&cache_key) {
+                cached.clone()
+            } else {
+                let result = crate::core::git::file_content_diff(
+                    &repo_path,
+                    &app.diff_target,
+                    &path,
+                    staged,
+                )
+                .map_err(|e| e.to_string());
+                app.diff_content_cache.insert(cache_key, result.clone());
+                result
+            };
+
+            let total_lines = diff.as_ref().map(|d| d.lines.len() as u16).unwrap_or(0);
+
+            let state = crate::tui::screens::diff::DiffViewerState {
+                repo_index,
+                repo_name,
+                repo_path,
+                file_path: path,
+                target: app.diff_target.clone(),
+                staged,
+                diff,
+                scroll_offset: 0,
+                total_lines,
+            };
+            app.screen = Screen::DiffViewer(state);
             None
         }
     }
