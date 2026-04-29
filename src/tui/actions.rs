@@ -38,4 +38,7 @@ pub enum ScreenAction {
     /// Navigate to the workspace containing a repo with the given name
     /// (repo name from Search, resolved to a workspace in `App::process_action`).
     NavigateToWorkspace(String),
+    /// Set a transient status message without changing screens.
+    #[allow(dead_code)]
+    SetStatus(String),
 }

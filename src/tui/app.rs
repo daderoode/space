@@ -1,12 +1,20 @@
 use crate::core::{
     config::SpaceConfig,
-    git::{DiffTarget, FileEntry},
+    git::{DiffTarget, FileDiff, FileEntry},
     workspace::{self, Workspace},
 };
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DiffCacheKey {
+    pub repo_index: usize,
+    pub path: String,
+    pub target: DiffTarget,
+    pub staged: bool,
+}
 
 const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(5);
 
@@ -88,6 +96,15 @@ pub enum Message {
     CollapseAllRepos,
     StartHelp,
     ToggleDiffTarget,
+    StageFile {
+        repo_index: usize,
+        path: String,
+        currently_staged: bool,
+    },
+    StageBulk {
+        repo_index: usize,
+        stage: bool, // true = stage all, false = unstage all
+    },
 }
 
 /// A row in the flattened repo table (repo header or file entry).
@@ -112,6 +129,7 @@ pub struct App {
     pub selected_repo: usize,
     pub expanded_repos: HashSet<usize>,
     pub repo_file_cache: HashMap<usize, Vec<FileEntry>>,
+    pub diff_content_cache: HashMap<DiffCacheKey, Result<FileDiff, String>>,
     pub cursor_row: usize,
     pub diff_target: DiffTarget,
     pub focus: Pane,
@@ -143,6 +161,7 @@ impl App {
             selected_repo: 0,
             expanded_repos: HashSet::new(),
             repo_file_cache: HashMap::new(),
+            diff_content_cache: HashMap::new(),
             cursor_row: 0,
             diff_target: DiffTarget::Base,
             focus: Pane::Left,
@@ -220,6 +239,7 @@ impl App {
         self.cursor_row = 0;
         self.expanded_repos.clear();
         self.repo_file_cache.clear();
+        self.diff_content_cache.clear();
     }
 
     /// Fetch file diffs for all repos in the selected workspace and populate
@@ -227,6 +247,7 @@ impl App {
     /// shows file line totals even on collapsed rows.
     pub fn refresh_file_diff_cache(&mut self) {
         self.repo_file_cache.clear();
+        self.diff_content_cache.clear();
         let repo_paths: Vec<(usize, std::path::PathBuf)> = self
             .selected_workspace()
             .map(|ws| {
@@ -473,6 +494,9 @@ impl App {
                     self.set_status("Not in any workspace — use 'c' to create one");
                 }
             }
+            ScreenAction::SetStatus(msg) => {
+                self.set_status(msg);
+            }
         }
     }
 
@@ -526,8 +550,54 @@ impl App {
                     (KeyCode::Char('r'), _) => Some(Message::RefreshRepos),
                     (KeyCode::Char('T'), _) => Some(Message::ToggleDiffTarget),
                     (KeyCode::Char('/'), _) => Some(Message::StartSearch),
-                    (KeyCode::Char('S'), _) => Some(Message::StartConfig),
                     (KeyCode::Char('?'), _) => Some(Message::StartHelp),
+                    // s: stage/unstage single file (Right pane only)
+                    (KeyCode::Char('s'), _) if self.focus == Pane::Right => {
+                        if self.diff_target == DiffTarget::Base {
+                            self.set_status("Staging only available in HEAD mode");
+                            return;
+                        }
+                        let rows = self.flattened_rows();
+                        if let Some(RepoRow::File {
+                            repo_index, entry, ..
+                        }) = rows.get(self.cursor_row)
+                        {
+                            Some(Message::StageFile {
+                                repo_index: *repo_index,
+                                path: entry.path.clone(),
+                                currently_staged: entry.staged,
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    // S: stage all (Right pane) or open config (Left pane)
+                    (KeyCode::Char('S'), _) => match self.focus {
+                        Pane::Right => {
+                            if self.diff_target == DiffTarget::Base {
+                                self.set_status("Staging only available in HEAD mode");
+                                return;
+                            }
+                            self.repo_index_for_cursor()
+                                .map(|repo_index| Message::StageBulk {
+                                    repo_index,
+                                    stage: true,
+                                })
+                        }
+                        Pane::Left => Some(Message::StartConfig),
+                    },
+                    // U: unstage all (Right pane only)
+                    (KeyCode::Char('U'), _) if self.focus == Pane::Right => {
+                        if self.diff_target == DiffTarget::Base {
+                            self.set_status("Staging only available in HEAD mode");
+                            return;
+                        }
+                        self.repo_index_for_cursor()
+                            .map(|repo_index| Message::StageBulk {
+                                repo_index,
+                                stage: false,
+                            })
+                    }
                     (KeyCode::Up, _) | (KeyCode::Char('k'), _) => match self.focus {
                         Pane::Left => Some(Message::SelectWorkspaceUp),
                         Pane::Right => Some(Message::SelectRepoUp),
@@ -759,6 +829,86 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             app.set_status(format!("Diff target: {}", label));
             None
         }
+        Message::StageFile {
+            repo_index,
+            path,
+            currently_staged,
+        } => {
+            let repo_path = app
+                .selected_workspace()
+                .and_then(|ws| ws.repos.get(repo_index))
+                .map(|r| r.path.clone());
+            let repo_path = match repo_path {
+                Some(p) => p,
+                None => {
+                    app.set_status("Stage failed: repo not found");
+                    return None;
+                }
+            };
+            let result = if currently_staged {
+                crate::core::git::unstage_file(&repo_path, &path)
+            } else {
+                crate::core::git::stage_file(&repo_path, &path)
+            };
+            match result {
+                Ok(()) => {
+                    // Invalidate diff content cache entries for this repo
+                    app.diff_content_cache
+                        .retain(|key, _| key.repo_index != repo_index);
+                    // Re-fetch file list for this repo
+                    app.repo_file_cache.remove(&repo_index);
+                    if let Ok(entries) = crate::core::git::file_diff(&repo_path, &app.diff_target) {
+                        app.repo_file_cache.insert(repo_index, entries);
+                    }
+                    let verb = if currently_staged {
+                        "Unstaged"
+                    } else {
+                        "Staged"
+                    };
+                    app.set_status(format!("{} {}", verb, path));
+                }
+                Err(err) => {
+                    app.set_status(format!("Stage failed: {}", err));
+                }
+            }
+            None
+        }
+        Message::StageBulk { repo_index, stage } => {
+            let repo_path = app
+                .selected_workspace()
+                .and_then(|ws| ws.repos.get(repo_index))
+                .map(|r| r.path.clone());
+            let repo_path = match repo_path {
+                Some(p) => p,
+                None => {
+                    app.set_status("Stage failed: repo not found");
+                    return None;
+                }
+            };
+            let result = if stage {
+                crate::core::git::stage_all_unstaged(&repo_path)
+            } else {
+                crate::core::git::unstage_all_staged(&repo_path)
+            };
+            match result {
+                Ok(count) => {
+                    // Invalidate diff content cache entries for this repo
+                    app.diff_content_cache
+                        .retain(|key, _| key.repo_index != repo_index);
+                    // Re-fetch file list for this repo
+                    app.repo_file_cache.remove(&repo_index);
+                    if let Ok(entries) = crate::core::git::file_diff(&repo_path, &app.diff_target) {
+                        app.repo_file_cache.insert(repo_index, entries);
+                    }
+                    let verb = if stage { "Staged" } else { "Unstaged" };
+                    app.set_status(format!("{} {} file(s)", verb, count));
+                }
+                Err(err) => {
+                    app.set_status(format!("Stage failed: {}", err));
+                }
+            }
+            None
+        }
     }
 }
 
@@ -853,6 +1003,7 @@ mod tests {
             selected_repo: 0,
             expanded_repos: HashSet::new(),
             repo_file_cache: HashMap::new(),
+            diff_content_cache: HashMap::new(),
             cursor_row: 0,
             diff_target: DiffTarget::Base,
             focus: Pane::Left,

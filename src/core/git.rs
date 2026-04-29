@@ -10,7 +10,7 @@ pub struct RepoStatus {
     pub untracked: usize,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DiffTarget {
     Head,
     Base,
@@ -554,7 +554,6 @@ pub fn file_content_diff(
 }
 
 /// Stage a single file (add to index). Handles both new/modified files and deletions.
-#[allow(dead_code)]
 pub fn stage_file(repo_path: &Path, file_path: &str) -> Result<()> {
     let repo = Repository::open(repo_path)
         .with_context(|| format!("opening repo at {}", repo_path.display()))?;
@@ -570,7 +569,6 @@ pub fn stage_file(repo_path: &Path, file_path: &str) -> Result<()> {
 }
 
 /// Unstage a single file (reset index entry to HEAD). Handles unborn HEAD (no commits).
-#[allow(dead_code)]
 pub fn unstage_file(repo_path: &Path, file_path: &str) -> Result<()> {
     let repo = Repository::open(repo_path)
         .with_context(|| format!("opening repo at {}", repo_path.display()))?;
@@ -591,7 +589,6 @@ pub fn unstage_file(repo_path: &Path, file_path: &str) -> Result<()> {
 }
 
 /// Stage all currently unstaged files. Returns the count of files staged.
-#[allow(dead_code)]
 pub fn stage_all_unstaged(repo_path: &Path) -> Result<usize> {
     let entries = file_diff(repo_path, &DiffTarget::Head)?;
     let unstaged: Vec<_> = entries.iter().filter(|e| !e.staged).collect();
@@ -603,7 +600,6 @@ pub fn stage_all_unstaged(repo_path: &Path) -> Result<usize> {
 }
 
 /// Unstage all currently staged files. Returns the count of files unstaged.
-#[allow(dead_code)]
 pub fn unstage_all_staged(repo_path: &Path) -> Result<usize> {
     let entries = file_diff(repo_path, &DiffTarget::Head)?;
     let staged: Vec<_> = entries.iter().filter(|e| e.staged).collect();
