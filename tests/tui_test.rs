@@ -1,11 +1,11 @@
 mod common;
 
-use common::{key, test_app, test_app_with_config, TestEnv};
+use common::{key, shift_key, test_app, test_app_with_config, TestEnv};
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::KeyCode;
 use ratatui::Terminal;
 use space::core::config::{RepoConfig, SpaceConfig, WorkspaceConfig};
-use space::core::git::RepoStatus;
+use space::core::git::{DiffTarget, RepoStatus};
 use space::core::workspace::{Workspace, WorkspaceRepo};
 use space::tui::app::{App, Pane, Screen};
 use std::path::PathBuf;
@@ -1626,5 +1626,350 @@ fn help_other_keys_are_noop() {
     assert!(
         matches!(app.screen, Screen::Help),
         "Help should remain open after non-close keys"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Diff viewer + staging integration tests (Phase 2)
+// ---------------------------------------------------------------------------
+
+/// Helper: set up a TestEnv with a real repo containing a committed file and
+/// an unstaged modification. Returns (env, repo_path, app) with diff_target=Head,
+/// the repo expanded, and cursor on the file row.
+fn setup_real_repo_app() -> (TestEnv, PathBuf, App) {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("testrepo");
+
+    // Commit a file, then modify it to create an unstaged change
+    std::fs::write(repo_path.join("file.txt"), "initial").unwrap();
+    std::process::Command::new("git")
+        .args(["add", "file.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "add file"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    std::fs::write(repo_path.join("file.txt"), "modified").unwrap();
+
+    let ws = Workspace {
+        name: "test-ws".into(),
+        path: env.workspaces_dir.clone(),
+        repos: vec![WorkspaceRepo {
+            name: "testrepo".into(),
+            path: repo_path.clone(),
+            branch: "main".into(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
+    app.diff_target = DiffTarget::Head;
+    app.load_selected_workspace_detail();
+
+    // Focus right pane and expand the repo
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Enter)); // expand repo at cursor_row=0
+
+    // Navigate down to the file row
+    app.handle_key(key(KeyCode::Down));
+
+    (env, repo_path, app)
+}
+
+#[test]
+fn enter_on_file_row_opens_diff_viewer() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    // Cursor should be on a file row now; press Enter to open diff viewer
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::DiffViewer(_)),
+        "expected DiffViewer screen, got {:?}",
+        std::mem::discriminant(&app.screen)
+    );
+}
+
+#[test]
+fn esc_in_diff_viewer_returns_to_dashboard() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    app.handle_key(key(KeyCode::Enter)); // open diff viewer
+    assert!(matches!(app.screen, Screen::DiffViewer(_)));
+
+    app.handle_key(key(KeyCode::Esc));
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "expected Dashboard after Esc from DiffViewer"
+    );
+}
+
+#[test]
+fn j_in_diff_viewer_increments_scroll() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    app.handle_key(key(KeyCode::Enter)); // open diff viewer
+    if let Screen::DiffViewer(ref state) = app.screen {
+        assert_eq!(state.scroll_offset, 0, "scroll should start at 0");
+    } else {
+        panic!("expected DiffViewer screen");
+    }
+
+    app.handle_key(key(KeyCode::Char('j')));
+    if let Screen::DiffViewer(ref state) = app.screen {
+        // If there are diff lines, scroll should have advanced
+        if state.total_lines > 1 {
+            assert!(
+                state.scroll_offset > 0,
+                "scroll_offset should increase after j"
+            );
+        }
+    } else {
+        panic!("expected DiffViewer screen after j");
+    }
+}
+
+#[test]
+fn k_at_top_does_not_underflow() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    app.handle_key(key(KeyCode::Enter)); // open diff viewer
+    if let Screen::DiffViewer(ref state) = app.screen {
+        assert_eq!(state.scroll_offset, 0, "should start at 0");
+    } else {
+        panic!("expected DiffViewer screen");
+    }
+
+    app.handle_key(key(KeyCode::Char('k')));
+    if let Screen::DiffViewer(ref state) = app.screen {
+        assert_eq!(
+            state.scroll_offset, 0,
+            "scroll_offset should remain 0 after k at top"
+        );
+    } else {
+        panic!("expected DiffViewer screen after k");
+    }
+}
+
+#[test]
+fn s_on_file_row_in_head_mode_stages() {
+    let (_env, repo_path, mut app) = setup_real_repo_app();
+
+    // Verify file is unstaged before staging
+    let files_before = app.repo_file_cache.get(&0).expect("should have cache");
+    let file_entry = files_before
+        .iter()
+        .find(|e| e.path == "file.txt")
+        .expect("file.txt should be in cache");
+    assert!(
+        !file_entry.staged,
+        "file.txt should be unstaged before pressing s"
+    );
+
+    // Press s to stage the file
+    app.handle_key(key(KeyCode::Char('s')));
+
+    // After staging, the repo_file_cache should be refreshed
+    let files_after = app.repo_file_cache.get(&0).expect("cache should exist");
+    let file_entry_after = files_after
+        .iter()
+        .find(|e| e.path == "file.txt")
+        .expect("file.txt should still be in cache");
+    assert!(
+        file_entry_after.staged,
+        "file.txt should be staged after pressing s"
+    );
+
+    // Verify via git that the file is actually staged
+    let status_out = std::process::Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    let staged_files = String::from_utf8_lossy(&status_out.stdout);
+    assert!(
+        staged_files.contains("file.txt"),
+        "file.txt should be staged in git"
+    );
+}
+
+#[test]
+fn s_on_file_row_in_base_mode_shows_status() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    // Switch to Base mode
+    app.diff_target = DiffTarget::Base;
+
+    // Press s -- should show a status message about HEAD mode
+    app.handle_key(key(KeyCode::Char('s')));
+    assert!(
+        app.status_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("HEAD mode"),
+        "expected status message about HEAD mode, got: {:?}",
+        app.status_message
+    );
+}
+
+#[test]
+fn shift_s_on_repo_row_stages_all_unstaged() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("bulk-stage-repo");
+
+    // Create two committed files, then modify both
+    for name in &["a.txt", "b.txt"] {
+        std::fs::write(repo_path.join(name), "initial").unwrap();
+    }
+    std::process::Command::new("git")
+        .args(["add", "a.txt", "b.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "add files"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    for name in &["a.txt", "b.txt"] {
+        std::fs::write(repo_path.join(name), "modified").unwrap();
+    }
+
+    let ws = Workspace {
+        name: "test-ws".into(),
+        path: env.workspaces_dir.clone(),
+        repos: vec![WorkspaceRepo {
+            name: "bulk-stage-repo".into(),
+            path: repo_path.clone(),
+            branch: "main".into(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
+    app.diff_target = DiffTarget::Head;
+    app.load_selected_workspace_detail();
+
+    // Focus right pane and expand repo
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Enter));
+
+    // Cursor is on repo row (row 0). Press Shift+S to stage all
+    assert_eq!(app.cursor_row, 0);
+    app.handle_key(shift_key(KeyCode::Char('S')));
+
+    // All files should now be staged
+    let files = app.repo_file_cache.get(&0).expect("cache should exist");
+    assert!(
+        files.iter().all(|e| e.staged),
+        "all files should be staged after S: {:?}",
+        files
+            .iter()
+            .map(|e| (&e.path, e.staged))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shift_u_on_repo_row_unstages_all_staged() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("bulk-unstage-repo");
+
+    // Create a file, commit it, modify it, then stage the modification
+    std::fs::write(repo_path.join("file.txt"), "initial").unwrap();
+    std::process::Command::new("git")
+        .args(["add", "file.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "add file"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    std::fs::write(repo_path.join("file.txt"), "modified").unwrap();
+    // Stage the modification
+    std::process::Command::new("git")
+        .args(["add", "file.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+
+    let ws = Workspace {
+        name: "test-ws".into(),
+        path: env.workspaces_dir.clone(),
+        repos: vec![WorkspaceRepo {
+            name: "bulk-unstage-repo".into(),
+            path: repo_path.clone(),
+            branch: "main".into(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
+    app.diff_target = DiffTarget::Head;
+    app.load_selected_workspace_detail();
+
+    // Verify file is staged before we unstage
+    let files_before = app.repo_file_cache.get(&0).expect("cache should exist");
+    assert!(
+        files_before.iter().any(|e| e.staged),
+        "should have at least one staged file before U"
+    );
+
+    // Focus right pane and expand repo
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Enter));
+
+    // Cursor is on repo row (row 0). Press U to unstage all
+    assert_eq!(app.cursor_row, 0);
+    app.handle_key(key(KeyCode::Char('U')));
+
+    // All files should now be unstaged
+    let files = app.repo_file_cache.get(&0).expect("cache should exist");
+    assert!(
+        files.iter().all(|e| !e.staged),
+        "all files should be unstaged after U: {:?}",
+        files
+            .iter()
+            .map(|e| (&e.path, e.staged))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn staging_invalidates_diff_content_cache() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    // Open diff viewer to populate the diff_content_cache
+    app.handle_key(key(KeyCode::Enter)); // open diff viewer
+    assert!(matches!(app.screen, Screen::DiffViewer(_)));
+
+    // Go back to dashboard
+    app.handle_key(key(KeyCode::Esc));
+    assert!(matches!(app.screen, Screen::Dashboard));
+
+    // Verify diff_content_cache has entries for repo 0
+    assert!(
+        app.diff_content_cache.keys().any(|k| k.repo_index == 0),
+        "diff_content_cache should have entries for repo 0 after viewing diff"
+    );
+
+    // Navigate back to the file row and stage it
+    app.handle_key(key(KeyCode::Down)); // move to file row
+    app.handle_key(key(KeyCode::Char('s'))); // stage the file
+
+    // After staging, diff_content_cache entries for repo 0 should be gone
+    assert!(
+        !app.diff_content_cache.keys().any(|k| k.repo_index == 0),
+        "diff_content_cache entries for repo 0 should be invalidated after staging"
     );
 }

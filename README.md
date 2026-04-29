@@ -50,6 +50,8 @@ Repos show total line divergence from the base branch (`+N -M` in green/red).
 The `STATUS` column uses plain-language summaries like `2 modified` or
 `14 modified, 3 new`.
 Press `→` or `Enter` on a repo to expand it and see per-file diffs.
+Press `Enter` on a file row to open a scrollable diff viewer. Stage/unstage
+files with `s`, or bulk stage/unstage repos with `S`/`U`.
 
 **Key bindings — Workspaces pane:**
 
@@ -71,9 +73,13 @@ Press `→` or `Enter` on a repo to expand it and see per-file diffs.
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` or `j` / `k` | Navigate repos and file rows |
-| `→` or `Enter` | Expand / collapse repo to show file-level diffs |
+| `→` or `Enter` (on repo) | Expand / collapse repo to show file-level diffs |
+| `Enter` (on file) | Open file diff viewer |
 | `←` or `Esc` | Collapse all expanded repos, then refocus workspaces pane |
 | `T` | Toggle diff target: base branch ↔ HEAD (uncommitted changes) |
+| `s` | Stage / unstage file (HEAD mode only) |
+| `S` | Stage all unstaged files in repo |
+| `U` | Unstage all staged files in repo |
 | `q` | Quit |
 
 Interactive commands (`go`, `create`, `add`, `config`, `rm` without `--force`)

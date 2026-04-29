@@ -160,6 +160,14 @@ The right pane can show two views, toggled with `T`:
 | **vs base** (default) | Total divergence from main/master — all committed + uncommitted changes |
 | **vs HEAD** | Uncommitted changes only — staged and unstaged, with `[staged]`/`[unstaged]` badges |
 
+### Diff Viewer
+
+Press `Enter` on a file row in the expanded repo list to open a full-screen scrollable diff viewer showing the unified diff for that file. Hunks are syntax-colored: green for additions, red for deletions, dimmed for context lines.
+
+- **Navigation:** `j`/`k` or `↑`/`↓` scroll line by line. `PgUp`/`PgDn` page through the diff. `Home`/`End` jump to start/end.
+- **Staging:** Press `s` to stage or unstage the viewed file (HEAD mode only). The viewer returns to the dashboard after staging.
+- **Closing:** `Esc` or `q` returns to the dashboard.
+
 ### Key Bindings — Workspaces Pane
 
 | Key | Action |
@@ -182,10 +190,24 @@ The right pane can show two views, toggled with `T`:
 | Key | Action |
 |-----|--------|
 | `j` / `k` or `↑` / `↓` | Navigate through repo rows and expanded file rows |
-| `→` or `Enter` | Expand / collapse repo to show per-file diffs |
+| `→` or `Enter` (on repo row) | Expand / collapse repo to show per-file diffs |
+| `Enter` (on file row) | Open scrollable diff viewer |
 | `←` or `Esc` | Collapse all expanded repos; second press refocuses workspaces pane |
 | `T` | Toggle diff target: base branch ↔ HEAD |
+| `s` | Stage / unstage file (HEAD mode only) |
+| `S` | Stage all unstaged files in repo |
+| `U` | Unstage all staged files in repo |
 | `q` | Quit |
+
+### Key Bindings — Diff Viewer
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` or `↑` / `↓` | Scroll up / down |
+| `PgUp` / `PgDn` | Page scroll |
+| `Home` / `End` | Jump to start / end |
+| `s` | Stage / unstage file |
+| `Esc` / `q` | Close viewer |
 
 ### Theme
 

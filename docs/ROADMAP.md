@@ -134,7 +134,15 @@ and base mode works, navigation through flattened rows is smooth.
 
 ---
 
-### 5. File-level diff viewer with staging (Phase 2)
+### 5. File-level diff viewer with staging (Phase 2) ✓
+
+Scrollable diff viewer opens on `Enter` from a file row, with syntax-colored
+unified diff (green additions, red deletions, dimmed context). `j`/`k` scroll,
+`PgUp`/`PgDn` page, `Home`/`End` jump. `s` stages/unstages the viewed file
+(HEAD mode only). From the dashboard, `s` stages a single file, `S` bulk-stages
+all unstaged files in a repo, and `U` unstages all staged files. Diff content
+cache is invalidated on staging operations. 9 integration tests cover the full
+flow.
 
 **Problem:** After seeing which files changed, users want to view the actual diff
 content and act on it — stage or unstage individual files — without leaving the
@@ -159,10 +167,8 @@ TUI.
   invalidated for that repo.
 - `S` (Shift+S) on a repo row stages/unstages all files in that repo.
 
-**Files:** `src/core/git.rs` (new diff content + stage/unstage functions),
-`src/tui/app.rs`, `src/tui/ui.rs`, `src/tui/screens/diff.rs` (new)
-**Done when:** Users can view full file diffs in a scrollable overlay and
-stage/unstage individual files or all files in a repo from the expanded view.
+**Files:** `src/core/git.rs`, `src/tui/app.rs`, `src/tui/ui.rs`,
+`src/tui/screens/diff.rs`
 
 ---
 
