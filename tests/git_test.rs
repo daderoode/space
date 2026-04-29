@@ -1,6 +1,9 @@
 mod common;
 
-use space::core::git::{file_diff, DiffTarget, FileStatus};
+use space::core::git::{
+    file_content_diff, file_diff, stage_all_unstaged, stage_file, unstage_all_staged, unstage_file,
+    DiffLineKind, DiffTarget, FileStatus,
+};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -449,4 +452,297 @@ fn file_diff_detects_deleted_file() {
     let entry = entries.iter().find(|e| e.path == "gone.txt").unwrap();
     assert_eq!(entry.status, FileStatus::Deleted);
     assert!(!entry.staged);
+}
+
+// ── A7 tests ──────────────────────────────────────────────────────────
+
+#[test]
+fn file_content_diff_returns_lines_for_modified_file() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    std::fs::write(tmp.path().join("f.txt"), "line1\n").unwrap();
+    Command::new("git")
+        .args(["add", "f.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "add f"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    std::fs::write(tmp.path().join("f.txt"), "line1\nline2\n").unwrap();
+
+    let fd = file_content_diff(tmp.path(), &DiffTarget::Head, "f.txt", false).unwrap();
+    assert_eq!(fd.path, "f.txt");
+    assert!(!fd.is_binary);
+    assert!(!fd.lines.is_empty());
+    assert!(
+        fd.lines.iter().any(|l| l.kind == DiffLineKind::Addition),
+        "should contain an addition line"
+    );
+}
+
+#[test]
+fn file_content_diff_for_staged_uses_tree_to_index() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    std::fs::write(tmp.path().join("s.txt"), "original\n").unwrap();
+    Command::new("git")
+        .args(["add", "s.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "add s"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    std::fs::write(tmp.path().join("s.txt"), "original\nstaged\n").unwrap();
+    Command::new("git")
+        .args(["add", "s.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+
+    let fd = file_content_diff(tmp.path(), &DiffTarget::Head, "s.txt", true).unwrap();
+    assert!(!fd.is_binary);
+    assert!(
+        fd.lines
+            .iter()
+            .any(|l| l.kind == DiffLineKind::Addition && l.content.contains("staged")),
+        "staged diff should contain the staged addition"
+    );
+}
+
+#[test]
+fn file_content_diff_for_untracked_returns_full_file_as_additions() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    std::fs::write(tmp.path().join("new.txt"), "aaa\nbbb\nccc\n").unwrap();
+
+    let fd = file_content_diff(tmp.path(), &DiffTarget::Head, "new.txt", false).unwrap();
+    assert!(!fd.is_binary);
+    let additions: Vec<_> = fd
+        .lines
+        .iter()
+        .filter(|l| l.kind == DiffLineKind::Addition)
+        .collect();
+    assert_eq!(additions.len(), 3, "all 3 lines should be additions");
+}
+
+#[test]
+fn file_content_diff_marks_binary() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    // Write a file with null bytes to trigger binary detection
+    std::fs::write(tmp.path().join("bin.dat"), b"\x00\x01\x02\x03").unwrap();
+
+    let fd = file_content_diff(tmp.path(), &DiffTarget::Head, "bin.dat", false).unwrap();
+    assert!(
+        fd.is_binary,
+        "file with null bytes should be detected as binary"
+    );
+    assert!(
+        fd.lines.iter().any(|l| l.kind == DiffLineKind::Binary),
+        "should have a Binary diff line"
+    );
+}
+
+#[test]
+fn stage_file_marks_modified_as_staged() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    std::fs::write(tmp.path().join("m.txt"), "v1").unwrap();
+    Command::new("git")
+        .args(["add", "m.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "add m"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    std::fs::write(tmp.path().join("m.txt"), "v2").unwrap();
+
+    stage_file(tmp.path(), "m.txt").unwrap();
+
+    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entry = entries.iter().find(|e| e.path == "m.txt").unwrap();
+    assert!(entry.staged, "file should be staged after stage_file");
+}
+
+#[test]
+fn stage_file_for_deletion_uses_remove_path() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    std::fs::write(tmp.path().join("d.txt"), "doomed").unwrap();
+    Command::new("git")
+        .args(["add", "d.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "add d"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    std::fs::remove_file(tmp.path().join("d.txt")).unwrap();
+
+    stage_file(tmp.path(), "d.txt").unwrap();
+
+    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entry = entries.iter().find(|e| e.path == "d.txt").unwrap();
+    assert!(entry.staged, "deleted file should be staged");
+    assert_eq!(entry.status, FileStatus::Deleted);
+}
+
+#[test]
+fn unstage_file_resets_index_to_head() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    std::fs::write(tmp.path().join("u.txt"), "v1").unwrap();
+    Command::new("git")
+        .args(["add", "u.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "add u"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    std::fs::write(tmp.path().join("u.txt"), "v2").unwrap();
+    Command::new("git")
+        .args(["add", "u.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+
+    // Verify it's staged
+    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    assert!(
+        entries.iter().any(|e| e.path == "u.txt" && e.staged),
+        "should be staged before unstage"
+    );
+
+    unstage_file(tmp.path(), "u.txt").unwrap();
+
+    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entry = entries.iter().find(|e| e.path == "u.txt").unwrap();
+    assert!(!entry.staged, "file should be unstaged after unstage_file");
+}
+
+#[test]
+fn unstage_file_in_unborn_repo_uses_remove_path() {
+    let tmp = TempDir::new().unwrap();
+    // Init repo WITHOUT any commits (unborn HEAD)
+    let out = Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    for args in [
+        vec!["config", "user.email", "test@local"],
+        vec!["config", "user.name", "Test"],
+    ] {
+        Command::new("git")
+            .args(&args)
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+    }
+
+    std::fs::write(tmp.path().join("new.txt"), "hello").unwrap();
+    Command::new("git")
+        .args(["add", "new.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+
+    unstage_file(tmp.path(), "new.txt").unwrap();
+
+    // Verify index is empty
+    let repo = git2::Repository::open(tmp.path()).unwrap();
+    let index = repo.index().unwrap();
+    assert_eq!(
+        index.len(),
+        0,
+        "index should be empty after unstaging in unborn repo"
+    );
+}
+
+#[test]
+fn stage_then_unstage_is_round_trip() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    std::fs::write(tmp.path().join("rt.txt"), "v1").unwrap();
+    Command::new("git")
+        .args(["add", "rt.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "add rt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    std::fs::write(tmp.path().join("rt.txt"), "v2").unwrap();
+
+    let before = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let before_entry = before.iter().find(|e| e.path == "rt.txt").unwrap();
+    assert!(!before_entry.staged);
+
+    stage_file(tmp.path(), "rt.txt").unwrap();
+    unstage_file(tmp.path(), "rt.txt").unwrap();
+
+    let after = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let after_entry = after.iter().find(|e| e.path == "rt.txt").unwrap();
+    assert!(
+        !after_entry.staged,
+        "after stage+unstage, file should be unstaged"
+    );
+    assert_eq!(after_entry.status, before_entry.status);
+}
+
+#[test]
+fn stage_all_unstaged_returns_correct_count() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    std::fs::write(tmp.path().join("a.txt"), "aaa").unwrap();
+    std::fs::write(tmp.path().join("b.txt"), "bbb").unwrap();
+    std::fs::write(tmp.path().join("c.txt"), "ccc").unwrap();
+
+    let count = stage_all_unstaged(tmp.path()).unwrap();
+    assert_eq!(count, 3, "should stage 3 unstaged files");
+
+    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    assert!(
+        entries.iter().all(|e| e.staged),
+        "all files should be staged"
+    );
+}
+
+#[test]
+fn unstage_all_staged_returns_correct_count() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    std::fs::write(tmp.path().join("x.txt"), "xxx").unwrap();
+    std::fs::write(tmp.path().join("y.txt"), "yyy").unwrap();
+    Command::new("git")
+        .args(["add", "x.txt", "y.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+
+    let count = unstage_all_staged(tmp.path()).unwrap();
+    assert_eq!(count, 2, "should unstage 2 staged files");
+
+    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    assert!(
+        entries.iter().all(|e| !e.staged),
+        "all files should be unstaged"
+    );
 }

@@ -11,14 +11,12 @@ pub struct RepoStatus {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub enum DiffTarget {
     Head,
     Base,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub enum FileStatus {
     Modified,
     Added,
@@ -29,13 +27,39 @@ pub enum FileStatus {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct FileEntry {
     pub path: String,
     pub status: FileStatus,
     pub staged: bool,
     pub insertions: usize,
     pub deletions: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiffLineKind {
+    Context,
+    Addition,
+    Deletion,
+    HunkHeader,
+    FileHeader,
+    Binary,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct DiffLine {
+    pub kind: DiffLineKind,
+    pub content: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct FileDiff {
+    pub path: String,
+    pub old_path: Option<String>,
+    pub is_binary: bool,
+    pub lines: Vec<DiffLine>,
 }
 
 #[derive(Debug)]
@@ -255,7 +279,6 @@ fn format_delta(delta: i64) -> String {
 /// Returns an error if none of those refs exist. All entries have `staged: false`
 /// in Base mode (the staged/unstaged distinction is not meaningful for
 /// committed divergence).
-#[allow(dead_code)]
 pub fn file_diff(repo_path: &Path, target: &DiffTarget) -> Result<Vec<FileEntry>> {
     let repo = Repository::open(repo_path)
         .with_context(|| format!("opening repo at {}", repo_path.display()))?;
@@ -266,7 +289,6 @@ pub fn file_diff(repo_path: &Path, target: &DiffTarget) -> Result<Vec<FileEntry>
     }
 }
 
-#[allow(dead_code)]
 fn file_diff_vs_head(repo: &Repository) -> Result<Vec<FileEntry>> {
     let mut entries: Vec<FileEntry> = Vec::new();
 
@@ -285,16 +307,26 @@ fn file_diff_vs_head(repo: &Repository) -> Result<Vec<FileEntry>> {
     Ok(entries)
 }
 
-#[allow(dead_code)]
 fn file_diff_vs_base(repo: &Repository, repo_path: &Path) -> Result<Vec<FileEntry>> {
+    let base_tree = resolve_base_tree(repo, repo_path)?;
+
+    let mut opts = git2::DiffOptions::new();
+    opts.include_untracked(true).recurse_untracked_dirs(true);
+    let diff = repo.diff_tree_to_workdir_with_index(Some(&base_tree), Some(&mut opts))?;
+    collect_entries(&diff, false)
+}
+
+/// Resolve the base branch tree by probing main/master/origin variants.
+fn resolve_base_tree<'repo>(
+    repo: &'repo Repository,
+    repo_path: &Path,
+) -> Result<git2::Tree<'repo>> {
     let base_oid = repo
         .refname_to_id("refs/heads/main")
         .or_else(|_| repo.refname_to_id("refs/heads/master"))
         .or_else(|_| repo.refname_to_id("refs/remotes/origin/main"))
         .or_else(|_| repo.refname_to_id("refs/remotes/origin/master"))
         .or_else(|_| {
-            // Follow origin/HEAD symbolic ref -- covers non-main/master defaults
-            // such as trunk, develop, etc.
             repo.find_reference("refs/remotes/origin/HEAD")
                 .ok()
                 .and_then(|r| r.resolve().ok())
@@ -309,15 +341,9 @@ fn file_diff_vs_base(repo: &Repository, repo_path: &Path) -> Result<Vec<FileEntr
         })?;
 
     let base_commit = repo.find_commit(base_oid)?;
-    let base_tree = base_commit.tree()?;
-
-    let mut opts = git2::DiffOptions::new();
-    opts.include_untracked(true).recurse_untracked_dirs(true);
-    let diff = repo.diff_tree_to_workdir_with_index(Some(&base_tree), Some(&mut opts))?;
-    collect_entries(&diff, false)
+    Ok(base_commit.tree()?)
 }
 
-#[allow(dead_code)]
 fn collect_entries(diff: &git2::Diff, staged: bool) -> Result<Vec<FileEntry>> {
     // First pass: collect file paths and statuses from deltas
     let file_stats: Vec<(String, FileStatus)> = diff
@@ -378,7 +404,6 @@ fn collect_entries(diff: &git2::Diff, staged: bool) -> Result<Vec<FileEntry>> {
         .collect())
 }
 
-#[allow(dead_code)]
 fn delta_to_file_status(delta: git2::Delta) -> Option<FileStatus> {
     match delta {
         git2::Delta::Modified => Some(FileStatus::Modified),
@@ -389,6 +414,204 @@ fn delta_to_file_status(delta: git2::Delta) -> Option<FileStatus> {
         git2::Delta::Untracked => Some(FileStatus::Untracked),
         _ => None,
     }
+}
+
+/// Return the full line-level diff for a single file.
+///
+/// `staged` controls which comparison is used:
+/// - `true`:  HEAD tree -> index  (staged changes)
+/// - `false`: index -> workdir    (unstaged changes, including untracked)
+///
+/// When `target` is `Base`, the diff is computed against the base branch tree
+/// and the `staged` flag is ignored.
+#[allow(dead_code)]
+pub fn file_content_diff(
+    repo_path: &Path,
+    target: &DiffTarget,
+    file_path: &str,
+    staged: bool,
+) -> Result<FileDiff> {
+    let repo = Repository::open(repo_path)
+        .with_context(|| format!("opening repo at {}", repo_path.display()))?;
+
+    let diff = match target {
+        DiffTarget::Head if staged => {
+            let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+            repo.diff_tree_to_index(head_tree.as_ref(), None, None)?
+        }
+        DiffTarget::Head => {
+            let mut opts = git2::DiffOptions::new();
+            opts.include_untracked(true)
+                .recurse_untracked_dirs(true)
+                .show_untracked_content(true);
+            repo.diff_index_to_workdir(None, Some(&mut opts))?
+        }
+        DiffTarget::Base => {
+            let base_tree = resolve_base_tree(&repo, repo_path)?;
+            let mut opts = git2::DiffOptions::new();
+            opts.include_untracked(true)
+                .recurse_untracked_dirs(true)
+                .show_untracked_content(true);
+            repo.diff_tree_to_workdir_with_index(Some(&base_tree), Some(&mut opts))?
+        }
+    };
+
+    // Find the delta index matching our file_path
+    let delta_idx = diff
+        .deltas()
+        .enumerate()
+        .find(|(_, delta)| {
+            let new_match = delta
+                .new_file()
+                .path()
+                .and_then(|p| p.to_str())
+                .map(|p| p == file_path)
+                .unwrap_or(false);
+            let old_match = delta
+                .old_file()
+                .path()
+                .and_then(|p| p.to_str())
+                .map(|p| p == file_path)
+                .unwrap_or(false);
+            new_match || old_match
+        })
+        .map(|(idx, _)| idx)
+        .with_context(|| format!("file '{}' not found in diff", file_path))?;
+
+    let delta = diff.get_delta(delta_idx).unwrap();
+    let old_path = delta
+        .old_file()
+        .path()
+        .and_then(|p| p.to_str())
+        .map(String::from)
+        .filter(|op| op != file_path);
+
+    let result = match git2::Patch::from_diff(&diff, delta_idx)? {
+        None => {
+            // Binary file (no patch available)
+            let size = delta.new_file().size();
+            FileDiff {
+                path: file_path.to_string(),
+                old_path,
+                is_binary: true,
+                lines: vec![DiffLine {
+                    kind: DiffLineKind::Binary,
+                    content: format!("Binary file ({} bytes)", size),
+                }],
+            }
+        }
+        Some(patch) => {
+            // Check if the patch itself considers this binary (the delta flags may
+            // only be set after the patch is created for untracked files).
+            let is_binary = patch.delta().flags().contains(git2::DiffFlags::BINARY);
+            if is_binary {
+                let size = patch.delta().new_file().size();
+                FileDiff {
+                    path: file_path.to_string(),
+                    old_path,
+                    is_binary: true,
+                    lines: vec![DiffLine {
+                        kind: DiffLineKind::Binary,
+                        content: format!("Binary file ({} bytes)", size),
+                    }],
+                }
+            } else {
+                let mut lines = Vec::new();
+                for hunk_idx in 0..patch.num_hunks() {
+                    let (hunk, _) = patch.hunk(hunk_idx)?;
+                    let header = std::str::from_utf8(hunk.header()).unwrap_or("<binary hunk>");
+                    lines.push(DiffLine {
+                        kind: DiffLineKind::HunkHeader,
+                        content: header.to_string(),
+                    });
+                    for line_idx in 0..patch.num_lines_in_hunk(hunk_idx)? {
+                        let line = patch.line_in_hunk(hunk_idx, line_idx)?;
+                        let kind = match line.origin() {
+                            '+' => DiffLineKind::Addition,
+                            '-' => DiffLineKind::Deletion,
+                            ' ' => DiffLineKind::Context,
+                            '=' | '>' => DiffLineKind::HunkHeader,
+                            _ => DiffLineKind::Context,
+                        };
+                        let content =
+                            std::str::from_utf8(line.content()).unwrap_or("<binary line>");
+                        lines.push(DiffLine {
+                            kind,
+                            content: content.to_string(),
+                        });
+                    }
+                }
+                FileDiff {
+                    path: file_path.to_string(),
+                    old_path,
+                    is_binary: false,
+                    lines,
+                }
+            }
+        }
+    };
+    Ok(result)
+}
+
+/// Stage a single file (add to index). Handles both new/modified files and deletions.
+#[allow(dead_code)]
+pub fn stage_file(repo_path: &Path, file_path: &str) -> Result<()> {
+    let repo = Repository::open(repo_path)
+        .with_context(|| format!("opening repo at {}", repo_path.display()))?;
+    let mut index = repo.index()?;
+
+    if repo_path.join(file_path).exists() {
+        index.add_path(Path::new(file_path))?;
+    } else {
+        index.remove_path(Path::new(file_path))?;
+    }
+    index.write()?;
+    Ok(())
+}
+
+/// Unstage a single file (reset index entry to HEAD). Handles unborn HEAD (no commits).
+#[allow(dead_code)]
+pub fn unstage_file(repo_path: &Path, file_path: &str) -> Result<()> {
+    let repo = Repository::open(repo_path)
+        .with_context(|| format!("opening repo at {}", repo_path.display()))?;
+
+    match repo.head() {
+        Ok(head_ref) => {
+            let head_commit = head_ref.peel_to_commit()?;
+            repo.reset_default(Some(head_commit.as_object()), [Path::new(file_path)])?;
+        }
+        Err(_) => {
+            // Unborn HEAD: no commits yet, just remove from index
+            let mut index = repo.index()?;
+            index.remove_path(Path::new(file_path))?;
+            index.write()?;
+        }
+    }
+    Ok(())
+}
+
+/// Stage all currently unstaged files. Returns the count of files staged.
+#[allow(dead_code)]
+pub fn stage_all_unstaged(repo_path: &Path) -> Result<usize> {
+    let entries = file_diff(repo_path, &DiffTarget::Head)?;
+    let unstaged: Vec<_> = entries.iter().filter(|e| !e.staged).collect();
+    let count = unstaged.len();
+    for entry in &unstaged {
+        stage_file(repo_path, &entry.path)?;
+    }
+    Ok(count)
+}
+
+/// Unstage all currently staged files. Returns the count of files unstaged.
+#[allow(dead_code)]
+pub fn unstage_all_staged(repo_path: &Path) -> Result<usize> {
+    let entries = file_diff(repo_path, &DiffTarget::Head)?;
+    let staged: Vec<_> = entries.iter().filter(|e| e.staged).collect();
+    let count = staged.len();
+    for entry in &staged {
+        unstage_file(repo_path, &entry.path)?;
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
