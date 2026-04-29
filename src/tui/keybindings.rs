@@ -89,6 +89,52 @@ const REPO_PANE: BindingGroup = BindingGroup {
             key: "T",
             desc: "Toggle diff target",
         },
+        Binding {
+            key: "s",
+            desc: "Stage / unstage file",
+        },
+        Binding {
+            key: "S",
+            desc: "Stage all unstaged",
+        },
+        Binding {
+            key: "U",
+            desc: "Unstage all staged",
+        },
+        Binding {
+            key: "Enter",
+            desc: "View file diff",
+        },
+    ],
+};
+
+const DIFF_VIEWER: BindingGroup = BindingGroup {
+    name: "Diff Viewer",
+    bindings: &[
+        Binding {
+            key: "up/k",
+            desc: "Scroll up",
+        },
+        Binding {
+            key: "dn/j",
+            desc: "Scroll down",
+        },
+        Binding {
+            key: "PgUp/PgDn",
+            desc: "Page scroll",
+        },
+        Binding {
+            key: "Home/End",
+            desc: "Jump to start/end",
+        },
+        Binding {
+            key: "s",
+            desc: "Stage / unstage",
+        },
+        Binding {
+            key: "Esc/q",
+            desc: "Close",
+        },
     ],
 };
 
@@ -112,7 +158,8 @@ const GENERAL: BindingGroup = BindingGroup {
 
 /// All binding groups — consumed by the help overlay.
 pub fn all_groups() -> &'static [BindingGroup] {
-    static GROUPS: [BindingGroup; 4] = [NAVIGATION, WORKSPACE_PANE, REPO_PANE, GENERAL];
+    static GROUPS: [BindingGroup; 5] =
+        [NAVIGATION, WORKSPACE_PANE, REPO_PANE, DIFF_VIEWER, GENERAL];
     &GROUPS
 }
 
@@ -161,10 +208,10 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
             desc: "quit",
         },
     ];
-    static RIGHT: [Binding; 5] = [
+    static RIGHT: [Binding; 8] = [
         Binding {
             key: "enter",
-            desc: "expand",
+            desc: "expand/diff",
         },
         Binding {
             key: "←/esc",
@@ -173,6 +220,18 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
         Binding {
             key: "T",
             desc: "toggle diff",
+        },
+        Binding {
+            key: "s",
+            desc: "stage",
+        },
+        Binding {
+            key: "S",
+            desc: "stage all",
+        },
+        Binding {
+            key: "U",
+            desc: "unstage all",
         },
         Binding {
             key: "?",
