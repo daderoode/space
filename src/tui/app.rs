@@ -281,6 +281,43 @@ impl App {
         }
     }
 
+    /// Stage or unstage a single file, invalidate caches, and set a status message.
+    /// Shared by `Message::StageFile` (dashboard) and `ScreenAction::StageFile` (diff overlay).
+    fn do_stage(
+        &mut self,
+        repo_index: usize,
+        repo_path: &std::path::Path,
+        path: &str,
+        currently_staged: bool,
+    ) {
+        let result = if currently_staged {
+            crate::core::git::unstage_file(repo_path, path)
+        } else {
+            crate::core::git::stage_file(repo_path, path)
+        };
+        match result {
+            Ok(()) => {
+                // Invalidate diff content cache entries for this repo
+                self.diff_content_cache
+                    .retain(|key, _| key.repo_index != repo_index);
+                // Re-fetch file list for this repo
+                self.repo_file_cache.remove(&repo_index);
+                if let Ok(entries) = crate::core::git::file_diff(repo_path, &self.diff_target) {
+                    self.repo_file_cache.insert(repo_index, entries);
+                }
+                let verb = if currently_staged {
+                    "Unstaged"
+                } else {
+                    "Staged"
+                };
+                self.set_status(format!("{} {}", verb, path));
+            }
+            Err(err) => {
+                self.set_status(format!("Stage failed: {}", err));
+            }
+        }
+    }
+
     fn set_status(&mut self, msg: impl Into<String>) {
         self.status_message = Some(msg.into());
         self.status_message_set_at = Some(Instant::now());
@@ -502,6 +539,15 @@ impl App {
             }
             ScreenAction::SetStatus(msg) => {
                 self.set_status(msg);
+            }
+            ScreenAction::StageFile {
+                repo_index,
+                repo_path,
+                path,
+                currently_staged,
+            } => {
+                self.do_stage(repo_index, &repo_path, &path, currently_staged);
+                self.screen = Screen::Dashboard;
             }
         }
     }
@@ -871,32 +917,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                     return None;
                 }
             };
-            let result = if currently_staged {
-                crate::core::git::unstage_file(&repo_path, &path)
-            } else {
-                crate::core::git::stage_file(&repo_path, &path)
-            };
-            match result {
-                Ok(()) => {
-                    // Invalidate diff content cache entries for this repo
-                    app.diff_content_cache
-                        .retain(|key, _| key.repo_index != repo_index);
-                    // Re-fetch file list for this repo
-                    app.repo_file_cache.remove(&repo_index);
-                    if let Ok(entries) = crate::core::git::file_diff(&repo_path, &app.diff_target) {
-                        app.repo_file_cache.insert(repo_index, entries);
-                    }
-                    let verb = if currently_staged {
-                        "Unstaged"
-                    } else {
-                        "Staged"
-                    };
-                    app.set_status(format!("{} {}", verb, path));
-                }
-                Err(err) => {
-                    app.set_status(format!("Stage failed: {}", err));
-                }
-            }
+            app.do_stage(repo_index, &repo_path, &path, currently_staged);
             None
         }
         Message::StageBulk { repo_index, stage } => {

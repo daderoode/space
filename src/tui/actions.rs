@@ -39,6 +39,12 @@ pub enum ScreenAction {
     /// (repo name from Search, resolved to a workspace in `App::process_action`).
     NavigateToWorkspace(String),
     /// Set a transient status message without changing screens.
-    #[allow(dead_code)]
     SetStatus(String),
+    /// Stage or unstage a single file from the diff overlay.
+    StageFile {
+        repo_index: usize,
+        repo_path: PathBuf,
+        path: String,
+        currently_staged: bool,
+    },
 }
