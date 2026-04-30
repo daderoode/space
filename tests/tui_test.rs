@@ -2008,3 +2008,283 @@ fn staging_invalidates_diff_content_cache() {
         "diff_content_cache entries for repo 0 should be invalidated after staging"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3 – diff viewer staging, scrolling, caching, error handling
+// ---------------------------------------------------------------------------
+
+#[test]
+fn s_in_diff_viewer_stages_file_and_returns_to_dashboard() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    // Verify file.txt is unstaged
+    let files = app.repo_file_cache.get(&0).expect("cache should exist");
+    assert!(
+        files
+            .iter()
+            .any(|e| !e.staged && e.path.contains("file.txt")),
+        "file.txt should be unstaged initially"
+    );
+
+    // Open diff viewer
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::DiffViewer(_)),
+        "expected DiffViewer screen after Enter"
+    );
+
+    // Press 's' to stage from inside the viewer
+    app.handle_key(key(KeyCode::Char('s')));
+
+    // Should return to dashboard
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "expected Dashboard after staging from DiffViewer"
+    );
+
+    // file.txt should now be staged
+    let files_after = app.repo_file_cache.get(&0).expect("cache should exist");
+    assert!(
+        files_after
+            .iter()
+            .any(|e| e.staged && e.path.contains("file.txt")),
+        "file.txt should be staged after pressing s in diff viewer"
+    );
+
+    // Status message should mention staging
+    let msg = app.status_message.as_deref().unwrap_or("");
+    assert!(
+        msg.to_lowercase().contains("staged"),
+        "status_message should contain 'Staged', got: {msg}"
+    );
+}
+
+#[test]
+fn s_in_diff_viewer_base_mode_shows_status_stays_on_viewer() {
+    use space::core::config::SpaceConfig;
+    use space::core::git::{DiffLine, DiffLineKind, DiffTarget, FileDiff};
+    use space::tui::actions::{ScreenAction, ScreenContext};
+    use space::tui::screens::diff::DiffViewerState;
+
+    let diff = FileDiff {
+        path: "dummy.txt".into(),
+        old_path: None,
+        is_binary: false,
+        lines: vec![DiffLine {
+            kind: DiffLineKind::Context,
+            content: " context line".into(),
+        }],
+    };
+
+    let mut state = DiffViewerState {
+        repo_index: 0,
+        repo_name: "test".into(),
+        repo_path: PathBuf::from("/tmp/fake"),
+        file_path: "dummy.txt".into(),
+        target: DiffTarget::Base,
+        staged: false,
+        diff: Ok(diff),
+        scroll_offset: 0,
+        total_lines: 1,
+    };
+
+    let config = SpaceConfig::default();
+    let ctx = ScreenContext { config: &config };
+    let action = state.handle_key(key(KeyCode::Char('s')), &ctx);
+
+    if let ScreenAction::SetStatus(msg) = action {
+        assert!(
+            msg.to_lowercase().contains("head mode"),
+            "expected message about HEAD mode, got: {msg}"
+        );
+    } else {
+        panic!("expected ScreenAction::SetStatus, got something else");
+    }
+}
+
+#[test]
+fn diff_viewer_page_and_home_end_scrolling() {
+    use space::core::config::SpaceConfig;
+    use space::core::git::{DiffLine, DiffLineKind, DiffTarget, FileDiff};
+    use space::tui::actions::ScreenContext;
+    use space::tui::screens::diff::DiffViewerState;
+
+    let lines: Vec<DiffLine> = (0..30)
+        .map(|i| DiffLine {
+            kind: DiffLineKind::Context,
+            content: format!(" line {i}"),
+        })
+        .collect();
+
+    let diff = FileDiff {
+        path: "big.txt".into(),
+        old_path: None,
+        is_binary: false,
+        lines,
+    };
+
+    let mut state = DiffViewerState {
+        repo_index: 0,
+        repo_name: "test".into(),
+        repo_path: PathBuf::from("/tmp/fake"),
+        file_path: "big.txt".into(),
+        target: DiffTarget::Head,
+        staged: false,
+        diff: Ok(diff),
+        scroll_offset: 0,
+        total_lines: 30,
+    };
+
+    let config = SpaceConfig::default();
+    let ctx = ScreenContext { config: &config };
+
+    // PageDown from 0 → 10
+    state.handle_key(key(KeyCode::PageDown), &ctx);
+    assert_eq!(state.scroll_offset, 10, "PageDown from 0 should go to 10");
+
+    // PageDown from 10 → 20
+    state.handle_key(key(KeyCode::PageDown), &ctx);
+    assert_eq!(state.scroll_offset, 20, "PageDown from 10 should go to 20");
+
+    // PageDown from 20 → capped at 29
+    state.handle_key(key(KeyCode::PageDown), &ctx);
+    assert_eq!(state.scroll_offset, 29, "PageDown from 20 should cap at 29");
+
+    // PageUp from 29 → 19
+    state.handle_key(key(KeyCode::PageUp), &ctx);
+    assert_eq!(state.scroll_offset, 19, "PageUp from 29 should go to 19");
+
+    // End → 29
+    state.handle_key(key(KeyCode::End), &ctx);
+    assert_eq!(state.scroll_offset, 29, "End should go to 29");
+
+    // Home → 0
+    state.handle_key(key(KeyCode::Home), &ctx);
+    assert_eq!(state.scroll_offset, 0, "Home should go to 0");
+
+    // PageUp from 0 → stays at 0 (no underflow)
+    state.handle_key(key(KeyCode::PageUp), &ctx);
+    assert_eq!(state.scroll_offset, 0, "PageUp from 0 should stay at 0");
+}
+
+#[test]
+fn reopening_diff_viewer_uses_cache() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    // Open diff viewer
+    app.handle_key(key(KeyCode::Enter));
+    assert!(matches!(app.screen, Screen::DiffViewer(_)));
+
+    // Close it
+    app.handle_key(key(KeyCode::Esc));
+    assert!(matches!(app.screen, Screen::Dashboard));
+
+    // Verify cache has entries for repo 0
+    assert!(
+        app.diff_content_cache.keys().any(|k| k.repo_index == 0),
+        "diff_content_cache should have entries for repo 0 after viewing diff"
+    );
+
+    // Count cache entries for repo 0
+    let count_before = app
+        .diff_content_cache
+        .keys()
+        .filter(|k| k.repo_index == 0)
+        .count();
+
+    // Re-open the same file
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::DiffViewer(_)),
+        "expected DiffViewer screen on re-open"
+    );
+
+    // Close again so cache is still visible
+    app.handle_key(key(KeyCode::Esc));
+
+    // Count should be the same (cache hit, no new entries)
+    let count_after = app
+        .diff_content_cache
+        .keys()
+        .filter(|k| k.repo_index == 0)
+        .count();
+    assert_eq!(
+        count_before, count_after,
+        "cache entry count should be the same after re-opening (cache hit): before={count_before}, after={count_after}"
+    );
+}
+
+#[test]
+fn toggle_diff_target_clears_diff_content_cache() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    // Open diff viewer and close to populate cache
+    app.handle_key(key(KeyCode::Enter));
+    app.handle_key(key(KeyCode::Esc));
+
+    // Assert cache is non-empty
+    assert!(
+        !app.diff_content_cache.is_empty(),
+        "diff_content_cache should be non-empty after viewing diff"
+    );
+
+    // Toggle diff target with shift+T
+    app.handle_key(shift_key(KeyCode::Char('T')));
+
+    // Cache should be cleared
+    assert!(
+        app.diff_content_cache.is_empty(),
+        "diff_content_cache should be empty after toggling diff target"
+    );
+}
+
+#[test]
+fn stage_with_invalid_repo_path_shows_error_status() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    // Corrupt the repo path
+    app.workspaces[0].repos[0].path = PathBuf::from("/nonexistent/repo");
+
+    // Press 's' to try staging
+    app.handle_key(key(KeyCode::Char('s')));
+
+    // Status message should contain "failed"
+    let msg = app.status_message.as_deref().unwrap_or("");
+    assert!(
+        msg.to_lowercase().contains("failed"),
+        "status_message should contain 'failed', got: {msg}"
+    );
+
+    // Should still be on dashboard (no crash)
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "should remain on Dashboard after failed stage"
+    );
+}
+
+#[test]
+fn bulk_stage_with_invalid_repo_path_shows_error_status() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    // Move cursor to repo row
+    app.cursor_row = 0;
+
+    // Corrupt the repo path
+    app.workspaces[0].repos[0].path = PathBuf::from("/nonexistent/repo");
+
+    // Press shift+S to try bulk staging
+    app.handle_key(shift_key(KeyCode::Char('S')));
+
+    // Status message should contain "failed"
+    let msg = app.status_message.as_deref().unwrap_or("");
+    assert!(
+        msg.to_lowercase().contains("failed"),
+        "status_message should contain 'failed', got: {msg}"
+    );
+
+    // Should still be on dashboard (no crash)
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "should remain on Dashboard after failed bulk stage"
+    );
+}

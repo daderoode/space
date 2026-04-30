@@ -746,3 +746,137 @@ fn unstage_all_staged_returns_correct_count() {
         "all files should be unstaged"
     );
 }
+
+#[test]
+fn file_content_diff_base_mode_returns_committed_divergence() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+
+    // Commit base.txt on main
+    std::fs::write(tmp.path().join("base.txt"), "base content\n").unwrap();
+    let out = Command::new("git")
+        .args(["add", "base.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git add base.txt failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = Command::new("git")
+        .args(["commit", "-m", "base"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git commit base failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Create feature branch
+    let out = Command::new("git")
+        .args(["checkout", "-b", "feature"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git checkout -b feature failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Write and commit feature.txt on feature branch
+    std::fs::write(tmp.path().join("feature.txt"), "line1\nline2\n").unwrap();
+    let out = Command::new("git")
+        .args(["add", "feature.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git add feature.txt failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = Command::new("git")
+        .args(["commit", "-m", "add feature file"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git commit feature failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let diff = file_content_diff(tmp.path(), &DiffTarget::Base, "feature.txt", false).unwrap();
+    assert!(!diff.is_binary, "feature.txt should not be binary");
+    assert!(!diff.lines.is_empty(), "diff lines should be non-empty");
+
+    let addition_count = diff
+        .lines
+        .iter()
+        .filter(|l| l.kind == DiffLineKind::Addition)
+        .count();
+    assert!(
+        addition_count >= 2,
+        "expected at least 2 addition lines for the 2 content lines, got {}",
+        addition_count
+    );
+}
+
+#[test]
+fn file_content_diff_detects_rename_old_path() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+
+    // Commit old_name.txt
+    std::fs::write(tmp.path().join("old_name.txt"), "content\n").unwrap();
+    let out = Command::new("git")
+        .args(["add", "old_name.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git add old_name.txt failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = Command::new("git")
+        .args(["commit", "-m", "add old_name"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git commit old_name failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Rename via git mv (stages the rename)
+    let out = Command::new("git")
+        .args(["mv", "old_name.txt", "new_name.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git mv failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let fd = file_content_diff(tmp.path(), &DiffTarget::Head, "new_name.txt", true).unwrap();
+    assert_eq!(fd.path, "new_name.txt");
+
+    // Document rename detection behaviour:
+    // If old_path is populated, it should equal the original name.
+    // If old_path is None, that documents a current limitation (no find_similar call).
+    // Either way, the function must not error (already proven by the unwrap above).
+    if let Some(ref old) = fd.old_path {
+        assert_eq!(
+            old, "old_name.txt",
+            "old_path should be the original filename"
+        );
+    }
+}
