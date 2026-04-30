@@ -51,7 +51,7 @@ The `STATUS` column uses plain-language summaries like `2 modified` or
 `14 modified, 3 new`.
 Press `→` or `Enter` on a repo to expand it and see per-file diffs.
 Press `Enter` on a file row to open a scrollable diff viewer. Stage/unstage
-files with `s`, or bulk stage/unstage repos with `S`/`U`.
+files with `s`, or bulk stage/unstage all files in the selected repo with `S`/`U`.
 
 **Key bindings — Workspaces pane:**
 

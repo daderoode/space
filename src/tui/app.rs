@@ -301,9 +301,13 @@ impl App {
                 self.diff_content_cache
                     .retain(|key, _| key.repo_index != repo_index);
                 // Re-fetch file list for this repo
-                self.repo_file_cache.remove(&repo_index);
-                if let Ok(entries) = crate::core::git::file_diff(repo_path, &self.diff_target) {
-                    self.repo_file_cache.insert(repo_index, entries);
+                match crate::core::git::file_diff(repo_path, &self.diff_target) {
+                    Ok(entries) => {
+                        self.repo_file_cache.insert(repo_index, entries);
+                    }
+                    Err(_) => {
+                        // Keep stale cache entry — better than empty UI
+                    }
                 }
                 let verb = if currently_staged {
                     "Unstaged"
@@ -943,9 +947,13 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                     app.diff_content_cache
                         .retain(|key, _| key.repo_index != repo_index);
                     // Re-fetch file list for this repo
-                    app.repo_file_cache.remove(&repo_index);
-                    if let Ok(entries) = crate::core::git::file_diff(&repo_path, &app.diff_target) {
-                        app.repo_file_cache.insert(repo_index, entries);
+                    match crate::core::git::file_diff(&repo_path, &app.diff_target) {
+                        Ok(entries) => {
+                            app.repo_file_cache.insert(repo_index, entries);
+                        }
+                        Err(_) => {
+                            // Keep stale cache entry — better than empty UI
+                        }
                     }
                     let verb = if stage { "Staged" } else { "Unstaged" };
                     app.set_status(format!("{} {} file(s)", verb, count));
@@ -993,7 +1001,10 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 result
             };
 
-            let total_lines = diff.as_ref().map(|d| d.lines.len() as u16).unwrap_or(0);
+            let total_lines = diff
+                .as_ref()
+                .map(|d| u16::try_from(d.lines.len()).unwrap_or(u16::MAX))
+                .unwrap_or(0);
 
             let state = crate::tui::screens::diff::DiffViewerState {
                 repo_index,

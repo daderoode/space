@@ -527,10 +527,9 @@ pub fn file_content_diff(
                     for line_idx in 0..patch.num_lines_in_hunk(hunk_idx)? {
                         let line = patch.line_in_hunk(hunk_idx, line_idx)?;
                         let kind = match line.origin() {
-                            '+' => DiffLineKind::Addition,
-                            '-' => DiffLineKind::Deletion,
-                            ' ' => DiffLineKind::Context,
-                            '=' | '>' => DiffLineKind::HunkHeader,
+                            '+' | '>' => DiffLineKind::Addition,
+                            '-' | '<' => DiffLineKind::Deletion,
+                            ' ' | '=' => DiffLineKind::Context,
                             _ => DiffLineKind::Context,
                         };
                         let content =
@@ -578,11 +577,14 @@ pub fn unstage_file(repo_path: &Path, file_path: &str) -> Result<()> {
             let head_commit = head_ref.peel_to_commit()?;
             repo.reset_default(Some(head_commit.as_object()), [Path::new(file_path)])?;
         }
-        Err(_) => {
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {
             // Unborn HEAD: no commits yet, just remove from index
             let mut index = repo.index()?;
             index.remove_path(Path::new(file_path))?;
             index.write()?;
+        }
+        Err(e) => {
+            return Err(e.into());
         }
     }
     Ok(())

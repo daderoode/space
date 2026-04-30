@@ -195,8 +195,8 @@ Press `Enter` on a file row in the expanded repo list to open a full-screen scro
 | `←` or `Esc` | Collapse all expanded repos; second press refocuses workspaces pane |
 | `T` | Toggle diff target: base branch ↔ HEAD |
 | `s` | Stage / unstage file (HEAD mode only) |
-| `S` | Stage all unstaged files in repo |
-| `U` | Unstage all staged files in repo |
+| `S` | Stage all unstaged files in repo (HEAD mode only) |
+| `U` | Unstage all staged files in repo (HEAD mode only) |
 | `q` | Quit |
 
 ### Key Bindings — Diff Viewer

@@ -1642,16 +1642,26 @@ fn setup_real_repo_app() -> (TestEnv, PathBuf, App) {
 
     // Commit a file, then modify it to create an unstaged change
     std::fs::write(repo_path.join("file.txt"), "initial").unwrap();
-    std::process::Command::new("git")
+    let out = std::process::Command::new("git")
         .args(["add", "file.txt"])
         .current_dir(&repo_path)
         .output()
-        .unwrap();
-    std::process::Command::new("git")
+        .expect("git add failed to run");
+    assert!(
+        out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = std::process::Command::new("git")
         .args(["commit", "-m", "add file"])
         .current_dir(&repo_path)
         .output()
-        .unwrap();
+        .expect("git commit failed to run");
+    assert!(
+        out.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     std::fs::write(repo_path.join("file.txt"), "modified").unwrap();
 
     let ws = Workspace {
@@ -1789,7 +1799,7 @@ fn s_on_file_row_in_head_mode_stages() {
         .args(["diff", "--cached", "--name-only"])
         .current_dir(&repo_path)
         .output()
-        .unwrap();
+        .expect("git diff --cached failed to run");
     let staged_files = String::from_utf8_lossy(&status_out.stdout);
     assert!(
         staged_files.contains("file.txt"),
@@ -1825,16 +1835,26 @@ fn shift_s_on_repo_row_stages_all_unstaged() {
     for name in &["a.txt", "b.txt"] {
         std::fs::write(repo_path.join(name), "initial").unwrap();
     }
-    std::process::Command::new("git")
+    let out = std::process::Command::new("git")
         .args(["add", "a.txt", "b.txt"])
         .current_dir(&repo_path)
         .output()
-        .unwrap();
-    std::process::Command::new("git")
+        .expect("git add failed to run");
+    assert!(
+        out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = std::process::Command::new("git")
         .args(["commit", "-m", "add files"])
         .current_dir(&repo_path)
         .output()
-        .unwrap();
+        .expect("git commit failed to run");
+    assert!(
+        out.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     for name in &["a.txt", "b.txt"] {
         std::fs::write(repo_path.join(name), "modified").unwrap();
     }
@@ -1883,23 +1903,38 @@ fn shift_u_on_repo_row_unstages_all_staged() {
 
     // Create a file, commit it, modify it, then stage the modification
     std::fs::write(repo_path.join("file.txt"), "initial").unwrap();
-    std::process::Command::new("git")
+    let out = std::process::Command::new("git")
         .args(["add", "file.txt"])
         .current_dir(&repo_path)
         .output()
-        .unwrap();
-    std::process::Command::new("git")
+        .expect("git add failed to run");
+    assert!(
+        out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = std::process::Command::new("git")
         .args(["commit", "-m", "add file"])
         .current_dir(&repo_path)
         .output()
-        .unwrap();
+        .expect("git commit failed to run");
+    assert!(
+        out.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     std::fs::write(repo_path.join("file.txt"), "modified").unwrap();
     // Stage the modification
-    std::process::Command::new("git")
+    let out = std::process::Command::new("git")
         .args(["add", "file.txt"])
         .current_dir(&repo_path)
         .output()
-        .unwrap();
+        .expect("git add failed to run");
+    assert!(
+        out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let ws = Workspace {
         name: "test-ws".into(),
@@ -1931,7 +1966,7 @@ fn shift_u_on_repo_row_unstages_all_staged() {
 
     // Cursor is on repo row (row 0). Press U to unstage all
     assert_eq!(app.cursor_row, 0);
-    app.handle_key(key(KeyCode::Char('U')));
+    app.handle_key(shift_key(KeyCode::Char('U')));
 
     // All files should now be unstaged
     let files = app.repo_file_cache.get(&0).expect("cache should exist");
