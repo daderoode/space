@@ -78,8 +78,12 @@ const REPO_PANE: BindingGroup = BindingGroup {
     name: "Repo Pane",
     bindings: &[
         Binding {
-            key: "Enter/→",
+            key: "Enter (repo)",
             desc: "Expand / collapse repo",
+        },
+        Binding {
+            key: "Enter (file)",
+            desc: "View file diff",
         },
         Binding {
             key: "←/Esc",
@@ -100,10 +104,6 @@ const REPO_PANE: BindingGroup = BindingGroup {
         Binding {
             key: "U",
             desc: "Unstage all staged",
-        },
-        Binding {
-            key: "Enter",
-            desc: "View file diff",
         },
     ],
 };

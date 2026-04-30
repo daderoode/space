@@ -317,7 +317,8 @@ impl App {
                 self.set_status(format!("{} {}", verb, path));
             }
             Err(err) => {
-                self.set_status(format!("Stage failed: {}", err));
+                let verb = if currently_staged { "Unstage" } else { "Stage" };
+                self.set_status(format!("{} failed: {}", verb, err));
             }
         }
     }
@@ -959,7 +960,8 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                     app.set_status(format!("{} {} file(s)", verb, count));
                 }
                 Err(err) => {
-                    app.set_status(format!("Stage failed: {}", err));
+                    let verb = if stage { "Stage" } else { "Unstage" };
+                    app.set_status(format!("{} failed: {}", verb, err));
                 }
             }
             None

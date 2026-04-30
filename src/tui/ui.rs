@@ -913,11 +913,18 @@ fn render_diff_overlay(state: &crate::tui::screens::diff::DiffViewerState, frame
         crate::core::git::DiffTarget::Head => "HEAD",
         crate::core::git::DiffTarget::Base => "base",
     };
-    let staged_label = if state.staged { "staged" } else { "unstaged" };
-    let title = format!(
-        " {}/{} \u{00b7} {} \u{00b7} {} ",
-        state.repo_name, state.file_path, target_label, staged_label
-    );
+    let title = if state.target == crate::core::git::DiffTarget::Head {
+        let staged_label = if state.staged { "staged" } else { "unstaged" };
+        format!(
+            " {}/{} \u{00b7} {} \u{00b7} {} ",
+            state.repo_name, state.file_path, target_label, staged_label
+        )
+    } else {
+        format!(
+            " {}/{} \u{00b7} {} ",
+            state.repo_name, state.file_path, target_label
+        )
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -960,11 +967,16 @@ fn render_diff_overlay(state: &crate::tui::screens::diff::DiffViewerState, frame
         }
     }
 
+    let footer_hint = match state.target {
+        crate::core::git::DiffTarget::Head => {
+            "  \u{2191}\u{2193} scroll \u{00b7} PgUp/PgDn page \u{00b7} s stage \u{00b7} Esc close"
+        }
+        crate::core::git::DiffTarget::Base => {
+            "  \u{2191}\u{2193} scroll \u{00b7} PgUp/PgDn page \u{00b7} Esc close"
+        }
+    };
     frame.render_widget(
-        Paragraph::new(
-            "  \u{2191}\u{2193} scroll \u{00b7} PgUp/PgDn page \u{00b7} s stage \u{00b7} Esc close",
-        )
-        .style(theme::muted()),
+        Paragraph::new(footer_hint).style(theme::muted()),
         sections[1],
     );
 }

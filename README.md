@@ -78,8 +78,8 @@ files with `s`, or bulk stage/unstage all files in the selected repo with `S`/`U
 | `←` or `Esc` | Collapse all expanded repos, then refocus workspaces pane |
 | `T` | Toggle diff target: base branch ↔ HEAD (uncommitted changes) |
 | `s` | Stage / unstage file (HEAD mode only) |
-| `S` | Stage all unstaged files in repo |
-| `U` | Unstage all staged files in repo |
+| `S` | Stage all unstaged files in repo (HEAD mode only) |
+| `U` | Unstage all staged files in repo (HEAD mode only) |
 | `q` | Quit |
 
 Interactive commands (`go`, `create`, `add`, `config`, `rm` without `--force`)
