@@ -3,6 +3,8 @@ use git2::{Repository, StatusOptions};
 use std::cmp::Reverse;
 use std::path::Path;
 
+pub const MAX_DIFF_LINES: usize = 10_000;
+
 #[derive(Debug, Default, serde::Serialize)]
 pub struct RepoStatus {
     pub modified: usize,
@@ -24,6 +26,7 @@ pub enum FileStatus {
     Renamed,
     Copied,
     Untracked,
+    Conflicted,
 }
 
 #[derive(Debug, Clone)]
@@ -413,6 +416,7 @@ fn delta_to_file_status(delta: git2::Delta) -> Option<FileStatus> {
         git2::Delta::Renamed => Some(FileStatus::Renamed),
         git2::Delta::Copied => Some(FileStatus::Copied),
         git2::Delta::Untracked => Some(FileStatus::Untracked),
+        git2::Delta::Conflicted => Some(FileStatus::Conflicted),
         _ => None,
     }
 }
@@ -540,6 +544,17 @@ pub fn file_content_diff(
                         });
                     }
                 }
+                if lines.len() > MAX_DIFF_LINES {
+                    let total = lines.len();
+                    lines.truncate(MAX_DIFF_LINES);
+                    lines.push(DiffLine {
+                        kind: DiffLineKind::FileHeader,
+                        content: format!(
+                            "... truncated ({} lines omitted)",
+                            total - MAX_DIFF_LINES
+                        ),
+                    });
+                }
                 FileDiff {
                     path: file_path.to_string(),
                     old_path,
@@ -553,6 +568,18 @@ pub fn file_content_diff(
 }
 
 /// Stage a single file (add to index). Handles both new/modified files and deletions.
+///
+/// # Rename handling
+///
+/// - **`git mv` renames** are already fully staged by git itself (both the deletion of the
+///   old path and the addition of the new path are written to the index). No call to
+///   `stage_file()` is needed — the TUI will show both sides as `staged: true`.
+///
+/// - **Manual renames** (e.g. `mv old new` or `std::fs::rename`) are NOT detected as renames.
+///   They appear in the TUI as two separate unstaged entries: the old path as `Deleted` and
+///   the new path as `Untracked`. This is correct behavior — the user must stage each side
+///   independently (or use `stage_all`). Rename detection would require calling
+///   `find_similar()` on the diff, which is intentionally not done to keep staging explicit.
 pub fn stage_file(repo_path: &Path, file_path: &str) -> Result<()> {
     let repo = Repository::open(repo_path)
         .with_context(|| format!("opening repo at {}", repo_path.display()))?;
@@ -591,25 +618,78 @@ pub fn unstage_file(repo_path: &Path, file_path: &str) -> Result<()> {
 }
 
 /// Stage all currently unstaged files. Returns the count of files staged.
+///
+/// Opens the repository and index once, applies all changes, then writes once.
 pub fn stage_all_unstaged(repo_path: &Path) -> Result<usize> {
     let entries = file_diff(repo_path, &DiffTarget::Head)?;
     let unstaged: Vec<_> = entries.iter().filter(|e| !e.staged).collect();
     let count = unstaged.len();
-    for entry in &unstaged {
-        stage_file(repo_path, &entry.path)?;
+
+    if count == 0 {
+        return Ok(0);
     }
+
+    let repo = Repository::open(repo_path)
+        .with_context(|| format!("opening repo at {}", repo_path.display()))?;
+    let mut index = repo.index()?;
+
+    for entry in &unstaged {
+        let path = Path::new(&entry.path);
+        if repo_path.join(path).exists() {
+            index.add_path(path)?;
+        } else {
+            index.remove_path(path)?;
+        }
+    }
+
+    index.write()?;
     Ok(count)
 }
 
 /// Unstage all currently staged files. Returns the count of files unstaged.
+///
+/// Opens the repository once and resets all staged paths in a single operation.
 pub fn unstage_all_staged(repo_path: &Path) -> Result<usize> {
     let entries = file_diff(repo_path, &DiffTarget::Head)?;
     let staged: Vec<_> = entries.iter().filter(|e| e.staged).collect();
     let count = staged.len();
-    for entry in &staged {
-        unstage_file(repo_path, &entry.path)?;
+
+    if count == 0 {
+        return Ok(0);
     }
+
+    let repo = Repository::open(repo_path)
+        .with_context(|| format!("opening repo at {}", repo_path.display()))?;
+
+    let paths: Vec<&Path> = staged.iter().map(|e| Path::new(e.path.as_str())).collect();
+
+    match repo.head() {
+        Ok(head_ref) => {
+            let head_commit = head_ref.peel_to_commit()?;
+            repo.reset_default(Some(head_commit.as_object()), paths.iter().copied())?;
+        }
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {
+            // Unborn HEAD: no commits yet, remove all from index
+            let mut index = repo.index()?;
+            for path in &paths {
+                index.remove_path(path)?;
+            }
+            index.write()?;
+        }
+        Err(e) => {
+            return Err(e.into());
+        }
+    }
+
     Ok(count)
+}
+
+/// Return the mtime of `<repo_path>/.git/index`, or `None` if it cannot be read.
+/// Used as a lightweight staleness signal for the diff content cache.
+pub fn git_index_mtime(repo_path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(repo_path.join(".git").join("index"))
+        .and_then(|m| m.modified())
+        .ok()
 }
 
 #[cfg(test)]

@@ -2060,6 +2060,121 @@ fn s_in_diff_viewer_stages_file_and_returns_to_dashboard() {
 }
 
 #[test]
+fn s_in_diff_viewer_unstages_staged_file_and_returns_to_dashboard() {
+    // Setup: create a repo with a staged modification (not unstaged like setup_real_repo_app)
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("testrepo");
+
+    // Commit a file
+    std::fs::write(repo_path.join("file.txt"), "initial").unwrap();
+    let out = std::process::Command::new("git")
+        .args(["add", "file.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("git add failed to run");
+    assert!(
+        out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = std::process::Command::new("git")
+        .args(["commit", "-m", "add file"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("git commit failed to run");
+    assert!(
+        out.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Modify the file and stage the modification
+    std::fs::write(repo_path.join("file.txt"), "modified").unwrap();
+    let out = std::process::Command::new("git")
+        .args(["add", "file.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("git add (stage modification) failed to run");
+    assert!(
+        out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Build the app with DiffTarget::Head
+    let ws = Workspace {
+        name: "test-ws".into(),
+        path: env.workspaces_dir.clone(),
+        repos: vec![WorkspaceRepo {
+            name: "testrepo".into(),
+            path: repo_path.clone(),
+            branch: "main".into(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
+    app.diff_target = DiffTarget::Head;
+    app.load_selected_workspace_detail();
+
+    // Focus right pane, expand repo, navigate to file row
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Enter)); // expand repo at cursor_row=0
+    app.handle_key(key(KeyCode::Down)); // navigate to the file row
+
+    // Verify file.txt is staged before opening viewer
+    let files = app.repo_file_cache.get(&0).expect("cache should exist");
+    assert!(
+        files
+            .iter()
+            .any(|e| e.staged && e.path.contains("file.txt")),
+        "file.txt should be staged initially"
+    );
+
+    // Open diff viewer
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::DiffViewer(_)),
+        "expected DiffViewer screen after Enter"
+    );
+
+    // Assert state.staged == true (we're viewing a staged file)
+    if let Screen::DiffViewer(ref state) = app.screen {
+        assert!(
+            state.staged,
+            "DiffViewerState.staged should be true for a staged file"
+        );
+    }
+
+    // Press 's' to unstage from inside the viewer
+    app.handle_key(key(KeyCode::Char('s')));
+
+    // Should return to dashboard
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "expected Dashboard after unstaging from DiffViewer"
+    );
+
+    // file.txt should now be unstaged in repo_file_cache
+    let files_after = app.repo_file_cache.get(&0).expect("cache should exist");
+    assert!(
+        files_after
+            .iter()
+            .any(|e| !e.staged && e.path.contains("file.txt")),
+        "file.txt should be unstaged after pressing s in diff viewer"
+    );
+
+    // Status message should mention "Unstaged"
+    let msg = app.status_message.as_deref().unwrap_or("");
+    assert!(
+        msg.to_lowercase().contains("unstaged"),
+        "status_message should contain 'Unstaged', got: {msg}"
+    );
+}
+
+#[test]
 fn s_in_diff_viewer_base_mode_shows_status_stays_on_viewer() {
     use space::core::config::SpaceConfig;
     use space::core::git::{DiffLine, DiffLineKind, DiffTarget, FileDiff};
@@ -2286,5 +2401,70 @@ fn bulk_stage_with_invalid_repo_path_shows_error_status() {
     assert!(
         matches!(app.screen, Screen::Dashboard),
         "should remain on Dashboard after failed bulk stage"
+    );
+}
+
+#[test]
+fn external_change_invalidates_diff_content_cache() {
+    let (_env, repo_path, mut app) = setup_real_repo_app();
+
+    // Open diff viewer (populates diff_content_cache)
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::DiffViewer(_)),
+        "expected DiffViewer screen"
+    );
+
+    // Close diff viewer
+    app.handle_key(key(KeyCode::Esc));
+    assert!(matches!(app.screen, Screen::Dashboard));
+
+    // Assert diff_content_cache is non-empty
+    assert!(
+        !app.diff_content_cache.is_empty(),
+        "diff_content_cache should be populated after viewing a diff"
+    );
+
+    // Remember the old cache content for comparison
+    let old_cache_keys: Vec<_> = app.diff_content_cache.keys().cloned().collect();
+
+    // Simulate an external change: stage the current modification (changes .git/index mtime),
+    // then write new content so there's still an unstaged diff to view.
+    let out = std::process::Command::new("git")
+        .args(["add", "file.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("git add failed to run");
+    assert!(
+        out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Write new content so there's still an unstaged change against HEAD
+    std::fs::write(repo_path.join("file.txt"), "externally modified content").unwrap();
+
+    // Open diff viewer again -- staleness check should invalidate the cache
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::DiffViewer(_)),
+        "expected DiffViewer screen after re-opening"
+    );
+
+    // The diff_content_cache should have been invalidated and repopulated with fresh data.
+    // Verify the new diff reflects the external change by checking that a cache entry exists
+    // and contains the new content.
+    let has_new_content = app.diff_content_cache.values().any(|result| {
+        if let Ok(diff) = result {
+            diff.lines
+                .iter()
+                .any(|line| line.content.contains("externally modified content"))
+        } else {
+            false
+        }
+    });
+    assert!(
+        has_new_content,
+        "diff_content_cache should reflect the externally modified content; keys: {:?}",
+        old_cache_keys
     );
 }

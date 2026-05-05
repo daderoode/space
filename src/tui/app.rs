@@ -136,6 +136,7 @@ pub struct App {
     pub expanded_repos: HashSet<usize>,
     pub repo_file_cache: HashMap<usize, Vec<FileEntry>>,
     pub diff_content_cache: HashMap<DiffCacheKey, Result<FileDiff, String>>,
+    pub repo_index_mtime: HashMap<usize, std::time::SystemTime>,
     pub cursor_row: usize,
     pub diff_target: DiffTarget,
     pub focus: Pane,
@@ -168,6 +169,7 @@ impl App {
             expanded_repos: HashSet::new(),
             repo_file_cache: HashMap::new(),
             diff_content_cache: HashMap::new(),
+            repo_index_mtime: HashMap::new(),
             cursor_row: 0,
             diff_target: DiffTarget::Base,
             focus: Pane::Left,
@@ -246,6 +248,7 @@ impl App {
         self.expanded_repos.clear();
         self.repo_file_cache.clear();
         self.diff_content_cache.clear();
+        self.repo_index_mtime.clear();
     }
 
     /// Fetch file diffs for all repos in the selected workspace and populate
@@ -270,6 +273,10 @@ impl App {
             match crate::core::git::file_diff(&path, &self.diff_target) {
                 Ok(entries) => {
                     self.repo_file_cache.insert(idx, entries);
+                    // Record .git/index mtime for staleness detection
+                    if let Some(mtime) = crate::core::git::git_index_mtime(&path) {
+                        self.repo_index_mtime.insert(idx, mtime);
+                    }
                 }
                 Err(_) => {
                     failures += 1;
@@ -290,6 +297,19 @@ impl App {
         path: &str,
         currently_staged: bool,
     ) {
+        // Block staging on conflicted files
+        if let Some(entries) = self.repo_file_cache.get(&repo_index) {
+            if entries
+                .iter()
+                .any(|e| e.path == path && e.status == crate::core::git::FileStatus::Conflicted)
+            {
+                self.set_status(
+                    "Cannot stage conflicted file \u{2014} resolve conflicts first".to_string(),
+                );
+                return;
+            }
+        }
+
         let result = if currently_staged {
             crate::core::git::unstage_file(repo_path, path)
         } else {
@@ -307,6 +327,13 @@ impl App {
                     }
                     Err(_) => {
                         // Keep stale cache entry — better than empty UI
+                        let verb = if currently_staged {
+                            "Unstaged"
+                        } else {
+                            "Staged"
+                        };
+                        self.set_status(format!("{} {} -- refresh failed, press r", verb, path));
+                        return;
                     }
                 }
                 let verb = if currently_staged {
@@ -862,6 +889,9 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                         match crate::core::git::file_diff(&repo_path, &app.diff_target) {
                             Ok(entries) => {
                                 app.repo_file_cache.insert(idx, entries);
+                                if let Some(mtime) = crate::core::git::git_index_mtime(&repo_path) {
+                                    app.repo_index_mtime.insert(idx, mtime);
+                                }
                             }
                             Err(err) => {
                                 app.set_status(format!("Diff failed: {}", err));
@@ -954,6 +984,12 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                         }
                         Err(_) => {
                             // Keep stale cache entry — better than empty UI
+                            let verb = if stage { "Staged" } else { "Unstaged" };
+                            app.set_status(format!(
+                                "{} {} file(s) -- refresh failed, press r",
+                                verb, count
+                            ));
+                            return None;
                         }
                     }
                     let verb = if stage { "Staged" } else { "Unstaged" };
@@ -981,6 +1017,24 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                     return None;
                 }
             };
+
+            // Check if .git/index has changed since cache was populated
+            let current_mtime = crate::core::git::git_index_mtime(&repo_path);
+            let cached_mtime = app.repo_index_mtime.get(&repo_index);
+            let stale = match (current_mtime, cached_mtime) {
+                (Some(current), Some(cached)) => &current != cached,
+                (Some(_), None) => true, // mtime exists but wasn't recorded -- treat as stale
+                _ => false,              // can't read mtime -- skip check
+            };
+            if stale {
+                // Invalidate diff content cache for this repo
+                app.diff_content_cache
+                    .retain(|key, _| key.repo_index != repo_index);
+                // Update recorded mtime
+                if let Some(mtime) = current_mtime {
+                    app.repo_index_mtime.insert(repo_index, mtime);
+                }
+            }
 
             let cache_key = DiffCacheKey {
                 repo_index,
@@ -1117,6 +1171,7 @@ mod tests {
             expanded_repos: HashSet::new(),
             repo_file_cache: HashMap::new(),
             diff_content_cache: HashMap::new(),
+            repo_index_mtime: HashMap::new(),
             cursor_row: 0,
             diff_target: DiffTarget::Base,
             focus: Pane::Left,

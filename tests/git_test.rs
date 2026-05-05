@@ -2,7 +2,7 @@ mod common;
 
 use space::core::git::{
     file_content_diff, file_diff, stage_all_unstaged, stage_file, unstage_all_staged, unstage_file,
-    DiffLineKind, DiffTarget, FileStatus,
+    DiffLineKind, DiffTarget, FileStatus, MAX_DIFF_LINES,
 };
 use std::process::Command;
 use tempfile::TempDir;
@@ -827,6 +827,133 @@ fn file_content_diff_base_mode_returns_committed_divergence() {
 }
 
 #[test]
+fn stage_file_after_git_mv_is_already_staged() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+
+    // Commit a file
+    std::fs::write(tmp.path().join("old_name.txt"), "content\n").unwrap();
+    let out = Command::new("git")
+        .args(["add", "old_name.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git add failed");
+    let out = Command::new("git")
+        .args(["commit", "-m", "add old_name"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git commit failed");
+
+    // Rename via `git mv` (stages both sides automatically)
+    let out = Command::new("git")
+        .args(["mv", "old_name.txt", "new_name.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git mv failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+
+    // `git mv` stages both the delete of old_name.txt and the add of new_name.txt.
+    // Without `find_similar()` on the diff, git2 reports these as separate staged
+    // entries (Deleted + Added) rather than a single Renamed entry.
+    // This correctly reflects the index state — both sides are staged.
+    let new_entry = entries
+        .iter()
+        .find(|e| e.path == "new_name.txt")
+        .expect("new_name.txt should appear in diff entries");
+    assert!(
+        new_entry.staged,
+        "git mv stages the new file — should be staged"
+    );
+
+    let old_entry = entries
+        .iter()
+        .find(|e| e.path == "old_name.txt")
+        .expect("old_name.txt should appear as deleted in diff entries");
+    assert!(
+        old_entry.staged,
+        "git mv stages the deletion — should be staged"
+    );
+    assert_eq!(
+        old_entry.status,
+        FileStatus::Deleted,
+        "old path should show as Deleted"
+    );
+
+    // Verify no unstaged orphan entries exist for these paths
+    let unstaged_old: Vec<_> = entries
+        .iter()
+        .filter(|e| e.path == "old_name.txt" && !e.staged)
+        .collect();
+    assert!(
+        unstaged_old.is_empty(),
+        "old_name.txt should NOT appear as an unstaged orphan"
+    );
+}
+
+#[test]
+fn manual_rename_shows_as_separate_add_and_delete() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+
+    // Commit a file
+    std::fs::write(tmp.path().join("original.txt"), "content\n").unwrap();
+    let out = Command::new("git")
+        .args(["add", "original.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git add failed");
+    let out = Command::new("git")
+        .args(["commit", "-m", "add original"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git commit failed");
+
+    // Manual rename (NOT git mv) — filesystem only
+    std::fs::rename(
+        tmp.path().join("original.txt"),
+        tmp.path().join("renamed.txt"),
+    )
+    .unwrap();
+
+    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+
+    // Manual rename is NOT detected as a rename — it appears as two separate entries:
+    // 1. original.txt is Deleted (working-tree deletion, unstaged)
+    // 2. renamed.txt is Untracked (new file, unstaged)
+    let original_entry = entries
+        .iter()
+        .find(|e| e.path == "original.txt")
+        .expect("original.txt should appear as deleted");
+    assert_eq!(
+        original_entry.status,
+        FileStatus::Deleted,
+        "original.txt should show as Deleted"
+    );
+    assert!(!original_entry.staged, "manual deletion is unstaged");
+
+    let renamed_entry = entries
+        .iter()
+        .find(|e| e.path == "renamed.txt")
+        .expect("renamed.txt should appear as untracked");
+    assert_eq!(
+        renamed_entry.status,
+        FileStatus::Untracked,
+        "renamed.txt should show as Untracked"
+    );
+    assert!(!renamed_entry.staged, "untracked file is not staged");
+}
+
+#[test]
 fn file_content_diff_detects_rename_old_path() {
     let tmp = TempDir::new().unwrap();
     common::init_repo(tmp.path());
@@ -879,4 +1006,127 @@ fn file_content_diff_detects_rename_old_path() {
             "old_path should be the original filename"
         );
     }
+}
+
+#[test]
+fn file_diff_detects_conflicted_file() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+
+    // Create a file on main and commit it
+    std::fs::write(tmp.path().join("conflict.txt"), "base content\n").unwrap();
+    let out = Command::new("git")
+        .args(["add", "conflict.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git add failed");
+    let out = Command::new("git")
+        .args(["commit", "-m", "add conflict.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git commit failed");
+
+    // Create a branch and modify the file
+    let out = Command::new("git")
+        .args(["checkout", "-b", "feature"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git checkout -b feature failed");
+    std::fs::write(tmp.path().join("conflict.txt"), "feature content\n").unwrap();
+    let out = Command::new("git")
+        .args(["commit", "-am", "feature change"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git commit on feature failed");
+
+    // Switch back to main and make a conflicting change
+    let out = Command::new("git")
+        .args(["checkout", "main"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git checkout main failed");
+    std::fs::write(tmp.path().join("conflict.txt"), "main content\n").unwrap();
+    let out = Command::new("git")
+        .args(["commit", "-am", "main change"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git commit on main failed");
+
+    // Attempt merge — this should fail with a conflict
+    let out = Command::new("git")
+        .args(["merge", "feature"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "git merge should have failed with conflict"
+    );
+
+    // file_diff should detect the conflicted file
+    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let conflicted = entries
+        .iter()
+        .find(|e| e.path == "conflict.txt")
+        .expect("conflict.txt should appear in file_diff results");
+    assert_eq!(
+        conflicted.status,
+        FileStatus::Conflicted,
+        "conflicted file should have Conflicted status"
+    );
+}
+
+#[test]
+fn file_content_diff_truncates_large_diff() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+
+    // Create and commit an initial file
+    let file_path = tmp.path().join("large.txt");
+    std::fs::write(&file_path, "initial\n").unwrap();
+    Command::new("git")
+        .args(["add", "large.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+
+    // Generate a modified file with 15,000+ new lines so the diff exceeds MAX_DIFF_LINES
+    let content: String = (0..15_500).map(|i| format!("line {}\n", i)).collect();
+    std::fs::write(&file_path, content).unwrap();
+
+    // Get the diff for the unstaged change
+    let diff = file_content_diff(tmp.path(), &DiffTarget::Head, "large.txt", false).unwrap();
+
+    // Should be truncated to MAX_DIFF_LINES + 1 (the truncation marker)
+    assert_eq!(
+        diff.lines.len(),
+        MAX_DIFF_LINES + 1,
+        "diff should be truncated to MAX_DIFF_LINES + 1 lines, got {}",
+        diff.lines.len()
+    );
+
+    // The last line should be the truncation marker
+    let last = diff.lines.last().unwrap();
+    assert_eq!(last.kind, DiffLineKind::FileHeader);
+    assert!(
+        last.content.contains("truncated"),
+        "truncation marker should contain 'truncated', got: {}",
+        last.content
+    );
+    assert!(
+        last.content.contains("omitted"),
+        "truncation marker should contain 'omitted', got: {}",
+        last.content
+    );
 }

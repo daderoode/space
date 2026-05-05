@@ -33,6 +33,7 @@ fn status_char(status: &crate::core::git::FileStatus) -> &'static str {
         FileStatus::Renamed => "R",
         FileStatus::Copied => "C",
         FileStatus::Untracked => "?",
+        FileStatus::Conflicted => "!",
     }
 }
 
@@ -327,18 +328,28 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
                 // In Base mode all entries have staged=false (committed divergence has
                 // no staging context), so the badge would always show "[unstaged]" which
                 // is misleading. Hide it entirely in Base mode.
-                let staged_badge = match app.diff_target {
-                    crate::core::git::DiffTarget::Head if entry.staged => {
-                        ratatui::text::Span::styled("[staged]", theme::staged())
+                let is_conflicted = entry.status == crate::core::git::FileStatus::Conflicted;
+                let staged_badge = if is_conflicted {
+                    ratatui::text::Span::styled("[conflict]", theme::error())
+                } else {
+                    match app.diff_target {
+                        crate::core::git::DiffTarget::Head if entry.staged => {
+                            ratatui::text::Span::styled("[staged]", theme::staged())
+                        }
+                        crate::core::git::DiffTarget::Head => {
+                            ratatui::text::Span::styled("[unstaged]", theme::unstaged())
+                        }
+                        crate::core::git::DiffTarget::Base => ratatui::text::Span::raw(""),
                     }
-                    crate::core::git::DiffTarget::Head => {
-                        ratatui::text::Span::styled("[unstaged]", theme::unstaged())
-                    }
-                    crate::core::git::DiffTarget::Base => ratatui::text::Span::raw(""),
                 };
                 let path_col = format!("  {} {}", status_char(&entry.status), entry.path);
+                let path_style = if is_conflicted {
+                    theme::error()
+                } else {
+                    theme::file_path()
+                };
                 Row::new(vec![
-                    Cell::from(Span::styled(path_col, theme::file_path())),
+                    Cell::from(Span::styled(path_col, path_style)),
                     Cell::from(""),
                     Cell::from(staged_badge), // col 3 = STATUS header
                     diff_cell(entry.insertions, entry.deletions), // col 4 = +/- header
