@@ -3,6 +3,7 @@ use crate::core::{
     git::{DiffTarget, FileDiff, FileEntry},
     workspace::{self, Workspace},
 };
+use crate::tui::actions::StatusKind;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -145,6 +146,7 @@ pub struct App {
     pub should_quit: bool,
     pub space_cd_target: Option<PathBuf>,
     pub status_message: Option<String>,
+    pub status_kind: StatusKind,
     pub status_message_set_at: Option<Instant>,
 }
 
@@ -179,6 +181,7 @@ impl App {
             should_quit: false,
             space_cd_target: None,
             status_message: None,
+            status_kind: StatusKind::Info,
             status_message_set_at: None,
         };
         app.load_selected_workspace_detail();
@@ -235,7 +238,10 @@ impl App {
                 }
                 Err(_e) => {
                     // Keep shallow workspace entry; note error for user
-                    self.set_status(format!("Could not load '{}' detail", name));
+                    self.set_status(
+                        format!("Could not load '{}' detail", name),
+                        StatusKind::Error,
+                    );
                 }
             }
         }
@@ -288,7 +294,10 @@ impl App {
             }
         }
         if failures > 0 {
-            self.set_status(format!("Diff failed for {} repo(s)", failures));
+            self.set_status(
+                format!("Diff failed for {} repo(s)", failures),
+                StatusKind::Error,
+            );
         }
     }
 
@@ -309,6 +318,7 @@ impl App {
             {
                 self.set_status(
                     "Cannot stage conflicted file \u{2014} resolve conflicts first".to_string(),
+                    StatusKind::Warning,
                 );
                 return;
             }
@@ -338,7 +348,10 @@ impl App {
                         } else {
                             "Staged"
                         };
-                        self.set_status(format!("{} {} -- refresh failed, press r", verb, path));
+                        self.set_status(
+                            format!("{} {} -- refresh failed, press r", verb, path),
+                            StatusKind::Warning,
+                        );
                         return;
                     }
                 }
@@ -347,17 +360,18 @@ impl App {
                 } else {
                     "Staged"
                 };
-                self.set_status(format!("{} {}", verb, path));
+                self.set_status(format!("{} {}", verb, path), StatusKind::Success);
             }
             Err(err) => {
                 let verb = if currently_staged { "Unstage" } else { "Stage" };
-                self.set_status(format!("{} failed: {}", verb, err));
+                self.set_status(format!("{} failed: {}", verb, err), StatusKind::Error);
             }
         }
     }
 
-    fn set_status(&mut self, msg: impl Into<String>) {
+    fn set_status(&mut self, msg: impl Into<String>, kind: StatusKind) {
         self.status_message = Some(msg.into());
+        self.status_kind = kind;
         self.status_message_set_at = Some(Instant::now());
     }
 
@@ -511,7 +525,10 @@ impl App {
                 "Added repos to"
             };
             self.screen = Screen::Dashboard;
-            self.set_status(format!("{} workspace '{}'", verb, params.workspace_name));
+            self.set_status(
+                format!("{} workspace '{}'", verb, params.workspace_name),
+                StatusKind::Success,
+            );
         }
         // If error, stay on Creating stage so user can see the log
     }
@@ -525,10 +542,10 @@ impl App {
                 self.refresh_if_leaving_creating_stage();
                 self.screen = Screen::Dashboard;
             }
-            ScreenAction::BackWithStatus(msg) => {
+            ScreenAction::BackWithStatus(msg, kind) => {
                 self.refresh_if_leaving_creating_stage();
                 self.screen = Screen::Dashboard;
-                self.set_status(msg);
+                self.set_status(msg, kind);
             }
             ScreenAction::CdAndQuit(path) => {
                 self.space_cd_target = Some(path);
@@ -545,11 +562,14 @@ impl App {
                         self.reset_repo_pane_state();
                         self.load_selected_workspace_detail();
                         self.screen = Screen::Dashboard;
-                        self.set_status(format!("Deleted workspace '{}'", name));
+                        self.set_status(
+                            format!("Deleted workspace '{}'", name),
+                            StatusKind::Success,
+                        );
                     }
                     Err(e) => {
                         self.screen = Screen::Dashboard;
-                        self.set_status(format!("Delete failed: {}", e));
+                        self.set_status(format!("Delete failed: {}", e), StatusKind::Error);
                     }
                 }
             }
@@ -559,7 +579,7 @@ impl App {
             ScreenAction::SaveConfig(new_config) => {
                 self.config = new_config;
                 self.screen = Screen::Dashboard;
-                self.set_status("Config saved");
+                self.set_status("Config saved", StatusKind::Success);
             }
             ScreenAction::NavigateToWorkspace(repo_name) => {
                 self.screen = Screen::Dashboard;
@@ -572,11 +592,14 @@ impl App {
                     self.selected_repo = 0;
                     self.load_selected_workspace_detail();
                 } else {
-                    self.set_status("Not in any workspace — use 'c' to create one");
+                    self.set_status(
+                        "Not in any workspace — use 'c' to create one",
+                        StatusKind::Info,
+                    );
                 }
             }
-            ScreenAction::SetStatus(msg) => {
-                self.set_status(msg);
+            ScreenAction::SetStatus(msg, kind) => {
+                self.set_status(msg, kind);
             }
             ScreenAction::StageFile {
                 repo_index,
@@ -658,7 +681,10 @@ impl App {
                     // s: stage/unstage single file (Right pane only)
                     (KeyCode::Char('s'), _) if self.focus == Pane::Right => {
                         if self.diff_target == DiffTarget::Base {
-                            self.set_status("Staging only available in HEAD mode");
+                            self.set_status(
+                                "Staging only available in HEAD mode",
+                                StatusKind::Info,
+                            );
                             return;
                         }
                         let rows = self.flattened_rows();
@@ -679,7 +705,10 @@ impl App {
                     (KeyCode::Char('S'), _) => match self.focus {
                         Pane::Right => {
                             if self.diff_target == DiffTarget::Base {
-                                self.set_status("Staging only available in HEAD mode");
+                                self.set_status(
+                                    "Staging only available in HEAD mode",
+                                    StatusKind::Info,
+                                );
                                 return;
                             }
                             self.repo_index_for_cursor()
@@ -693,7 +722,10 @@ impl App {
                     // U: unstage all (Right pane only)
                     (KeyCode::Char('U'), _) if self.focus == Pane::Right => {
                         if self.diff_target == DiffTarget::Base {
-                            self.set_status("Staging only available in HEAD mode");
+                            self.set_status(
+                                "Staging only available in HEAD mode",
+                                StatusKind::Info,
+                            );
                             return;
                         }
                         self.repo_index_for_cursor()
@@ -811,7 +843,10 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             app.cursor_row = 0;
             app.expanded_repos.clear();
             app.refresh_file_diff_cache();
-            app.set_status(format!("Refreshed: {} repos found", app.repos_cache.len()));
+            app.set_status(
+                format!("Refreshed: {} repos found", app.repos_cache.len()),
+                StatusKind::Success,
+            );
             None
         }
         Message::GoToWorkspace => {
@@ -900,7 +935,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                                 }
                             }
                             Err(err) => {
-                                app.set_status(format!("Diff failed: {}", err));
+                                app.set_status(format!("Diff failed: {}", err), StatusKind::Error);
                                 return None;
                             }
                         }
@@ -939,7 +974,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 DiffTarget::Head => "HEAD (uncommitted changes)",
                 DiffTarget::Base => "base branch (total divergence)",
             };
-            app.set_status(format!("Diff target: {}", label));
+            app.set_status(format!("Diff target: {}", label), StatusKind::Info);
             None
         }
         Message::StageFile {
@@ -954,7 +989,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             let repo_path = match repo_path {
                 Some(p) => p,
                 None => {
-                    app.set_status("Stage failed: repo not found");
+                    app.set_status("Stage failed: repo not found", StatusKind::Error);
                     return None;
                 }
             };
@@ -969,7 +1004,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             let repo_path = match repo_path {
                 Some(p) => p,
                 None => {
-                    app.set_status("Stage failed: repo not found");
+                    app.set_status("Stage failed: repo not found", StatusKind::Error);
                     return None;
                 }
             };
@@ -993,19 +1028,19 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                         Err(_) => {
                             // Keep stale cache entry — better than empty UI
                             let verb = if stage { "Staged" } else { "Unstaged" };
-                            app.set_status(format!(
-                                "{} {} file(s) -- refresh failed, press r",
-                                verb, count
-                            ));
+                            app.set_status(
+                                format!("{} {} file(s) -- refresh failed, press r", verb, count),
+                                StatusKind::Warning,
+                            );
                             return None;
                         }
                     }
                     let verb = if stage { "Staged" } else { "Unstaged" };
-                    app.set_status(format!("{} {} file(s)", verb, count));
+                    app.set_status(format!("{} {} file(s)", verb, count), StatusKind::Success);
                 }
                 Err(err) => {
                     let verb = if stage { "Stage" } else { "Unstage" };
-                    app.set_status(format!("{} failed: {}", verb, err));
+                    app.set_status(format!("{} failed: {}", verb, err), StatusKind::Error);
                 }
             }
             None
@@ -1021,7 +1056,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             {
                 Some(r) => (r.path.clone(), r.name.clone()),
                 None => {
-                    app.set_status("Diff viewer: repo not found");
+                    app.set_status("Diff viewer: repo not found", StatusKind::Error);
                     return None;
                 }
             };
@@ -1218,9 +1253,13 @@ mod tests {
             should_quit: false,
             space_cd_target: None,
             status_message: None,
+            status_kind: StatusKind::Info,
             status_message_set_at: None,
         };
-        app.set_status("Added repos to workspace 'mission-control-ui'");
+        app.set_status(
+            "Added repos to workspace 'mission-control-ui'",
+            StatusKind::Success,
+        );
         app
     }
 

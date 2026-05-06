@@ -2210,7 +2210,7 @@ fn s_in_diff_viewer_base_mode_shows_status_stays_on_viewer() {
     let ctx = ScreenContext { config: &config };
     let action = state.handle_key(key(KeyCode::Char('s')), &ctx);
 
-    if let ScreenAction::SetStatus(msg) = action {
+    if let ScreenAction::SetStatus(msg, _) = action {
         assert!(
             msg.to_lowercase().contains("head mode"),
             "expected message about HEAD mode, got: {msg}"

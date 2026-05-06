@@ -19,6 +19,16 @@ pub struct WorktreeParams {
     pub is_new: bool,
 }
 
+/// Severity of a transient status message shown in the status bar.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum StatusKind {
+    Error,
+    Success,
+    Warning,
+    #[default]
+    Info,
+}
+
 /// Actions a screen handler can request from the app.
 pub enum ScreenAction {
     /// Key handled internally, no app-level work needed.
@@ -26,7 +36,7 @@ pub enum ScreenAction {
     /// Return to Dashboard.
     Back,
     /// Return to Dashboard with a transient status message.
-    BackWithStatus(String),
+    BackWithStatus(String, StatusKind),
     /// Set cd target and quit (used by Go).
     CdAndQuit(PathBuf),
     /// Execute worktree creation/addition.
@@ -39,7 +49,7 @@ pub enum ScreenAction {
     /// (repo name from Search, resolved to a workspace in `App::process_action`).
     NavigateToWorkspace(String),
     /// Set a transient status message without changing screens.
-    SetStatus(String),
+    SetStatus(String, StatusKind),
     /// Stage or unstage a single file from the diff overlay.
     StageFile {
         repo_index: usize,

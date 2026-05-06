@@ -181,17 +181,22 @@ pub fn view(app: &App, frame: &mut Frame) {
 fn render_dashboard(app: &App, frame: &mut Frame) {
     let area = frame.area();
 
-    // Outer layout: title bar / main / status bar
+    // Outer layout: title bar / main / (collapsible) status message / keybindings bar
+    let status_height: u16 = if app.status_message.is_some() { 1 } else { 0 };
     let outer = Layout::vertical([
-        Constraint::Length(1), // title
-        Constraint::Min(0),    // main
-        Constraint::Length(1), // status bar
+        Constraint::Length(1),             // title
+        Constraint::Min(0),                // main
+        Constraint::Length(status_height), // status message (collapses when idle)
+        Constraint::Length(1),             // keybindings (always visible)
     ])
     .split(area);
 
     render_title(frame, outer[0]);
     render_main(app, frame, outer[1]);
-    render_status_bar(app, frame, outer[2]);
+    if app.status_message.is_some() {
+        render_status_message(app, frame, outer[2]);
+    }
+    render_keybindings_bar(app, frame, outer[3]);
 }
 
 fn render_title(frame: &mut Frame, area: Rect) {
@@ -387,12 +392,22 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(table, area, &mut state);
 }
 
-fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
+/// Render the colored status message row (only called when a message is set).
+fn render_status_message(app: &App, frame: &mut Frame, area: Rect) {
+    use crate::tui::actions::StatusKind;
     if let Some(msg) = &app.status_message {
-        frame.render_widget(Paragraph::new(msg.as_str()).style(theme::muted()), area);
-        return;
+        let style = match app.status_kind {
+            StatusKind::Error => theme::error(),
+            StatusKind::Success => theme::success(),
+            StatusKind::Warning => theme::warn(),
+            StatusKind::Info => theme::muted(),
+        };
+        frame.render_widget(Paragraph::new(msg.as_str()).style(style), area);
     }
+}
 
+/// Render the always-visible keybindings hint bar at the bottom.
+fn render_keybindings_bar(app: &App, frame: &mut Frame, area: Rect) {
     let bindings = crate::tui::keybindings::status_bar_bindings(app.focus);
     let sep = Span::styled("  ·  ", theme::muted());
     let mut spans: Vec<Span> = Vec::new();

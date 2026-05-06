@@ -143,6 +143,7 @@ pub fn test_app(workspaces: Vec<Workspace>, repos_cache: Vec<PathBuf>) -> App {
         should_quit: false,
         space_cd_target: None,
         status_message: None,
+        status_kind: space::tui::actions::StatusKind::Info,
         status_message_set_at: None,
     }
 }
@@ -172,6 +173,7 @@ pub fn test_app_with_config(
         should_quit: false,
         space_cd_target: None,
         status_message: None,
+        status_kind: space::tui::actions::StatusKind::Info,
         status_message_set_at: None,
     }
 }

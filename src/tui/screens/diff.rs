@@ -54,6 +54,7 @@ impl DiffViewerState {
                 if self.target == DiffTarget::Base {
                     return ScreenAction::SetStatus(
                         "Staging only available in HEAD mode".to_string(),
+                        crate::tui::actions::StatusKind::Info,
                     );
                 }
                 ScreenAction::StageFile {
