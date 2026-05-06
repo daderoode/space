@@ -10,6 +10,7 @@ pub struct RepoStatus {
     pub modified: usize,
     pub staged: usize,
     pub untracked: usize,
+    pub conflicted: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -118,6 +119,9 @@ pub fn repo_status(repo_path: &Path) -> Result<RepoStatus> {
         }
         if s.contains(git2::Status::WT_NEW) {
             result.untracked += 1;
+        }
+        if s.contains(git2::Status::CONFLICTED) {
+            result.conflicted += 1;
         }
     }
     Ok(result)
@@ -622,7 +626,10 @@ pub fn unstage_file(repo_path: &Path, file_path: &str) -> Result<()> {
 /// Opens the repository and index once, applies all changes, then writes once.
 pub fn stage_all_unstaged(repo_path: &Path) -> Result<usize> {
     let entries = file_diff(repo_path, &DiffTarget::Head)?;
-    let unstaged: Vec<_> = entries.iter().filter(|e| !e.staged).collect();
+    let unstaged: Vec<_> = entries
+        .iter()
+        .filter(|e| !e.staged && e.status != FileStatus::Conflicted)
+        .collect();
     let count = unstaged.len();
 
     if count == 0 {
@@ -687,7 +694,9 @@ pub fn unstage_all_staged(repo_path: &Path) -> Result<usize> {
 /// Return the mtime of `<repo_path>/.git/index`, or `None` if it cannot be read.
 /// Used as a lightweight staleness signal for the diff content cache.
 pub fn git_index_mtime(repo_path: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(repo_path.join(".git").join("index"))
+    let repo = Repository::open(repo_path).ok()?;
+    let index_path = repo.path().join("index");
+    std::fs::metadata(index_path)
         .and_then(|m| m.modified())
         .ok()
 }

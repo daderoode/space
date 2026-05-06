@@ -49,6 +49,9 @@ fn format_repo_status(status: &crate::core::git::RepoStatus, max_width: usize) -
     if status.untracked > 0 {
         parts.push(format!("{} new", status.untracked));
     }
+    if status.conflicted > 0 {
+        parts.push(format!("{} conflict", status.conflicted));
+    }
 
     if parts.is_empty() {
         return "clean".to_string();
@@ -298,7 +301,9 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
             } => {
                 let indicator = if *expanded { "▼ " } else { "▶ " };
                 let name = format!("{}{}", indicator, r.name);
-                let dirty = r.status.modified + r.status.staged + r.status.untracked > 0;
+                let dirty =
+                    r.status.modified + r.status.staged + r.status.untracked + r.status.conflicted
+                        > 0;
                 let status_style = if dirty {
                     theme::warn()
                 } else {
@@ -979,6 +984,9 @@ fn render_diff_overlay(state: &crate::tui::screens::diff::DiffViewerState, frame
     }
 
     let footer_hint = match state.target {
+        crate::core::git::DiffTarget::Head if state.staged => {
+            "  \u{2191}\u{2193} scroll \u{00b7} PgUp/PgDn page \u{00b7} s unstage \u{00b7} Esc close"
+        }
         crate::core::git::DiffTarget::Head => {
             "  \u{2191}\u{2193} scroll \u{00b7} PgUp/PgDn page \u{00b7} s stage \u{00b7} Esc close"
         }

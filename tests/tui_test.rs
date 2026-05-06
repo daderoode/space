@@ -537,6 +537,7 @@ fn dashboard_status_uses_plain_language_summary() {
                 modified: 14,
                 staged: 0,
                 untracked: 3,
+                conflicted: 0,
             },
             ahead: 0,
             behind: 0,
@@ -566,6 +567,7 @@ fn dashboard_status_fits_common_80_col_terminal() {
                 modified: 14,
                 staged: 0,
                 untracked: 3,
+                conflicted: 0,
             },
             ahead: 0,
             behind: 0,
@@ -595,6 +597,7 @@ fn dashboard_three_part_status_fits_common_80_col_terminal() {
                 modified: 14,
                 staged: 3,
                 untracked: 2,
+                conflicted: 0,
             },
             ahead: 0,
             behind: 0,
@@ -2466,5 +2469,57 @@ fn external_change_invalidates_diff_content_cache() {
         has_new_content,
         "diff_content_cache should reflect the externally modified content; keys: {:?}",
         old_cache_keys
+    );
+}
+
+#[test]
+fn external_file_edit_invalidates_cached_unstaged_diff() {
+    let (_env, repo_path, mut app) = setup_real_repo_app();
+
+    // Open diff viewer — populates diff_content_cache and file_mtime_cache
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::DiffViewer(_)),
+        "expected DiffViewer screen"
+    );
+
+    // Close diff viewer
+    app.handle_key(key(KeyCode::Esc));
+    assert!(matches!(app.screen, Screen::Dashboard));
+
+    // Assert caches are populated
+    assert!(
+        !app.diff_content_cache.is_empty(),
+        "diff_content_cache should be populated after viewing a diff"
+    );
+    assert!(
+        !app.file_mtime_cache.is_empty(),
+        "file_mtime_cache should be populated after viewing an unstaged diff"
+    );
+
+    // Externally modify the file (without staging — .git/index mtime doesn't change)
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::fs::write(repo_path.join("file.txt"), "changed again").unwrap();
+
+    // Open diff viewer again — file mtime staleness check should invalidate the cache
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::DiffViewer(_)),
+        "expected DiffViewer screen after re-opening"
+    );
+
+    // The diff content should reflect the new file content
+    let has_new_content = app.diff_content_cache.values().any(|result| {
+        if let Ok(diff) = result {
+            diff.lines
+                .iter()
+                .any(|line| line.content.contains("changed again"))
+        } else {
+            false
+        }
+    });
+    assert!(
+        has_new_content,
+        "diff_content_cache should reflect the externally modified file content 'changed again'"
     );
 }

@@ -1,8 +1,8 @@
 mod common;
 
 use space::core::git::{
-    file_content_diff, file_diff, stage_all_unstaged, stage_file, unstage_all_staged, unstage_file,
-    DiffLineKind, DiffTarget, FileStatus, MAX_DIFF_LINES,
+    file_content_diff, file_diff, git_index_mtime, repo_status, stage_all_unstaged, stage_file,
+    unstage_all_staged, unstage_file, DiffLineKind, DiffTarget, FileStatus, MAX_DIFF_LINES,
 };
 use std::process::Command;
 use tempfile::TempDir;
@@ -1128,5 +1128,208 @@ fn file_content_diff_truncates_large_diff() {
         last.content.contains("omitted"),
         "truncation marker should contain 'omitted', got: {}",
         last.content
+    );
+}
+
+#[test]
+fn stage_all_unstaged_skips_conflicted_files() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+
+    // Commit a file on main
+    std::fs::write(tmp.path().join("conflict.txt"), "original\n").unwrap();
+    Command::new("git")
+        .args(["add", "conflict.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+
+    // Create a branch and modify the file
+    Command::new("git")
+        .args(["checkout", "-b", "feature"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    std::fs::write(tmp.path().join("conflict.txt"), "feature change\n").unwrap();
+    Command::new("git")
+        .args(["add", "conflict.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "feature"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+
+    // Switch back to main and make a conflicting change
+    Command::new("git")
+        .args(["checkout", "main"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    std::fs::write(tmp.path().join("conflict.txt"), "main change\n").unwrap();
+    Command::new("git")
+        .args(["add", "conflict.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "main change"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+
+    // Merge feature branch — should fail with conflict
+    let merge_output = Command::new("git")
+        .args(["merge", "feature"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        !merge_output.status.success(),
+        "merge should fail with conflict"
+    );
+
+    // stage_all_unstaged should skip conflicted files
+    let count = stage_all_unstaged(tmp.path()).unwrap();
+    assert_eq!(count, 0, "conflicted files should not be staged");
+
+    // Verify conflicted file still appears as conflicted in the diff
+    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let conflicted: Vec<_> = entries
+        .iter()
+        .filter(|e| e.status == FileStatus::Conflicted)
+        .collect();
+    assert!(
+        !conflicted.is_empty(),
+        "conflicted file should still appear as conflicted"
+    );
+}
+
+#[test]
+fn git_index_mtime_works_for_worktree() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+
+    // Commit a file so the repo has history
+    std::fs::write(tmp.path().join("file.txt"), "content\n").unwrap();
+    Command::new("git")
+        .args(["add", "file.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+
+    // Create a worktree
+    let wt_path = tmp.path().parent().unwrap().join("wt-test");
+    let output = Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "-b",
+            "wt-branch",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git worktree add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // git_index_mtime should return Some for the worktree
+    let mtime = git_index_mtime(&wt_path);
+    assert!(
+        mtime.is_some(),
+        "git_index_mtime should return Some for a worktree, got None"
+    );
+
+    // Cleanup worktree
+    Command::new("git")
+        .args(["worktree", "remove", wt_path.to_str().unwrap()])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+}
+
+#[test]
+fn repo_status_counts_conflicted_files() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+
+    // Create a file on main and commit it
+    std::fs::write(tmp.path().join("conflict.txt"), "base content\n").unwrap();
+    let out = Command::new("git")
+        .args(["add", "conflict.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git add failed");
+    let out = Command::new("git")
+        .args(["commit", "-m", "add conflict.txt"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git commit failed");
+
+    // Create a branch and modify the file
+    let out = Command::new("git")
+        .args(["checkout", "-b", "feature"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git checkout -b feature failed");
+    std::fs::write(tmp.path().join("conflict.txt"), "feature content\n").unwrap();
+    let out = Command::new("git")
+        .args(["commit", "-am", "feature change"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git commit on feature failed");
+
+    // Switch back to main and make a conflicting change
+    let out = Command::new("git")
+        .args(["checkout", "main"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git checkout main failed");
+    std::fs::write(tmp.path().join("conflict.txt"), "main content\n").unwrap();
+    let out = Command::new("git")
+        .args(["commit", "-am", "main change"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git commit on main failed");
+
+    // Attempt merge — this should fail with a conflict
+    let out = Command::new("git")
+        .args(["merge", "feature"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "git merge should have failed with conflict"
+    );
+
+    // repo_status should count the conflicted file
+    let status = repo_status(tmp.path()).unwrap();
+    assert!(
+        status.conflicted > 0,
+        "repo_status should count conflicted files, got conflicted={}",
+        status.conflicted
     );
 }

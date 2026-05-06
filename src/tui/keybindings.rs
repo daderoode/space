@@ -129,7 +129,7 @@ const DIFF_VIEWER: BindingGroup = BindingGroup {
         },
         Binding {
             key: "s",
-            desc: "Stage / unstage",
+            desc: "Stage / unstage (HEAD mode)",
         },
         Binding {
             key: "Esc/q",

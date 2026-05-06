@@ -136,6 +136,7 @@ pub struct App {
     pub expanded_repos: HashSet<usize>,
     pub repo_file_cache: HashMap<usize, Vec<FileEntry>>,
     pub diff_content_cache: HashMap<DiffCacheKey, Result<FileDiff, String>>,
+    pub file_mtime_cache: HashMap<DiffCacheKey, std::time::SystemTime>,
     pub repo_index_mtime: HashMap<usize, std::time::SystemTime>,
     pub cursor_row: usize,
     pub diff_target: DiffTarget,
@@ -169,6 +170,7 @@ impl App {
             expanded_repos: HashSet::new(),
             repo_file_cache: HashMap::new(),
             diff_content_cache: HashMap::new(),
+            file_mtime_cache: HashMap::new(),
             repo_index_mtime: HashMap::new(),
             cursor_row: 0,
             diff_target: DiffTarget::Base,
@@ -248,6 +250,7 @@ impl App {
         self.expanded_repos.clear();
         self.repo_file_cache.clear();
         self.diff_content_cache.clear();
+        self.file_mtime_cache.clear();
         self.repo_index_mtime.clear();
     }
 
@@ -257,6 +260,7 @@ impl App {
     pub fn refresh_file_diff_cache(&mut self) {
         self.repo_file_cache.clear();
         self.diff_content_cache.clear();
+        self.file_mtime_cache.clear();
         let repo_paths: Vec<(usize, std::path::PathBuf)> = self
             .selected_workspace()
             .map(|ws| {
@@ -319,6 +323,8 @@ impl App {
             Ok(()) => {
                 // Invalidate diff content cache entries for this repo
                 self.diff_content_cache
+                    .retain(|key, _| key.repo_index != repo_index);
+                self.file_mtime_cache
                     .retain(|key, _| key.repo_index != repo_index);
                 // Re-fetch file list for this repo
                 match crate::core::git::file_diff(repo_path, &self.diff_target) {
@@ -977,6 +983,8 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                     // Invalidate diff content cache entries for this repo
                     app.diff_content_cache
                         .retain(|key, _| key.repo_index != repo_index);
+                    app.file_mtime_cache
+                        .retain(|key, _| key.repo_index != repo_index);
                     // Re-fetch file list for this repo
                     match crate::core::git::file_diff(&repo_path, &app.diff_target) {
                         Ok(entries) => {
@@ -1030,6 +1038,8 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 // Invalidate diff content cache for this repo
                 app.diff_content_cache
                     .retain(|key, _| key.repo_index != repo_index);
+                app.file_mtime_cache
+                    .retain(|key, _| key.repo_index != repo_index);
                 // Update recorded mtime
                 if let Some(mtime) = current_mtime {
                     app.repo_index_mtime.insert(repo_index, mtime);
@@ -1043,6 +1053,24 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 staged,
             };
 
+            // Check if the specific working-tree file has changed
+            if !staged {
+                // Only relevant for unstaged diffs — staged diffs depend on the index, already covered
+                let file_full_path = repo_path.join(&path);
+                let current_file_mtime = std::fs::metadata(&file_full_path)
+                    .and_then(|m| m.modified())
+                    .ok();
+                let cached_file_mtime = app.file_mtime_cache.get(&cache_key);
+                let file_stale = match (current_file_mtime, cached_file_mtime) {
+                    (Some(current), Some(cached)) => &current != cached,
+                    (Some(_), None) => false, // first time — not stale, will be recorded after caching
+                    _ => false,
+                };
+                if file_stale {
+                    app.diff_content_cache.remove(&cache_key);
+                }
+            }
+
             let diff = if let Some(cached) = app.diff_content_cache.get(&cache_key) {
                 cached.clone()
             } else {
@@ -1053,7 +1081,17 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                     staged,
                 )
                 .map_err(|e| e.to_string());
-                app.diff_content_cache.insert(cache_key, result.clone());
+                app.diff_content_cache
+                    .insert(cache_key.clone(), result.clone());
+                // Record the file's mtime for future staleness checks
+                if !staged {
+                    let file_full_path = repo_path.join(&path);
+                    if let Ok(meta) = std::fs::metadata(&file_full_path) {
+                        if let Ok(mtime) = meta.modified() {
+                            app.file_mtime_cache.insert(cache_key, mtime);
+                        }
+                    }
+                }
                 result
             };
 
@@ -1171,6 +1209,7 @@ mod tests {
             expanded_repos: HashSet::new(),
             repo_file_cache: HashMap::new(),
             diff_content_cache: HashMap::new(),
+            file_mtime_cache: HashMap::new(),
             repo_index_mtime: HashMap::new(),
             cursor_row: 0,
             diff_target: DiffTarget::Base,
