@@ -97,7 +97,6 @@ pub enum Message {
     ToggleRepoExpand,
     CollapseAllRepos,
     StartHelp,
-    ToggleDiffTarget,
     StageFile {
         repo_index: usize,
         path: String,
@@ -122,6 +121,11 @@ pub enum RepoRow<'a> {
         repo: &'a crate::core::workspace::WorkspaceRepo,
         expanded: bool,
     },
+    /// Section divider within an expanded repo: "Conflicts", "Unstaged", or "Staged".
+    SectionHeader {
+        repo_index: usize,
+        label: &'static str,
+    },
     File {
         repo_index: usize,
         entry: &'a FileEntry,
@@ -140,7 +144,6 @@ pub struct App {
     pub file_mtime_cache: HashMap<DiffCacheKey, std::time::SystemTime>,
     pub repo_index_mtime: HashMap<usize, std::time::SystemTime>,
     pub cursor_row: usize,
-    pub diff_target: DiffTarget,
     pub focus: Pane,
     pub screen: Screen,
     pub should_quit: bool,
@@ -175,7 +178,6 @@ impl App {
             file_mtime_cache: HashMap::new(),
             repo_index_mtime: HashMap::new(),
             cursor_row: 0,
-            diff_target: DiffTarget::Base,
             focus: Pane::Left,
             screen: Screen::Dashboard,
             should_quit: false,
@@ -193,6 +195,9 @@ impl App {
     }
 
     /// Build the flat list of rows for the repo table.
+    ///
+    /// Each expanded repo emits section headers (Conflicts / Unstaged / Staged)
+    /// followed by the file entries in each group. Empty groups are omitted.
     pub fn flattened_rows(&self) -> Vec<RepoRow<'_>> {
         let repos = match self.selected_workspace() {
             Some(ws) => &ws.repos,
@@ -208,11 +213,52 @@ impl App {
             });
             if expanded {
                 if let Some(entries) = self.repo_file_cache.get(&i) {
-                    for entry in entries {
-                        rows.push(RepoRow::File {
+                    use crate::core::git::FileStatus;
+                    let conflicts: Vec<_> = entries
+                        .iter()
+                        .filter(|e| e.status == FileStatus::Conflicted)
+                        .collect();
+                    let unstaged: Vec<_> = entries
+                        .iter()
+                        .filter(|e| !e.staged && e.status != FileStatus::Conflicted)
+                        .collect();
+                    let staged: Vec<_> = entries.iter().filter(|e| e.staged).collect();
+
+                    if !conflicts.is_empty() {
+                        rows.push(RepoRow::SectionHeader {
                             repo_index: i,
-                            entry,
+                            label: "Conflicts",
                         });
+                        for entry in conflicts {
+                            rows.push(RepoRow::File {
+                                repo_index: i,
+                                entry,
+                            });
+                        }
+                    }
+                    if !unstaged.is_empty() {
+                        rows.push(RepoRow::SectionHeader {
+                            repo_index: i,
+                            label: "Unstaged",
+                        });
+                        for entry in unstaged {
+                            rows.push(RepoRow::File {
+                                repo_index: i,
+                                entry,
+                            });
+                        }
+                    }
+                    if !staged.is_empty() {
+                        rows.push(RepoRow::SectionHeader {
+                            repo_index: i,
+                            label: "Staged",
+                        });
+                        for entry in staged {
+                            rows.push(RepoRow::File {
+                                repo_index: i,
+                                entry,
+                            });
+                        }
                     }
                 }
             }
@@ -220,10 +266,11 @@ impl App {
         rows
     }
 
-    /// Return the repo index the cursor is on (whether on a Repo or File row).
+    /// Return the repo index the cursor is on (whether on a Repo, SectionHeader, or File row).
     pub fn repo_index_for_cursor(&self) -> Option<usize> {
         match self.flattened_rows().get(self.cursor_row) {
             Some(RepoRow::Repo { index, .. }) => Some(*index),
+            Some(RepoRow::SectionHeader { repo_index, .. }) => Some(*repo_index),
             Some(RepoRow::File { repo_index, .. }) => Some(*repo_index),
             None => None,
         }
@@ -280,7 +327,7 @@ impl App {
 
         let mut failures = 0usize;
         for (idx, path) in repo_paths {
-            match crate::core::git::file_diff(&path, &self.diff_target) {
+            match crate::core::git::file_diff(&path, &DiffTarget::Head) {
                 Ok(entries) => {
                     self.repo_file_cache.insert(idx, entries);
                     // Record .git/index mtime for staleness detection
@@ -337,7 +384,7 @@ impl App {
                 self.file_mtime_cache
                     .retain(|key, _| key.repo_index != repo_index);
                 // Re-fetch file list for this repo
-                match crate::core::git::file_diff(repo_path, &self.diff_target) {
+                match crate::core::git::file_diff(repo_path, &DiffTarget::Head) {
                     Ok(entries) => {
                         self.repo_file_cache.insert(repo_index, entries);
                     }
@@ -666,7 +713,7 @@ impl App {
                                     path: entry.path.clone(),
                                     staged: entry.staged,
                                 }),
-                                None => None,
+                                Some(RepoRow::SectionHeader { .. }) | None => None,
                             }
                         }
                     },
@@ -675,18 +722,10 @@ impl App {
                     (KeyCode::Char('a'), _) => Some(Message::StartAdd),
                     (KeyCode::Char('d'), _) => Some(Message::StartDelete),
                     (KeyCode::Char('r'), _) => Some(Message::RefreshRepos),
-                    (KeyCode::Char('T'), _) => Some(Message::ToggleDiffTarget),
                     (KeyCode::Char('/'), _) => Some(Message::StartSearch),
                     (KeyCode::Char('?'), _) => Some(Message::StartHelp),
-                    // s: stage/unstage single file (Right pane only)
-                    (KeyCode::Char('s'), _) if self.focus == Pane::Right => {
-                        if self.diff_target == DiffTarget::Base {
-                            self.set_status(
-                                "Staging only available in HEAD mode",
-                                StatusKind::Info,
-                            );
-                            return;
-                        }
+                    // s/space: stage/unstage single file (Right pane only)
+                    (KeyCode::Char('s') | KeyCode::Char(' '), _) if self.focus == Pane::Right => {
                         let rows = self.flattened_rows();
                         if let Some(RepoRow::File {
                             repo_index, entry, ..
@@ -704,13 +743,6 @@ impl App {
                     // S: stage all (Right pane) or open config (Left pane)
                     (KeyCode::Char('S'), _) => match self.focus {
                         Pane::Right => {
-                            if self.diff_target == DiffTarget::Base {
-                                self.set_status(
-                                    "Staging only available in HEAD mode",
-                                    StatusKind::Info,
-                                );
-                                return;
-                            }
                             self.repo_index_for_cursor()
                                 .map(|repo_index| Message::StageBulk {
                                     repo_index,
@@ -720,20 +752,12 @@ impl App {
                         Pane::Left => Some(Message::StartConfig),
                     },
                     // U: unstage all (Right pane only)
-                    (KeyCode::Char('U'), _) if self.focus == Pane::Right => {
-                        if self.diff_target == DiffTarget::Base {
-                            self.set_status(
-                                "Staging only available in HEAD mode",
-                                StatusKind::Info,
-                            );
-                            return;
-                        }
-                        self.repo_index_for_cursor()
-                            .map(|repo_index| Message::StageBulk {
-                                repo_index,
-                                stage: false,
-                            })
-                    }
+                    (KeyCode::Char('U'), _) if self.focus == Pane::Right => self
+                        .repo_index_for_cursor()
+                        .map(|repo_index| Message::StageBulk {
+                            repo_index,
+                            stage: false,
+                        }),
                     (KeyCode::Up, _) | (KeyCode::Char('k'), _) => match self.focus {
                         Pane::Left => Some(Message::SelectWorkspaceUp),
                         Pane::Right => Some(Message::SelectRepoUp),
@@ -927,7 +951,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                         .and_then(|ws| ws.repos.get(idx))
                         .map(|r| r.path.clone())
                     {
-                        match crate::core::git::file_diff(&repo_path, &app.diff_target) {
+                        match crate::core::git::file_diff(&repo_path, &DiffTarget::Head) {
                             Ok(entries) => {
                                 app.repo_file_cache.insert(idx, entries);
                                 if let Some(mtime) = crate::core::git::git_index_mtime(&repo_path) {
@@ -958,23 +982,6 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 .map(|ws| ws.repos.len())
                 .unwrap_or(0);
             app.cursor_row = current_repo_idx.min(repos_len.saturating_sub(1));
-            None
-        }
-        Message::ToggleDiffTarget => {
-            app.diff_target = match app.diff_target {
-                DiffTarget::Head => DiffTarget::Base,
-                DiffTarget::Base => DiffTarget::Head,
-            };
-            // Re-fetch diffs for ALL repos (not just expanded) so +/- totals
-            // on collapsed rows also update immediately.
-            app.refresh_file_diff_cache();
-            let max_row = app.flattened_rows().len().saturating_sub(1);
-            app.cursor_row = app.cursor_row.min(max_row);
-            let label = match app.diff_target {
-                DiffTarget::Head => "HEAD (uncommitted changes)",
-                DiffTarget::Base => "base branch (total divergence)",
-            };
-            app.set_status(format!("Diff target: {}", label), StatusKind::Info);
             None
         }
         Message::StageFile {
@@ -1021,7 +1028,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                     app.file_mtime_cache
                         .retain(|key, _| key.repo_index != repo_index);
                     // Re-fetch file list for this repo
-                    match crate::core::git::file_diff(&repo_path, &app.diff_target) {
+                    match crate::core::git::file_diff(&repo_path, &DiffTarget::Head) {
                         Ok(entries) => {
                             app.repo_file_cache.insert(repo_index, entries);
                         }
@@ -1084,7 +1091,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             let cache_key = DiffCacheKey {
                 repo_index,
                 path: path.clone(),
-                target: app.diff_target.clone(),
+                target: DiffTarget::Head,
                 staged,
             };
 
@@ -1111,7 +1118,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             } else {
                 let result = crate::core::git::file_content_diff(
                     &repo_path,
-                    &app.diff_target,
+                    &DiffTarget::Head,
                     &path,
                     staged,
                 )
@@ -1140,7 +1147,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 repo_name,
                 repo_path,
                 file_path: path,
-                target: app.diff_target.clone(),
+                target: DiffTarget::Head,
                 staged,
                 diff,
                 scroll_offset: 0,
@@ -1247,7 +1254,6 @@ mod tests {
             file_mtime_cache: HashMap::new(),
             repo_index_mtime: HashMap::new(),
             cursor_row: 0,
-            diff_target: DiffTarget::Base,
             focus: Pane::Left,
             screen: Screen::Dashboard,
             should_quit: false,

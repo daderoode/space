@@ -16,6 +16,8 @@ pub struct RepoStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DiffTarget {
     Head,
+    /// Reserved for future "commits ahead of base" screen.
+    #[allow(dead_code)]
     Base,
 }
 

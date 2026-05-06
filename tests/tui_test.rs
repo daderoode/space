@@ -5,7 +5,7 @@ use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::KeyCode;
 use ratatui::Terminal;
 use space::core::config::{RepoConfig, SpaceConfig, WorkspaceConfig};
-use space::core::git::{DiffTarget, RepoStatus};
+use space::core::git::RepoStatus;
 use space::core::workspace::{Workspace, WorkspaceRepo};
 use space::tui::app::{App, Pane, Screen};
 use std::path::PathBuf;
@@ -1031,7 +1031,8 @@ fn flattened_rows_one_expanded_with_files() {
         ],
     );
     let rows = app.flattened_rows();
-    assert_eq!(rows.len(), 4); // repo-a, repo-b, foo.rs, bar.rs
+    // repo-a, repo-b, SectionHeader("Unstaged"), foo.rs, SectionHeader("Staged"), bar.rs
+    assert_eq!(rows.len(), 6);
     assert!(matches!(
         rows[0],
         space::tui::app::RepoRow::Repo {
@@ -1050,10 +1051,26 @@ fn flattened_rows_one_expanded_with_files() {
     ));
     assert!(matches!(
         rows[2],
-        space::tui::app::RepoRow::File { repo_index: 1, .. }
+        space::tui::app::RepoRow::SectionHeader {
+            repo_index: 1,
+            label: "Unstaged",
+            ..
+        }
     ));
     assert!(matches!(
         rows[3],
+        space::tui::app::RepoRow::File { repo_index: 1, .. }
+    ));
+    assert!(matches!(
+        rows[4],
+        space::tui::app::RepoRow::SectionHeader {
+            repo_index: 1,
+            label: "Staged",
+            ..
+        }
+    ));
+    assert!(matches!(
+        rows[5],
         space::tui::app::RepoRow::File { repo_index: 1, .. }
     ));
 }
@@ -1074,7 +1091,8 @@ fn repo_index_for_cursor_on_file_row() {
             deletions: 0,
         }],
     );
-    app.cursor_row = 2; // repo-a=0, repo-b=1, x.rs=2
+    // repo-a=0, repo-b=1, SectionHeader("Unstaged")=2, x.rs=3
+    app.cursor_row = 3;
     assert_eq!(app.repo_index_for_cursor(), Some(1));
 }
 
@@ -1104,14 +1122,64 @@ fn cursor_row_navigates_through_file_rows() {
             },
         ],
     );
-    // rows: [Repo(0), File(a.rs), File(b.rs)]
+    // rows: [Repo(0), SectionHeader("Unstaged")(1), File(a.rs)(2), SectionHeader("Staged")(3), File(b.rs)(4)]
     assert_eq!(app.cursor_row, 0);
     app.handle_key(key(KeyCode::Down));
-    assert_eq!(app.cursor_row, 1);
+    assert_eq!(app.cursor_row, 1); // SectionHeader("Unstaged")
     app.handle_key(key(KeyCode::Down));
-    assert_eq!(app.cursor_row, 2);
+    assert_eq!(app.cursor_row, 2); // a.rs
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.cursor_row, 3); // SectionHeader("Staged")
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.cursor_row, 4); // b.rs
     app.handle_key(key(KeyCode::Down)); // clamp at end
-    assert_eq!(app.cursor_row, 2);
+    assert_eq!(app.cursor_row, 4);
+}
+
+#[test]
+fn section_header_rows_are_non_interactive() {
+    use space::core::git::{FileEntry, FileStatus};
+
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.expanded_repos.insert(0);
+    app.repo_file_cache.insert(
+        0,
+        vec![FileEntry {
+            path: "x.rs".into(),
+            status: FileStatus::Modified,
+            staged: false,
+            insertions: 1,
+            deletions: 0,
+        }],
+    );
+    // rows: [Repo(0), SectionHeader("Unstaged")(1), File(x.rs)(2)]
+    // Navigate to the section header row
+    app.cursor_row = 1;
+    assert!(
+        matches!(
+            app.flattened_rows().get(1),
+            Some(space::tui::app::RepoRow::SectionHeader { .. })
+        ),
+        "cursor should be on SectionHeader row"
+    );
+
+    // s on a SectionHeader should be a no-op (no staging)
+    let files_before = app.repo_file_cache.get(&0).unwrap().clone();
+    app.handle_key(key(KeyCode::Char('s')));
+    let files_after = app.repo_file_cache.get(&0).unwrap();
+    assert_eq!(
+        files_before[0].staged, files_after[0].staged,
+        "s on SectionHeader should not change staging state"
+    );
+
+    // Enter on a SectionHeader should be a no-op (no diff viewer)
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "Enter on SectionHeader should stay on Dashboard"
+    );
 }
 
 #[test]
@@ -1247,54 +1315,6 @@ fn workspace_switch_clears_expand_state() {
 }
 
 // ---------------------------------------------------------------------------
-// Diff target toggle (Task 6)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn shift_t_toggles_diff_target_to_head() {
-    // Default is now Base -- T should toggle to Head
-    let mut app = test_app(vec![], vec![]);
-    assert!(matches!(
-        app.diff_target,
-        space::core::git::DiffTarget::Base
-    ));
-    app.handle_key(key(KeyCode::Char('T'))); // uppercase T = Shift+T
-    assert!(matches!(
-        app.diff_target,
-        space::core::git::DiffTarget::Head
-    ));
-}
-
-#[test]
-fn shift_t_toggles_diff_target_back_to_base() {
-    let mut app = test_app(vec![], vec![]);
-    app.handle_key(key(KeyCode::Char('T')));
-    app.handle_key(key(KeyCode::Char('T')));
-    assert!(matches!(
-        app.diff_target,
-        space::core::git::DiffTarget::Base
-    ));
-}
-
-#[test]
-fn toggle_diff_target_re_fetches_expanded_cache() {
-    let ws = common::workspace_with_repos(&["repo-a"]);
-    let mut app = test_app(vec![ws], vec![]);
-    // Default is Base; toggle should switch to Head
-    assert!(matches!(
-        app.diff_target,
-        space::core::git::DiffTarget::Base
-    ));
-    app.handle_key(key(KeyCode::Char('T')));
-    assert!(
-        matches!(app.diff_target, space::core::git::DiffTarget::Head),
-        "diff_target should be Head after toggle from Base"
-    );
-    // refresh_file_diff_cache clears and re-fetches; repo path doesn't exist
-    // so no entries are inserted -- that's correct behaviour (not a bug).
-}
-
-// ---------------------------------------------------------------------------
 // Integration smoke tests for Phase 1 feature (Task manual test equivalent)
 // ---------------------------------------------------------------------------
 
@@ -1355,8 +1375,6 @@ fn phase1_expand_dirty_repo_shows_file_entries() {
     let config = config_from_env(&env);
     let mut app = test_app_with_config(config, vec![ws], vec![]);
     app.focus = Pane::Right;
-    // Use Head mode so staged/unstaged flags are meaningful
-    app.diff_target = space::core::git::DiffTarget::Head;
 
     // Pre-expand: should have 1 repo row (collapsed)
     assert_eq!(app.flattened_rows().len(), 1);
@@ -1471,45 +1489,6 @@ fn phase1_collapse_snaps_cursor_to_repo_row() {
         app.flattened_rows().len(),
         2,
         "only 2 rows after full collapse"
-    );
-}
-
-#[test]
-fn phase1_toggle_diff_target_updates_title_label() {
-    // Verify diff_target state changes when T is pressed -- the title label
-    // in render_repo_table reads app.diff_target, so this covers that path.
-    let ws = common::workspace_with_repos(&["repo-a"]);
-    let mut app = test_app(vec![ws], vec![]);
-
-    // Default is now Base
-    assert!(matches!(
-        app.diff_target,
-        space::core::git::DiffTarget::Base
-    ));
-
-    app.handle_key(key(KeyCode::Char('T')));
-    assert!(matches!(
-        app.diff_target,
-        space::core::git::DiffTarget::Head
-    ));
-
-    // Status message should be set
-    assert!(
-        app.status_message.as_deref().unwrap_or("").contains("HEAD"),
-        "status message should mention HEAD"
-    );
-
-    app.handle_key(key(KeyCode::Char('T')));
-    assert!(matches!(
-        app.diff_target,
-        space::core::git::DiffTarget::Base
-    ));
-    assert!(
-        app.status_message
-            .as_deref()
-            .unwrap_or("")
-            .contains("base branch"),
-        "status message should mention base branch"
     );
 }
 
@@ -1681,15 +1660,15 @@ fn setup_real_repo_app() -> (TestEnv, PathBuf, App) {
     };
     let config = config_from_env(&env);
     let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
-    app.diff_target = DiffTarget::Head;
     app.load_selected_workspace_detail();
 
     // Focus right pane and expand the repo
     app.focus = Pane::Right;
     app.handle_key(key(KeyCode::Enter)); // expand repo at cursor_row=0
 
-    // Navigate down to the file row
-    app.handle_key(key(KeyCode::Down));
+    // Navigate past the section header to the file row
+    app.handle_key(key(KeyCode::Down)); // SectionHeader("Unstaged")
+    app.handle_key(key(KeyCode::Down)); // File(file.txt)
 
     (env, repo_path, app)
 }
@@ -1811,25 +1790,6 @@ fn s_on_file_row_in_head_mode_stages() {
 }
 
 #[test]
-fn s_on_file_row_in_base_mode_shows_status() {
-    let (_env, _repo_path, mut app) = setup_real_repo_app();
-
-    // Switch to Base mode
-    app.diff_target = DiffTarget::Base;
-
-    // Press s -- should show a status message about HEAD mode
-    app.handle_key(key(KeyCode::Char('s')));
-    assert!(
-        app.status_message
-            .as_deref()
-            .unwrap_or("")
-            .contains("HEAD mode"),
-        "expected status message about HEAD mode, got: {:?}",
-        app.status_message
-    );
-}
-
-#[test]
 fn shift_s_on_repo_row_stages_all_unstaged() {
     let env = TestEnv::new();
     let repo_path = env.create_repo("bulk-stage-repo");
@@ -1876,7 +1836,6 @@ fn shift_s_on_repo_row_stages_all_unstaged() {
     };
     let config = config_from_env(&env);
     let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
-    app.diff_target = DiffTarget::Head;
     app.load_selected_workspace_detail();
 
     // Focus right pane and expand repo
@@ -1953,7 +1912,6 @@ fn shift_u_on_repo_row_unstages_all_staged() {
     };
     let config = config_from_env(&env);
     let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
-    app.diff_target = DiffTarget::Head;
     app.load_selected_workspace_detail();
 
     // Verify file is staged before we unstage
@@ -2119,13 +2077,13 @@ fn s_in_diff_viewer_unstages_staged_file_and_returns_to_dashboard() {
     };
     let config = config_from_env(&env);
     let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
-    app.diff_target = DiffTarget::Head;
     app.load_selected_workspace_detail();
 
     // Focus right pane, expand repo, navigate to file row
     app.focus = Pane::Right;
     app.handle_key(key(KeyCode::Enter)); // expand repo at cursor_row=0
-    app.handle_key(key(KeyCode::Down)); // navigate to the file row
+    app.handle_key(key(KeyCode::Down)); // SectionHeader("Staged")
+    app.handle_key(key(KeyCode::Down)); // File(file.txt)
 
     // Verify file.txt is staged before opening viewer
     let files = app.repo_file_cache.get(&0).expect("cache should exist");
@@ -2175,49 +2133,6 @@ fn s_in_diff_viewer_unstages_staged_file_and_returns_to_dashboard() {
         msg.to_lowercase().contains("unstaged"),
         "status_message should contain 'Unstaged', got: {msg}"
     );
-}
-
-#[test]
-fn s_in_diff_viewer_base_mode_shows_status_stays_on_viewer() {
-    use space::core::config::SpaceConfig;
-    use space::core::git::{DiffLine, DiffLineKind, DiffTarget, FileDiff};
-    use space::tui::actions::{ScreenAction, ScreenContext};
-    use space::tui::screens::diff::DiffViewerState;
-
-    let diff = FileDiff {
-        path: "dummy.txt".into(),
-        old_path: None,
-        is_binary: false,
-        lines: vec![DiffLine {
-            kind: DiffLineKind::Context,
-            content: " context line".into(),
-        }],
-    };
-
-    let mut state = DiffViewerState {
-        repo_index: 0,
-        repo_name: "test".into(),
-        repo_path: PathBuf::from("/tmp/fake"),
-        file_path: "dummy.txt".into(),
-        target: DiffTarget::Base,
-        staged: false,
-        diff: Ok(diff),
-        scroll_offset: 0,
-        total_lines: 1,
-    };
-
-    let config = SpaceConfig::default();
-    let ctx = ScreenContext { config: &config };
-    let action = state.handle_key(key(KeyCode::Char('s')), &ctx);
-
-    if let ScreenAction::SetStatus(msg, _) = action {
-        assert!(
-            msg.to_lowercase().contains("head mode"),
-            "expected message about HEAD mode, got: {msg}"
-        );
-    } else {
-        panic!("expected ScreenAction::SetStatus, got something else");
-    }
 }
 
 #[test]
@@ -2329,30 +2244,6 @@ fn reopening_diff_viewer_uses_cache() {
     assert_eq!(
         count_before, count_after,
         "cache entry count should be the same after re-opening (cache hit): before={count_before}, after={count_after}"
-    );
-}
-
-#[test]
-fn toggle_diff_target_clears_diff_content_cache() {
-    let (_env, _repo_path, mut app) = setup_real_repo_app();
-
-    // Open diff viewer and close to populate cache
-    app.handle_key(key(KeyCode::Enter));
-    app.handle_key(key(KeyCode::Esc));
-
-    // Assert cache is non-empty
-    assert!(
-        !app.diff_content_cache.is_empty(),
-        "diff_content_cache should be non-empty after viewing diff"
-    );
-
-    // Toggle diff target with shift+T
-    app.handle_key(shift_key(KeyCode::Char('T')));
-
-    // Cache should be cleared
-    assert!(
-        app.diff_content_cache.is_empty(),
-        "diff_content_cache should be empty after toggling diff target"
     );
 }
 

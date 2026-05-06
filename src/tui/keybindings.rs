@@ -90,11 +90,7 @@ const REPO_PANE: BindingGroup = BindingGroup {
             desc: "Collapse all / back",
         },
         Binding {
-            key: "T",
-            desc: "Toggle diff target",
-        },
-        Binding {
-            key: "s",
+            key: "s/space",
             desc: "Stage / unstage file",
         },
         Binding {
@@ -208,7 +204,7 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
             desc: "quit",
         },
     ];
-    static RIGHT: [Binding; 8] = [
+    static RIGHT: [Binding; 7] = [
         Binding {
             key: "enter",
             desc: "expand/diff",
@@ -218,11 +214,7 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
             desc: "back",
         },
         Binding {
-            key: "T",
-            desc: "toggle diff",
-        },
-        Binding {
-            key: "s",
+            key: "s/space",
             desc: "stage",
         },
         Binding {

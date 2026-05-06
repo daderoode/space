@@ -50,20 +50,12 @@ impl DiffViewerState {
                 self.scroll_offset = self.total_lines.saturating_sub(1);
                 ScreenAction::Continue
             }
-            KeyCode::Char('s') => {
-                if self.target == DiffTarget::Base {
-                    return ScreenAction::SetStatus(
-                        "Staging only available in HEAD mode".to_string(),
-                        crate::tui::actions::StatusKind::Info,
-                    );
-                }
-                ScreenAction::StageFile {
-                    repo_index: self.repo_index,
-                    repo_path: self.repo_path.clone(),
-                    path: self.file_path.clone(),
-                    currently_staged: self.staged,
-                }
-            }
+            KeyCode::Char('s') | KeyCode::Char(' ') => ScreenAction::StageFile {
+                repo_index: self.repo_index,
+                repo_path: self.repo_path.clone(),
+                path: self.file_path.clone(),
+                currently_staged: self.staged,
+            },
             _ => ScreenAction::Continue,
         }
     }

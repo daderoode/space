@@ -276,11 +276,7 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
         .selected_workspace()
         .map(|ws| ws.name.as_str())
         .unwrap_or("");
-    let target_label = match app.diff_target {
-        crate::core::git::DiffTarget::Head => "HEAD",
-        crate::core::git::DiffTarget::Base => "base",
-    };
-    let title = format!(" {} (vs {}) ", ws_name, target_label);
+    let title = format!(" {} ", ws_name);
     let status_width = area.width.saturating_sub(2) as usize * 36 / 100;
 
     let block = Block::default()
@@ -334,23 +330,23 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
                     diff_cell(ins, del),
                 ])
             }
+            RepoRow::SectionHeader { label, .. } => {
+                let label_text = format!("  ── {} ──", label);
+                Row::new(vec![
+                    Cell::from(Span::styled(label_text, theme::muted())),
+                    Cell::from(""),
+                    Cell::from(""),
+                    Cell::from(""),
+                ])
+            }
             RepoRow::File { entry, .. } => {
-                // In Base mode all entries have staged=false (committed divergence has
-                // no staging context), so the badge would always show "[unstaged]" which
-                // is misleading. Hide it entirely in Base mode.
                 let is_conflicted = entry.status == crate::core::git::FileStatus::Conflicted;
                 let staged_badge = if is_conflicted {
                     ratatui::text::Span::styled("[conflict]", theme::error())
+                } else if entry.staged {
+                    ratatui::text::Span::styled("[staged]", theme::staged())
                 } else {
-                    match app.diff_target {
-                        crate::core::git::DiffTarget::Head if entry.staged => {
-                            ratatui::text::Span::styled("[staged]", theme::staged())
-                        }
-                        crate::core::git::DiffTarget::Head => {
-                            ratatui::text::Span::styled("[unstaged]", theme::unstaged())
-                        }
-                        crate::core::git::DiffTarget::Base => ratatui::text::Span::raw(""),
-                    }
+                    ratatui::text::Span::styled("[unstaged]", theme::unstaged())
                 };
                 let path_col = format!("  {} {}", status_char(&entry.status), entry.path);
                 let path_style = if is_conflicted {
@@ -412,28 +408,12 @@ fn render_keybindings_bar(app: &App, frame: &mut Frame, area: Rect) {
     let sep = Span::styled("  ·  ", theme::muted());
     let mut spans: Vec<Span> = Vec::new();
 
-    // Dynamic T-label for right pane: tell user which direction T will go
-    let t_override: Option<&'static str> = if app.focus == crate::tui::app::Pane::Right {
-        Some(match app.diff_target {
-            crate::core::git::DiffTarget::Base => "switch to HEAD",
-            crate::core::git::DiffTarget::Head => "switch to base",
-        })
-    } else {
-        None
-    };
-
     for (i, binding) in bindings.iter().enumerate() {
         if i > 0 {
             spans.push(sep.clone());
         }
         spans.push(Span::styled(binding.key, theme::text()));
-        // Use dynamic label for T on right pane, static label otherwise
-        let desc = if binding.key == "T" {
-            t_override.unwrap_or(binding.desc)
-        } else {
-            binding.desc
-        };
-        spans.push(Span::styled(format!(" {}", desc), theme::muted()));
+        spans.push(Span::styled(format!(" {}", binding.desc), theme::muted()));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
