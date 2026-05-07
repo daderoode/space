@@ -1,4 +1,4 @@
-use crate::core::git::{DiffTarget, FileDiff};
+use crate::core::git::FileDiff;
 use crate::tui::actions::{ScreenAction, ScreenContext};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::path::PathBuf;
@@ -9,7 +9,6 @@ pub struct DiffViewerState {
     pub repo_name: String,
     pub repo_path: PathBuf,
     pub file_path: String,
-    pub target: DiffTarget,
     pub staged: bool,
     pub diff: Result<FileDiff, String>,
     pub scroll_offset: u16,

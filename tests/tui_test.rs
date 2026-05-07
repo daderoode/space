@@ -1123,15 +1123,12 @@ fn cursor_row_navigates_through_file_rows() {
         ],
     );
     // rows: [Repo(0), SectionHeader("Unstaged")(1), File(a.rs)(2), SectionHeader("Staged")(3), File(b.rs)(4)]
+    // j/k skip SectionHeader rows, so navigation goes: Repo → a.rs → b.rs
     assert_eq!(app.cursor_row, 0);
     app.handle_key(key(KeyCode::Down));
-    assert_eq!(app.cursor_row, 1); // SectionHeader("Unstaged")
+    assert_eq!(app.cursor_row, 2); // skips SectionHeader("Unstaged"), lands on a.rs
     app.handle_key(key(KeyCode::Down));
-    assert_eq!(app.cursor_row, 2); // a.rs
-    app.handle_key(key(KeyCode::Down));
-    assert_eq!(app.cursor_row, 3); // SectionHeader("Staged")
-    app.handle_key(key(KeyCode::Down));
-    assert_eq!(app.cursor_row, 4); // b.rs
+    assert_eq!(app.cursor_row, 4); // skips SectionHeader("Staged"), lands on b.rs
     app.handle_key(key(KeyCode::Down)); // clamp at end
     assert_eq!(app.cursor_row, 4);
 }
@@ -1179,6 +1176,194 @@ fn section_header_rows_are_non_interactive() {
     assert!(
         matches!(app.screen, Screen::Dashboard),
         "Enter on SectionHeader should stay on Dashboard"
+    );
+}
+
+#[test]
+fn j_skips_section_headers() {
+    use space::core::git::{FileEntry, FileStatus};
+
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.expanded_repos.insert(0);
+    app.repo_file_cache.insert(
+        0,
+        vec![
+            FileEntry {
+                path: "a.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 1,
+                deletions: 0,
+            },
+            FileEntry {
+                path: "b.rs".into(),
+                status: FileStatus::Added,
+                staged: true,
+                insertions: 5,
+                deletions: 0,
+            },
+        ],
+    );
+    // rows: [Repo(0), SectionHeader("Unstaged"), File(a.rs), SectionHeader("Staged"), File(b.rs)]
+    // cursor at 0 (Repo)
+    app.cursor_row = 0;
+    app.handle_key(key(KeyCode::Down)); // should skip SectionHeader("Unstaged") → land on File(a.rs) at row 2
+    assert_eq!(
+        app.cursor_row, 2,
+        "Down from Repo should skip SectionHeader and land on a.rs"
+    );
+
+    app.handle_key(key(KeyCode::Down)); // should skip SectionHeader("Staged") → land on File(b.rs) at row 4
+    assert_eq!(
+        app.cursor_row, 4,
+        "Down from a.rs should skip SectionHeader and land on b.rs"
+    );
+
+    app.handle_key(key(KeyCode::Down)); // clamp at 4
+    assert_eq!(app.cursor_row, 4, "Down at end should stay at b.rs");
+}
+
+#[test]
+fn k_skips_section_headers() {
+    use space::core::git::{FileEntry, FileStatus};
+
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.expanded_repos.insert(0);
+    app.repo_file_cache.insert(
+        0,
+        vec![
+            FileEntry {
+                path: "a.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 1,
+                deletions: 0,
+            },
+            FileEntry {
+                path: "b.rs".into(),
+                status: FileStatus::Added,
+                staged: true,
+                insertions: 5,
+                deletions: 0,
+            },
+        ],
+    );
+    // rows: [Repo(0), SectionHeader("Unstaged"), File(a.rs), SectionHeader("Staged"), File(b.rs)]
+    app.cursor_row = 4; // start at b.rs
+    app.handle_key(key(KeyCode::Up)); // should skip SectionHeader("Staged") → land on a.rs at row 2
+    assert_eq!(
+        app.cursor_row, 2,
+        "Up from b.rs should skip SectionHeader and land on a.rs"
+    );
+
+    app.handle_key(key(KeyCode::Up)); // should skip SectionHeader("Unstaged") → land on Repo at row 0
+    assert_eq!(
+        app.cursor_row, 0,
+        "Up from a.rs should skip SectionHeader and land on Repo"
+    );
+}
+
+#[test]
+fn cursor_repositions_after_staging() {
+    use space::core::git::{FileEntry, FileStatus};
+
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.expanded_repos.insert(0);
+    // Two unstaged files
+    app.repo_file_cache.insert(
+        0,
+        vec![
+            FileEntry {
+                path: "a.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 1,
+                deletions: 0,
+            },
+            FileEntry {
+                path: "b.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 2,
+                deletions: 0,
+            },
+        ],
+    );
+    // rows: [Repo(0), SectionHeader("Unstaged"), File(a.rs at 2), File(b.rs at 3)]
+    // cursor on a.rs
+    app.cursor_row = 2;
+
+    // Simulate staging a.rs by updating cache directly (no real git repo)
+    app.repo_file_cache.insert(
+        0,
+        vec![
+            FileEntry {
+                path: "a.rs".into(),
+                status: FileStatus::Modified,
+                staged: true, // now staged
+                insertions: 1,
+                deletions: 0,
+            },
+            FileEntry {
+                path: "b.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 2,
+                deletions: 0,
+            },
+        ],
+    );
+    // rows after: [Repo(0), SectionHeader("Unstaged"), File(b.rs at 2), SectionHeader("Staged"), File(a.rs at 4)]
+    // cursor_row=2 was a.rs (now b.rs is at row 2) — cursor stays valid
+    // Apply the reposition logic manually by calling Down then verifying sensible state
+    // The key invariant: cursor must NOT be on a SectionHeader
+    let rows = app.flattened_rows();
+    let cursor = app.cursor_row.min(rows.len().saturating_sub(1));
+    assert!(
+        !matches!(rows[cursor], space::tui::app::RepoRow::SectionHeader { .. }),
+        "cursor should not rest on a SectionHeader after section structure change"
+    );
+}
+
+/// End-to-end test: stage a file via the `s` key on a real repo and verify the
+/// cursor lands on a non-SectionHeader row (proves `reposition_after_section_change`
+/// fires correctly through the `StageFile` message handler).
+#[test]
+fn cursor_not_on_section_header_after_s_key_stages_file() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+    // setup_real_repo_app leaves cursor on the file row (unstaged modification)
+    // rows: [Repo(0), SectionHeader("Unstaged"), File(file.txt)]
+    // cursor is at row 2 (the file row)
+    assert!(
+        matches!(
+            app.flattened_rows().get(app.cursor_row),
+            Some(space::tui::app::RepoRow::File { .. })
+        ),
+        "pre-condition: cursor should start on a File row"
+    );
+
+    // Press s to stage the file
+    app.handle_key(key(KeyCode::Char('s')));
+
+    // After staging, rows change:
+    // [Repo(0), SectionHeader("Staged"), File(file.txt staged)]
+    // cursor must not rest on a SectionHeader
+    let rows = app.flattened_rows();
+    let cursor = app.cursor_row;
+    assert!(
+        cursor < rows.len(),
+        "cursor_row {cursor} must be within bounds (rows len {})",
+        rows.len()
+    );
+    assert!(
+        !matches!(rows[cursor], space::tui::app::RepoRow::SectionHeader { .. }),
+        "cursor must not rest on SectionHeader after staging, got row {cursor}"
     );
 }
 
@@ -1666,9 +1851,9 @@ fn setup_real_repo_app() -> (TestEnv, PathBuf, App) {
     app.focus = Pane::Right;
     app.handle_key(key(KeyCode::Enter)); // expand repo at cursor_row=0
 
-    // Navigate past the section header to the file row
-    app.handle_key(key(KeyCode::Down)); // SectionHeader("Unstaged")
-    app.handle_key(key(KeyCode::Down)); // File(file.txt)
+    // Navigate to the file row (Down skips SectionHeader, second Down is a no-op at end)
+    app.handle_key(key(KeyCode::Down)); // skips SectionHeader("Unstaged") → File(file.txt)
+    app.handle_key(key(KeyCode::Down)); // clamp: already at last row, stays on File(file.txt)
 
     (env, repo_path, app)
 }
@@ -2082,8 +2267,8 @@ fn s_in_diff_viewer_unstages_staged_file_and_returns_to_dashboard() {
     // Focus right pane, expand repo, navigate to file row
     app.focus = Pane::Right;
     app.handle_key(key(KeyCode::Enter)); // expand repo at cursor_row=0
-    app.handle_key(key(KeyCode::Down)); // SectionHeader("Staged")
-    app.handle_key(key(KeyCode::Down)); // File(file.txt)
+    app.handle_key(key(KeyCode::Down)); // skips SectionHeader("Staged") → File(file.txt)
+    app.handle_key(key(KeyCode::Down)); // clamp: already at last row, stays on File(file.txt)
 
     // Verify file.txt is staged before opening viewer
     let files = app.repo_file_cache.get(&0).expect("cache should exist");
@@ -2138,7 +2323,7 @@ fn s_in_diff_viewer_unstages_staged_file_and_returns_to_dashboard() {
 #[test]
 fn diff_viewer_page_and_home_end_scrolling() {
     use space::core::config::SpaceConfig;
-    use space::core::git::{DiffLine, DiffLineKind, DiffTarget, FileDiff};
+    use space::core::git::{DiffLine, DiffLineKind, FileDiff};
     use space::tui::actions::ScreenContext;
     use space::tui::screens::diff::DiffViewerState;
 
@@ -2161,7 +2346,6 @@ fn diff_viewer_page_and_home_end_scrolling() {
         repo_name: "test".into(),
         repo_path: PathBuf::from("/tmp/fake"),
         file_path: "big.txt".into(),
-        target: DiffTarget::Head,
         staged: false,
         diff: Ok(diff),
         scroll_offset: 0,
@@ -2361,6 +2545,85 @@ fn external_change_invalidates_diff_content_cache() {
         "diff_content_cache should reflect the externally modified content; keys: {:?}",
         old_cache_keys
     );
+}
+
+// ---------------------------------------------------------------------------
+// Partially-staged file detection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn partially_staged_file_shows_in_both_sections() {
+    use space::core::git::{FileEntry, FileStatus};
+
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.expanded_repos.insert(0);
+
+    // Simulate a partially-staged file: same path "main.rs" appears
+    // in both staged and unstaged (e.g. only some hunks were staged)
+    app.repo_file_cache.insert(
+        0,
+        vec![
+            FileEntry {
+                path: "main.rs".into(),
+                status: FileStatus::Modified,
+                staged: true, // the staged version
+                insertions: 3,
+                deletions: 1,
+            },
+            FileEntry {
+                path: "main.rs".into(),
+                status: FileStatus::Modified,
+                staged: false, // the unstaged version
+                insertions: 2,
+                deletions: 0,
+            },
+            FileEntry {
+                path: "other.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 1,
+                deletions: 0,
+            },
+        ],
+    );
+
+    let rows = app.flattened_rows();
+
+    // Collect all File rows
+    let file_rows: Vec<_> = rows
+        .iter()
+        .filter_map(|r| {
+            if let space::tui::app::RepoRow::File {
+                entry,
+                partially_staged,
+                ..
+            } = r
+            {
+                Some((entry.path.as_str(), entry.staged, *partially_staged))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // main.rs should appear twice (once unstaged, once staged) and both should be marked partial
+    let main_rows: Vec<_> = file_rows
+        .iter()
+        .filter(|(p, _, _)| *p == "main.rs")
+        .collect();
+    assert_eq!(main_rows.len(), 2, "main.rs should appear in both sections");
+    assert!(
+        main_rows.iter().all(|(_, _, partial)| *partial),
+        "both main.rs entries should be marked partially_staged"
+    );
+
+    // other.rs should not be marked partial
+    let other = file_rows
+        .iter()
+        .find(|(p, _, _)| *p == "other.rs")
+        .expect("other.rs should appear");
+    assert!(!other.2, "other.rs should not be marked partially_staged");
 }
 
 #[test]

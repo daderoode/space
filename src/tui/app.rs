@@ -1,6 +1,6 @@
 use crate::core::{
     config::SpaceConfig,
-    git::{DiffTarget, FileDiff, FileEntry},
+    git::{FileDiff, FileEntry},
     workspace::{self, Workspace},
 };
 use crate::tui::actions::StatusKind;
@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 pub struct DiffCacheKey {
     pub repo_index: usize,
     pub path: String,
-    pub target: DiffTarget,
     pub staged: bool,
 }
 
@@ -126,9 +125,13 @@ pub enum RepoRow<'a> {
         repo_index: usize,
         label: &'static str,
     },
+    /// A file entry within an expanded repo.
+    /// `partially_staged` is true when the same path appears in both the
+    /// Staged and Unstaged sections (some hunks staged, some not).
     File {
         repo_index: usize,
         entry: &'a FileEntry,
+        partially_staged: bool,
     },
 }
 
@@ -198,6 +201,12 @@ impl App {
     ///
     /// Each expanded repo emits section headers (Conflicts / Unstaged / Staged)
     /// followed by the file entries in each group. Empty groups are omitted.
+    ///
+    /// # Invariant
+    /// Every `SectionHeader` row is always immediately followed by at least one
+    /// `File` row (empty sections are never emitted). The first and last rows of
+    /// the list are therefore always `Repo` or `File` rows — never `SectionHeader`.
+    /// `skip_headers` and `reposition_after_section_change` rely on this.
     pub fn flattened_rows(&self) -> Vec<RepoRow<'_>> {
         let repos = match self.selected_workspace() {
             Some(ws) => &ws.repos,
@@ -224,15 +233,27 @@ impl App {
                         .collect();
                     let staged: Vec<_> = entries.iter().filter(|e| e.staged).collect();
 
+                    // Detect partially-staged files: same path in both staged and unstaged groups
+                    let partially_staged_paths: std::collections::HashSet<&str> = {
+                        let staged_set: std::collections::HashSet<&str> =
+                            staged.iter().map(|e| e.path.as_str()).collect();
+                        unstaged
+                            .iter()
+                            .filter(|e| staged_set.contains(e.path.as_str()))
+                            .map(|e| e.path.as_str())
+                            .collect()
+                    };
+
                     if !conflicts.is_empty() {
                         rows.push(RepoRow::SectionHeader {
                             repo_index: i,
                             label: "Conflicts",
                         });
-                        for entry in conflicts {
+                        for entry in &conflicts {
                             rows.push(RepoRow::File {
                                 repo_index: i,
                                 entry,
+                                partially_staged: false, // conflicts can't be partially staged
                             });
                         }
                     }
@@ -241,10 +262,12 @@ impl App {
                             repo_index: i,
                             label: "Unstaged",
                         });
-                        for entry in unstaged {
+                        for entry in &unstaged {
                             rows.push(RepoRow::File {
                                 repo_index: i,
                                 entry,
+                                partially_staged: partially_staged_paths
+                                    .contains(entry.path.as_str()),
                             });
                         }
                     }
@@ -253,10 +276,12 @@ impl App {
                             repo_index: i,
                             label: "Staged",
                         });
-                        for entry in staged {
+                        for entry in &staged {
                             rows.push(RepoRow::File {
                                 repo_index: i,
                                 entry,
+                                partially_staged: partially_staged_paths
+                                    .contains(entry.path.as_str()),
                             });
                         }
                     }
@@ -327,7 +352,7 @@ impl App {
 
         let mut failures = 0usize;
         for (idx, path) in repo_paths {
-            match crate::core::git::file_diff(&path, &DiffTarget::Head) {
+            match crate::core::git::file_diff(&path) {
                 Ok(entries) => {
                     self.repo_file_cache.insert(idx, entries);
                     // Record .git/index mtime for staleness detection
@@ -384,7 +409,7 @@ impl App {
                 self.file_mtime_cache
                     .retain(|key, _| key.repo_index != repo_index);
                 // Re-fetch file list for this repo
-                match crate::core::git::file_diff(repo_path, &DiffTarget::Head) {
+                match crate::core::git::file_diff(repo_path) {
                     Ok(entries) => {
                         self.repo_file_cache.insert(repo_index, entries);
                     }
@@ -645,9 +670,6 @@ impl App {
                     );
                 }
             }
-            ScreenAction::SetStatus(msg, kind) => {
-                self.set_status(msg, kind);
-            }
             ScreenAction::StageFile {
                 repo_index,
                 repo_path,
@@ -814,6 +836,68 @@ impl App {
     }
 }
 
+/// Advance `cursor_row` in the given direction, skipping `SectionHeader` rows.
+/// Returns the new cursor position.
+///
+/// # Invariant
+/// `flattened_rows()` guarantees every `SectionHeader` is immediately followed
+/// (or preceded) by at least one `Repo` or `File` row — empty sections are never
+/// emitted. The boundary escape paths therefore always land on a non-header row.
+/// The `debug_assert` below catches any future violation in debug builds.
+fn skip_headers(rows: &[RepoRow<'_>], from: usize, down: bool) -> usize {
+    let max = rows.len().saturating_sub(1);
+    let mut pos = from;
+    loop {
+        if down {
+            if pos >= max {
+                break;
+            }
+            pos += 1;
+        } else {
+            if pos == 0 {
+                break;
+            }
+            pos -= 1;
+        }
+        if !matches!(rows[pos], RepoRow::SectionHeader { .. }) {
+            return pos;
+        }
+    }
+    debug_assert!(
+        !matches!(rows.get(pos), Some(RepoRow::SectionHeader { .. })),
+        "skip_headers boundary landed on SectionHeader at {pos} — flattened_rows invariant violated"
+    );
+    pos
+}
+
+/// After a staging operation, cursor may rest on a SectionHeader.
+/// Try advancing forward to the next non-header row; if none, retreat backward.
+///
+/// See the invariant note on `skip_headers` — the `flattened_rows()` guarantee
+/// ensures this always resolves to a non-header. The `debug_assert` catches
+/// violations in debug builds.
+fn reposition_after_section_change(rows: &[RepoRow<'_>], cursor: usize) -> usize {
+    if rows.is_empty() {
+        return 0;
+    }
+    let max = rows.len().saturating_sub(1);
+    let cursor = cursor.min(max);
+    // Try advancing forward past any header
+    let mut pos = cursor;
+    while pos < max && matches!(rows[pos], RepoRow::SectionHeader { .. }) {
+        pos += 1;
+    }
+    // If still on a header (e.g. last row is a header), retreat
+    while pos > 0 && matches!(rows[pos], RepoRow::SectionHeader { .. }) {
+        pos -= 1;
+    }
+    debug_assert!(
+        !matches!(rows.get(pos), Some(RepoRow::SectionHeader { .. })),
+        "reposition_after_section_change landed on SectionHeader at {pos} — invariant violated"
+    );
+    pos
+}
+
 pub fn update(app: &mut App, msg: Message) -> Option<Message> {
     match msg {
         Message::Quit => {
@@ -846,16 +930,13 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             None
         }
         Message::SelectRepoUp => {
-            if app.cursor_row > 0 {
-                app.cursor_row -= 1;
-            }
+            let rows = app.flattened_rows();
+            app.cursor_row = skip_headers(&rows, app.cursor_row, false);
             None
         }
         Message::SelectRepoDown => {
-            let max = app.flattened_rows().len().saturating_sub(1);
-            if app.cursor_row < max {
-                app.cursor_row += 1;
-            }
+            let rows = app.flattened_rows();
+            app.cursor_row = skip_headers(&rows, app.cursor_row, true);
             None
         }
         Message::RefreshRepos => {
@@ -951,7 +1032,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                         .and_then(|ws| ws.repos.get(idx))
                         .map(|r| r.path.clone())
                     {
-                        match crate::core::git::file_diff(&repo_path, &DiffTarget::Head) {
+                        match crate::core::git::file_diff(&repo_path) {
                             Ok(entries) => {
                                 app.repo_file_cache.insert(idx, entries);
                                 if let Some(mtime) = crate::core::git::git_index_mtime(&repo_path) {
@@ -1001,6 +1082,9 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 }
             };
             app.do_stage(repo_index, &repo_path, &path, currently_staged);
+            // Adjust cursor: clamp and skip headers after the file moved sections
+            let rows = app.flattened_rows();
+            app.cursor_row = reposition_after_section_change(&rows, app.cursor_row);
             None
         }
         Message::StageBulk { repo_index, stage } => {
@@ -1028,7 +1112,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                     app.file_mtime_cache
                         .retain(|key, _| key.repo_index != repo_index);
                     // Re-fetch file list for this repo
-                    match crate::core::git::file_diff(&repo_path, &DiffTarget::Head) {
+                    match crate::core::git::file_diff(&repo_path) {
                         Ok(entries) => {
                             app.repo_file_cache.insert(repo_index, entries);
                         }
@@ -1048,8 +1132,13 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 Err(err) => {
                     let verb = if stage { "Stage" } else { "Unstage" };
                     app.set_status(format!("{} failed: {}", verb, err), StatusKind::Error);
+                    // Operation failed — section structure unchanged, no reposition needed.
+                    return None;
                 }
             }
+            // Reposition cursor after section structure changed
+            let rows = app.flattened_rows();
+            app.cursor_row = reposition_after_section_change(&rows, app.cursor_row);
             None
         }
         Message::OpenDiffViewer {
@@ -1091,7 +1180,6 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             let cache_key = DiffCacheKey {
                 repo_index,
                 path: path.clone(),
-                target: DiffTarget::Head,
                 staged,
             };
 
@@ -1116,13 +1204,8 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             let diff = if let Some(cached) = app.diff_content_cache.get(&cache_key) {
                 cached.clone()
             } else {
-                let result = crate::core::git::file_content_diff(
-                    &repo_path,
-                    &DiffTarget::Head,
-                    &path,
-                    staged,
-                )
-                .map_err(|e| e.to_string());
+                let result = crate::core::git::file_content_diff(&repo_path, &path, staged)
+                    .map_err(|e| e.to_string());
                 app.diff_content_cache
                     .insert(cache_key.clone(), result.clone());
                 // Record the file's mtime for future staleness checks
@@ -1147,7 +1230,6 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 repo_name,
                 repo_path,
                 file_path: path,
-                target: DiffTarget::Head,
                 staged,
                 diff,
                 scroll_offset: 0,

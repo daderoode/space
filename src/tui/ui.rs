@@ -339,14 +339,18 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
                     Cell::from(""),
                 ])
             }
-            RepoRow::File { entry, .. } => {
+            RepoRow::File {
+                entry,
+                partially_staged,
+                ..
+            } => {
                 let is_conflicted = entry.status == crate::core::git::FileStatus::Conflicted;
-                let staged_badge = if is_conflicted {
+                let badge = if is_conflicted {
                     ratatui::text::Span::styled("[conflict]", theme::error())
-                } else if entry.staged {
-                    ratatui::text::Span::styled("[staged]", theme::staged())
+                } else if *partially_staged {
+                    ratatui::text::Span::styled("[partial]", theme::warn())
                 } else {
-                    ratatui::text::Span::styled("[unstaged]", theme::unstaged())
+                    ratatui::text::Span::raw("")
                 };
                 let path_col = format!("  {} {}", status_char(&entry.status), entry.path);
                 let path_style = if is_conflicted {
@@ -357,8 +361,8 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
                 Row::new(vec![
                     Cell::from(Span::styled(path_col, path_style)),
                     Cell::from(""),
-                    Cell::from(staged_badge), // col 3 = STATUS header
-                    diff_cell(entry.insertions, entry.deletions), // col 4 = +/- header
+                    Cell::from(badge),
+                    diff_cell(entry.insertions, entry.deletions),
                 ])
             }
         })
@@ -920,22 +924,11 @@ fn render_diff_overlay(state: &crate::tui::screens::diff::DiffViewerState, frame
     let area = centered_rect_percent(90, 80, frame.area());
     frame.render_widget(Clear, area);
 
-    let target_label = match state.target {
-        crate::core::git::DiffTarget::Head => "HEAD",
-        crate::core::git::DiffTarget::Base => "base",
-    };
-    let title = if state.target == crate::core::git::DiffTarget::Head {
-        let staged_label = if state.staged { "staged" } else { "unstaged" };
-        format!(
-            " {}/{} \u{00b7} {} \u{00b7} {} ",
-            state.repo_name, state.file_path, target_label, staged_label
-        )
-    } else {
-        format!(
-            " {}/{} \u{00b7} {} ",
-            state.repo_name, state.file_path, target_label
-        )
-    };
+    let staged_label = if state.staged { "staged" } else { "unstaged" };
+    let title = format!(
+        " {}/{} \u{00b7} HEAD \u{00b7} {} ",
+        state.repo_name, state.file_path, staged_label
+    );
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -978,16 +971,10 @@ fn render_diff_overlay(state: &crate::tui::screens::diff::DiffViewerState, frame
         }
     }
 
-    let footer_hint = match state.target {
-        crate::core::git::DiffTarget::Head if state.staged => {
-            "  \u{2191}\u{2193} scroll \u{00b7} PgUp/PgDn page \u{00b7} s unstage \u{00b7} Esc close"
-        }
-        crate::core::git::DiffTarget::Head => {
-            "  \u{2191}\u{2193} scroll \u{00b7} PgUp/PgDn page \u{00b7} s stage \u{00b7} Esc close"
-        }
-        crate::core::git::DiffTarget::Base => {
-            "  \u{2191}\u{2193} scroll \u{00b7} PgUp/PgDn page \u{00b7} Esc close"
-        }
+    let footer_hint = if state.staged {
+        "  \u{2191}\u{2193} scroll \u{00b7} PgUp/PgDn page \u{00b7} s/space unstage \u{00b7} Esc close"
+    } else {
+        "  \u{2191}\u{2193} scroll \u{00b7} PgUp/PgDn page \u{00b7} s/space stage \u{00b7} Esc close"
     };
     frame.render_widget(
         Paragraph::new(footer_hint).style(theme::muted()),

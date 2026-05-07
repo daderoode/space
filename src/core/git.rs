@@ -13,14 +13,6 @@ pub struct RepoStatus {
     pub conflicted: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum DiffTarget {
-    Head,
-    /// Reserved for future "commits ahead of base" screen.
-    #[allow(dead_code)]
-    Base,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileStatus {
     Modified,
@@ -280,23 +272,12 @@ fn format_delta(delta: i64) -> String {
 
 /// Return per-file diff entries for a repo.
 ///
-/// `Head` mode returns uncommitted changes: staged entries (tree→index) and
+/// Returns uncommitted changes: staged entries (tree→index) and
 /// unstaged entries (index→workdir), each with the correct `staged` flag.
-///
-/// `Base` mode returns total divergence from the base branch. The base branch
-/// is resolved by probing `refs/heads/main`, `refs/heads/master`,
-/// `refs/remotes/origin/main`, and `refs/remotes/origin/master` in order.
-/// Returns an error if none of those refs exist. All entries have `staged: false`
-/// in Base mode (the staged/unstaged distinction is not meaningful for
-/// committed divergence).
-pub fn file_diff(repo_path: &Path, target: &DiffTarget) -> Result<Vec<FileEntry>> {
+pub fn file_diff(repo_path: &Path) -> Result<Vec<FileEntry>> {
     let repo = Repository::open(repo_path)
         .with_context(|| format!("opening repo at {}", repo_path.display()))?;
-
-    match target {
-        DiffTarget::Head => file_diff_vs_head(&repo),
-        DiffTarget::Base => file_diff_vs_base(&repo, repo_path),
-    }
+    file_diff_vs_head(&repo)
 }
 
 fn file_diff_vs_head(repo: &Repository) -> Result<Vec<FileEntry>> {
@@ -315,43 +296,6 @@ fn file_diff_vs_head(repo: &Repository) -> Result<Vec<FileEntry>> {
     entries.extend(collect_entries(&unstaged_diff, false)?);
 
     Ok(entries)
-}
-
-fn file_diff_vs_base(repo: &Repository, repo_path: &Path) -> Result<Vec<FileEntry>> {
-    let base_tree = resolve_base_tree(repo, repo_path)?;
-
-    let mut opts = git2::DiffOptions::new();
-    opts.include_untracked(true).recurse_untracked_dirs(true);
-    let diff = repo.diff_tree_to_workdir_with_index(Some(&base_tree), Some(&mut opts))?;
-    collect_entries(&diff, false)
-}
-
-/// Resolve the base branch tree by probing main/master/origin variants.
-fn resolve_base_tree<'repo>(
-    repo: &'repo Repository,
-    repo_path: &Path,
-) -> Result<git2::Tree<'repo>> {
-    let base_oid = repo
-        .refname_to_id("refs/heads/main")
-        .or_else(|_| repo.refname_to_id("refs/heads/master"))
-        .or_else(|_| repo.refname_to_id("refs/remotes/origin/main"))
-        .or_else(|_| repo.refname_to_id("refs/remotes/origin/master"))
-        .or_else(|_| {
-            repo.find_reference("refs/remotes/origin/HEAD")
-                .ok()
-                .and_then(|r| r.resolve().ok())
-                .and_then(|r| r.target())
-                .ok_or_else(|| git2::Error::from_str("origin/HEAD not found"))
-        })
-        .with_context(|| {
-            format!(
-                "could not find base branch (tried main/master/origin/main/origin/master/origin/HEAD) in {}",
-                repo_path.display()
-            )
-        })?;
-
-    let base_commit = repo.find_commit(base_oid)?;
-    Ok(base_commit.tree()?)
 }
 
 fn collect_entries(diff: &git2::Diff, staged: bool) -> Result<Vec<FileEntry>> {
@@ -432,38 +376,19 @@ fn delta_to_file_status(delta: git2::Delta) -> Option<FileStatus> {
 /// `staged` controls which comparison is used:
 /// - `true`:  HEAD tree -> index  (staged changes)
 /// - `false`: index -> workdir    (unstaged changes, including untracked)
-///
-/// When `target` is `Base`, the diff is computed against the base branch tree
-/// and the `staged` flag is ignored.
-pub fn file_content_diff(
-    repo_path: &Path,
-    target: &DiffTarget,
-    file_path: &str,
-    staged: bool,
-) -> Result<FileDiff> {
+pub fn file_content_diff(repo_path: &Path, file_path: &str, staged: bool) -> Result<FileDiff> {
     let repo = Repository::open(repo_path)
         .with_context(|| format!("opening repo at {}", repo_path.display()))?;
 
-    let diff = match target {
-        DiffTarget::Head if staged => {
-            let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-            repo.diff_tree_to_index(head_tree.as_ref(), None, None)?
-        }
-        DiffTarget::Head => {
-            let mut opts = git2::DiffOptions::new();
-            opts.include_untracked(true)
-                .recurse_untracked_dirs(true)
-                .show_untracked_content(true);
-            repo.diff_index_to_workdir(None, Some(&mut opts))?
-        }
-        DiffTarget::Base => {
-            let base_tree = resolve_base_tree(&repo, repo_path)?;
-            let mut opts = git2::DiffOptions::new();
-            opts.include_untracked(true)
-                .recurse_untracked_dirs(true)
-                .show_untracked_content(true);
-            repo.diff_tree_to_workdir_with_index(Some(&base_tree), Some(&mut opts))?
-        }
+    let diff = if staged {
+        let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+        repo.diff_tree_to_index(head_tree.as_ref(), None, None)?
+    } else {
+        let mut opts = git2::DiffOptions::new();
+        opts.include_untracked(true)
+            .recurse_untracked_dirs(true)
+            .show_untracked_content(true);
+        repo.diff_index_to_workdir(None, Some(&mut opts))?
     };
 
     // Find the delta index matching our file_path
@@ -627,7 +552,7 @@ pub fn unstage_file(repo_path: &Path, file_path: &str) -> Result<()> {
 ///
 /// Opens the repository and index once, applies all changes, then writes once.
 pub fn stage_all_unstaged(repo_path: &Path) -> Result<usize> {
-    let entries = file_diff(repo_path, &DiffTarget::Head)?;
+    let entries = file_diff(repo_path)?;
     let unstaged: Vec<_> = entries
         .iter()
         .filter(|e| !e.staged && e.status != FileStatus::Conflicted)
@@ -659,7 +584,7 @@ pub fn stage_all_unstaged(repo_path: &Path) -> Result<usize> {
 ///
 /// Opens the repository once and resets all staged paths in a single operation.
 pub fn unstage_all_staged(repo_path: &Path) -> Result<usize> {
-    let entries = file_diff(repo_path, &DiffTarget::Head)?;
+    let entries = file_diff(repo_path)?;
     let staged: Vec<_> = entries.iter().filter(|e| e.staged).collect();
     let count = staged.len();
 

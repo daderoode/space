@@ -2,7 +2,7 @@ mod common;
 
 use space::core::git::{
     file_content_diff, file_diff, git_index_mtime, repo_status, stage_all_unstaged, stage_file,
-    unstage_all_staged, unstage_file, DiffLineKind, DiffTarget, FileStatus, MAX_DIFF_LINES,
+    unstage_all_staged, unstage_file, DiffLineKind, FileStatus, MAX_DIFF_LINES,
 };
 use std::process::Command;
 use tempfile::TempDir;
@@ -27,55 +27,6 @@ fn clean_repo_status_is_zero() {
     assert_eq!(status.modified, 0);
     assert_eq!(status.staged, 0);
     assert_eq!(status.untracked, 0);
-}
-
-#[test]
-fn file_diff_base_mode_shows_committed_divergence() {
-    let tmp = TempDir::new().unwrap();
-    common::init_repo(tmp.path());
-    std::fs::write(tmp.path().join("base.txt"), "base content").unwrap();
-    Command::new("git")
-        .args(["add", "base.txt"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["commit", "-m", "base"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["checkout", "-b", "feature"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    std::fs::write(tmp.path().join("feature.txt"), "new feature\nline2").unwrap();
-    Command::new("git")
-        .args(["add", "feature.txt"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["commit", "-m", "feature"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-
-    let entries = file_diff(tmp.path(), &DiffTarget::Base).unwrap();
-
-    let feature_entry = entries
-        .iter()
-        .find(|e| e.path == "feature.txt")
-        .expect("base mode should show committed divergence from base branch");
-    assert!(
-        feature_entry.insertions > 0,
-        "feature.txt should have insertions"
-    );
-
-    assert!(
-        !entries.iter().any(|e| e.path == "base.txt"),
-        "base.txt exists on both branches and should not appear in divergence diff"
-    );
 }
 
 #[test]
@@ -343,7 +294,7 @@ fn repo_status_counts_deletions() {
 fn file_diff_clean_repo_returns_empty() {
     let tmp = TempDir::new().unwrap();
     common::init_repo(tmp.path());
-    let result = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let result = file_diff(tmp.path()).unwrap();
     assert!(result.is_empty(), "clean repo should have no diffs");
 }
 
@@ -364,7 +315,7 @@ fn file_diff_detects_unstaged_modification() {
         .unwrap();
     std::fs::write(tmp.path().join("foo.txt"), "v1\nv2\nv3").unwrap();
 
-    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entries = file_diff(tmp.path()).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].path, "foo.txt");
     assert_eq!(entries[0].status, FileStatus::Modified);
@@ -386,7 +337,7 @@ fn file_diff_detects_staged_file() {
         .output()
         .unwrap();
 
-    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entries = file_diff(tmp.path()).unwrap();
     let staged_entry = entries.iter().find(|e| e.path == "new.txt").unwrap();
     assert!(
         staged_entry.staged,
@@ -420,7 +371,7 @@ fn file_diff_detects_staged_and_unstaged_separately() {
         .unwrap();
     std::fs::write(tmp.path().join("b.txt"), "unstaged").unwrap();
 
-    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entries = file_diff(tmp.path()).unwrap();
     let a_entry = entries.iter().find(|e| e.path == "a.txt").unwrap();
     assert!(a_entry.staged);
     let b_entry = entries.iter().find(|e| e.path == "b.txt").unwrap();
@@ -448,7 +399,7 @@ fn file_diff_detects_deleted_file() {
         .unwrap();
     std::fs::remove_file(tmp.path().join("gone.txt")).unwrap();
 
-    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entries = file_diff(tmp.path()).unwrap();
     let entry = entries.iter().find(|e| e.path == "gone.txt").unwrap();
     assert_eq!(entry.status, FileStatus::Deleted);
     assert!(!entry.staged);
@@ -473,7 +424,7 @@ fn file_content_diff_returns_lines_for_modified_file() {
         .unwrap();
     std::fs::write(tmp.path().join("f.txt"), "line1\nline2\n").unwrap();
 
-    let fd = file_content_diff(tmp.path(), &DiffTarget::Head, "f.txt", false).unwrap();
+    let fd = file_content_diff(tmp.path(), "f.txt", false).unwrap();
     assert_eq!(fd.path, "f.txt");
     assert!(!fd.is_binary);
     assert!(!fd.lines.is_empty());
@@ -505,7 +456,7 @@ fn file_content_diff_for_staged_uses_tree_to_index() {
         .output()
         .unwrap();
 
-    let fd = file_content_diff(tmp.path(), &DiffTarget::Head, "s.txt", true).unwrap();
+    let fd = file_content_diff(tmp.path(), "s.txt", true).unwrap();
     assert!(!fd.is_binary);
     assert!(
         fd.lines
@@ -521,7 +472,7 @@ fn file_content_diff_for_untracked_returns_full_file_as_additions() {
     common::init_repo(tmp.path());
     std::fs::write(tmp.path().join("new.txt"), "aaa\nbbb\nccc\n").unwrap();
 
-    let fd = file_content_diff(tmp.path(), &DiffTarget::Head, "new.txt", false).unwrap();
+    let fd = file_content_diff(tmp.path(), "new.txt", false).unwrap();
     assert!(!fd.is_binary);
     let additions: Vec<_> = fd
         .lines
@@ -538,7 +489,7 @@ fn file_content_diff_marks_binary() {
     // Write a file with null bytes to trigger binary detection
     std::fs::write(tmp.path().join("bin.dat"), b"\x00\x01\x02\x03").unwrap();
 
-    let fd = file_content_diff(tmp.path(), &DiffTarget::Head, "bin.dat", false).unwrap();
+    let fd = file_content_diff(tmp.path(), "bin.dat", false).unwrap();
     assert!(
         fd.is_binary,
         "file with null bytes should be detected as binary"
@@ -568,7 +519,7 @@ fn stage_file_marks_modified_as_staged() {
 
     stage_file(tmp.path(), "m.txt").unwrap();
 
-    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entries = file_diff(tmp.path()).unwrap();
     let entry = entries.iter().find(|e| e.path == "m.txt").unwrap();
     assert!(entry.staged, "file should be staged after stage_file");
 }
@@ -592,7 +543,7 @@ fn stage_file_for_deletion_uses_remove_path() {
 
     stage_file(tmp.path(), "d.txt").unwrap();
 
-    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entries = file_diff(tmp.path()).unwrap();
     let entry = entries.iter().find(|e| e.path == "d.txt").unwrap();
     assert!(entry.staged, "deleted file should be staged");
     assert_eq!(entry.status, FileStatus::Deleted);
@@ -621,7 +572,7 @@ fn unstage_file_resets_index_to_head() {
         .unwrap();
 
     // Verify it's staged
-    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entries = file_diff(tmp.path()).unwrap();
     assert!(
         entries.iter().any(|e| e.path == "u.txt" && e.staged),
         "should be staged before unstage"
@@ -629,7 +580,7 @@ fn unstage_file_resets_index_to_head() {
 
     unstage_file(tmp.path(), "u.txt").unwrap();
 
-    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entries = file_diff(tmp.path()).unwrap();
     let entry = entries.iter().find(|e| e.path == "u.txt").unwrap();
     assert!(!entry.staged, "file should be unstaged after unstage_file");
 }
@@ -691,14 +642,14 @@ fn stage_then_unstage_is_round_trip() {
         .unwrap();
     std::fs::write(tmp.path().join("rt.txt"), "v2").unwrap();
 
-    let before = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let before = file_diff(tmp.path()).unwrap();
     let before_entry = before.iter().find(|e| e.path == "rt.txt").unwrap();
     assert!(!before_entry.staged);
 
     stage_file(tmp.path(), "rt.txt").unwrap();
     unstage_file(tmp.path(), "rt.txt").unwrap();
 
-    let after = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let after = file_diff(tmp.path()).unwrap();
     let after_entry = after.iter().find(|e| e.path == "rt.txt").unwrap();
     assert!(
         !after_entry.staged,
@@ -718,7 +669,7 @@ fn stage_all_unstaged_returns_correct_count() {
     let count = stage_all_unstaged(tmp.path()).unwrap();
     assert_eq!(count, 3, "should stage 3 unstaged files");
 
-    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entries = file_diff(tmp.path()).unwrap();
     assert!(
         entries.iter().all(|e| e.staged),
         "all files should be staged"
@@ -740,89 +691,10 @@ fn unstage_all_staged_returns_correct_count() {
     let count = unstage_all_staged(tmp.path()).unwrap();
     assert_eq!(count, 2, "should unstage 2 staged files");
 
-    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entries = file_diff(tmp.path()).unwrap();
     assert!(
         entries.iter().all(|e| !e.staged),
         "all files should be unstaged"
-    );
-}
-
-#[test]
-fn file_content_diff_base_mode_returns_committed_divergence() {
-    let tmp = TempDir::new().unwrap();
-    common::init_repo(tmp.path());
-
-    // Commit base.txt on main
-    std::fs::write(tmp.path().join("base.txt"), "base content\n").unwrap();
-    let out = Command::new("git")
-        .args(["add", "base.txt"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git add base.txt failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let out = Command::new("git")
-        .args(["commit", "-m", "base"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git commit base failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    // Create feature branch
-    let out = Command::new("git")
-        .args(["checkout", "-b", "feature"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git checkout -b feature failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    // Write and commit feature.txt on feature branch
-    std::fs::write(tmp.path().join("feature.txt"), "line1\nline2\n").unwrap();
-    let out = Command::new("git")
-        .args(["add", "feature.txt"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git add feature.txt failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let out = Command::new("git")
-        .args(["commit", "-m", "add feature file"])
-        .current_dir(tmp.path())
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "git commit feature failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let diff = file_content_diff(tmp.path(), &DiffTarget::Base, "feature.txt", false).unwrap();
-    assert!(!diff.is_binary, "feature.txt should not be binary");
-    assert!(!diff.lines.is_empty(), "diff lines should be non-empty");
-
-    let addition_count = diff
-        .lines
-        .iter()
-        .filter(|l| l.kind == DiffLineKind::Addition)
-        .count();
-    assert!(
-        addition_count >= 2,
-        "expected at least 2 addition lines for the 2 content lines, got {}",
-        addition_count
     );
 }
 
@@ -858,7 +730,7 @@ fn stage_file_after_git_mv_is_already_staged() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entries = file_diff(tmp.path()).unwrap();
 
     // `git mv` stages both the delete of old_name.txt and the add of new_name.txt.
     // Without `find_similar()` on the diff, git2 reports these as separate staged
@@ -925,7 +797,7 @@ fn manual_rename_shows_as_separate_add_and_delete() {
     )
     .unwrap();
 
-    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entries = file_diff(tmp.path()).unwrap();
 
     // Manual rename is NOT detected as a rename — it appears as two separate entries:
     // 1. original.txt is Deleted (working-tree deletion, unstaged)
@@ -993,7 +865,7 @@ fn file_content_diff_detects_rename_old_path() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let fd = file_content_diff(tmp.path(), &DiffTarget::Head, "new_name.txt", true).unwrap();
+    let fd = file_content_diff(tmp.path(), "new_name.txt", true).unwrap();
     assert_eq!(fd.path, "new_name.txt");
 
     // Document rename detection behaviour:
@@ -1070,7 +942,7 @@ fn file_diff_detects_conflicted_file() {
     );
 
     // file_diff should detect the conflicted file
-    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entries = file_diff(tmp.path()).unwrap();
     let conflicted = entries
         .iter()
         .find(|e| e.path == "conflict.txt")
@@ -1106,7 +978,7 @@ fn file_content_diff_truncates_large_diff() {
     std::fs::write(&file_path, content).unwrap();
 
     // Get the diff for the unstaged change
-    let diff = file_content_diff(tmp.path(), &DiffTarget::Head, "large.txt", false).unwrap();
+    let diff = file_content_diff(tmp.path(), "large.txt", false).unwrap();
 
     // Should be truncated to MAX_DIFF_LINES + 1 (the truncation marker)
     assert_eq!(
@@ -1201,7 +1073,7 @@ fn stage_all_unstaged_skips_conflicted_files() {
     assert_eq!(count, 0, "conflicted files should not be staged");
 
     // Verify conflicted file still appears as conflicted in the diff
-    let entries = file_diff(tmp.path(), &DiffTarget::Head).unwrap();
+    let entries = file_diff(tmp.path()).unwrap();
     let conflicted: Vec<_> = entries
         .iter()
         .filter(|e| e.status == FileStatus::Conflicted)
