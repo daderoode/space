@@ -39,7 +39,6 @@ pub enum DiffLineKind {
     Addition,
     Deletion,
     HunkHeader,
-    #[allow(dead_code)] // matched in render_diff_overlay, not yet constructed
     FileHeader,
     Binary,
 }
@@ -52,11 +51,13 @@ pub struct DiffLine {
 
 #[derive(Debug, Clone)]
 pub struct FileDiff {
-    #[allow(dead_code)] // used in diff overlay title (Step D)
+    #[allow(dead_code)]
+    // returned by file_content_diff; renderer uses DiffViewerState.file_path instead
     pub path: String,
-    #[allow(dead_code)] // used in diff overlay for renamed files (Step D)
+    #[allow(dead_code)] // available for future rename display in the diff overlay
     pub old_path: Option<String>,
-    #[allow(dead_code)] // used in diff overlay rendering
+    #[allow(dead_code)]
+    // renderer detects binary files via DiffLineKind::Binary lines, not this field
     pub is_binary: bool,
     pub lines: Vec<DiffLine>,
 }

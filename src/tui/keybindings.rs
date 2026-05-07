@@ -124,8 +124,8 @@ const DIFF_VIEWER: BindingGroup = BindingGroup {
             desc: "Jump to start/end",
         },
         Binding {
-            key: "s",
-            desc: "Stage / unstage (HEAD mode)",
+            key: "s/space",
+            desc: "Stage / unstage",
         },
         Binding {
             key: "Esc/q",

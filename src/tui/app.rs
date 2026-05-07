@@ -231,7 +231,10 @@ impl App {
                         .iter()
                         .filter(|e| !e.staged && e.status != FileStatus::Conflicted)
                         .collect();
-                    let staged: Vec<_> = entries.iter().filter(|e| e.staged).collect();
+                    let staged: Vec<_> = entries
+                        .iter()
+                        .filter(|e| e.staged && e.status != FileStatus::Conflicted)
+                        .collect();
 
                     // Detect partially-staged files: same path in both staged and unstaged groups
                     let partially_staged_paths: std::collections::HashSet<&str> = {

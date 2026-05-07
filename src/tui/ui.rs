@@ -50,7 +50,15 @@ fn format_repo_status(status: &crate::core::git::RepoStatus, max_width: usize) -
         parts.push(format!("{} new", status.untracked));
     }
     if status.conflicted > 0 {
-        parts.push(format!("{} conflict", status.conflicted));
+        parts.push(format!(
+            "{} {}",
+            status.conflicted,
+            if status.conflicted == 1 {
+                "conflict"
+            } else {
+                "conflicts"
+            }
+        ));
     }
 
     if parts.is_empty() {

@@ -2626,6 +2626,54 @@ fn partially_staged_file_shows_in_both_sections() {
     assert!(!other.2, "other.rs should not be marked partially_staged");
 }
 
+/// Defensive test: a Conflicted entry with staged=true (impossible from git2 today,
+/// but guarded against) must appear only in the Conflicts section, not the Staged section.
+#[test]
+fn conflicted_staged_entry_appears_only_in_conflicts_section() {
+    use space::core::git::{FileEntry, FileStatus};
+
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.expanded_repos.insert(0);
+
+    // Inject a hypothetical entry that is both Conflicted and staged=true.
+    // This state is impossible from file_diff() today (conflicts always have staged=false),
+    // but Fix 1 defensively excludes it from the Staged section regardless.
+    app.repo_file_cache.insert(
+        0,
+        vec![FileEntry {
+            path: "conflict.rs".into(),
+            status: FileStatus::Conflicted,
+            staged: true, // hypothetical — should NOT land in Staged section
+            insertions: 0,
+            deletions: 0,
+        }],
+    );
+
+    let rows = app.flattened_rows();
+
+    // Should appear in the Conflicts section only
+    let section_labels: Vec<_> = rows
+        .iter()
+        .filter_map(|r| {
+            if let space::tui::app::RepoRow::SectionHeader { label, .. } = r {
+                Some(*label)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        section_labels.contains(&"Conflicts"),
+        "expected a Conflicts section header"
+    );
+    assert!(
+        !section_labels.contains(&"Staged"),
+        "Conflicted entry with staged=true must not create a Staged section"
+    );
+}
+
 #[test]
 fn external_file_edit_invalidates_cached_unstaged_diff() {
     let (_env, repo_path, mut app) = setup_real_repo_app();
@@ -2651,9 +2699,26 @@ fn external_file_edit_invalidates_cached_unstaged_diff() {
         "file_mtime_cache should be populated after viewing an unstaged diff"
     );
 
-    // Externally modify the file (without staging — .git/index mtime doesn't change)
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    std::fs::write(repo_path.join("file.txt"), "changed again").unwrap();
+    // Externally modify the file (without staging — .git/index mtime doesn't change).
+    // Poll until the filesystem mtime actually advances before writing, so the test
+    // is not sensitive to mtime granularity (ext4 = 1s, APFS = 1ns).
+    let pre_mtime = std::fs::metadata(repo_path.join("file.txt"))
+        .and_then(|m| m.modified())
+        .ok();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        std::fs::write(repo_path.join("file.txt"), "changed again").unwrap();
+        let new_mtime = std::fs::metadata(repo_path.join("file.txt"))
+            .and_then(|m| m.modified())
+            .ok();
+        if new_mtime != pre_mtime {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            break; // proceed anyway — assert below will catch if cache wasn't invalidated
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 
     // Open diff viewer again — file mtime staleness check should invalidate the cache
     app.handle_key(key(KeyCode::Enter));
