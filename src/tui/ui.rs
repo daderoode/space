@@ -488,6 +488,12 @@ fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &m
         Paragraph::new(format!("> {}", state.ws_name.value())).style(theme::input_style()),
         sections[1],
     );
+    // Position the terminal cursor after the "> " prefix plus the visual cursor offset.
+    // `visual_cursor()` from tui_input handles multi-byte and wide characters correctly.
+    frame.set_cursor_position((
+        sections[1].x + 2 + state.ws_name.visual_cursor() as u16,
+        sections[1].y,
+    ));
     if let Some(err) = &state.error {
         frame.render_widget(
             Paragraph::new(err.as_str()).style(theme::error()),
