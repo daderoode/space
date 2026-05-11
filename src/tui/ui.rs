@@ -134,7 +134,6 @@ fn truncate_for_width(text: &str, max_width: usize) -> String {
 /// Returns `""` when `skip` >= total display width of `s`.
 /// When `skip` bisects a wide character (display width > 1), the entire
 /// wide character is skipped (snap-forward policy).
-#[allow(dead_code)] // used in Task 3 (horizontal scroll offset)
 fn skip_display_width(s: &str, skip: usize) -> &str {
     if skip == 0 {
         return s;
@@ -331,8 +330,11 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
         .unwrap_or("");
     // Horizontal scroll: REPO is pinned, BRANCH+STATUS are the scrollable zone.
     let inner_width = area.width.saturating_sub(2) as usize;
-    let branch_display = inner_width * 22 / 100;
-    let status_display = inner_width * 36 / 100; // same as status_width
+    // Match ratatui's Percentage layout rounding (nearest integer, not floor) so that
+    // max_scroll reaches exactly 0 at the same terminal width where the columns become
+    // wide enough to display all content without clipping.
+    let branch_display = ((inner_width as f64 * 22.0) / 100.0).round() as usize;
+    let status_display = ((inner_width as f64 * 36.0) / 100.0).round() as usize; // same as status_width
     let scrollable_virtual = BRANCH_VIRTUAL + STATUS_VIRTUAL; // 95
     let scrollable_display = branch_display + status_display;
     let max_scroll = scrollable_virtual.saturating_sub(scrollable_display);
