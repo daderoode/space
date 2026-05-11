@@ -189,6 +189,25 @@ pub fn view(app: &App, frame: &mut Frame) {
 fn render_dashboard(app: &App, frame: &mut Frame) {
     let area = frame.area();
 
+    // Guard: the dashboard layout requires at least 80 columns for the repo
+    // table columns and dialogs to remain readable. Overlay screens (delete
+    // confirm, etc.) render on top of the dashboard and handle narrow widths
+    // themselves, so this guard only affects the background dashboard layer.
+    const MIN_DASHBOARD_WIDTH: u16 = 80;
+    if area.width < MIN_DASHBOARD_WIDTH {
+        let msg = format!(
+            "Terminal too narrow\nMinimum: {} columns | Current: {}",
+            MIN_DASHBOARD_WIDTH, area.width,
+        );
+        frame.render_widget(
+            Paragraph::new(msg)
+                .alignment(Alignment::Center)
+                .style(theme::error()),
+            centered_rect_percent(80, 30, area),
+        );
+        return;
+    }
+
     // Outer layout: title bar / main / (collapsible) status message / keybindings bar
     let status_height: u16 = if app.status_message.is_some() { 1 } else { 0 };
     let outer = Layout::vertical([
@@ -461,7 +480,8 @@ fn render_create_overlay(state: &crate::tui::screens::create::CreateState, frame
 
 fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
     use ratatui::widgets::Clear;
-    let area = centered_rect_fixed(50, 7, frame.area());
+    let dialog_w = (frame.area().width * 70 / 100).max(50);
+    let area = centered_rect_fixed(dialog_w, 7, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -484,16 +504,64 @@ fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &m
         Paragraph::new("Enter workspace name:").style(theme::text()),
         sections[0],
     );
+    // Split the input row into: left-scroll-indicator | text area | right-scroll-indicator
+    let indicator_style = theme::muted();
+    let text_area_w = sections[1].width.saturating_sub(2); // 1 char each side for indicators
+    let text_area = Rect {
+        x: sections[1].x + 1,
+        y: sections[1].y,
+        width: text_area_w,
+        height: 1,
+    };
+    let left_ind_area = Rect {
+        x: sections[1].x,
+        y: sections[1].y,
+        width: 1,
+        height: 1,
+    };
+    let right_ind_area = Rect {
+        x: sections[1].x + 1 + text_area_w,
+        y: sections[1].y,
+        width: 1,
+        height: 1,
+    };
+
+    // Compute horizontal scroll to keep cursor in the visible text area
+    let scroll = state.ws_name.visual_scroll(text_area_w as usize) as u16;
+    let cursor_col = state.ws_name.visual_cursor() as u16;
+    let value_vis_w = UnicodeWidthStr::width(state.ws_name.value()) as u16;
+
+    // Left indicator: ‹ when text is scrolled (content hidden on left)
+    let left_text = if scroll > 0 { "\u{2039}" } else { " " }; // ‹
     frame.render_widget(
-        Paragraph::new(format!("> {}", state.ws_name.value())).style(theme::input_style()),
-        sections[1],
+        Paragraph::new(left_text).style(indicator_style),
+        left_ind_area,
     );
-    // Position the terminal cursor after the "> " prefix plus the visual cursor offset.
-    // `visual_cursor()` from tui_input handles multi-byte and wide characters correctly.
-    frame.set_cursor_position((
-        sections[1].x + 2 + state.ws_name.visual_cursor() as u16,
-        sections[1].y,
-    ));
+
+    // Text with horizontal scroll
+    frame.render_widget(
+        Paragraph::new(state.ws_name.value())
+            .style(theme::input_style())
+            .scroll((0, scroll)),
+        text_area,
+    );
+
+    // Right indicator: › when content extends beyond the visible right edge.
+    let right_text = if value_vis_w > text_area_w + scroll {
+        "\u{203a}" // ›
+    } else {
+        " "
+    };
+    frame.render_widget(
+        Paragraph::new(right_text).style(indicator_style),
+        right_ind_area,
+    );
+
+    // Cursor: position within the visible text area (clamped to bounds)
+    let cursor_x = (text_area.x + cursor_col.saturating_sub(scroll))
+        .min(text_area.x + text_area_w.saturating_sub(1));
+    frame.set_cursor_position((cursor_x, text_area.y));
+
     if let Some(err) = &state.error {
         frame.render_widget(
             Paragraph::new(err.as_str()).style(theme::error()),
@@ -515,7 +583,8 @@ fn render_branch_strategy_picker(
     let branch_rows = if n > 0 { 1 + n as u16 + 1 } else { 1 };
     let content_rows = 3 + branch_rows;
     let height: u16 = content_rows + 2 + if has_error { 3 } else { 1 };
-    let area = centered_rect_fixed(62, height, frame.area());
+    let dialog_w = (frame.area().width * 70 / 100).max(62);
+    let area = centered_rect_fixed(dialog_w, height, frame.area());
     frame.render_widget(Clear, area);
 
     let border_style = if has_error {
@@ -544,10 +613,15 @@ fn render_branch_strategy_picker(
 
     let mut items: Vec<ListItem> = Vec::new();
 
-    // Fixed options (selectable indices 0, 1, 2)
+    // Fixed options (selectable indices 0, 1, 2).
+    // Truncate to fit the dialog inner width (minus 4 for the "> " or "  " prefix).
+    let opt_max_w = dialog_w.saturating_sub(2 + 4) as usize;
     let fixed = [
-        format!("New branch '{}'", workspace_name),
-        format!("Existing branch '{}' (if present)", workspace_name),
+        truncate_for_width(&format!("New branch '{}'", workspace_name), opt_max_w),
+        truncate_for_width(
+            &format!("Existing branch '{}' (if present)", workspace_name),
+            opt_max_w,
+        ),
         "Detached HEAD".to_string(),
     ];
     for (i, opt) in fixed.iter().enumerate() {
@@ -566,18 +640,14 @@ fn render_branch_strategy_picker(
         for (i, branch) in recent_branches.iter().enumerate() {
             let sel_idx = 3 + i;
             let time_str = crate::core::git::relative_time(branch.last_commit_time);
-            let max_name = 56_usize.saturating_sub(time_str.len() + 2);
-            let display_name = if branch.name.len() > max_name {
-                let truncated: String = branch
-                    .name
-                    .chars()
-                    .take(max_name.saturating_sub(3))
-                    .collect();
-                format!("{}...", truncated)
-            } else {
-                branch.name.clone()
-            };
-            let padding = 56_usize.saturating_sub(display_name.len() + time_str.len());
+            let inner_w = dialog_w.saturating_sub(2) as usize;
+            // Use display widths (not byte lengths) so non-ASCII branch names align correctly.
+            let time_w = line_width(&time_str);
+            let max_name = inner_w.saturating_sub(6).saturating_sub(time_w + 2);
+            let display_name = truncate_for_width(&branch.name, max_name);
+            let display_w = line_width(&display_name);
+            let content_w = inner_w.saturating_sub(6);
+            let padding = content_w.saturating_sub(display_w + time_w);
             let line = format!("{}{}{}", display_name, " ".repeat(padding), time_str);
             if sel_idx == strategy_idx {
                 items.push(ListItem::new(format!("  > {}", line)).style(theme::selected()));
@@ -621,7 +691,8 @@ fn render_worktree_progress(
     error: Option<&str>,
 ) {
     use ratatui::widgets::Clear;
-    let area = centered_rect_fixed(60, 15, frame.area());
+    let dialog_w = (frame.area().width * 70 / 100).max(60);
+    let area = centered_rect_fixed(dialog_w, 15, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -1011,7 +1082,8 @@ fn render_help_overlay(frame: &mut Frame) {
     let height = (content_rows + 2).min(frame.area().height); // +2 for border
                                                               // Height is clamped to terminal height — content clips on very short terminals
                                                               // (< 27 rows). Acceptable: 24+ rows is the practical minimum for a terminal.
-    let area = centered_rect_fixed(50, height, frame.area());
+    let dialog_w = (frame.area().width * 70 / 100).max(50);
+    let area = centered_rect_fixed(dialog_w, height, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
