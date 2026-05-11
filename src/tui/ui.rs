@@ -37,6 +37,11 @@ fn status_char(status: &crate::core::git::FileStatus) -> &'static str {
     }
 }
 
+/// Minimum virtual content widths (display chars) for the scrollable columns.
+/// REPO is pinned. BRANCH and STATUS form the scrollable zone.
+const BRANCH_VIRTUAL: usize = 50;
+const STATUS_VIRTUAL: usize = 45;
+
 fn format_repo_status(status: &crate::core::git::RepoStatus, max_width: usize) -> String {
     let mut parts = Vec::new();
 
@@ -324,8 +329,20 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
         .selected_workspace()
         .map(|ws| ws.name.as_str())
         .unwrap_or("");
-    let title = format!(" {} ", ws_name);
-    let status_width = area.width.saturating_sub(2) as usize * 36 / 100;
+    // Horizontal scroll: REPO is pinned, BRANCH+STATUS are the scrollable zone.
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let branch_display = inner_width * 22 / 100;
+    let status_display = inner_width * 36 / 100; // same as status_width
+    let scrollable_virtual = BRANCH_VIRTUAL + STATUS_VIRTUAL; // 95
+    let scrollable_display = branch_display + status_display;
+    let max_scroll = scrollable_virtual.saturating_sub(scrollable_display);
+    let scroll_x = (app.table_scroll_x as usize).min(max_scroll);
+    let branch_offset = scroll_x;
+    let status_offset = scroll_x.saturating_sub(BRANCH_VIRTUAL);
+
+    let left_ind = if scroll_x > 0 { " <" } else { "" };
+    let right_ind = if scroll_x < max_scroll { " >" } else { "" };
+    let title = format!(" {}{}{} ", ws_name, left_ind, right_ind);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -358,7 +375,7 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
                 } else {
                     theme::status_clean()
                 };
-                let status_str = format_repo_status(&r.status, status_width);
+                let status_str = format_repo_status(&r.status, status_display + status_offset);
                 // +/- column: file line totals from cache. Show zeros when the
                 // cache isn't populated yet rather than falling back to commit
                 // counts (ahead/behind), which would mix different metrics.
@@ -373,8 +390,16 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
                     .unwrap_or((0, 0));
                 Row::new(vec![
                     Cell::from(Span::raw(name)),
-                    Cell::from(Span::styled(r.branch.clone(), theme::branch())),
-                    Cell::from(Span::styled(status_str, status_style)),
+                    {
+                        let b = skip_display_width(&r.branch, branch_offset);
+                        let b = truncate_for_width(b, branch_display);
+                        Cell::from(Span::styled(b, theme::branch()))
+                    },
+                    {
+                        let s = skip_display_width(&status_str, status_offset);
+                        let s = truncate_for_width(s, status_display);
+                        Cell::from(Span::styled(s, status_style))
+                    },
                     diff_cell(ins, del),
                 ])
             }

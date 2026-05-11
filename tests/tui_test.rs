@@ -2794,3 +2794,92 @@ fn scroll_table_left_pane_noop() {
     app.handle_key(key(KeyCode::Char('l')));
     assert_eq!(app.table_scroll_x, 0);
 }
+
+#[test]
+fn scroll_x_offsets_branch_content_in_render() {
+    use space::core::git::RepoStatus;
+    use space::core::workspace::{Workspace, WorkspaceRepo};
+
+    let ws = Workspace {
+        name: "ws".into(),
+        path: std::path::PathBuf::from("/tmp/ws"),
+        repos: vec![WorkspaceRepo {
+            name: "api".into(),
+            path: std::path::PathBuf::from("/tmp/ws/api"),
+            branch: "feature/very-long-branch-name-here".into(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+
+    // At scroll_x=0 branch shows from start.
+    // Use 160 cols: right pane inner_width=118, branch_display=25, max_scroll=28.
+    // truncate_for_width("feature/very-long-branch-name-here", 25) = "feature/very-long-branch..."
+    let rendered0 = render_text(&app, 160, 20);
+    assert!(
+        rendered0.contains("feature/very-long"),
+        "branch start visible at scroll 0"
+    );
+
+    // At scroll_x=19 first 19 chars are scrolled off.
+    // "feature/very-long-branch-name-here"[19..] = "ranch-name-here"
+    app.table_scroll_x = 19;
+    let rendered20 = render_text(&app, 160, 20);
+    assert!(
+        rendered20.contains("ranch-name-here"),
+        "branch content offset by scroll_x=19"
+    );
+    assert!(
+        !rendered20.contains("feature/"),
+        "branch start scrolled off at scroll_x=19"
+    );
+}
+
+#[test]
+fn scroll_x_past_branch_virtual_offsets_status_content() {
+    use space::core::git::RepoStatus;
+    use space::core::workspace::{Workspace, WorkspaceRepo};
+
+    // Narrow terminal: max_scroll will be > BRANCH_VIRTUAL so STATUS scrolls.
+    // inner_width=60 -> branch_display=13, status_display=21, max_scroll=61
+    // At scroll_x=55, status_offset=55-50=5
+    let ws = Workspace {
+        name: "ws".into(),
+        path: std::path::PathBuf::from("/tmp/ws"),
+        repos: vec![WorkspaceRepo {
+            name: "api".into(),
+            path: std::path::PathBuf::from("/tmp/ws/api"),
+            branch: "main".into(),
+            status: RepoStatus {
+                modified: 10,
+                staged: 5,
+                untracked: 3,
+                conflicted: 0,
+            },
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.table_scroll_x = 55;
+
+    // render with width=80, height=10 (80 is the minimum allowed width)
+    // Right pane = 75% of 80 = 60 cols wide, inner_width=58
+    // branch_display=12, status_display=20, max_scroll=63
+    // At scroll_x=55, status_offset=5
+    let rendered = render_text(&app, 80, 10);
+
+    // status_offset = 5, full status = "10 modified, 5 staged, 3 new"
+    // After skipping 5 chars: "odified, 5 staged, 3 new"
+    // We should see some part of the status string after the skip
+    // The key check: status content IS rendered (not empty due to the bug)
+    assert!(
+        rendered.contains("odified") || rendered.contains("staged") || rendered.contains("new"),
+        "STATUS content visible after scrolling past BRANCH_VIRTUAL: {:?}",
+        rendered
+    );
+}
