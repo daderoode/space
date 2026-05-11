@@ -123,6 +123,27 @@ fn truncate_for_width(text: &str, max_width: usize) -> String {
     format!("{}{}", truncated, ellipsis)
 }
 
+/// Skip `skip` display-width characters from the start of `s`.
+/// Returns the remaining substring starting from the first character
+/// whose cumulative display width reaches or exceeds `skip`.
+/// Returns `""` when `skip` >= total display width of `s`.
+/// When `skip` bisects a wide character (display width > 1), the entire
+/// wide character is skipped (snap-forward policy).
+#[allow(dead_code)] // used in Task 3 (horizontal scroll offset)
+fn skip_display_width(s: &str, skip: usize) -> &str {
+    if skip == 0 {
+        return s;
+    }
+    let mut consumed = 0usize;
+    for (byte_idx, ch) in s.char_indices() {
+        if consumed >= skip {
+            return &s[byte_idx..];
+        }
+        consumed += UnicodeWidthChar::width(ch).unwrap_or(0);
+    }
+    ""
+}
+
 fn render_delete_footer(
     inner_width: usize,
     footer_delete: &str,
@@ -889,6 +910,46 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].width(), 14);
         assert_eq!(lines[1].width(), 12);
+    }
+
+    #[test]
+    fn skip_zero_returns_full_string() {
+        assert_eq!(skip_display_width("abcde", 0), "abcde");
+    }
+
+    #[test]
+    fn skip_ascii_offset() {
+        assert_eq!(skip_display_width("abcdefg", 3), "defg");
+    }
+
+    #[test]
+    fn skip_exact_length_returns_empty() {
+        assert_eq!(skip_display_width("abc", 3), "");
+    }
+
+    #[test]
+    fn skip_exceeds_length_returns_empty() {
+        assert_eq!(skip_display_width("abc", 10), "");
+    }
+
+    #[test]
+    fn skip_unicode_multibyte() {
+        // "café" = c(1) a(1) f(1) é(1 display width, 2 UTF-8 bytes)
+        // skip 3 display chars -> should return "é"
+        assert_eq!(skip_display_width("café", 3), "é");
+    }
+
+    #[test]
+    fn skip_wide_char_full_column() {
+        // '日' width=2; skip 2 columns → return "語"
+        assert_eq!(skip_display_width("日語", 2), "語");
+    }
+
+    #[test]
+    fn skip_bisects_wide_char_snaps_forward() {
+        // '日' width=2; skip=1 bisects the wide char.
+        // Policy: snap forward — skip the entire wide char, return "bc".
+        assert_eq!(skip_display_width("日bc", 1), "bc");
     }
 }
 
