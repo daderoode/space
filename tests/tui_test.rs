@@ -2742,3 +2742,55 @@ fn external_file_edit_invalidates_cached_unstaged_diff() {
         "diff_content_cache should reflect the externally modified file content 'changed again'"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Horizontal table scroll tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scroll_table_right_increments_scroll_x() {
+    let ws = common::workspace_with_repos(&["api"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    assert_eq!(app.table_scroll_x, 0);
+    app.handle_key(key(KeyCode::Char('l')));
+    assert_eq!(app.table_scroll_x, 5);
+}
+
+#[test]
+fn scroll_table_left_decrements_scroll_x() {
+    let ws = common::workspace_with_repos(&["api"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.table_scroll_x = 10;
+    app.handle_key(key(KeyCode::Char('h')));
+    assert_eq!(app.table_scroll_x, 5);
+}
+
+#[test]
+fn scroll_table_left_at_zero_stays_zero() {
+    let ws = common::workspace_with_repos(&["api"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Char('h')));
+    assert_eq!(app.table_scroll_x, 0);
+}
+
+#[test]
+fn scroll_table_resets_on_workspace_switch() {
+    let ws1 = common::workspace_with_repos(&["api"]);
+    let ws2 = common::workspace_with_repos(&["web"]);
+    let mut app = test_app(vec![ws1, ws2], vec![]);
+    app.table_scroll_x = 30;
+    app.handle_key(key(KeyCode::Down)); // SelectWorkspaceDown on Left pane (focus is Left by default)
+    assert_eq!(app.table_scroll_x, 0);
+}
+
+#[test]
+fn scroll_table_left_pane_noop() {
+    let ws = common::workspace_with_repos(&["api"]);
+    let mut app = test_app(vec![ws], vec![]);
+    // focus is Left by default
+    app.handle_key(key(KeyCode::Char('l')));
+    assert_eq!(app.table_scroll_x, 0);
+}

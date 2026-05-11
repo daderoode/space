@@ -17,6 +17,7 @@ pub struct DiffCacheKey {
 }
 
 const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(5);
+const SCROLL_STEP: u16 = 5;
 
 /// Convert a ratatui/crossterm 0.29 KeyEvent into a tui_input InputRequest,
 /// bypassing the tui_input crossterm backend which links against crossterm 0.28.
@@ -110,6 +111,8 @@ pub enum Message {
         path: String,
         staged: bool,
     },
+    ScrollTableLeft,
+    ScrollTableRight,
 }
 
 /// A row in the flattened repo table (repo header or file entry).
@@ -147,6 +150,7 @@ pub struct App {
     pub file_mtime_cache: HashMap<DiffCacheKey, std::time::SystemTime>,
     pub repo_index_mtime: HashMap<usize, std::time::SystemTime>,
     pub cursor_row: usize,
+    pub table_scroll_x: u16,
     pub focus: Pane,
     pub screen: Screen,
     pub should_quit: bool,
@@ -181,6 +185,7 @@ impl App {
             file_mtime_cache: HashMap::new(),
             repo_index_mtime: HashMap::new(),
             cursor_row: 0,
+            table_scroll_x: 0,
             focus: Pane::Left,
             screen: Screen::Dashboard,
             should_quit: false,
@@ -328,6 +333,7 @@ impl App {
     /// positions from the previous workspace are never visible.
     pub fn reset_repo_pane_state(&mut self) {
         self.cursor_row = 0;
+        self.table_scroll_x = 0;
         self.expanded_repos.clear();
         self.repo_file_cache.clear();
         self.diff_content_cache.clear();
@@ -665,6 +671,7 @@ impl App {
                 if let Some(idx) = found_idx {
                     self.selected_ws = idx;
                     self.selected_repo = 0;
+                    self.reset_repo_pane_state();
                     self.load_selected_workspace_detail();
                 } else {
                     self.set_status(
@@ -783,6 +790,12 @@ impl App {
                             repo_index,
                             stage: false,
                         }),
+                    (KeyCode::Char('h'), _) if self.focus == Pane::Right => {
+                        Some(Message::ScrollTableLeft)
+                    }
+                    (KeyCode::Char('l'), _) if self.focus == Pane::Right => {
+                        Some(Message::ScrollTableRight)
+                    }
                     (KeyCode::Up, _) | (KeyCode::Char('k'), _) => match self.focus {
                         Pane::Left => Some(Message::SelectWorkspaceUp),
                         Pane::Right => Some(Message::SelectRepoUp),
@@ -1241,6 +1254,14 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             app.screen = Screen::DiffViewer(state);
             None
         }
+        Message::ScrollTableLeft => {
+            app.table_scroll_x = app.table_scroll_x.saturating_sub(SCROLL_STEP);
+            None
+        }
+        Message::ScrollTableRight => {
+            app.table_scroll_x = app.table_scroll_x.saturating_add(SCROLL_STEP);
+            None
+        }
     }
 }
 
@@ -1324,12 +1345,14 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::git::RepoStatus;
+    use crate::core::workspace::{Workspace, WorkspaceRepo};
     use std::time::{Duration, Instant};
 
-    fn app_with_status() -> App {
-        let mut app = App {
+    fn make_app(workspaces: Vec<Workspace>) -> App {
+        App {
             config: SpaceConfig::default(),
-            workspaces: vec![],
+            workspaces,
             repos_cache: vec![],
             selected_ws: 0,
             selected_repo: 0,
@@ -1339,6 +1362,7 @@ mod tests {
             file_mtime_cache: HashMap::new(),
             repo_index_mtime: HashMap::new(),
             cursor_row: 0,
+            table_scroll_x: 0,
             focus: Pane::Left,
             screen: Screen::Dashboard,
             should_quit: false,
@@ -1346,7 +1370,22 @@ mod tests {
             status_message: None,
             status_kind: StatusKind::Info,
             status_message_set_at: None,
-        };
+        }
+    }
+
+    fn stub_repo(name: &str) -> WorkspaceRepo {
+        WorkspaceRepo {
+            name: name.to_string(),
+            path: std::path::PathBuf::from("/tmp").join(name),
+            branch: "main".to_string(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }
+    }
+
+    fn app_with_status() -> App {
+        let mut app = make_app(vec![]);
         app.set_status(
             "Added repos to workspace 'mission-control-ui'",
             StatusKind::Success,
@@ -1363,5 +1402,36 @@ mod tests {
         app.expire_status_message(Instant::now());
 
         assert_eq!(app.status_message, None);
+    }
+
+    #[test]
+    fn navigate_to_workspace_resets_scroll_and_cursor() {
+        let ws0 = Workspace {
+            name: "alpha".to_string(),
+            path: std::path::PathBuf::from("/tmp/alpha"),
+            repos: vec![stub_repo("repo-a")],
+        };
+        let ws1 = Workspace {
+            name: "beta".to_string(),
+            path: std::path::PathBuf::from("/tmp/beta"),
+            repos: vec![stub_repo("repo-b")],
+        };
+        let mut app = make_app(vec![ws0, ws1]);
+
+        // Simulate stale state from a previous workspace
+        app.table_scroll_x = 20;
+        app.cursor_row = 3;
+
+        // Dispatch NavigateToWorkspace targeting a repo in workspace 1
+        app.process_action(crate::tui::actions::ScreenAction::NavigateToWorkspace(
+            "repo-b".to_string(),
+        ));
+
+        assert_eq!(
+            app.selected_ws, 1,
+            "selected_ws should switch to workspace 1"
+        );
+        assert_eq!(app.table_scroll_x, 0, "table_scroll_x must be reset to 0");
+        assert_eq!(app.cursor_row, 0, "cursor_row must be reset to 0");
     }
 }
