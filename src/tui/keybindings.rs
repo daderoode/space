@@ -26,6 +26,10 @@ const NAVIGATION: BindingGroup = BindingGroup {
             desc: "Down",
         },
         Binding {
+            key: "h/l",
+            desc: "Scroll table left/right (repo pane)",
+        },
+        Binding {
             key: "→",
             desc: "Expand / focus repos",
         },
@@ -204,7 +208,7 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
             desc: "quit",
         },
     ];
-    static RIGHT: [Binding; 7] = [
+    static RIGHT: [Binding; 8] = [
         Binding {
             key: "enter",
             desc: "expand/diff",
@@ -212,6 +216,10 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
         Binding {
             key: "←/esc",
             desc: "back",
+        },
+        Binding {
+            key: "h/l",
+            desc: "scroll",
         },
         Binding {
             key: "s/space",

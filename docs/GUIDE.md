@@ -185,6 +185,8 @@ Press `Enter` on a file row in the expanded repo list to open a full-screen scro
 | `→` or `Enter` (on repo row) | Expand / collapse repo to show per-file diffs |
 | `Enter` (on file row) | Open scrollable diff viewer |
 | `←` or `Esc` | Collapse all expanded repos; second press refocuses workspaces pane |
+| `h` | Scroll table left |
+| `l` | Scroll table right |
 | `s` or `space` | Stage / unstage file |
 | `S` | Stage all unstaged files in repo |
 | `U` | Unstage all staged files in repo |
