@@ -39,6 +39,70 @@ stay aligned.
 
 ---
 
+## Tier 1.6 -- Create-flow polish
+
+UX improvements from user feedback. Small, self-contained changes to the
+workspace-creation flow. Can be picked off independently.
+
+### 3a. Reorder workspace-creation steps (#7)
+
+**Problem:** The current creation order is: select repos, enter workspace name,
+pick branch strategy. Users expect to name the workspace first, then select
+repos — the name provides context for the subsequent choices.
+
+**Approach:**
+
+- Reorder `CreateStage` variants: `EnterName` → `PickRepos` → `PickBranchStrategy`
+  → `Creating`.
+- Workspace name is available earlier, so it can be used as the default
+  branch name in `PickBranchStrategy`.
+- `AddStage` is unaffected (workspace already exists).
+
+**Files:** `src/tui/screens/create.rs`, `src/tui/ui.rs`
+**Done when:** `c` opens a name-first flow and existing tests pass.
+
+---
+
+### 3b. Custom new-branch name (#6)
+
+**Problem:** "New branch" always uses the workspace name as the branch name.
+Users want to specify a different branch name (e.g. `feature/DEV-1234`).
+
+**Approach:**
+
+- After selecting "New branch" in `PickBranchStrategy`, show an editable
+  text field pre-filled with the workspace name.
+- `BranchStrategy::NewBranch(String)` already carries the name — wire the
+  input value through instead of defaulting to the workspace name.
+- Same field applies in both Create and Add flows.
+
+**Files:** `src/tui/screens/create.rs`, `src/tui/screens/add.rs`,
+`src/tui/ui.rs`
+**Done when:** Users can edit the branch name before worktree creation.
+
+---
+
+### 3c. Repo metadata and tree view in picker (#5)
+
+**Problem:** The repo picker shows repos as `<dir-name> (<parent-dir-name>)`.
+No branch, URL, or hierarchical grouping. Hard to distinguish repos with
+similar names under different organisations.
+
+**Approach:**
+
+- Enrich `PickerItem` with optional metadata fields (current branch, remote
+  URL) populated at picker construction time via `git2`.
+- Render metadata as a dimmed suffix or second column in the picker.
+- Optionally group repos by parent directory in a collapsible tree view.
+  Tree view is stretch — the metadata suffix alone is high value.
+
+**Files:** `src/tui/widgets/fuzzy_picker.rs`, `src/tui/screens/create.rs`,
+`src/tui/screens/add.rs`, `src/tui/ui.rs`
+**Done when:** Repos show branch and remote URL in the picker. Tree grouping
+is a bonus.
+
+---
+
 ## Tier 2 -- Git Visibility
 
 Turn `space` from a workspace navigator into a workspace-aware git viewer.
@@ -70,7 +134,15 @@ and base mode works, navigation through flattened rows is smooth.
 
 ---
 
-### 5. File-level diff viewer with staging (Phase 2)
+### 5. File-level diff viewer with staging (Phase 2) ✓
+
+Scrollable diff viewer opens on `Enter` from a file row, with syntax-colored
+unified diff (green additions, red deletions, dimmed context). `j`/`k` scroll,
+`PgUp`/`PgDn` page, `Home`/`End` jump. `s` stages/unstages the viewed file
+(HEAD mode only). From the dashboard, `s` stages a single file, `S` bulk-stages
+all unstaged files in a repo, and `U` unstages all staged files. Diff content
+cache is invalidated on staging operations. 9 integration tests cover the full
+flow.
 
 **Problem:** After seeing which files changed, users want to view the actual diff
 content and act on it — stage or unstage individual files — without leaving the
@@ -95,10 +167,8 @@ TUI.
   invalidated for that repo.
 - `S` (Shift+S) on a repo row stages/unstages all files in that repo.
 
-**Files:** `src/core/git.rs` (new diff content + stage/unstage functions),
-`src/tui/app.rs`, `src/tui/ui.rs`, `src/tui/screens/diff.rs` (new)
-**Done when:** Users can view full file diffs in a scrollable overlay and
-stage/unstage individual files or all files in a repo from the expanded view.
+**Files:** `src/core/git.rs`, `src/tui/app.rs`, `src/tui/ui.rs`,
+`src/tui/screens/diff.rs`
 
 ---
 

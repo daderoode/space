@@ -96,7 +96,12 @@ impl ConfigState {
             let base = ctx.config.clone();
             match self.save_to_config(base) {
                 Ok(new_config) => return ScreenAction::SaveConfig(new_config),
-                Err(e) => return ScreenAction::BackWithStatus(format!("Save failed: {}", e)),
+                Err(e) => {
+                    return ScreenAction::BackWithStatus(
+                        format!("Save failed: {}", e),
+                        crate::tui::actions::StatusKind::Error,
+                    )
+                }
             }
         }
 

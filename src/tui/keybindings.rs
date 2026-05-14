@@ -26,6 +26,10 @@ const NAVIGATION: BindingGroup = BindingGroup {
             desc: "Down",
         },
         Binding {
+            key: "h/l",
+            desc: "Scroll table left/right (repo pane)",
+        },
+        Binding {
             key: "→",
             desc: "Expand / focus repos",
         },
@@ -78,16 +82,58 @@ const REPO_PANE: BindingGroup = BindingGroup {
     name: "Repo Pane",
     bindings: &[
         Binding {
-            key: "Enter/→",
+            key: "Enter (repo)",
             desc: "Expand / collapse repo",
+        },
+        Binding {
+            key: "Enter (file)",
+            desc: "View file diff",
         },
         Binding {
             key: "←/Esc",
             desc: "Collapse all / back",
         },
         Binding {
-            key: "T",
-            desc: "Toggle diff target",
+            key: "s/space",
+            desc: "Stage / unstage file",
+        },
+        Binding {
+            key: "S",
+            desc: "Stage all unstaged",
+        },
+        Binding {
+            key: "U",
+            desc: "Unstage all staged",
+        },
+    ],
+};
+
+const DIFF_VIEWER: BindingGroup = BindingGroup {
+    name: "Diff Viewer",
+    bindings: &[
+        Binding {
+            key: "up/k",
+            desc: "Scroll up",
+        },
+        Binding {
+            key: "dn/j",
+            desc: "Scroll down",
+        },
+        Binding {
+            key: "PgUp/PgDn",
+            desc: "Page scroll",
+        },
+        Binding {
+            key: "Home/End",
+            desc: "Jump to start/end",
+        },
+        Binding {
+            key: "s/space",
+            desc: "Stage / unstage",
+        },
+        Binding {
+            key: "Esc/q",
+            desc: "Close",
         },
     ],
 };
@@ -112,7 +158,8 @@ const GENERAL: BindingGroup = BindingGroup {
 
 /// All binding groups — consumed by the help overlay.
 pub fn all_groups() -> &'static [BindingGroup] {
-    static GROUPS: [BindingGroup; 4] = [NAVIGATION, WORKSPACE_PANE, REPO_PANE, GENERAL];
+    static GROUPS: [BindingGroup; 5] =
+        [NAVIGATION, WORKSPACE_PANE, REPO_PANE, DIFF_VIEWER, GENERAL];
     &GROUPS
 }
 
@@ -161,18 +208,30 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
             desc: "quit",
         },
     ];
-    static RIGHT: [Binding; 5] = [
+    static RIGHT: [Binding; 8] = [
         Binding {
             key: "enter",
-            desc: "expand",
+            desc: "expand/diff",
         },
         Binding {
             key: "←/esc",
             desc: "back",
         },
         Binding {
-            key: "T",
-            desc: "toggle diff",
+            key: "h/l",
+            desc: "scroll",
+        },
+        Binding {
+            key: "s/space",
+            desc: "stage",
+        },
+        Binding {
+            key: "S",
+            desc: "stage all",
+        },
+        Binding {
+            key: "U",
+            desc: "unstage all",
         },
         Binding {
             key: "?",

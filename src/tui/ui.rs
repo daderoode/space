@@ -33,7 +33,23 @@ fn status_char(status: &crate::core::git::FileStatus) -> &'static str {
         FileStatus::Renamed => "R",
         FileStatus::Copied => "C",
         FileStatus::Untracked => "?",
+        FileStatus::Conflicted => "!",
     }
+}
+
+/// Minimum virtual content widths (display chars) for the scrollable columns.
+/// REPO is pinned. BRANCH and STATUS form the scrollable zone.
+const BRANCH_VIRTUAL: usize = 50;
+const STATUS_VIRTUAL: usize = 45;
+
+/// Compute the maximum horizontal table scroll for the given right-pane inner
+/// width (pane width minus 2 for borders). Returns 0 when the terminal is wide
+/// enough that all content fits without scrolling.
+/// Inner width = right pane width - 2.
+pub(crate) fn max_table_scroll(inner_width: usize) -> u16 {
+    let branch_display = ((inner_width as f64 * 22.0) / 100.0).round() as usize;
+    let status_display = ((inner_width as f64 * 36.0) / 100.0).round() as usize;
+    (BRANCH_VIRTUAL + STATUS_VIRTUAL).saturating_sub(branch_display + status_display) as u16
 }
 
 fn format_repo_status(status: &crate::core::git::RepoStatus, max_width: usize) -> String {
@@ -47,6 +63,17 @@ fn format_repo_status(status: &crate::core::git::RepoStatus, max_width: usize) -
     }
     if status.untracked > 0 {
         parts.push(format!("{} new", status.untracked));
+    }
+    if status.conflicted > 0 {
+        parts.push(format!(
+            "{} {}",
+            status.conflicted,
+            if status.conflicted == 1 {
+                "conflict"
+            } else {
+                "conflicts"
+            }
+        ));
     }
 
     if parts.is_empty() {
@@ -111,6 +138,26 @@ fn truncate_for_width(text: &str, max_width: usize) -> String {
     format!("{}{}", truncated, ellipsis)
 }
 
+/// Skip `skip` display-width characters from the start of `s`.
+/// Returns the remaining substring starting from the first character
+/// whose cumulative display width reaches or exceeds `skip`.
+/// Returns `""` when `skip` >= total display width of `s`.
+/// When `skip` bisects a wide character (display width > 1), the entire
+/// wide character is skipped (snap-forward policy).
+fn skip_display_width(s: &str, skip: usize) -> &str {
+    if skip == 0 {
+        return s;
+    }
+    let mut consumed = 0usize;
+    for (byte_idx, ch) in s.char_indices() {
+        if consumed >= skip {
+            return &s[byte_idx..];
+        }
+        consumed += UnicodeWidthChar::width(ch).unwrap_or(0);
+    }
+    ""
+}
+
 fn render_delete_footer(
     inner_width: usize,
     footer_delete: &str,
@@ -163,6 +210,10 @@ pub fn view(app: &App, frame: &mut Frame) {
             crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
         }
         Screen::ConfigEditor(state) => render_config_editor(state, frame),
+        Screen::DiffViewer(state) => {
+            render_dashboard(app, frame);
+            render_diff_overlay(state, frame);
+        }
         Screen::Help => {
             render_dashboard(app, frame);
             render_help_overlay(frame);
@@ -173,17 +224,41 @@ pub fn view(app: &App, frame: &mut Frame) {
 fn render_dashboard(app: &App, frame: &mut Frame) {
     let area = frame.area();
 
-    // Outer layout: title bar / main / status bar
+    // Guard: the dashboard layout requires at least 80 columns for the repo
+    // table columns and dialogs to remain readable. Overlay screens (delete
+    // confirm, etc.) render on top of the dashboard and handle narrow widths
+    // themselves, so this guard only affects the background dashboard layer.
+    const MIN_DASHBOARD_WIDTH: u16 = 80;
+    if area.width < MIN_DASHBOARD_WIDTH {
+        let msg = format!(
+            "Terminal too narrow\nMinimum: {} columns | Current: {}",
+            MIN_DASHBOARD_WIDTH, area.width,
+        );
+        frame.render_widget(
+            Paragraph::new(msg)
+                .alignment(Alignment::Center)
+                .style(theme::error()),
+            centered_rect_percent(80, 30, area),
+        );
+        return;
+    }
+
+    // Outer layout: title bar / main / (collapsible) status message / keybindings bar
+    let status_height: u16 = if app.status_message.is_some() { 1 } else { 0 };
     let outer = Layout::vertical([
-        Constraint::Length(1), // title
-        Constraint::Min(0),    // main
-        Constraint::Length(1), // status bar
+        Constraint::Length(1),             // title
+        Constraint::Min(0),                // main
+        Constraint::Length(status_height), // status message (collapses when idle)
+        Constraint::Length(1),             // keybindings (always visible)
     ])
     .split(area);
 
     render_title(frame, outer[0]);
     render_main(app, frame, outer[1]);
-    render_status_bar(app, frame, outer[2]);
+    if app.status_message.is_some() {
+        render_status_message(app, frame, outer[2]);
+    }
+    render_keybindings_bar(app, frame, outer[3]);
 }
 
 fn render_title(frame: &mut Frame, area: Rect) {
@@ -263,12 +338,23 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
         .selected_workspace()
         .map(|ws| ws.name.as_str())
         .unwrap_or("");
-    let target_label = match app.diff_target {
-        crate::core::git::DiffTarget::Head => "HEAD",
-        crate::core::git::DiffTarget::Base => "base",
-    };
-    let title = format!(" {} (vs {}) ", ws_name, target_label);
-    let status_width = area.width.saturating_sub(2) as usize * 36 / 100;
+    // Horizontal scroll: REPO is pinned, BRANCH+STATUS are the scrollable zone.
+    let inner_width = area.width.saturating_sub(2) as usize;
+    // Match ratatui's Percentage layout rounding (nearest integer, not floor) so that
+    // max_scroll reaches exactly 0 at the same terminal width where the columns become
+    // wide enough to display all content without clipping.
+    let branch_display = ((inner_width as f64 * 22.0) / 100.0).round() as usize;
+    let status_display = ((inner_width as f64 * 36.0) / 100.0).round() as usize; // same as status_width
+    let scrollable_virtual = BRANCH_VIRTUAL + STATUS_VIRTUAL; // 95
+    let scrollable_display = branch_display + status_display;
+    let max_scroll = scrollable_virtual.saturating_sub(scrollable_display);
+    let scroll_x = (app.table_scroll_x as usize).min(max_scroll);
+    let branch_offset = scroll_x;
+    let status_offset = scroll_x.saturating_sub(BRANCH_VIRTUAL);
+
+    let left_ind = if scroll_x > 0 { " <" } else { "" };
+    let right_ind = if scroll_x < max_scroll { " >" } else { "" };
+    let title = format!(" {}{}{} ", ws_name, left_ind, right_ind);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -293,13 +379,15 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
             } => {
                 let indicator = if *expanded { "▼ " } else { "▶ " };
                 let name = format!("{}{}", indicator, r.name);
-                let dirty = r.status.modified + r.status.staged + r.status.untracked > 0;
+                let dirty =
+                    r.status.modified + r.status.staged + r.status.untracked + r.status.conflicted
+                        > 0;
                 let status_style = if dirty {
                     theme::warn()
                 } else {
                     theme::status_clean()
                 };
-                let status_str = format_repo_status(&r.status, status_width);
+                let status_str = format_repo_status(&r.status, status_display + status_offset);
                 // +/- column: file line totals from cache. Show zeros when the
                 // cache isn't populated yet rather than falling back to commit
                 // counts (ahead/behind), which would mix different metrics.
@@ -314,30 +402,52 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
                     .unwrap_or((0, 0));
                 Row::new(vec![
                     Cell::from(Span::raw(name)),
-                    Cell::from(Span::styled(r.branch.clone(), theme::branch())),
-                    Cell::from(Span::styled(status_str, status_style)),
+                    {
+                        let b = skip_display_width(&r.branch, branch_offset);
+                        let b = truncate_for_width(b, branch_display);
+                        Cell::from(Span::styled(b, theme::branch()))
+                    },
+                    {
+                        let s = skip_display_width(&status_str, status_offset);
+                        let s = truncate_for_width(s, status_display);
+                        Cell::from(Span::styled(s, status_style))
+                    },
                     diff_cell(ins, del),
                 ])
             }
-            RepoRow::File { entry, .. } => {
-                // In Base mode all entries have staged=false (committed divergence has
-                // no staging context), so the badge would always show "[unstaged]" which
-                // is misleading. Hide it entirely in Base mode.
-                let staged_badge = match app.diff_target {
-                    crate::core::git::DiffTarget::Head if entry.staged => {
-                        ratatui::text::Span::styled("[staged]", theme::staged())
-                    }
-                    crate::core::git::DiffTarget::Head => {
-                        ratatui::text::Span::styled("[unstaged]", theme::unstaged())
-                    }
-                    crate::core::git::DiffTarget::Base => ratatui::text::Span::raw(""),
+            RepoRow::SectionHeader { label, .. } => {
+                let label_text = format!("  ── {} ──", label);
+                Row::new(vec![
+                    Cell::from(Span::styled(label_text, theme::muted())),
+                    Cell::from(""),
+                    Cell::from(""),
+                    Cell::from(""),
+                ])
+            }
+            RepoRow::File {
+                entry,
+                partially_staged,
+                ..
+            } => {
+                let is_conflicted = entry.status == crate::core::git::FileStatus::Conflicted;
+                let badge = if is_conflicted {
+                    ratatui::text::Span::styled("[conflict]", theme::error())
+                } else if *partially_staged {
+                    ratatui::text::Span::styled("[partial]", theme::warn())
+                } else {
+                    ratatui::text::Span::raw("")
                 };
                 let path_col = format!("  {} {}", status_char(&entry.status), entry.path);
+                let path_style = if is_conflicted {
+                    theme::error()
+                } else {
+                    theme::file_path()
+                };
                 Row::new(vec![
-                    Cell::from(Span::styled(path_col, theme::file_path())),
+                    Cell::from(Span::styled(path_col, path_style)),
                     Cell::from(""),
-                    Cell::from(staged_badge), // col 3 = STATUS header
-                    diff_cell(entry.insertions, entry.deletions), // col 4 = +/- header
+                    Cell::from(badge),
+                    diff_cell(entry.insertions, entry.deletions),
                 ])
             }
         })
@@ -367,38 +477,32 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(table, area, &mut state);
 }
 
-fn render_status_bar(app: &App, frame: &mut Frame, area: Rect) {
+/// Render the colored status message row (only called when a message is set).
+fn render_status_message(app: &App, frame: &mut Frame, area: Rect) {
+    use crate::tui::actions::StatusKind;
     if let Some(msg) = &app.status_message {
-        frame.render_widget(Paragraph::new(msg.as_str()).style(theme::muted()), area);
-        return;
+        let style = match app.status_kind {
+            StatusKind::Error => theme::error(),
+            StatusKind::Success => theme::success(),
+            StatusKind::Warning => theme::warn(),
+            StatusKind::Info => theme::muted(),
+        };
+        frame.render_widget(Paragraph::new(msg.as_str()).style(style), area);
     }
+}
 
+/// Render the always-visible keybindings hint bar at the bottom.
+fn render_keybindings_bar(app: &App, frame: &mut Frame, area: Rect) {
     let bindings = crate::tui::keybindings::status_bar_bindings(app.focus);
     let sep = Span::styled("  ·  ", theme::muted());
     let mut spans: Vec<Span> = Vec::new();
-
-    // Dynamic T-label for right pane: tell user which direction T will go
-    let t_override: Option<&'static str> = if app.focus == crate::tui::app::Pane::Right {
-        Some(match app.diff_target {
-            crate::core::git::DiffTarget::Base => "switch to HEAD",
-            crate::core::git::DiffTarget::Head => "switch to base",
-        })
-    } else {
-        None
-    };
 
     for (i, binding) in bindings.iter().enumerate() {
         if i > 0 {
             spans.push(sep.clone());
         }
         spans.push(Span::styled(binding.key, theme::text()));
-        // Use dynamic label for T on right pane, static label otherwise
-        let desc = if binding.key == "T" {
-            t_override.unwrap_or(binding.desc)
-        } else {
-            binding.desc
-        };
-        spans.push(Span::styled(format!(" {}", desc), theme::muted()));
+        spans.push(Span::styled(format!(" {}", binding.desc), theme::muted()));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -434,7 +538,8 @@ fn render_create_overlay(state: &crate::tui::screens::create::CreateState, frame
 
 fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
     use ratatui::widgets::Clear;
-    let area = centered_rect_fixed(50, 7, frame.area());
+    let dialog_w = (frame.area().width * 70 / 100).max(50);
+    let area = centered_rect_fixed(dialog_w, 7, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -457,10 +562,64 @@ fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &m
         Paragraph::new("Enter workspace name:").style(theme::text()),
         sections[0],
     );
+    // Split the input row into: left-scroll-indicator | text area | right-scroll-indicator
+    let indicator_style = theme::muted();
+    let text_area_w = sections[1].width.saturating_sub(2); // 1 char each side for indicators
+    let text_area = Rect {
+        x: sections[1].x + 1,
+        y: sections[1].y,
+        width: text_area_w,
+        height: 1,
+    };
+    let left_ind_area = Rect {
+        x: sections[1].x,
+        y: sections[1].y,
+        width: 1,
+        height: 1,
+    };
+    let right_ind_area = Rect {
+        x: sections[1].x + 1 + text_area_w,
+        y: sections[1].y,
+        width: 1,
+        height: 1,
+    };
+
+    // Compute horizontal scroll to keep cursor in the visible text area
+    let scroll = state.ws_name.visual_scroll(text_area_w as usize) as u16;
+    let cursor_col = state.ws_name.visual_cursor() as u16;
+    let value_vis_w = UnicodeWidthStr::width(state.ws_name.value()) as u16;
+
+    // Left indicator: ‹ when text is scrolled (content hidden on left)
+    let left_text = if scroll > 0 { "\u{2039}" } else { " " }; // ‹
     frame.render_widget(
-        Paragraph::new(format!("> {}", state.ws_name.value())).style(theme::input_style()),
-        sections[1],
+        Paragraph::new(left_text).style(indicator_style),
+        left_ind_area,
     );
+
+    // Text with horizontal scroll
+    frame.render_widget(
+        Paragraph::new(state.ws_name.value())
+            .style(theme::input_style())
+            .scroll((0, scroll)),
+        text_area,
+    );
+
+    // Right indicator: › when content extends beyond the visible right edge.
+    let right_text = if value_vis_w > text_area_w + scroll {
+        "\u{203a}" // ›
+    } else {
+        " "
+    };
+    frame.render_widget(
+        Paragraph::new(right_text).style(indicator_style),
+        right_ind_area,
+    );
+
+    // Cursor: position within the visible text area (clamped to bounds)
+    let cursor_x = (text_area.x + cursor_col.saturating_sub(scroll))
+        .min(text_area.x + text_area_w.saturating_sub(1));
+    frame.set_cursor_position((cursor_x, text_area.y));
+
     if let Some(err) = &state.error {
         frame.render_widget(
             Paragraph::new(err.as_str()).style(theme::error()),
@@ -482,7 +641,8 @@ fn render_branch_strategy_picker(
     let branch_rows = if n > 0 { 1 + n as u16 + 1 } else { 1 };
     let content_rows = 3 + branch_rows;
     let height: u16 = content_rows + 2 + if has_error { 3 } else { 1 };
-    let area = centered_rect_fixed(62, height, frame.area());
+    let dialog_w = (frame.area().width * 70 / 100).max(62);
+    let area = centered_rect_fixed(dialog_w, height, frame.area());
     frame.render_widget(Clear, area);
 
     let border_style = if has_error {
@@ -511,10 +671,15 @@ fn render_branch_strategy_picker(
 
     let mut items: Vec<ListItem> = Vec::new();
 
-    // Fixed options (selectable indices 0, 1, 2)
+    // Fixed options (selectable indices 0, 1, 2).
+    // Truncate to fit the dialog inner width (minus 4 for the "> " or "  " prefix).
+    let opt_max_w = dialog_w.saturating_sub(2 + 4) as usize;
     let fixed = [
-        format!("New branch '{}'", workspace_name),
-        format!("Existing branch '{}' (if present)", workspace_name),
+        truncate_for_width(&format!("New branch '{}'", workspace_name), opt_max_w),
+        truncate_for_width(
+            &format!("Existing branch '{}' (if present)", workspace_name),
+            opt_max_w,
+        ),
         "Detached HEAD".to_string(),
     ];
     for (i, opt) in fixed.iter().enumerate() {
@@ -533,18 +698,14 @@ fn render_branch_strategy_picker(
         for (i, branch) in recent_branches.iter().enumerate() {
             let sel_idx = 3 + i;
             let time_str = crate::core::git::relative_time(branch.last_commit_time);
-            let max_name = 56_usize.saturating_sub(time_str.len() + 2);
-            let display_name = if branch.name.len() > max_name {
-                let truncated: String = branch
-                    .name
-                    .chars()
-                    .take(max_name.saturating_sub(3))
-                    .collect();
-                format!("{}...", truncated)
-            } else {
-                branch.name.clone()
-            };
-            let padding = 56_usize.saturating_sub(display_name.len() + time_str.len());
+            let inner_w = dialog_w.saturating_sub(2) as usize;
+            // Use display widths (not byte lengths) so non-ASCII branch names align correctly.
+            let time_w = line_width(&time_str);
+            let max_name = inner_w.saturating_sub(6).saturating_sub(time_w + 2);
+            let display_name = truncate_for_width(&branch.name, max_name);
+            let display_w = line_width(&display_name);
+            let content_w = inner_w.saturating_sub(6);
+            let padding = content_w.saturating_sub(display_w + time_w);
             let line = format!("{}{}{}", display_name, " ".repeat(padding), time_str);
             if sel_idx == strategy_idx {
                 items.push(ListItem::new(format!("  > {}", line)).style(theme::selected()));
@@ -588,7 +749,8 @@ fn render_worktree_progress(
     error: Option<&str>,
 ) {
     use ratatui::widgets::Clear;
-    let area = centered_rect_fixed(60, 15, frame.area());
+    let dialog_w = (frame.area().width * 70 / 100).max(60);
+    let area = centered_rect_fixed(dialog_w, 15, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -786,6 +948,46 @@ mod tests {
         assert_eq!(lines[0].width(), 14);
         assert_eq!(lines[1].width(), 12);
     }
+
+    #[test]
+    fn skip_zero_returns_full_string() {
+        assert_eq!(skip_display_width("abcde", 0), "abcde");
+    }
+
+    #[test]
+    fn skip_ascii_offset() {
+        assert_eq!(skip_display_width("abcdefg", 3), "defg");
+    }
+
+    #[test]
+    fn skip_exact_length_returns_empty() {
+        assert_eq!(skip_display_width("abc", 3), "");
+    }
+
+    #[test]
+    fn skip_exceeds_length_returns_empty() {
+        assert_eq!(skip_display_width("abc", 10), "");
+    }
+
+    #[test]
+    fn skip_unicode_multibyte() {
+        // "café" = c(1) a(1) f(1) é(1 display width, 2 UTF-8 bytes)
+        // skip 3 display chars -> should return "é"
+        assert_eq!(skip_display_width("café", 3), "é");
+    }
+
+    #[test]
+    fn skip_wide_char_full_column() {
+        // '日' width=2; skip 2 columns → return "語"
+        assert_eq!(skip_display_width("日語", 2), "語");
+    }
+
+    #[test]
+    fn skip_bisects_wide_char_snaps_forward() {
+        // '日' width=2; skip=1 bisects the wide char.
+        // Policy: snap forward — skip the entire wide char, return "bc".
+        assert_eq!(skip_display_width("日bc", 1), "bc");
+    }
 }
 
 fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame: &mut Frame) {
@@ -885,6 +1087,84 @@ fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame:
     );
 }
 
+fn centered_rect_percent(width_pct: u16, height_pct: u16, area: Rect) -> Rect {
+    let width = (area.width as u32 * width_pct as u32 / 100) as u16;
+    let height = (area.height as u32 * height_pct as u32 / 100) as u16;
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    Rect {
+        x,
+        y,
+        width: width.min(area.width),
+        height: height.min(area.height),
+    }
+}
+
+fn render_diff_overlay(state: &crate::tui::screens::diff::DiffViewerState, frame: &mut Frame) {
+    use crate::core::git::DiffLineKind;
+    use ratatui::widgets::Clear;
+
+    let area = centered_rect_percent(90, 80, frame.area());
+    frame.render_widget(Clear, area);
+
+    let staged_label = if state.staged { "staged" } else { "unstaged" };
+    let title = format!(
+        " {}/{} \u{00b7} HEAD \u{00b7} {} ",
+        state.repo_name, state.file_path, staged_label
+    );
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border_focused())
+        .title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Split inner into body + footer
+    let sections = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+
+    match &state.diff {
+        Ok(file_diff) => {
+            let styled_lines: Vec<Line> = file_diff
+                .lines
+                .iter()
+                .map(|dl| {
+                    let style = match dl.kind {
+                        DiffLineKind::Addition => theme::additions(),
+                        DiffLineKind::Deletion => theme::deletions(),
+                        DiffLineKind::HunkHeader => {
+                            Style::default().fg(ratatui::style::Color::Cyan)
+                        }
+                        DiffLineKind::FileHeader => theme::muted(),
+                        DiffLineKind::Context => Style::default(),
+                        DiffLineKind::Binary => theme::muted(),
+                    };
+                    Line::from(Span::styled(dl.content.clone(), style))
+                })
+                .collect();
+            let paragraph = Paragraph::new(styled_lines).scroll((state.scroll_offset, 0));
+            frame.render_widget(paragraph, sections[0]);
+        }
+        Err(msg) => {
+            frame.render_widget(
+                Paragraph::new(msg.as_str()).style(theme::error()),
+                sections[0],
+            );
+        }
+    }
+
+    let footer_hint = if state.staged {
+        "  \u{2191}\u{2193} scroll \u{00b7} PgUp/PgDn page \u{00b7} s/space unstage \u{00b7} Esc close"
+    } else {
+        "  \u{2191}\u{2193} scroll \u{00b7} PgUp/PgDn page \u{00b7} s/space stage \u{00b7} Esc close"
+    };
+    frame.render_widget(
+        Paragraph::new(footer_hint).style(theme::muted()),
+        sections[1],
+    );
+}
+
 fn render_help_overlay(frame: &mut Frame) {
     use ratatui::widgets::Clear;
 
@@ -900,7 +1180,8 @@ fn render_help_overlay(frame: &mut Frame) {
     let height = (content_rows + 2).min(frame.area().height); // +2 for border
                                                               // Height is clamped to terminal height — content clips on very short terminals
                                                               // (< 27 rows). Acceptable: 24+ rows is the practical minimum for a terminal.
-    let area = centered_rect_fixed(50, height, frame.area());
+    let dialog_w = (frame.area().width * 70 / 100).max(50);
+    let area = centered_rect_fixed(dialog_w, height, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()

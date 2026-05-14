@@ -262,7 +262,10 @@ impl AddState {
             KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
                 let error_msg = self.error.clone();
                 if let Some(err) = error_msg {
-                    ScreenAction::BackWithStatus(format!("Add failed: {}", err))
+                    ScreenAction::BackWithStatus(
+                        format!("Add failed: {}", err),
+                        crate::tui::actions::StatusKind::Error,
+                    )
                 } else {
                     ScreenAction::Back
                 }

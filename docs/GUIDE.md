@@ -131,14 +131,16 @@ graph TD
 Running `space` with no arguments opens an interactive terminal dashboard:
 
 ```
-┌─ Workspaces (25%) ──────────┬─ my-feature (vs base) ────────────────────┐
+┌─ Workspaces (25%) ──────────┬─ my-feature ──────────────────────────────┐
 │  my-feature                 │  ▶ api-service  feat/x  clean   +142 -20  │
 │  hotfix-payment             │  ▼ sak          feat/x  2 modified  +38  -4 │
-│  ...                        │    M src/main.rs          [staged]  +12 -4 │
-│                             │    A src/new.rs            [staged]  +26 -0│
-│                             │    ? untracked.txt                   +3  -0│
+│  ...                        │  ── Unstaged ──────────────────────────── │
+│                             │    M src/main.rs                   +12 -4 │
+│                             │    ? untracked.txt                  +3  -0│
+│                             │  ── Staged ────────────────────────────── │
+│                             │    A src/new.rs                    +26 -0 │
 └─────────────────────────────┴───────────────────────────────────────────┘
- enter expand · ←/esc back · T switch to HEAD · q quit
+ enter expand · ←/esc back · s/space stage · q quit
 ```
 
 ### Layout
@@ -147,18 +149,16 @@ Running `space` with no arguments opens an interactive terminal dashboard:
 - **Right pane (75%):** Repo table with columns: REPO, BRANCH, STATUS, +/-.
   - STATUS shows `clean` (green) or plain-language summaries like `3 modified, 1 new`.
   - +/- shows total file insertions/deletions vs the base branch in green/red.
-  - Repos can be expanded (`→` or `Enter`) to show per-file diff rows beneath them. File rows show a status letter (M/A/D/R/?), file path, staged/unstaged indicator, and per-file +/- counts.
-  - Pane title shows the active diff target: `(vs base)` or `(vs HEAD)`.
+  - Repos can be expanded (`→` or `Enter`) to show per-file diffs. Expanded repos group files into **Conflicts**, **Unstaged**, and **Staged** sections. File rows show a status letter (M/A/D/R/?/!), the file path, and per-file +/- counts. Files with only some hunks staged show a `[partial]` badge; conflicts show `[conflict]`.
 - **Status bar:** Context-sensitive key hints. Shows timed status messages (5-second TTL) when actions complete or fail.
 
-### Diff Targets
+### Diff Viewer
 
-The right pane can show two views, toggled with `T`:
+Press `Enter` on a file row in the expanded repo list to open a full-screen scrollable diff viewer showing the unified diff for that file. Hunks are syntax-colored: green for additions, red for deletions, dimmed for context lines.
 
-| Mode | Shows |
-|------|-------|
-| **vs base** (default) | Total divergence from main/master — all committed + uncommitted changes |
-| **vs HEAD** | Uncommitted changes only — staged and unstaged, with `[staged]`/`[unstaged]` badges |
+- **Navigation:** `j`/`k` or `↑`/`↓` scroll line by line. `PgUp`/`PgDn` page through the diff. `Home`/`End` jump to start/end.
+- **Staging:** Press `s` or `space` to stage or unstage the viewed file. The viewer returns to the dashboard after staging.
+- **Closing:** `Esc` or `q` returns to the dashboard.
 
 ### Key Bindings — Workspaces Pane
 
@@ -182,10 +182,25 @@ The right pane can show two views, toggled with `T`:
 | Key | Action |
 |-----|--------|
 | `j` / `k` or `↑` / `↓` | Navigate through repo rows and expanded file rows |
-| `→` or `Enter` | Expand / collapse repo to show per-file diffs |
+| `→` or `Enter` (on repo row) | Expand / collapse repo to show per-file diffs |
+| `Enter` (on file row) | Open scrollable diff viewer |
 | `←` or `Esc` | Collapse all expanded repos; second press refocuses workspaces pane |
-| `T` | Toggle diff target: base branch ↔ HEAD |
+| `h` | Scroll table left |
+| `l` | Scroll table right |
+| `s` or `space` | Stage / unstage file |
+| `S` | Stage all unstaged files in repo |
+| `U` | Unstage all staged files in repo |
 | `q` | Quit |
+
+### Key Bindings — Diff Viewer
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` or `↑` / `↓` | Scroll up / down |
+| `PgUp` / `PgDn` | Page scroll |
+| `Home` / `End` | Jump to start / end |
+| `s` or `space` | Stage / unstage file |
+| `Esc` / `q` | Close viewer |
 
 ### Theme
 
@@ -198,8 +213,8 @@ Custom color palette:
 | Light Blue | `#82BEFF` | Branch names |
 | Muted | `#646E78` | Dim text, separators, file paths |
 | Error | `#FF6464` | Errors, danger borders, deletion counts |
-| Warn | `#F0C850` | Modified status, unstaged file indicators |
-| Staged Green | `#64DC82` | Insertion counts, staged file indicators |
+| Warn | `#F0C850` | Modified status, warnings, [partial] badge |
+| Staged Green | `#64DC82` | Insertion counts |
 
 ---
 

@@ -1,6 +1,6 @@
 mod common;
 
-use common::{key, test_app, test_app_with_config, TestEnv};
+use common::{key, shift_key, test_app, test_app_with_config, TestEnv};
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::KeyCode;
 use ratatui::Terminal;
@@ -537,6 +537,7 @@ fn dashboard_status_uses_plain_language_summary() {
                 modified: 14,
                 staged: 0,
                 untracked: 3,
+                conflicted: 0,
             },
             ahead: 0,
             behind: 0,
@@ -566,6 +567,7 @@ fn dashboard_status_fits_common_80_col_terminal() {
                 modified: 14,
                 staged: 0,
                 untracked: 3,
+                conflicted: 0,
             },
             ahead: 0,
             behind: 0,
@@ -595,6 +597,7 @@ fn dashboard_three_part_status_fits_common_80_col_terminal() {
                 modified: 14,
                 staged: 3,
                 untracked: 2,
+                conflicted: 0,
             },
             ahead: 0,
             behind: 0,
@@ -1028,7 +1031,8 @@ fn flattened_rows_one_expanded_with_files() {
         ],
     );
     let rows = app.flattened_rows();
-    assert_eq!(rows.len(), 4); // repo-a, repo-b, foo.rs, bar.rs
+    // repo-a, repo-b, SectionHeader("Unstaged"), foo.rs, SectionHeader("Staged"), bar.rs
+    assert_eq!(rows.len(), 6);
     assert!(matches!(
         rows[0],
         space::tui::app::RepoRow::Repo {
@@ -1047,10 +1051,26 @@ fn flattened_rows_one_expanded_with_files() {
     ));
     assert!(matches!(
         rows[2],
-        space::tui::app::RepoRow::File { repo_index: 1, .. }
+        space::tui::app::RepoRow::SectionHeader {
+            repo_index: 1,
+            label: "Unstaged",
+            ..
+        }
     ));
     assert!(matches!(
         rows[3],
+        space::tui::app::RepoRow::File { repo_index: 1, .. }
+    ));
+    assert!(matches!(
+        rows[4],
+        space::tui::app::RepoRow::SectionHeader {
+            repo_index: 1,
+            label: "Staged",
+            ..
+        }
+    ));
+    assert!(matches!(
+        rows[5],
         space::tui::app::RepoRow::File { repo_index: 1, .. }
     ));
 }
@@ -1071,7 +1091,8 @@ fn repo_index_for_cursor_on_file_row() {
             deletions: 0,
         }],
     );
-    app.cursor_row = 2; // repo-a=0, repo-b=1, x.rs=2
+    // repo-a=0, repo-b=1, SectionHeader("Unstaged")=2, x.rs=3
+    app.cursor_row = 3;
     assert_eq!(app.repo_index_for_cursor(), Some(1));
 }
 
@@ -1101,14 +1122,249 @@ fn cursor_row_navigates_through_file_rows() {
             },
         ],
     );
-    // rows: [Repo(0), File(a.rs), File(b.rs)]
+    // rows: [Repo(0), SectionHeader("Unstaged")(1), File(a.rs)(2), SectionHeader("Staged")(3), File(b.rs)(4)]
+    // j/k skip SectionHeader rows, so navigation goes: Repo → a.rs → b.rs
     assert_eq!(app.cursor_row, 0);
     app.handle_key(key(KeyCode::Down));
-    assert_eq!(app.cursor_row, 1);
+    assert_eq!(app.cursor_row, 2); // skips SectionHeader("Unstaged"), lands on a.rs
     app.handle_key(key(KeyCode::Down));
-    assert_eq!(app.cursor_row, 2);
+    assert_eq!(app.cursor_row, 4); // skips SectionHeader("Staged"), lands on b.rs
     app.handle_key(key(KeyCode::Down)); // clamp at end
-    assert_eq!(app.cursor_row, 2);
+    assert_eq!(app.cursor_row, 4);
+}
+
+#[test]
+fn section_header_rows_are_non_interactive() {
+    use space::core::git::{FileEntry, FileStatus};
+
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.expanded_repos.insert(0);
+    app.repo_file_cache.insert(
+        0,
+        vec![FileEntry {
+            path: "x.rs".into(),
+            status: FileStatus::Modified,
+            staged: false,
+            insertions: 1,
+            deletions: 0,
+        }],
+    );
+    // rows: [Repo(0), SectionHeader("Unstaged")(1), File(x.rs)(2)]
+    // Navigate to the section header row
+    app.cursor_row = 1;
+    assert!(
+        matches!(
+            app.flattened_rows().get(1),
+            Some(space::tui::app::RepoRow::SectionHeader { .. })
+        ),
+        "cursor should be on SectionHeader row"
+    );
+
+    // s on a SectionHeader should be a no-op (no staging)
+    let files_before = app.repo_file_cache.get(&0).unwrap().clone();
+    app.handle_key(key(KeyCode::Char('s')));
+    let files_after = app.repo_file_cache.get(&0).unwrap();
+    assert_eq!(
+        files_before[0].staged, files_after[0].staged,
+        "s on SectionHeader should not change staging state"
+    );
+
+    // Enter on a SectionHeader should be a no-op (no diff viewer)
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "Enter on SectionHeader should stay on Dashboard"
+    );
+}
+
+#[test]
+fn j_skips_section_headers() {
+    use space::core::git::{FileEntry, FileStatus};
+
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.expanded_repos.insert(0);
+    app.repo_file_cache.insert(
+        0,
+        vec![
+            FileEntry {
+                path: "a.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 1,
+                deletions: 0,
+            },
+            FileEntry {
+                path: "b.rs".into(),
+                status: FileStatus::Added,
+                staged: true,
+                insertions: 5,
+                deletions: 0,
+            },
+        ],
+    );
+    // rows: [Repo(0), SectionHeader("Unstaged"), File(a.rs), SectionHeader("Staged"), File(b.rs)]
+    // cursor at 0 (Repo)
+    app.cursor_row = 0;
+    app.handle_key(key(KeyCode::Down)); // should skip SectionHeader("Unstaged") → land on File(a.rs) at row 2
+    assert_eq!(
+        app.cursor_row, 2,
+        "Down from Repo should skip SectionHeader and land on a.rs"
+    );
+
+    app.handle_key(key(KeyCode::Down)); // should skip SectionHeader("Staged") → land on File(b.rs) at row 4
+    assert_eq!(
+        app.cursor_row, 4,
+        "Down from a.rs should skip SectionHeader and land on b.rs"
+    );
+
+    app.handle_key(key(KeyCode::Down)); // clamp at 4
+    assert_eq!(app.cursor_row, 4, "Down at end should stay at b.rs");
+}
+
+#[test]
+fn k_skips_section_headers() {
+    use space::core::git::{FileEntry, FileStatus};
+
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.expanded_repos.insert(0);
+    app.repo_file_cache.insert(
+        0,
+        vec![
+            FileEntry {
+                path: "a.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 1,
+                deletions: 0,
+            },
+            FileEntry {
+                path: "b.rs".into(),
+                status: FileStatus::Added,
+                staged: true,
+                insertions: 5,
+                deletions: 0,
+            },
+        ],
+    );
+    // rows: [Repo(0), SectionHeader("Unstaged"), File(a.rs), SectionHeader("Staged"), File(b.rs)]
+    app.cursor_row = 4; // start at b.rs
+    app.handle_key(key(KeyCode::Up)); // should skip SectionHeader("Staged") → land on a.rs at row 2
+    assert_eq!(
+        app.cursor_row, 2,
+        "Up from b.rs should skip SectionHeader and land on a.rs"
+    );
+
+    app.handle_key(key(KeyCode::Up)); // should skip SectionHeader("Unstaged") → land on Repo at row 0
+    assert_eq!(
+        app.cursor_row, 0,
+        "Up from a.rs should skip SectionHeader and land on Repo"
+    );
+}
+
+#[test]
+fn cursor_repositions_after_staging() {
+    use space::core::git::{FileEntry, FileStatus};
+
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.expanded_repos.insert(0);
+    // Two unstaged files
+    app.repo_file_cache.insert(
+        0,
+        vec![
+            FileEntry {
+                path: "a.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 1,
+                deletions: 0,
+            },
+            FileEntry {
+                path: "b.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 2,
+                deletions: 0,
+            },
+        ],
+    );
+    // rows: [Repo(0), SectionHeader("Unstaged"), File(a.rs at 2), File(b.rs at 3)]
+    // cursor on a.rs
+    app.cursor_row = 2;
+
+    // Simulate staging a.rs by updating cache directly (no real git repo)
+    app.repo_file_cache.insert(
+        0,
+        vec![
+            FileEntry {
+                path: "a.rs".into(),
+                status: FileStatus::Modified,
+                staged: true, // now staged
+                insertions: 1,
+                deletions: 0,
+            },
+            FileEntry {
+                path: "b.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 2,
+                deletions: 0,
+            },
+        ],
+    );
+    // rows after: [Repo(0), SectionHeader("Unstaged"), File(b.rs at 2), SectionHeader("Staged"), File(a.rs at 4)]
+    // cursor_row=2 was a.rs (now b.rs is at row 2) — cursor stays valid
+    // Apply the reposition logic manually by calling Down then verifying sensible state
+    // The key invariant: cursor must NOT be on a SectionHeader
+    let rows = app.flattened_rows();
+    let cursor = app.cursor_row.min(rows.len().saturating_sub(1));
+    assert!(
+        !matches!(rows[cursor], space::tui::app::RepoRow::SectionHeader { .. }),
+        "cursor should not rest on a SectionHeader after section structure change"
+    );
+}
+
+/// End-to-end test: stage a file via the `s` key on a real repo and verify the
+/// cursor lands on a non-SectionHeader row (proves `reposition_after_section_change`
+/// fires correctly through the `StageFile` message handler).
+#[test]
+fn cursor_not_on_section_header_after_s_key_stages_file() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+    // setup_real_repo_app leaves cursor on the file row (unstaged modification)
+    // rows: [Repo(0), SectionHeader("Unstaged"), File(file.txt)]
+    // cursor is at row 2 (the file row)
+    assert!(
+        matches!(
+            app.flattened_rows().get(app.cursor_row),
+            Some(space::tui::app::RepoRow::File { .. })
+        ),
+        "pre-condition: cursor should start on a File row"
+    );
+
+    // Press s to stage the file
+    app.handle_key(key(KeyCode::Char('s')));
+
+    // After staging, rows change:
+    // [Repo(0), SectionHeader("Staged"), File(file.txt staged)]
+    // cursor must not rest on a SectionHeader
+    let rows = app.flattened_rows();
+    let cursor = app.cursor_row;
+    assert!(
+        cursor < rows.len(),
+        "cursor_row {cursor} must be within bounds (rows len {})",
+        rows.len()
+    );
+    assert!(
+        !matches!(rows[cursor], space::tui::app::RepoRow::SectionHeader { .. }),
+        "cursor must not rest on SectionHeader after staging, got row {cursor}"
+    );
 }
 
 #[test]
@@ -1244,54 +1500,6 @@ fn workspace_switch_clears_expand_state() {
 }
 
 // ---------------------------------------------------------------------------
-// Diff target toggle (Task 6)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn shift_t_toggles_diff_target_to_head() {
-    // Default is now Base -- T should toggle to Head
-    let mut app = test_app(vec![], vec![]);
-    assert!(matches!(
-        app.diff_target,
-        space::core::git::DiffTarget::Base
-    ));
-    app.handle_key(key(KeyCode::Char('T'))); // uppercase T = Shift+T
-    assert!(matches!(
-        app.diff_target,
-        space::core::git::DiffTarget::Head
-    ));
-}
-
-#[test]
-fn shift_t_toggles_diff_target_back_to_base() {
-    let mut app = test_app(vec![], vec![]);
-    app.handle_key(key(KeyCode::Char('T')));
-    app.handle_key(key(KeyCode::Char('T')));
-    assert!(matches!(
-        app.diff_target,
-        space::core::git::DiffTarget::Base
-    ));
-}
-
-#[test]
-fn toggle_diff_target_re_fetches_expanded_cache() {
-    let ws = common::workspace_with_repos(&["repo-a"]);
-    let mut app = test_app(vec![ws], vec![]);
-    // Default is Base; toggle should switch to Head
-    assert!(matches!(
-        app.diff_target,
-        space::core::git::DiffTarget::Base
-    ));
-    app.handle_key(key(KeyCode::Char('T')));
-    assert!(
-        matches!(app.diff_target, space::core::git::DiffTarget::Head),
-        "diff_target should be Head after toggle from Base"
-    );
-    // refresh_file_diff_cache clears and re-fetches; repo path doesn't exist
-    // so no entries are inserted -- that's correct behaviour (not a bug).
-}
-
-// ---------------------------------------------------------------------------
 // Integration smoke tests for Phase 1 feature (Task manual test equivalent)
 // ---------------------------------------------------------------------------
 
@@ -1352,8 +1560,6 @@ fn phase1_expand_dirty_repo_shows_file_entries() {
     let config = config_from_env(&env);
     let mut app = test_app_with_config(config, vec![ws], vec![]);
     app.focus = Pane::Right;
-    // Use Head mode so staged/unstaged flags are meaningful
-    app.diff_target = space::core::git::DiffTarget::Head;
 
     // Pre-expand: should have 1 repo row (collapsed)
     assert_eq!(app.flattened_rows().len(), 1);
@@ -1450,11 +1656,11 @@ fn phase1_collapse_snaps_cursor_to_repo_row() {
         ],
     );
 
-    // Navigate cursor to the last file row (index 4: repo-a=0, repo-b=1, a=2, b=3, c=4)
-    app.cursor_row = 4;
+    // Navigate cursor to repo-b's header row (index 1: repo-a=0, repo-b=1, then files)
+    app.cursor_row = 1;
     assert_eq!(app.repo_index_for_cursor(), Some(1));
 
-    // Collapse via Enter
+    // Collapse via Enter on the repo header row
     app.handle_key(key(KeyCode::Enter));
 
     // repo-b should be collapsed
@@ -1468,45 +1674,6 @@ fn phase1_collapse_snaps_cursor_to_repo_row() {
         app.flattened_rows().len(),
         2,
         "only 2 rows after full collapse"
-    );
-}
-
-#[test]
-fn phase1_toggle_diff_target_updates_title_label() {
-    // Verify diff_target state changes when T is pressed -- the title label
-    // in render_repo_table reads app.diff_target, so this covers that path.
-    let ws = common::workspace_with_repos(&["repo-a"]);
-    let mut app = test_app(vec![ws], vec![]);
-
-    // Default is now Base
-    assert!(matches!(
-        app.diff_target,
-        space::core::git::DiffTarget::Base
-    ));
-
-    app.handle_key(key(KeyCode::Char('T')));
-    assert!(matches!(
-        app.diff_target,
-        space::core::git::DiffTarget::Head
-    ));
-
-    // Status message should be set
-    assert!(
-        app.status_message.as_deref().unwrap_or("").contains("HEAD"),
-        "status message should mention HEAD"
-    );
-
-    app.handle_key(key(KeyCode::Char('T')));
-    assert!(matches!(
-        app.diff_target,
-        space::core::git::DiffTarget::Base
-    ));
-    assert!(
-        app.status_message
-            .as_deref()
-            .unwrap_or("")
-            .contains("base branch"),
-        "status message should mention base branch"
     );
 }
 
@@ -1626,5 +1793,1093 @@ fn help_other_keys_are_noop() {
     assert!(
         matches!(app.screen, Screen::Help),
         "Help should remain open after non-close keys"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Diff viewer + staging integration tests (Phase 2)
+// ---------------------------------------------------------------------------
+
+/// Helper: set up a TestEnv with a real repo containing a committed file and
+/// an unstaged modification. Returns (env, repo_path, app) with diff_target=Head,
+/// the repo expanded, and cursor on the file row.
+fn setup_real_repo_app() -> (TestEnv, PathBuf, App) {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("testrepo");
+
+    // Commit a file, then modify it to create an unstaged change
+    std::fs::write(repo_path.join("file.txt"), "initial").unwrap();
+    let out = std::process::Command::new("git")
+        .args(["add", "file.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("git add failed to run");
+    assert!(
+        out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = std::process::Command::new("git")
+        .args(["commit", "-m", "add file"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("git commit failed to run");
+    assert!(
+        out.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::write(repo_path.join("file.txt"), "modified").unwrap();
+
+    let ws = Workspace {
+        name: "test-ws".into(),
+        path: env.workspaces_dir.clone(),
+        repos: vec![WorkspaceRepo {
+            name: "testrepo".into(),
+            path: repo_path.clone(),
+            branch: "main".into(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
+    app.load_selected_workspace_detail();
+
+    // Focus right pane and expand the repo
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Enter)); // expand repo at cursor_row=0
+
+    // Navigate to the file row (Down skips SectionHeader, second Down is a no-op at end)
+    app.handle_key(key(KeyCode::Down)); // skips SectionHeader("Unstaged") → File(file.txt)
+    app.handle_key(key(KeyCode::Down)); // clamp: already at last row, stays on File(file.txt)
+
+    (env, repo_path, app)
+}
+
+#[test]
+fn enter_on_file_row_opens_diff_viewer() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    // Cursor should be on a file row now; press Enter to open diff viewer
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::DiffViewer(_)),
+        "expected DiffViewer screen, got {:?}",
+        std::mem::discriminant(&app.screen)
+    );
+}
+
+#[test]
+fn esc_in_diff_viewer_returns_to_dashboard() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    app.handle_key(key(KeyCode::Enter)); // open diff viewer
+    assert!(matches!(app.screen, Screen::DiffViewer(_)));
+
+    app.handle_key(key(KeyCode::Esc));
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "expected Dashboard after Esc from DiffViewer"
+    );
+}
+
+#[test]
+fn j_in_diff_viewer_increments_scroll() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    app.handle_key(key(KeyCode::Enter)); // open diff viewer
+    if let Screen::DiffViewer(ref state) = app.screen {
+        assert_eq!(state.scroll_offset, 0, "scroll should start at 0");
+    } else {
+        panic!("expected DiffViewer screen");
+    }
+
+    app.handle_key(key(KeyCode::Char('j')));
+    if let Screen::DiffViewer(ref state) = app.screen {
+        // If there are diff lines, scroll should have advanced
+        if state.total_lines > 1 {
+            assert!(
+                state.scroll_offset > 0,
+                "scroll_offset should increase after j"
+            );
+        }
+    } else {
+        panic!("expected DiffViewer screen after j");
+    }
+}
+
+#[test]
+fn k_at_top_does_not_underflow() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    app.handle_key(key(KeyCode::Enter)); // open diff viewer
+    if let Screen::DiffViewer(ref state) = app.screen {
+        assert_eq!(state.scroll_offset, 0, "should start at 0");
+    } else {
+        panic!("expected DiffViewer screen");
+    }
+
+    app.handle_key(key(KeyCode::Char('k')));
+    if let Screen::DiffViewer(ref state) = app.screen {
+        assert_eq!(
+            state.scroll_offset, 0,
+            "scroll_offset should remain 0 after k at top"
+        );
+    } else {
+        panic!("expected DiffViewer screen after k");
+    }
+}
+
+#[test]
+fn s_on_file_row_in_head_mode_stages() {
+    let (_env, repo_path, mut app) = setup_real_repo_app();
+
+    // Verify file is unstaged before staging
+    let files_before = app.repo_file_cache.get(&0).expect("should have cache");
+    let file_entry = files_before
+        .iter()
+        .find(|e| e.path == "file.txt")
+        .expect("file.txt should be in cache");
+    assert!(
+        !file_entry.staged,
+        "file.txt should be unstaged before pressing s"
+    );
+
+    // Press s to stage the file
+    app.handle_key(key(KeyCode::Char('s')));
+
+    // After staging, the repo_file_cache should be refreshed
+    let files_after = app.repo_file_cache.get(&0).expect("cache should exist");
+    let file_entry_after = files_after
+        .iter()
+        .find(|e| e.path == "file.txt")
+        .expect("file.txt should still be in cache");
+    assert!(
+        file_entry_after.staged,
+        "file.txt should be staged after pressing s"
+    );
+
+    // Verify via git that the file is actually staged
+    let status_out = std::process::Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("git diff --cached failed to run");
+    let staged_files = String::from_utf8_lossy(&status_out.stdout);
+    assert!(
+        staged_files.contains("file.txt"),
+        "file.txt should be staged in git"
+    );
+}
+
+#[test]
+fn shift_s_on_repo_row_stages_all_unstaged() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("bulk-stage-repo");
+
+    // Create two committed files, then modify both
+    for name in &["a.txt", "b.txt"] {
+        std::fs::write(repo_path.join(name), "initial").unwrap();
+    }
+    let out = std::process::Command::new("git")
+        .args(["add", "a.txt", "b.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("git add failed to run");
+    assert!(
+        out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = std::process::Command::new("git")
+        .args(["commit", "-m", "add files"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("git commit failed to run");
+    assert!(
+        out.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for name in &["a.txt", "b.txt"] {
+        std::fs::write(repo_path.join(name), "modified").unwrap();
+    }
+
+    let ws = Workspace {
+        name: "test-ws".into(),
+        path: env.workspaces_dir.clone(),
+        repos: vec![WorkspaceRepo {
+            name: "bulk-stage-repo".into(),
+            path: repo_path.clone(),
+            branch: "main".into(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
+    app.load_selected_workspace_detail();
+
+    // Focus right pane and expand repo
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Enter));
+
+    // Cursor is on repo row (row 0). Press Shift+S to stage all
+    assert_eq!(app.cursor_row, 0);
+    app.handle_key(shift_key(KeyCode::Char('S')));
+
+    // All files should now be staged
+    let files = app.repo_file_cache.get(&0).expect("cache should exist");
+    assert!(
+        files.iter().all(|e| e.staged),
+        "all files should be staged after S: {:?}",
+        files
+            .iter()
+            .map(|e| (&e.path, e.staged))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shift_u_on_repo_row_unstages_all_staged() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("bulk-unstage-repo");
+
+    // Create a file, commit it, modify it, then stage the modification
+    std::fs::write(repo_path.join("file.txt"), "initial").unwrap();
+    let out = std::process::Command::new("git")
+        .args(["add", "file.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("git add failed to run");
+    assert!(
+        out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = std::process::Command::new("git")
+        .args(["commit", "-m", "add file"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("git commit failed to run");
+    assert!(
+        out.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::write(repo_path.join("file.txt"), "modified").unwrap();
+    // Stage the modification
+    let out = std::process::Command::new("git")
+        .args(["add", "file.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("git add failed to run");
+    assert!(
+        out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let ws = Workspace {
+        name: "test-ws".into(),
+        path: env.workspaces_dir.clone(),
+        repos: vec![WorkspaceRepo {
+            name: "bulk-unstage-repo".into(),
+            path: repo_path.clone(),
+            branch: "main".into(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
+    app.load_selected_workspace_detail();
+
+    // Verify file is staged before we unstage
+    let files_before = app.repo_file_cache.get(&0).expect("cache should exist");
+    assert!(
+        files_before.iter().any(|e| e.staged),
+        "should have at least one staged file before U"
+    );
+
+    // Focus right pane and expand repo
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Enter));
+
+    // Cursor is on repo row (row 0). Press U to unstage all
+    assert_eq!(app.cursor_row, 0);
+    app.handle_key(shift_key(KeyCode::Char('U')));
+
+    // All files should now be unstaged
+    let files = app.repo_file_cache.get(&0).expect("cache should exist");
+    assert!(
+        files.iter().all(|e| !e.staged),
+        "all files should be unstaged after U: {:?}",
+        files
+            .iter()
+            .map(|e| (&e.path, e.staged))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn staging_invalidates_diff_content_cache() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    // Open diff viewer to populate the diff_content_cache
+    app.handle_key(key(KeyCode::Enter)); // open diff viewer
+    assert!(matches!(app.screen, Screen::DiffViewer(_)));
+
+    // Go back to dashboard
+    app.handle_key(key(KeyCode::Esc));
+    assert!(matches!(app.screen, Screen::Dashboard));
+
+    // Verify diff_content_cache has entries for repo 0
+    assert!(
+        app.diff_content_cache.keys().any(|k| k.repo_index == 0),
+        "diff_content_cache should have entries for repo 0 after viewing diff"
+    );
+
+    // Navigate back to the file row and stage it
+    app.handle_key(key(KeyCode::Down)); // move to file row
+    app.handle_key(key(KeyCode::Char('s'))); // stage the file
+
+    // After staging, diff_content_cache entries for repo 0 should be gone
+    assert!(
+        !app.diff_content_cache.keys().any(|k| k.repo_index == 0),
+        "diff_content_cache entries for repo 0 should be invalidated after staging"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 – diff viewer staging, scrolling, caching, error handling
+// ---------------------------------------------------------------------------
+
+#[test]
+fn s_in_diff_viewer_stages_file_and_returns_to_dashboard() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    // Verify file.txt is unstaged
+    let files = app.repo_file_cache.get(&0).expect("cache should exist");
+    assert!(
+        files
+            .iter()
+            .any(|e| !e.staged && e.path.contains("file.txt")),
+        "file.txt should be unstaged initially"
+    );
+
+    // Open diff viewer
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::DiffViewer(_)),
+        "expected DiffViewer screen after Enter"
+    );
+
+    // Press 's' to stage from inside the viewer
+    app.handle_key(key(KeyCode::Char('s')));
+
+    // Should return to dashboard
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "expected Dashboard after staging from DiffViewer"
+    );
+
+    // file.txt should now be staged
+    let files_after = app.repo_file_cache.get(&0).expect("cache should exist");
+    assert!(
+        files_after
+            .iter()
+            .any(|e| e.staged && e.path.contains("file.txt")),
+        "file.txt should be staged after pressing s in diff viewer"
+    );
+
+    // Status message should mention staging
+    let msg = app.status_message.as_deref().unwrap_or("");
+    assert!(
+        msg.to_lowercase().contains("staged"),
+        "status_message should contain 'Staged', got: {msg}"
+    );
+}
+
+#[test]
+fn s_in_diff_viewer_unstages_staged_file_and_returns_to_dashboard() {
+    // Setup: create a repo with a staged modification (not unstaged like setup_real_repo_app)
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("testrepo");
+
+    // Commit a file
+    std::fs::write(repo_path.join("file.txt"), "initial").unwrap();
+    let out = std::process::Command::new("git")
+        .args(["add", "file.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("git add failed to run");
+    assert!(
+        out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = std::process::Command::new("git")
+        .args(["commit", "-m", "add file"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("git commit failed to run");
+    assert!(
+        out.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Modify the file and stage the modification
+    std::fs::write(repo_path.join("file.txt"), "modified").unwrap();
+    let out = std::process::Command::new("git")
+        .args(["add", "file.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("git add (stage modification) failed to run");
+    assert!(
+        out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Build the app with DiffTarget::Head
+    let ws = Workspace {
+        name: "test-ws".into(),
+        path: env.workspaces_dir.clone(),
+        repos: vec![WorkspaceRepo {
+            name: "testrepo".into(),
+            path: repo_path.clone(),
+            branch: "main".into(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
+    app.load_selected_workspace_detail();
+
+    // Focus right pane, expand repo, navigate to file row
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Enter)); // expand repo at cursor_row=0
+    app.handle_key(key(KeyCode::Down)); // skips SectionHeader("Staged") → File(file.txt)
+    app.handle_key(key(KeyCode::Down)); // clamp: already at last row, stays on File(file.txt)
+
+    // Verify file.txt is staged before opening viewer
+    let files = app.repo_file_cache.get(&0).expect("cache should exist");
+    assert!(
+        files
+            .iter()
+            .any(|e| e.staged && e.path.contains("file.txt")),
+        "file.txt should be staged initially"
+    );
+
+    // Open diff viewer
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::DiffViewer(_)),
+        "expected DiffViewer screen after Enter"
+    );
+
+    // Assert state.staged == true (we're viewing a staged file)
+    if let Screen::DiffViewer(ref state) = app.screen {
+        assert!(
+            state.staged,
+            "DiffViewerState.staged should be true for a staged file"
+        );
+    }
+
+    // Press 's' to unstage from inside the viewer
+    app.handle_key(key(KeyCode::Char('s')));
+
+    // Should return to dashboard
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "expected Dashboard after unstaging from DiffViewer"
+    );
+
+    // file.txt should now be unstaged in repo_file_cache
+    let files_after = app.repo_file_cache.get(&0).expect("cache should exist");
+    assert!(
+        files_after
+            .iter()
+            .any(|e| !e.staged && e.path.contains("file.txt")),
+        "file.txt should be unstaged after pressing s in diff viewer"
+    );
+
+    // Status message should mention "Unstaged"
+    let msg = app.status_message.as_deref().unwrap_or("");
+    assert!(
+        msg.to_lowercase().contains("unstaged"),
+        "status_message should contain 'Unstaged', got: {msg}"
+    );
+}
+
+#[test]
+fn diff_viewer_page_and_home_end_scrolling() {
+    use space::core::config::SpaceConfig;
+    use space::core::git::{DiffLine, DiffLineKind, FileDiff};
+    use space::tui::actions::ScreenContext;
+    use space::tui::screens::diff::DiffViewerState;
+
+    let lines: Vec<DiffLine> = (0..30)
+        .map(|i| DiffLine {
+            kind: DiffLineKind::Context,
+            content: format!(" line {i}"),
+        })
+        .collect();
+
+    let diff = FileDiff {
+        path: "big.txt".into(),
+        old_path: None,
+        is_binary: false,
+        lines,
+    };
+
+    let mut state = DiffViewerState {
+        repo_index: 0,
+        repo_name: "test".into(),
+        repo_path: PathBuf::from("/tmp/fake"),
+        file_path: "big.txt".into(),
+        staged: false,
+        diff: Ok(diff),
+        scroll_offset: 0,
+        total_lines: 30,
+    };
+
+    let config = SpaceConfig::default();
+    let ctx = ScreenContext { config: &config };
+
+    // PageDown from 0 → 10
+    state.handle_key(key(KeyCode::PageDown), &ctx);
+    assert_eq!(state.scroll_offset, 10, "PageDown from 0 should go to 10");
+
+    // PageDown from 10 → 20
+    state.handle_key(key(KeyCode::PageDown), &ctx);
+    assert_eq!(state.scroll_offset, 20, "PageDown from 10 should go to 20");
+
+    // PageDown from 20 → capped at 29
+    state.handle_key(key(KeyCode::PageDown), &ctx);
+    assert_eq!(state.scroll_offset, 29, "PageDown from 20 should cap at 29");
+
+    // PageUp from 29 → 19
+    state.handle_key(key(KeyCode::PageUp), &ctx);
+    assert_eq!(state.scroll_offset, 19, "PageUp from 29 should go to 19");
+
+    // End → 29
+    state.handle_key(key(KeyCode::End), &ctx);
+    assert_eq!(state.scroll_offset, 29, "End should go to 29");
+
+    // Home → 0
+    state.handle_key(key(KeyCode::Home), &ctx);
+    assert_eq!(state.scroll_offset, 0, "Home should go to 0");
+
+    // PageUp from 0 → stays at 0 (no underflow)
+    state.handle_key(key(KeyCode::PageUp), &ctx);
+    assert_eq!(state.scroll_offset, 0, "PageUp from 0 should stay at 0");
+}
+
+#[test]
+fn reopening_diff_viewer_uses_cache() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    // Open diff viewer
+    app.handle_key(key(KeyCode::Enter));
+    assert!(matches!(app.screen, Screen::DiffViewer(_)));
+
+    // Close it
+    app.handle_key(key(KeyCode::Esc));
+    assert!(matches!(app.screen, Screen::Dashboard));
+
+    // Verify cache has entries for repo 0
+    assert!(
+        app.diff_content_cache.keys().any(|k| k.repo_index == 0),
+        "diff_content_cache should have entries for repo 0 after viewing diff"
+    );
+
+    // Count cache entries for repo 0
+    let count_before = app
+        .diff_content_cache
+        .keys()
+        .filter(|k| k.repo_index == 0)
+        .count();
+
+    // Re-open the same file
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::DiffViewer(_)),
+        "expected DiffViewer screen on re-open"
+    );
+
+    // Close again so cache is still visible
+    app.handle_key(key(KeyCode::Esc));
+
+    // Count should be the same (cache hit, no new entries)
+    let count_after = app
+        .diff_content_cache
+        .keys()
+        .filter(|k| k.repo_index == 0)
+        .count();
+    assert_eq!(
+        count_before, count_after,
+        "cache entry count should be the same after re-opening (cache hit): before={count_before}, after={count_after}"
+    );
+}
+
+#[test]
+fn stage_with_invalid_repo_path_shows_error_status() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    // Corrupt the repo path
+    app.workspaces[0].repos[0].path = PathBuf::from("/nonexistent/repo");
+
+    // Press 's' to try staging
+    app.handle_key(key(KeyCode::Char('s')));
+
+    // Status message should contain "failed"
+    let msg = app.status_message.as_deref().unwrap_or("");
+    assert!(
+        msg.to_lowercase().contains("failed"),
+        "status_message should contain 'failed', got: {msg}"
+    );
+
+    // Should still be on dashboard (no crash)
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "should remain on Dashboard after failed stage"
+    );
+}
+
+#[test]
+fn bulk_stage_with_invalid_repo_path_shows_error_status() {
+    let (_env, _repo_path, mut app) = setup_real_repo_app();
+
+    // Move cursor to repo row
+    app.cursor_row = 0;
+
+    // Corrupt the repo path
+    app.workspaces[0].repos[0].path = PathBuf::from("/nonexistent/repo");
+
+    // Press shift+S to try bulk staging
+    app.handle_key(shift_key(KeyCode::Char('S')));
+
+    // Status message should contain "failed"
+    let msg = app.status_message.as_deref().unwrap_or("");
+    assert!(
+        msg.to_lowercase().contains("failed"),
+        "status_message should contain 'failed', got: {msg}"
+    );
+
+    // Should still be on dashboard (no crash)
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "should remain on Dashboard after failed bulk stage"
+    );
+}
+
+#[test]
+fn external_change_invalidates_diff_content_cache() {
+    let (_env, repo_path, mut app) = setup_real_repo_app();
+
+    // Open diff viewer (populates diff_content_cache)
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::DiffViewer(_)),
+        "expected DiffViewer screen"
+    );
+
+    // Close diff viewer
+    app.handle_key(key(KeyCode::Esc));
+    assert!(matches!(app.screen, Screen::Dashboard));
+
+    // Assert diff_content_cache is non-empty
+    assert!(
+        !app.diff_content_cache.is_empty(),
+        "diff_content_cache should be populated after viewing a diff"
+    );
+
+    // Remember the old cache content for comparison
+    let old_cache_keys: Vec<_> = app.diff_content_cache.keys().cloned().collect();
+
+    // Simulate an external change: stage the current modification (changes .git/index mtime),
+    // then write new content so there's still an unstaged diff to view.
+    let out = std::process::Command::new("git")
+        .args(["add", "file.txt"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("git add failed to run");
+    assert!(
+        out.status.success(),
+        "git add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Write new content so there's still an unstaged change against HEAD
+    std::fs::write(repo_path.join("file.txt"), "externally modified content").unwrap();
+
+    // Open diff viewer again -- staleness check should invalidate the cache
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::DiffViewer(_)),
+        "expected DiffViewer screen after re-opening"
+    );
+
+    // The diff_content_cache should have been invalidated and repopulated with fresh data.
+    // Verify the new diff reflects the external change by checking that a cache entry exists
+    // and contains the new content.
+    let has_new_content = app.diff_content_cache.values().any(|result| {
+        if let Ok(diff) = result {
+            diff.lines
+                .iter()
+                .any(|line| line.content.contains("externally modified content"))
+        } else {
+            false
+        }
+    });
+    assert!(
+        has_new_content,
+        "diff_content_cache should reflect the externally modified content; keys: {:?}",
+        old_cache_keys
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Partially-staged file detection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn partially_staged_file_shows_in_both_sections() {
+    use space::core::git::{FileEntry, FileStatus};
+
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.expanded_repos.insert(0);
+
+    // Simulate a partially-staged file: same path "main.rs" appears
+    // in both staged and unstaged (e.g. only some hunks were staged)
+    app.repo_file_cache.insert(
+        0,
+        vec![
+            FileEntry {
+                path: "main.rs".into(),
+                status: FileStatus::Modified,
+                staged: true, // the staged version
+                insertions: 3,
+                deletions: 1,
+            },
+            FileEntry {
+                path: "main.rs".into(),
+                status: FileStatus::Modified,
+                staged: false, // the unstaged version
+                insertions: 2,
+                deletions: 0,
+            },
+            FileEntry {
+                path: "other.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 1,
+                deletions: 0,
+            },
+        ],
+    );
+
+    let rows = app.flattened_rows();
+
+    // Collect all File rows
+    let file_rows: Vec<_> = rows
+        .iter()
+        .filter_map(|r| {
+            if let space::tui::app::RepoRow::File {
+                entry,
+                partially_staged,
+                ..
+            } = r
+            {
+                Some((entry.path.as_str(), entry.staged, *partially_staged))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // main.rs should appear twice (once unstaged, once staged) and both should be marked partial
+    let main_rows: Vec<_> = file_rows
+        .iter()
+        .filter(|(p, _, _)| *p == "main.rs")
+        .collect();
+    assert_eq!(main_rows.len(), 2, "main.rs should appear in both sections");
+    assert!(
+        main_rows.iter().all(|(_, _, partial)| *partial),
+        "both main.rs entries should be marked partially_staged"
+    );
+
+    // other.rs should not be marked partial
+    let other = file_rows
+        .iter()
+        .find(|(p, _, _)| *p == "other.rs")
+        .expect("other.rs should appear");
+    assert!(!other.2, "other.rs should not be marked partially_staged");
+}
+
+/// Defensive test: a Conflicted entry with staged=true (impossible from git2 today,
+/// but guarded against) must appear only in the Conflicts section, not the Staged section.
+#[test]
+fn conflicted_staged_entry_appears_only_in_conflicts_section() {
+    use space::core::git::{FileEntry, FileStatus};
+
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.expanded_repos.insert(0);
+
+    // Inject a hypothetical entry that is both Conflicted and staged=true.
+    // This state is impossible from file_diff() today (conflicts always have staged=false),
+    // but Fix 1 defensively excludes it from the Staged section regardless.
+    app.repo_file_cache.insert(
+        0,
+        vec![FileEntry {
+            path: "conflict.rs".into(),
+            status: FileStatus::Conflicted,
+            staged: true, // hypothetical — should NOT land in Staged section
+            insertions: 0,
+            deletions: 0,
+        }],
+    );
+
+    let rows = app.flattened_rows();
+
+    // Should appear in the Conflicts section only
+    let section_labels: Vec<_> = rows
+        .iter()
+        .filter_map(|r| {
+            if let space::tui::app::RepoRow::SectionHeader { label, .. } = r {
+                Some(*label)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(
+        section_labels.contains(&"Conflicts"),
+        "expected a Conflicts section header"
+    );
+    assert!(
+        !section_labels.contains(&"Staged"),
+        "Conflicted entry with staged=true must not create a Staged section"
+    );
+}
+
+#[test]
+fn external_file_edit_invalidates_cached_unstaged_diff() {
+    let (_env, repo_path, mut app) = setup_real_repo_app();
+
+    // Open diff viewer — populates diff_content_cache and file_mtime_cache
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::DiffViewer(_)),
+        "expected DiffViewer screen"
+    );
+
+    // Close diff viewer
+    app.handle_key(key(KeyCode::Esc));
+    assert!(matches!(app.screen, Screen::Dashboard));
+
+    // Assert caches are populated
+    assert!(
+        !app.diff_content_cache.is_empty(),
+        "diff_content_cache should be populated after viewing a diff"
+    );
+    assert!(
+        !app.file_mtime_cache.is_empty(),
+        "file_mtime_cache should be populated after viewing an unstaged diff"
+    );
+
+    // Externally modify the file (without staging — .git/index mtime doesn't change).
+    // Poll until the filesystem mtime actually advances before writing, so the test
+    // is not sensitive to mtime granularity (ext4 = 1s, APFS = 1ns).
+    let pre_mtime = std::fs::metadata(repo_path.join("file.txt"))
+        .and_then(|m| m.modified())
+        .ok();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        std::fs::write(repo_path.join("file.txt"), "changed again").unwrap();
+        let new_mtime = std::fs::metadata(repo_path.join("file.txt"))
+            .and_then(|m| m.modified())
+            .ok();
+        if new_mtime != pre_mtime {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            break; // proceed anyway — assert below will catch if cache wasn't invalidated
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // Open diff viewer again — file mtime staleness check should invalidate the cache
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::DiffViewer(_)),
+        "expected DiffViewer screen after re-opening"
+    );
+
+    // The diff content should reflect the new file content
+    let has_new_content = app.diff_content_cache.values().any(|result| {
+        if let Ok(diff) = result {
+            diff.lines
+                .iter()
+                .any(|line| line.content.contains("changed again"))
+        } else {
+            false
+        }
+    });
+    assert!(
+        has_new_content,
+        "diff_content_cache should reflect the externally modified file content 'changed again'"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Horizontal table scroll tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scroll_table_right_increments_scroll_x() {
+    let ws = common::workspace_with_repos(&["api"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    assert_eq!(app.table_scroll_x, 0);
+    app.handle_key(key(KeyCode::Char('l')));
+    assert_eq!(app.table_scroll_x, 5);
+}
+
+#[test]
+fn scroll_table_left_decrements_scroll_x() {
+    let ws = common::workspace_with_repos(&["api"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.table_scroll_x = 10;
+    app.handle_key(key(KeyCode::Char('h')));
+    assert_eq!(app.table_scroll_x, 5);
+}
+
+#[test]
+fn scroll_table_left_at_zero_stays_zero() {
+    let ws = common::workspace_with_repos(&["api"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Char('h')));
+    assert_eq!(app.table_scroll_x, 0);
+}
+
+#[test]
+fn scroll_table_resets_on_workspace_switch() {
+    let ws1 = common::workspace_with_repos(&["api"]);
+    let ws2 = common::workspace_with_repos(&["web"]);
+    let mut app = test_app(vec![ws1, ws2], vec![]);
+    app.table_scroll_x = 30;
+    app.handle_key(key(KeyCode::Down)); // SelectWorkspaceDown on Left pane (focus is Left by default)
+    assert_eq!(app.table_scroll_x, 0);
+}
+
+#[test]
+fn scroll_table_left_pane_noop() {
+    let ws = common::workspace_with_repos(&["api"]);
+    let mut app = test_app(vec![ws], vec![]);
+    // focus is Left by default
+    app.handle_key(key(KeyCode::Char('l')));
+    assert_eq!(app.table_scroll_x, 0);
+}
+
+#[test]
+fn scroll_x_offsets_branch_content_in_render() {
+    use space::core::git::RepoStatus;
+    use space::core::workspace::{Workspace, WorkspaceRepo};
+
+    let ws = Workspace {
+        name: "ws".into(),
+        path: std::path::PathBuf::from("/tmp/ws"),
+        repos: vec![WorkspaceRepo {
+            name: "api".into(),
+            path: std::path::PathBuf::from("/tmp/ws/api"),
+            branch: "feature/very-long-branch-name-here".into(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+
+    // At scroll_x=0 branch shows from start.
+    // Use 160 cols: right pane inner_width=118, branch_display=25, max_scroll=28.
+    // truncate_for_width("feature/very-long-branch-name-here", 25) = "feature/very-long-branch..."
+    let rendered0 = render_text(&app, 160, 20);
+    assert!(
+        rendered0.contains("feature/very-long"),
+        "branch start visible at scroll 0"
+    );
+
+    // At scroll_x=19 first 19 chars are scrolled off.
+    // "feature/very-long-branch-name-here"[19..] = "ranch-name-here"
+    app.table_scroll_x = 19;
+    let rendered20 = render_text(&app, 160, 20);
+    assert!(
+        rendered20.contains("ranch-name-here"),
+        "branch content offset by scroll_x=19"
+    );
+    assert!(
+        !rendered20.contains("feature/"),
+        "branch start scrolled off at scroll_x=19"
+    );
+}
+
+#[test]
+fn scroll_x_past_branch_virtual_offsets_status_content() {
+    use space::core::git::RepoStatus;
+    use space::core::workspace::{Workspace, WorkspaceRepo};
+
+    // Narrow terminal: max_scroll will be > BRANCH_VIRTUAL so STATUS scrolls.
+    // inner_width=60 -> branch_display=13, status_display=21, max_scroll=61
+    // At scroll_x=55, status_offset=55-50=5
+    let ws = Workspace {
+        name: "ws".into(),
+        path: std::path::PathBuf::from("/tmp/ws"),
+        repos: vec![WorkspaceRepo {
+            name: "api".into(),
+            path: std::path::PathBuf::from("/tmp/ws/api"),
+            branch: "main".into(),
+            status: RepoStatus {
+                modified: 10,
+                staged: 5,
+                untracked: 3,
+                conflicted: 0,
+            },
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.table_scroll_x = 55;
+
+    // render with width=80, height=10 (80 is the minimum allowed width)
+    // Right pane = 75% of 80 = 60 cols wide, inner_width=58
+    // branch_display=12, status_display=20, max_scroll=63
+    // At scroll_x=55, status_offset=5
+    let rendered = render_text(&app, 80, 10);
+
+    // status_offset = 5, full status = "10 modified, 5 staged, 3 new"
+    // After skipping 5 chars: "odified, 5 staged, 3 new"
+    // We should see some part of the status string after the skip
+    // The key check: status content IS rendered (not empty due to the bug)
+    assert!(
+        rendered.contains("odified") || rendered.contains("staged") || rendered.contains("new"),
+        "STATUS content visible after scrolling past BRANCH_VIRTUAL: {:?}",
+        rendered
     );
 }

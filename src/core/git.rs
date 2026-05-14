@@ -3,22 +3,17 @@ use git2::{Repository, StatusOptions};
 use std::cmp::Reverse;
 use std::path::Path;
 
+pub const MAX_DIFF_LINES: usize = 10_000;
+
 #[derive(Debug, Default, serde::Serialize)]
 pub struct RepoStatus {
     pub modified: usize,
     pub staged: usize,
     pub untracked: usize,
+    pub conflicted: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
-pub enum DiffTarget {
-    Head,
-    Base,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub enum FileStatus {
     Modified,
     Added,
@@ -26,16 +21,45 @@ pub enum FileStatus {
     Renamed,
     Copied,
     Untracked,
+    Conflicted,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct FileEntry {
     pub path: String,
     pub status: FileStatus,
     pub staged: bool,
     pub insertions: usize,
     pub deletions: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiffLineKind {
+    Context,
+    Addition,
+    Deletion,
+    HunkHeader,
+    FileHeader,
+    Binary,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiffLine {
+    pub kind: DiffLineKind,
+    pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileDiff {
+    #[allow(dead_code)]
+    // returned by file_content_diff; renderer uses DiffViewerState.file_path instead
+    pub path: String,
+    #[allow(dead_code)] // available for future rename display in the diff overlay
+    pub old_path: Option<String>,
+    #[allow(dead_code)]
+    // renderer detects binary files via DiffLineKind::Binary lines, not this field
+    pub is_binary: bool,
+    pub lines: Vec<DiffLine>,
 }
 
 #[derive(Debug)]
@@ -90,6 +114,9 @@ pub fn repo_status(repo_path: &Path) -> Result<RepoStatus> {
         }
         if s.contains(git2::Status::WT_NEW) {
             result.untracked += 1;
+        }
+        if s.contains(git2::Status::CONFLICTED) {
+            result.conflicted += 1;
         }
     }
     Ok(result)
@@ -246,27 +273,14 @@ fn format_delta(delta: i64) -> String {
 
 /// Return per-file diff entries for a repo.
 ///
-/// `Head` mode returns uncommitted changes: staged entries (tree→index) and
+/// Returns uncommitted changes: staged entries (tree→index) and
 /// unstaged entries (index→workdir), each with the correct `staged` flag.
-///
-/// `Base` mode returns total divergence from the base branch. The base branch
-/// is resolved by probing `refs/heads/main`, `refs/heads/master`,
-/// `refs/remotes/origin/main`, and `refs/remotes/origin/master` in order.
-/// Returns an error if none of those refs exist. All entries have `staged: false`
-/// in Base mode (the staged/unstaged distinction is not meaningful for
-/// committed divergence).
-#[allow(dead_code)]
-pub fn file_diff(repo_path: &Path, target: &DiffTarget) -> Result<Vec<FileEntry>> {
+pub fn file_diff(repo_path: &Path) -> Result<Vec<FileEntry>> {
     let repo = Repository::open(repo_path)
         .with_context(|| format!("opening repo at {}", repo_path.display()))?;
-
-    match target {
-        DiffTarget::Head => file_diff_vs_head(&repo),
-        DiffTarget::Base => file_diff_vs_base(&repo, repo_path),
-    }
+    file_diff_vs_head(&repo)
 }
 
-#[allow(dead_code)]
 fn file_diff_vs_head(repo: &Repository) -> Result<Vec<FileEntry>> {
     let mut entries: Vec<FileEntry> = Vec::new();
 
@@ -285,39 +299,6 @@ fn file_diff_vs_head(repo: &Repository) -> Result<Vec<FileEntry>> {
     Ok(entries)
 }
 
-#[allow(dead_code)]
-fn file_diff_vs_base(repo: &Repository, repo_path: &Path) -> Result<Vec<FileEntry>> {
-    let base_oid = repo
-        .refname_to_id("refs/heads/main")
-        .or_else(|_| repo.refname_to_id("refs/heads/master"))
-        .or_else(|_| repo.refname_to_id("refs/remotes/origin/main"))
-        .or_else(|_| repo.refname_to_id("refs/remotes/origin/master"))
-        .or_else(|_| {
-            // Follow origin/HEAD symbolic ref -- covers non-main/master defaults
-            // such as trunk, develop, etc.
-            repo.find_reference("refs/remotes/origin/HEAD")
-                .ok()
-                .and_then(|r| r.resolve().ok())
-                .and_then(|r| r.target())
-                .ok_or_else(|| git2::Error::from_str("origin/HEAD not found"))
-        })
-        .with_context(|| {
-            format!(
-                "could not find base branch (tried main/master/origin/main/origin/master/origin/HEAD) in {}",
-                repo_path.display()
-            )
-        })?;
-
-    let base_commit = repo.find_commit(base_oid)?;
-    let base_tree = base_commit.tree()?;
-
-    let mut opts = git2::DiffOptions::new();
-    opts.include_untracked(true).recurse_untracked_dirs(true);
-    let diff = repo.diff_tree_to_workdir_with_index(Some(&base_tree), Some(&mut opts))?;
-    collect_entries(&diff, false)
-}
-
-#[allow(dead_code)]
 fn collect_entries(diff: &git2::Diff, staged: bool) -> Result<Vec<FileEntry>> {
     // First pass: collect file paths and statuses from deltas
     let file_stats: Vec<(String, FileStatus)> = diff
@@ -378,7 +359,6 @@ fn collect_entries(diff: &git2::Diff, staged: bool) -> Result<Vec<FileEntry>> {
         .collect())
 }
 
-#[allow(dead_code)]
 fn delta_to_file_status(delta: git2::Delta) -> Option<FileStatus> {
     match delta {
         git2::Delta::Modified => Some(FileStatus::Modified),
@@ -387,8 +367,266 @@ fn delta_to_file_status(delta: git2::Delta) -> Option<FileStatus> {
         git2::Delta::Renamed => Some(FileStatus::Renamed),
         git2::Delta::Copied => Some(FileStatus::Copied),
         git2::Delta::Untracked => Some(FileStatus::Untracked),
+        git2::Delta::Conflicted => Some(FileStatus::Conflicted),
         _ => None,
     }
+}
+
+/// Return the full line-level diff for a single file.
+///
+/// `staged` controls which comparison is used:
+/// - `true`:  HEAD tree -> index  (staged changes)
+/// - `false`: index -> workdir    (unstaged changes, including untracked)
+pub fn file_content_diff(repo_path: &Path, file_path: &str, staged: bool) -> Result<FileDiff> {
+    let repo = Repository::open(repo_path)
+        .with_context(|| format!("opening repo at {}", repo_path.display()))?;
+
+    let diff = if staged {
+        let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+        repo.diff_tree_to_index(head_tree.as_ref(), None, None)?
+    } else {
+        let mut opts = git2::DiffOptions::new();
+        opts.include_untracked(true)
+            .recurse_untracked_dirs(true)
+            .show_untracked_content(true);
+        repo.diff_index_to_workdir(None, Some(&mut opts))?
+    };
+
+    // Find the delta index matching our file_path
+    let delta_idx = diff
+        .deltas()
+        .enumerate()
+        .find(|(_, delta)| {
+            let new_match = delta
+                .new_file()
+                .path()
+                .and_then(|p| p.to_str())
+                .map(|p| p == file_path)
+                .unwrap_or(false);
+            let old_match = delta
+                .old_file()
+                .path()
+                .and_then(|p| p.to_str())
+                .map(|p| p == file_path)
+                .unwrap_or(false);
+            new_match || old_match
+        })
+        .map(|(idx, _)| idx)
+        .with_context(|| format!("file '{}' not found in diff", file_path))?;
+
+    let delta = diff.get_delta(delta_idx).unwrap();
+    let old_path = delta
+        .old_file()
+        .path()
+        .and_then(|p| p.to_str())
+        .map(String::from)
+        .filter(|op| op != file_path);
+
+    let result = match git2::Patch::from_diff(&diff, delta_idx)? {
+        None => {
+            // Binary file (no patch available)
+            let size = delta.new_file().size();
+            FileDiff {
+                path: file_path.to_string(),
+                old_path,
+                is_binary: true,
+                lines: vec![DiffLine {
+                    kind: DiffLineKind::Binary,
+                    content: format!("Binary file ({} bytes)", size),
+                }],
+            }
+        }
+        Some(patch) => {
+            // Check if the patch itself considers this binary (the delta flags may
+            // only be set after the patch is created for untracked files).
+            let is_binary = patch.delta().flags().contains(git2::DiffFlags::BINARY);
+            if is_binary {
+                let size = patch.delta().new_file().size();
+                FileDiff {
+                    path: file_path.to_string(),
+                    old_path,
+                    is_binary: true,
+                    lines: vec![DiffLine {
+                        kind: DiffLineKind::Binary,
+                        content: format!("Binary file ({} bytes)", size),
+                    }],
+                }
+            } else {
+                let mut lines = Vec::new();
+                for hunk_idx in 0..patch.num_hunks() {
+                    let (hunk, _) = patch.hunk(hunk_idx)?;
+                    let header = std::str::from_utf8(hunk.header()).unwrap_or("<binary hunk>");
+                    lines.push(DiffLine {
+                        kind: DiffLineKind::HunkHeader,
+                        content: header.to_string(),
+                    });
+                    for line_idx in 0..patch.num_lines_in_hunk(hunk_idx)? {
+                        let line = patch.line_in_hunk(hunk_idx, line_idx)?;
+                        let kind = match line.origin() {
+                            '+' | '>' => DiffLineKind::Addition,
+                            '-' | '<' => DiffLineKind::Deletion,
+                            ' ' | '=' => DiffLineKind::Context,
+                            _ => DiffLineKind::Context,
+                        };
+                        let content =
+                            std::str::from_utf8(line.content()).unwrap_or("<binary line>");
+                        lines.push(DiffLine {
+                            kind,
+                            content: content.to_string(),
+                        });
+                    }
+                }
+                if lines.len() > MAX_DIFF_LINES {
+                    let total = lines.len();
+                    lines.truncate(MAX_DIFF_LINES);
+                    lines.push(DiffLine {
+                        kind: DiffLineKind::FileHeader,
+                        content: format!(
+                            "... truncated ({} lines omitted)",
+                            total - MAX_DIFF_LINES
+                        ),
+                    });
+                }
+                FileDiff {
+                    path: file_path.to_string(),
+                    old_path,
+                    is_binary: false,
+                    lines,
+                }
+            }
+        }
+    };
+    Ok(result)
+}
+
+/// Stage a single file (add to index). Handles both new/modified files and deletions.
+///
+/// # Rename handling
+///
+/// - **`git mv` renames** are already fully staged by git itself (both the deletion of the
+///   old path and the addition of the new path are written to the index). No call to
+///   `stage_file()` is needed — the TUI will show both sides as `staged: true`.
+///
+/// - **Manual renames** (e.g. `mv old new` or `std::fs::rename`) are NOT detected as renames.
+///   They appear in the TUI as two separate unstaged entries: the old path as `Deleted` and
+///   the new path as `Untracked`. This is correct behavior — the user must stage each side
+///   independently (or use `stage_all`). Rename detection would require calling
+///   `find_similar()` on the diff, which is intentionally not done to keep staging explicit.
+pub fn stage_file(repo_path: &Path, file_path: &str) -> Result<()> {
+    let repo = Repository::open(repo_path)
+        .with_context(|| format!("opening repo at {}", repo_path.display()))?;
+    let mut index = repo.index()?;
+
+    if repo_path.join(file_path).exists() {
+        index.add_path(Path::new(file_path))?;
+    } else {
+        index.remove_path(Path::new(file_path))?;
+    }
+    index.write()?;
+    Ok(())
+}
+
+/// Unstage a single file (reset index entry to HEAD). Handles unborn HEAD (no commits).
+pub fn unstage_file(repo_path: &Path, file_path: &str) -> Result<()> {
+    let repo = Repository::open(repo_path)
+        .with_context(|| format!("opening repo at {}", repo_path.display()))?;
+
+    match repo.head() {
+        Ok(head_ref) => {
+            let head_commit = head_ref.peel_to_commit()?;
+            repo.reset_default(Some(head_commit.as_object()), [Path::new(file_path)])?;
+        }
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {
+            // Unborn HEAD: no commits yet, just remove from index
+            let mut index = repo.index()?;
+            index.remove_path(Path::new(file_path))?;
+            index.write()?;
+        }
+        Err(e) => {
+            return Err(e.into());
+        }
+    }
+    Ok(())
+}
+
+/// Stage all currently unstaged files. Returns the count of files staged.
+///
+/// Opens the repository and index once, applies all changes, then writes once.
+pub fn stage_all_unstaged(repo_path: &Path) -> Result<usize> {
+    let entries = file_diff(repo_path)?;
+    let unstaged: Vec<_> = entries
+        .iter()
+        .filter(|e| !e.staged && e.status != FileStatus::Conflicted)
+        .collect();
+    let count = unstaged.len();
+
+    if count == 0 {
+        return Ok(0);
+    }
+
+    let repo = Repository::open(repo_path)
+        .with_context(|| format!("opening repo at {}", repo_path.display()))?;
+    let mut index = repo.index()?;
+
+    for entry in &unstaged {
+        let path = Path::new(&entry.path);
+        if repo_path.join(path).exists() {
+            index.add_path(path)?;
+        } else {
+            index.remove_path(path)?;
+        }
+    }
+
+    index.write()?;
+    Ok(count)
+}
+
+/// Unstage all currently staged files. Returns the count of files unstaged.
+///
+/// Opens the repository once and resets all staged paths in a single operation.
+pub fn unstage_all_staged(repo_path: &Path) -> Result<usize> {
+    let entries = file_diff(repo_path)?;
+    let staged: Vec<_> = entries.iter().filter(|e| e.staged).collect();
+    let count = staged.len();
+
+    if count == 0 {
+        return Ok(0);
+    }
+
+    let repo = Repository::open(repo_path)
+        .with_context(|| format!("opening repo at {}", repo_path.display()))?;
+
+    let paths: Vec<&Path> = staged.iter().map(|e| Path::new(e.path.as_str())).collect();
+
+    match repo.head() {
+        Ok(head_ref) => {
+            let head_commit = head_ref.peel_to_commit()?;
+            repo.reset_default(Some(head_commit.as_object()), paths.iter().copied())?;
+        }
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {
+            // Unborn HEAD: no commits yet, remove all from index
+            let mut index = repo.index()?;
+            for path in &paths {
+                index.remove_path(path)?;
+            }
+            index.write()?;
+        }
+        Err(e) => {
+            return Err(e.into());
+        }
+    }
+
+    Ok(count)
+}
+
+/// Return the mtime of `<repo_path>/.git/index`, or `None` if it cannot be read.
+/// Used as a lightweight staleness signal for the diff content cache.
+pub fn git_index_mtime(repo_path: &Path) -> Option<std::time::SystemTime> {
+    let repo = Repository::open(repo_path).ok()?;
+    let index_path = repo.path().join("index");
+    std::fs::metadata(index_path)
+        .and_then(|m| m.modified())
+        .ok()
 }
 
 #[cfg(test)]
