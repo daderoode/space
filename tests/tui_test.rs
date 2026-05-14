@@ -214,31 +214,28 @@ fn dashboard_a_opens_add() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn create_name_to_strategy() {
+fn create_enter_name_advances_to_pick_repos() {
     let mut app = test_app(vec![], vec![]);
-    // Open create screen and advance to NameWorkspace stage
     app.handle_key(key(KeyCode::Char('c')));
 
-    // Manually advance to NameWorkspace stage with a selected repo
     if let Screen::CreateWorkspace(ref mut st) = app.screen {
-        st.selected_repos = vec![PathBuf::from("/tmp/repos/foo")];
-        st.stage = space::tui::screens::create::CreateStage::NameWorkspace;
+        assert_eq!(st.stage, space::tui::screens::create::CreateStage::EnterName);
+    } else {
+        panic!("expected CreateWorkspace screen");
     }
 
-    // Type a workspace name
     app.handle_key(key(KeyCode::Char('m')));
     app.handle_key(key(KeyCode::Char('y')));
     app.handle_key(key(KeyCode::Char('-')));
     app.handle_key(key(KeyCode::Char('w')));
     app.handle_key(key(KeyCode::Char('s')));
-
-    // Press Enter to advance to PickBranchStrategy
     app.handle_key(key(KeyCode::Enter));
 
     if let Screen::CreateWorkspace(ref st) = app.screen {
         assert_eq!(
             st.stage,
-            space::tui::screens::create::CreateStage::PickBranchStrategy
+            space::tui::screens::create::CreateStage::PickRepos,
+            "EnterName + Enter should advance to PickRepos"
         );
     } else {
         panic!("expected CreateWorkspace screen");
@@ -275,23 +272,36 @@ fn create_strategy_new_branch_creates() {
 }
 
 #[test]
-fn create_esc_from_name_goes_back() {
+fn create_esc_from_enter_name_exits_to_dashboard() {
     let mut app = test_app(vec![], vec![]);
     app.handle_key(key(KeyCode::Char('c')));
 
-    // Advance to NameWorkspace
+    app.handle_key(key(KeyCode::Esc));
+
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "Esc from EnterName should return to Dashboard, got {:?}",
+        std::mem::discriminant(&app.screen)
+    );
+}
+
+#[test]
+fn create_esc_from_pick_repos_returns_to_enter_name() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('c')));
+
     if let Screen::CreateWorkspace(ref mut st) = app.screen {
-        st.selected_repos = vec![PathBuf::from("/tmp/repos/foo")];
-        st.stage = space::tui::screens::create::CreateStage::NameWorkspace;
+        st.ws_name = tui_input::Input::default().with_value("my-ws".to_string());
+        st.stage = space::tui::screens::create::CreateStage::PickRepos;
     }
 
-    // Press Esc to go back to PickRepos
     app.handle_key(key(KeyCode::Esc));
 
     if let Screen::CreateWorkspace(ref st) = app.screen {
         assert_eq!(
             st.stage,
-            space::tui::screens::create::CreateStage::PickRepos
+            space::tui::screens::create::CreateStage::EnterName,
+            "Esc from PickRepos should go back to EnterName"
         );
     } else {
         panic!("expected CreateWorkspace screen");
@@ -303,20 +313,14 @@ fn create_empty_name_rejected() {
     let mut app = test_app(vec![], vec![]);
     app.handle_key(key(KeyCode::Char('c')));
 
-    // Advance to NameWorkspace
-    if let Screen::CreateWorkspace(ref mut st) = app.screen {
-        st.selected_repos = vec![PathBuf::from("/tmp/repos/foo")];
-        st.stage = space::tui::screens::create::CreateStage::NameWorkspace;
-    }
-
-    // Press Enter with empty name
+    // EnterName is the initial stage — press Enter immediately with empty name
     app.handle_key(key(KeyCode::Enter));
 
     if let Screen::CreateWorkspace(ref st) = app.screen {
         assert_eq!(
             st.stage,
-            space::tui::screens::create::CreateStage::NameWorkspace,
-            "stage should stay NameWorkspace when name is empty"
+            space::tui::screens::create::CreateStage::EnterName,
+            "stage should stay EnterName when name is empty"
         );
         assert!(st.error.is_some(), "error should be set for empty name");
     } else {
@@ -325,11 +329,10 @@ fn create_empty_name_rejected() {
 }
 
 #[test]
-fn create_populates_recent_branches_on_strategy_entry() {
+fn create_populates_recent_branches_on_pick_repos_enter() {
     let env = TestEnv::new();
     let repo_path = env.create_repo("branchy-repo");
 
-    // Create a second branch with a commit that has a guaranteed later timestamp
     let out = std::process::Command::new("git")
         .args(["checkout", "-b", "feature-recent"])
         .current_dir(&repo_path)
@@ -344,7 +347,6 @@ fn create_populates_recent_branches_on_strategy_entry() {
         .output()
         .unwrap();
     assert!(out.status.success());
-    // Go back to main
     let out = std::process::Command::new("git")
         .args(["checkout", "main"])
         .current_dir(&repo_path)
@@ -353,28 +355,27 @@ fn create_populates_recent_branches_on_strategy_entry() {
     assert!(out.status.success());
 
     let config = config_from_env(&env);
-    let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
+    let mut app = test_app_with_config(config, vec![], vec![repo_path]);
 
     app.handle_key(key(KeyCode::Char('c')));
     if let Screen::CreateWorkspace(ref mut st) = app.screen {
-        st.selected_repos = vec![repo_path];
-        st.stage = space::tui::screens::create::CreateStage::NameWorkspace;
         st.ws_name = tui_input::Input::default().with_value("test-ws".to_string());
+        st.stage = space::tui::screens::create::CreateStage::PickRepos;
+        // Picker was built from repos_cache which contains repo_path.
+        // confirmed_items() returns highlighted item (index 0) when nothing toggled.
     }
 
-    // Press Enter to advance to PickBranchStrategy — should populate recent_branches
     app.handle_key(key(KeyCode::Enter));
 
     if let Screen::CreateWorkspace(ref st) = app.screen {
         assert_eq!(
             st.stage,
-            space::tui::screens::create::CreateStage::PickBranchStrategy
+            space::tui::screens::create::CreateStage::PickBranchStrategy,
         );
         assert!(
             !st.recent_branches.is_empty(),
-            "recent_branches should be populated, got empty"
+            "recent_branches should be populated after confirming repos"
         );
-        // Should be sorted by commit time descending (feature-recent committed later)
         assert_eq!(
             st.recent_branches[0].name, "feature-recent",
             "most recent branch should be first"
@@ -959,14 +960,9 @@ fn create_reentry_resets_branch_strategy_idx() {
 
     app.handle_key(key(KeyCode::Char('c')));
     if let Screen::CreateWorkspace(ref mut st) = app.screen {
-        st.selected_repos = vec![repo_path];
-        st.stage = space::tui::screens::create::CreateStage::NameWorkspace;
-        st.ws_name = tui_input::Input::default().with_value("ws-reentry".to_string());
-        // Simulate stale idx from a previous PickBranchStrategy visit
+        st.stage = space::tui::screens::create::CreateStage::PickRepos;
         st.branch_strategy_idx = 7;
     }
-
-    // Press Enter to advance to PickBranchStrategy
     app.handle_key(key(KeyCode::Enter));
 
     if let Screen::CreateWorkspace(ref st) = app.screen {
@@ -974,12 +970,9 @@ fn create_reentry_resets_branch_strategy_idx() {
             st.stage,
             space::tui::screens::create::CreateStage::PickBranchStrategy,
         );
-        let max_valid = 3 + st.recent_branches.len();
-        assert!(
-            st.branch_strategy_idx <= max_valid,
-            "branch_strategy_idx ({}) exceeds valid range (0..={}), would panic on Enter",
-            st.branch_strategy_idx,
-            max_valid,
+        assert_eq!(
+            st.branch_strategy_idx, 0,
+            "branch_strategy_idx must be reset to 0 on repo confirmation (was 7)"
         );
     } else {
         panic!("expected CreateWorkspace screen");

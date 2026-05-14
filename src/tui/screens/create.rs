@@ -5,8 +5,8 @@ use tui_input::Input;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CreateStage {
+    EnterName,
     PickRepos,
-    NameWorkspace,
     PickBranchStrategy,
     PickBranch,
     Creating,
@@ -53,7 +53,7 @@ impl CreateState {
             picker.refilter();
         }
         Self {
-            stage: CreateStage::PickRepos,
+            stage: CreateStage::EnterName,
             picker,
             ws_name: Input::default(),
             selected_repos: vec![],
@@ -72,8 +72,8 @@ impl CreateState {
         ctx: &crate::tui::actions::ScreenContext,
     ) -> crate::tui::actions::ScreenAction {
         match self.stage {
+            CreateStage::EnterName => self.handle_enter_name(key),
             CreateStage::PickRepos => self.handle_pick_repos(key),
-            CreateStage::NameWorkspace => self.handle_name_workspace(key),
             CreateStage::PickBranchStrategy => self.handle_branch_strategy(key, ctx),
             CreateStage::PickBranch => self.handle_pick_branch(key, ctx),
             CreateStage::Creating => self.handle_creating(key),
@@ -88,7 +88,10 @@ impl CreateState {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
         match key.code {
-            KeyCode::Esc => ScreenAction::Back,
+            KeyCode::Esc => {
+                self.stage = CreateStage::EnterName;
+                ScreenAction::Continue
+            }
             KeyCode::Enter => {
                 let confirmed: Vec<PathBuf> = self
                     .picker
@@ -102,7 +105,11 @@ impl CreateState {
                 }
                 self.selected_repos = confirmed;
                 self.error = None;
-                self.stage = CreateStage::NameWorkspace;
+                if let Some(repo_path) = self.selected_repos.first() {
+                    self.recent_branches = crate::core::git::recent_branches(repo_path, 5);
+                }
+                self.branch_strategy_idx = 0;
+                self.stage = CreateStage::PickBranchStrategy;
                 ScreenAction::Continue
             }
             KeyCode::Tab => {
@@ -131,7 +138,7 @@ impl CreateState {
         }
     }
 
-    fn handle_name_workspace(
+    fn handle_enter_name(
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
     ) -> crate::tui::actions::ScreenAction {
@@ -139,10 +146,7 @@ impl CreateState {
         use ratatui::crossterm::event::KeyCode;
 
         match key.code {
-            KeyCode::Esc => {
-                self.stage = CreateStage::PickRepos;
-                ScreenAction::Continue
-            }
+            KeyCode::Esc => ScreenAction::Back,
             KeyCode::Enter => {
                 let name = self.ws_name.value().trim().to_string();
                 if name.is_empty() {
@@ -153,12 +157,7 @@ impl CreateState {
                 // (WorktreeParams, branch_strategy) get the clean name.
                 self.ws_name = self.ws_name.clone().with_value(name);
                 self.error = None;
-                self.stage = CreateStage::PickBranchStrategy;
-                // Fetch recent branches from first selected repo
-                if let Some(repo_path) = self.selected_repos.first() {
-                    self.recent_branches = crate::core::git::recent_branches(repo_path, 5);
-                }
-                self.branch_strategy_idx = 0;
+                self.stage = CreateStage::PickRepos;
                 ScreenAction::Continue
             }
             _ => {
@@ -184,7 +183,7 @@ impl CreateState {
         match key.code {
             KeyCode::Esc => {
                 self.error = None;
-                self.stage = CreateStage::NameWorkspace;
+                self.stage = CreateStage::PickRepos;
                 ScreenAction::Continue
             }
             KeyCode::Up | KeyCode::Char('k') => {

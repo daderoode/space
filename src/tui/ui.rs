@@ -511,10 +511,10 @@ fn render_keybindings_bar(app: &App, frame: &mut Frame, area: Rect) {
 fn render_create_overlay(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
     use crate::tui::screens::create::CreateStage;
     match &state.stage {
+        CreateStage::EnterName => render_name_input(state, frame),
         CreateStage::PickRepos => {
             crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
         }
-        CreateStage::NameWorkspace => render_name_input(state, frame),
         CreateStage::PickBranchStrategy => render_branch_strategy_picker(
             frame,
             state.ws_name.value(),
