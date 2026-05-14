@@ -1,6 +1,14 @@
 use space::core::config::SpaceConfig;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use tempfile::TempDir;
+
+/// Serialise tests that read or write SPACE_CONFIG_DIR so they never run
+/// concurrently.  Rust's test harness runs tests in parallel by default;
+/// without this lock, config_path_is_under_config_dir can observe the temp
+/// path set by config_dir_respects_space_config_dir_env and fail the
+/// `ends_with("space/config.toml")` assertion.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn default_config_has_reasonable_values() {
@@ -31,15 +39,19 @@ dir = "/tmp/test-workspaces"
 
 #[test]
 fn config_path_is_under_config_dir() {
+    let _guard = ENV_LOCK.lock().unwrap();
     let path = SpaceConfig::config_path();
-    assert!(path.ends_with("space/config.toml"));
+    assert!(
+        path.ends_with("space/config.toml"),
+        "expected path ending in space/config.toml, got: {path:?}"
+    );
 }
 
-// NOTE: set_var/remove_var are process-global. Safe here because config_test
-// runs as its own test binary (separate from mcp_test which also touches this
-// env var). Tests within this binary don't read SPACE_CONFIG_DIR concurrently.
 #[test]
 fn config_dir_respects_space_config_dir_env() {
+    // ENV_LOCK serialises this test with config_path_is_under_config_dir so
+    // the set_var/remove_var pair does not race with the assertion there.
+    let _guard = ENV_LOCK.lock().unwrap();
     let tmp = TempDir::new().unwrap();
     std::env::set_var("SPACE_CONFIG_DIR", tmp.path());
     let dir = SpaceConfig::config_dir();
