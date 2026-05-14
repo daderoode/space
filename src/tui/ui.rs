@@ -42,6 +42,16 @@ fn status_char(status: &crate::core::git::FileStatus) -> &'static str {
 const BRANCH_VIRTUAL: usize = 50;
 const STATUS_VIRTUAL: usize = 45;
 
+/// Compute the maximum horizontal table scroll for the given right-pane inner
+/// width (pane width minus 2 for borders). Returns 0 when the terminal is wide
+/// enough that all content fits without scrolling.
+/// Inner width = right pane width - 2.
+pub(crate) fn max_table_scroll(inner_width: usize) -> u16 {
+    let branch_display = ((inner_width as f64 * 22.0) / 100.0).round() as usize;
+    let status_display = ((inner_width as f64 * 36.0) / 100.0).round() as usize;
+    (BRANCH_VIRTUAL + STATUS_VIRTUAL).saturating_sub(branch_display + status_display) as u16
+}
+
 fn format_repo_status(status: &crate::core::git::RepoStatus, max_width: usize) -> String {
     let mut parts = Vec::new();
 

@@ -699,7 +699,7 @@ impl App {
     /// a terminal or event loop.
     #[allow(clippy::drop_non_drop)] // drop(ctx) releases shared borrows before &mut self
     pub fn handle_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
-        use ratatui::crossterm::event::KeyCode;
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
         // Global: Ctrl-C always quits (raw mode swallows the OS signal)
         if key.code == KeyCode::Char('c')
@@ -790,10 +790,10 @@ impl App {
                             repo_index,
                             stage: false,
                         }),
-                    (KeyCode::Char('h'), _) if self.focus == Pane::Right => {
+                    (KeyCode::Char('h'), KeyModifiers::NONE) if self.focus == Pane::Right => {
                         Some(Message::ScrollTableLeft)
                     }
-                    (KeyCode::Char('l'), _) if self.focus == Pane::Right => {
+                    (KeyCode::Char('l'), KeyModifiers::NONE) if self.focus == Pane::Right => {
                         Some(Message::ScrollTableRight)
                     }
                     (KeyCode::Up, _) | (KeyCode::Char('k'), _) => match self.focus {
@@ -1325,6 +1325,15 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()
     loop {
         app.expire_status_message(Instant::now());
         terminal.draw(|frame| crate::tui::ui::view(app, frame))?;
+
+        // Post-draw: clamp table_scroll_x to the actual max for the current terminal
+        // size, so 'h' always responds immediately rather than unwinding an overshoot.
+        if let Ok(size) = terminal.size() {
+            let right_pane = ((size.width as f64 * 75.0) / 100.0).round() as usize;
+            let inner = right_pane.saturating_sub(2);
+            let max = crate::tui::ui::max_table_scroll(inner);
+            app.table_scroll_x = app.table_scroll_x.min(max);
+        }
 
         if event::poll(std::time::Duration::from_millis(16))? {
             if let Event::Key(key) = event::read()? {
