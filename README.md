@@ -37,21 +37,23 @@ Running `space` (no arguments) opens an interactive terminal dashboard with two
 panes:
 
 ```
-┌─ Workspaces (25%) ──────────┬─ my-feature (vs base) ────────────────────┐
+┌─ Workspaces (25%) ──────────┬─ my-feature ──────────────────────────────┐
 │  my-feature                 │  ▶ api-service  feat/x  clean  +142 -20   │
 │  hotfix-payment             │  ▼ sak          feat/x  2 modified  +38 -4 │
-│  ...                        │    M src/main.rs          [staged]  +12 -4 │
-│                             │    A src/new.rs            [staged]  +26 -0 │
+│  ...                        │    ── Unstaged ──                           │
+│                             │    M src/main.rs                   +12 -4  │
+│                             │    A src/new.rs                    +26 -0  │
 └─────────────────────────────┴───────────────────────────────────────────┘
- enter expand · ←/esc back · T switch to HEAD · q quit
+ enter expand · ←/esc back · h/l scroll · q quit
 ```
 
-Repos show total line divergence from the base branch (`+N -M` in green/red).
+Repos show total line changes across uncommitted files (`+N -M` in green/red).
 The `STATUS` column uses plain-language summaries like `2 modified` or
 `14 modified, 3 new`.
-Press `→` or `Enter` on a repo to expand it and see per-file diffs.
+Press `→` or `Enter` on a repo to expand it and see per-file diffs grouped
+into Conflicts, Unstaged, and Staged sections.
 Press `Enter` on a file row to open a scrollable diff viewer. Stage/unstage
-files with `s`, or bulk stage/unstage all files in the selected repo with `S`/`U`.
+files with `s`/`space`, or bulk stage/unstage all files in the selected repo with `S`/`U`.
 
 **Key bindings — Workspaces pane:**
 
@@ -73,13 +75,13 @@ files with `s`, or bulk stage/unstage all files in the selected repo with `S`/`U
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` or `j` / `k` | Navigate repos and file rows |
+| `h` / `l` | Scroll table left / right (reveal long branch names) |
 | `→` or `Enter` (on repo) | Expand / collapse repo to show file-level diffs |
 | `Enter` (on file) | Open file diff viewer |
 | `←` or `Esc` | Collapse all expanded repos, then refocus workspaces pane |
-| `T` | Toggle diff target: base branch ↔ HEAD (uncommitted changes) |
-| `s` | Stage / unstage file (HEAD mode only) |
-| `S` | Stage all unstaged files in repo (HEAD mode only) |
-| `U` | Unstage all staged files in repo (HEAD mode only) |
+| `s` / `space` | Stage / unstage file |
+| `S` | Stage all unstaged files in repo |
+| `U` | Unstage all staged files in repo |
 | `q` | Quit |
 
 Interactive commands (`go`, `create`, `add`, `config`, `rm` without `--force`)
