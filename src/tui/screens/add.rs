@@ -80,8 +80,17 @@ impl AddState {
                     .clone()
                     .unwrap_or_else(|| self.workspace_name.clone()),
             ),
-            // idx 0 — New Branch; name comes from the EnterBranchName stage input
-            _ => BranchStrategy::NewBranch(self.branch_name_input.value().to_string()),
+            // idx 0 — New Branch; name comes from the EnterBranchName stage input.
+            // Fall back to workspace_name if branch_name_input is empty (direct callers
+            // before the stage gate has run).
+            _ => {
+                let name = self.branch_name_input.value().trim().to_string();
+                BranchStrategy::NewBranch(if name.is_empty() {
+                    self.workspace_name.clone()
+                } else {
+                    name
+                })
+            }
         }
     }
 

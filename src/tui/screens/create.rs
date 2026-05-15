@@ -179,6 +179,7 @@ impl CreateState {
                 if let Some(req) = crate::tui::app::key_to_input_request(&key) {
                     self.ws_name.handle(req);
                 }
+                self.error = None;
                 ScreenAction::Continue
             }
         }
@@ -404,8 +405,17 @@ impl CreateState {
                     .clone()
                     .unwrap_or_else(|| self.ws_name.value().to_string()),
             ),
-            // idx 0 — New Branch; name comes from the EnterBranchName stage input
-            _ => BranchStrategy::NewBranch(self.branch_name_input.value().to_string()),
+            // idx 0 — New Branch; name comes from the EnterBranchName stage input.
+            // Fall back to ws_name if branch_name_input is empty (direct callers,
+            // e.g. tests or future MCP tools, before the stage gate has run).
+            _ => {
+                let name = self.branch_name_input.value().trim().to_string();
+                BranchStrategy::NewBranch(if name.is_empty() {
+                    self.ws_name.value().to_string()
+                } else {
+                    name
+                })
+            }
         }
     }
 }

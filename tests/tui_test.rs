@@ -366,8 +366,9 @@ fn create_populates_recent_branches_on_pick_repos_enter() {
     if let Screen::CreateWorkspace(ref mut st) = app.screen {
         st.ws_name = tui_input::Input::default().with_value("test-ws".to_string());
         st.stage = space::tui::screens::create::CreateStage::PickRepos;
-        // Picker was built from repos_cache which contains repo_path.
-        // confirmed_items() returns highlighted item (index 0) when nothing toggled.
+        // Picker was built from repos_cache (contains repo_path).
+        // Toggle the highlighted item explicitly so confirmed_items() returns it.
+        st.picker.toggle_highlighted();
     }
 
     app.handle_key(key(KeyCode::Enter));
@@ -969,6 +970,8 @@ fn create_reentry_resets_branch_strategy_idx() {
     if let Screen::CreateWorkspace(ref mut st) = app.screen {
         st.stage = space::tui::screens::create::CreateStage::PickRepos;
         st.branch_strategy_idx = 7;
+        // Toggle the highlighted item explicitly so confirmed_items() returns it.
+        st.picker.toggle_highlighted();
     }
     app.handle_key(key(KeyCode::Enter));
 
