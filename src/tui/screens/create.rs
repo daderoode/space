@@ -8,6 +8,7 @@ pub enum CreateStage {
     EnterName,
     PickRepos,
     PickBranchStrategy,
+    EnterBranchName, // edit the new-branch name
     PickBranch,
     Creating,
 }
@@ -16,6 +17,7 @@ pub struct CreateState {
     pub stage: CreateStage,
     pub picker: FuzzyPicker,
     pub ws_name: Input,
+    pub branch_name_input: Input,
     pub selected_repos: Vec<PathBuf>,
     pub branch_strategy_idx: usize, // 0=new branch, 1=existing, 2=detached, 3=pick branch
     pub branch_picker: Option<FuzzyPicker>, // populated when entering PickBranch stage
@@ -56,6 +58,7 @@ impl CreateState {
             stage: CreateStage::EnterName,
             picker,
             ws_name: Input::default(),
+            branch_name_input: Input::default(),
             selected_repos: vec![],
             branch_strategy_idx: 0,
             branch_picker: None,
@@ -75,6 +78,7 @@ impl CreateState {
             CreateStage::EnterName => self.handle_enter_name(key),
             CreateStage::PickRepos => self.handle_pick_repos(key),
             CreateStage::PickBranchStrategy => self.handle_branch_strategy(key, ctx),
+            CreateStage::EnterBranchName => self.handle_enter_branch_name(key, ctx),
             CreateStage::PickBranch => self.handle_pick_branch(key, ctx),
             CreateStage::Creating => self.handle_creating(key),
         }
@@ -236,8 +240,15 @@ impl CreateState {
                         branch_strategy: BranchStrategy::ExistingBranch(branch_name),
                         is_new: true,
                     })
+                } else if self.branch_strategy_idx == 0 {
+                    // New branch — open branch name editing stage
+                    let ws_name = self.ws_name.value().to_string();
+                    self.branch_name_input = Input::default().with_value(ws_name);
+                    self.error = None;
+                    self.stage = CreateStage::EnterBranchName;
+                    ScreenAction::Continue
                 } else {
-                    // idx 0, 1, or 2 — fixed options
+                    // idx 1 (ExistingBranch) or idx 2 (DetachedHead)
                     self.stage = CreateStage::Creating;
                     ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
                         workspace_name: self.ws_name.value().to_string(),
@@ -249,6 +260,46 @@ impl CreateState {
                 }
             }
             _ => ScreenAction::Continue,
+        }
+    }
+
+    fn handle_enter_branch_name(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+        ctx: &crate::tui::actions::ScreenContext,
+    ) -> crate::tui::actions::ScreenAction {
+        use crate::tui::actions::{ScreenAction, WorktreeParams};
+        use ratatui::crossterm::event::KeyCode;
+
+        match key.code {
+            KeyCode::Esc => {
+                self.error = None;
+                self.stage = CreateStage::PickBranchStrategy;
+                ScreenAction::Continue
+            }
+            KeyCode::Enter => {
+                let name = self.branch_name_input.value().trim().to_string();
+                if name.is_empty() {
+                    self.error = Some("Branch name cannot be empty".to_string());
+                    return ScreenAction::Continue;
+                }
+                self.error = None;
+                self.stage = CreateStage::Creating;
+                ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
+                    workspace_name: self.ws_name.value().to_string(),
+                    workspace_dir: ctx.config.workspaces.dir.clone(),
+                    repos: self.selected_repos.clone(),
+                    branch_strategy: BranchStrategy::NewBranch(name),
+                    is_new: true,
+                })
+            }
+            _ => {
+                if let Some(req) = crate::tui::app::key_to_input_request(&key) {
+                    self.branch_name_input.handle(req);
+                }
+                self.error = None;
+                ScreenAction::Continue
+            }
         }
     }
 
@@ -342,7 +393,8 @@ impl CreateState {
                     .clone()
                     .unwrap_or_else(|| self.ws_name.value().to_string()),
             ),
-            _ => BranchStrategy::NewBranch(self.ws_name.value().to_string()),
+            // idx 0 — New Branch; name comes from the EnterBranchName stage input
+            _ => BranchStrategy::NewBranch(self.branch_name_input.value().to_string()),
         }
     }
 }

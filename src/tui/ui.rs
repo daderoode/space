@@ -522,6 +522,13 @@ fn render_create_overlay(state: &crate::tui::screens::create::CreateState, frame
             state.error.as_deref(),
             &state.recent_branches,
         ),
+        CreateStage::EnterBranchName => render_text_input_dialog(
+            "Branch Name",
+            "New branch name:",
+            &state.branch_name_input,
+            state.error.as_deref(),
+            frame,
+        ),
         CreateStage::PickBranch => {
             if let Some(ref picker) = state.branch_picker {
                 crate::tui::widgets::fuzzy_picker::render(picker, frame);
@@ -536,7 +543,13 @@ fn render_create_overlay(state: &crate::tui::screens::create::CreateState, frame
     }
 }
 
-fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
+fn render_text_input_dialog(
+    title: &str,
+    prompt: &str,
+    input: &tui_input::Input,
+    error: Option<&str>,
+    frame: &mut Frame,
+) {
     use ratatui::widgets::Clear;
     let dialog_w = (frame.area().width * 70 / 100).max(50);
     let area = centered_rect_fixed(dialog_w, 7, frame.area());
@@ -546,7 +559,7 @@ fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &m
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(theme::border_focused())
-        .title(" Workspace Name ");
+        .title(format!(" {} ", title));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -558,10 +571,8 @@ fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &m
     ])
     .split(inner);
 
-    frame.render_widget(
-        Paragraph::new("Enter workspace name:").style(theme::text()),
-        sections[0],
-    );
+    frame.render_widget(Paragraph::new(prompt).style(theme::text()), sections[0]);
+
     // Split the input row into: left-scroll-indicator | text area | right-scroll-indicator
     let indicator_style = theme::muted();
     let text_area_w = sections[1].width.saturating_sub(2); // 1 char each side for indicators
@@ -585,9 +596,9 @@ fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &m
     };
 
     // Compute horizontal scroll to keep cursor in the visible text area
-    let scroll = state.ws_name.visual_scroll(text_area_w as usize) as u16;
-    let cursor_col = state.ws_name.visual_cursor() as u16;
-    let value_vis_w = UnicodeWidthStr::width(state.ws_name.value()) as u16;
+    let scroll = input.visual_scroll(text_area_w as usize) as u16;
+    let cursor_col = input.visual_cursor() as u16;
+    let value_vis_w = UnicodeWidthStr::width(input.value()) as u16;
 
     // Left indicator: ‹ when text is scrolled (content hidden on left)
     let left_text = if scroll > 0 { "\u{2039}" } else { " " }; // ‹
@@ -598,7 +609,7 @@ fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &m
 
     // Text with horizontal scroll
     frame.render_widget(
-        Paragraph::new(state.ws_name.value())
+        Paragraph::new(input.value())
             .style(theme::input_style())
             .scroll((0, scroll)),
         text_area,
@@ -620,12 +631,19 @@ fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &m
         .min(text_area.x + text_area_w.saturating_sub(1));
     frame.set_cursor_position((cursor_x, text_area.y));
 
-    if let Some(err) = &state.error {
-        frame.render_widget(
-            Paragraph::new(err.as_str()).style(theme::error()),
-            sections[2],
-        );
+    if let Some(err) = error {
+        frame.render_widget(Paragraph::new(err).style(theme::error()), sections[2]);
     }
+}
+
+fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
+    render_text_input_dialog(
+        "Workspace Name",
+        "Enter workspace name:",
+        &state.ws_name,
+        state.error.as_deref(),
+        frame,
+    );
 }
 
 fn render_branch_strategy_picker(
@@ -803,6 +821,13 @@ fn render_add_overlay(state: &crate::tui::screens::add::AddState, frame: &mut Fr
             state.branch_strategy_idx,
             state.error.as_deref(),
             &state.recent_branches,
+        ),
+        AddStage::EnterBranchName => render_text_input_dialog(
+            "Branch Name",
+            "New branch name:",
+            &state.branch_name_input,
+            state.error.as_deref(),
+            frame,
         ),
         AddStage::PickBranch => {
             if let Some(ref picker) = state.branch_picker {

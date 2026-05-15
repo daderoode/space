@@ -259,7 +259,9 @@ fn create_strategy_new_branch_creates() {
         st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
     }
 
-    // Press Enter to trigger do_create
+    // First Enter: PickBranchStrategy → EnterBranchName (pre-filled with ws_name)
+    app.handle_key(key(KeyCode::Enter));
+    // Second Enter: EnterBranchName → Creating (confirms pre-filled name)
     app.handle_key(key(KeyCode::Enter));
 
     // Workspace dir should have been created, and screen should be Dashboard
@@ -414,7 +416,9 @@ fn add_strategy_creates_worktrees() {
         st.stage = space::tui::screens::add::AddStage::PickBranchStrategy;
     }
 
-    // Press Enter to trigger do_add
+    // First Enter: PickBranchStrategy → EnterBranchName (pre-filled with workspace name)
+    app.handle_key(key(KeyCode::Enter));
+    // Second Enter: EnterBranchName → Creating (confirms pre-filled name)
     app.handle_key(key(KeyCode::Enter));
 
     assert!(
@@ -2828,6 +2832,242 @@ fn scroll_x_offsets_branch_content_in_render() {
     assert!(
         !rendered20.contains("feature/"),
         "branch start scrolled off at scroll_x=19"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Branch name editor (Task 3b)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create_new_branch_enters_name_stage() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![PathBuf::from("/tmp/repos/foo")];
+        st.ws_name = tui_input::Input::default().with_value("my-feature".to_string());
+        st.branch_strategy_idx = 0;
+        st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::EnterBranchName,
+            "selecting New branch should open branch name editor"
+        );
+        assert_eq!(
+            st.branch_name_input.value(),
+            "my-feature",
+            "branch name input should be pre-filled with workspace name"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+#[test]
+fn create_new_branch_esc_returns_to_strategy() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![PathBuf::from("/tmp/repos/foo")];
+        st.ws_name = tui_input::Input::default().with_value("my-feature".to_string());
+        st.stage = space::tui::screens::create::CreateStage::EnterBranchName;
+        st.branch_name_input = tui_input::Input::default().with_value("my-feature".to_string());
+    }
+
+    app.handle_key(key(KeyCode::Esc));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::PickBranchStrategy
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+#[test]
+fn create_new_branch_empty_name_rejected() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![PathBuf::from("/tmp/repos/foo")];
+        st.ws_name = tui_input::Input::default().with_value("my-feature".to_string());
+        st.stage = space::tui::screens::create::CreateStage::EnterBranchName;
+        st.branch_name_input = tui_input::Input::default(); // empty
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::EnterBranchName,
+            "empty branch name should be rejected"
+        );
+        assert!(
+            st.error.is_some(),
+            "error should be set for empty branch name"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+#[test]
+fn create_new_branch_custom_name_creates_worktree() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("branch-name-repo");
+
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.ws_name = tui_input::Input::default().with_value("my-ws".to_string());
+        st.stage = space::tui::screens::create::CreateStage::EnterBranchName;
+        st.branch_name_input =
+            tui_input::Input::default().with_value("feature/DEV-1234".to_string());
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "expected Dashboard after creating with custom branch name"
+    );
+    assert!(env.workspaces_dir.join("my-ws").join("branch-name-repo").exists());
+}
+
+#[test]
+fn add_new_branch_enters_name_stage() {
+    let ws_name = "existing-ws";
+    let workspaces = vec![Workspace {
+        name: ws_name.to_string(),
+        path: PathBuf::from("/tmp").join(ws_name),
+        repos: vec![],
+    }];
+    let mut app = test_app(workspaces, vec![PathBuf::from("/tmp/repos/foo")]);
+    app.handle_key(key(KeyCode::Char('a')));
+    if let Screen::AddRepos(ref mut st) = app.screen {
+        st.selected_repos = vec![PathBuf::from("/tmp/repos/foo")];
+        st.branch_strategy_idx = 0;
+        st.stage = space::tui::screens::add::AddStage::PickBranchStrategy;
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    if let Screen::AddRepos(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            space::tui::screens::add::AddStage::EnterBranchName,
+            "selecting New branch in Add flow should open branch name editor"
+        );
+        assert_eq!(
+            st.branch_name_input.value(),
+            ws_name,
+            "branch name input should be pre-filled with workspace name"
+        );
+    } else {
+        panic!("expected AddRepos screen");
+    }
+}
+
+#[test]
+fn add_new_branch_esc_returns_to_strategy() {
+    let ws_name = "existing-ws";
+    let workspaces = vec![Workspace {
+        name: ws_name.to_string(),
+        path: PathBuf::from("/tmp").join(ws_name),
+        repos: vec![],
+    }];
+    let mut app = test_app(workspaces, vec![PathBuf::from("/tmp/repos/foo")]);
+    app.handle_key(key(KeyCode::Char('a')));
+    if let Screen::AddRepos(ref mut st) = app.screen {
+        st.selected_repos = vec![PathBuf::from("/tmp/repos/foo")];
+        st.stage = space::tui::screens::add::AddStage::EnterBranchName;
+        st.branch_name_input = tui_input::Input::default().with_value("existing-ws".to_string());
+    }
+
+    app.handle_key(key(KeyCode::Esc));
+
+    if let Screen::AddRepos(ref st) = app.screen {
+        assert_eq!(st.stage, space::tui::screens::add::AddStage::PickBranchStrategy);
+        assert!(st.error.is_none(), "error should be cleared on Esc");
+    } else {
+        panic!("expected AddRepos screen");
+    }
+}
+
+#[test]
+fn add_new_branch_empty_name_rejected() {
+    let ws_name = "existing-ws";
+    let workspaces = vec![Workspace {
+        name: ws_name.to_string(),
+        path: PathBuf::from("/tmp").join(ws_name),
+        repos: vec![],
+    }];
+    let mut app = test_app(workspaces, vec![PathBuf::from("/tmp/repos/foo")]);
+    app.handle_key(key(KeyCode::Char('a')));
+    if let Screen::AddRepos(ref mut st) = app.screen {
+        st.selected_repos = vec![PathBuf::from("/tmp/repos/foo")];
+        st.stage = space::tui::screens::add::AddStage::EnterBranchName;
+        st.branch_name_input = tui_input::Input::default(); // empty
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    if let Screen::AddRepos(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            space::tui::screens::add::AddStage::EnterBranchName,
+            "empty branch name should be rejected"
+        );
+        assert!(st.error.is_some(), "error should be set for empty branch name");
+    } else {
+        panic!("expected AddRepos screen");
+    }
+}
+
+#[test]
+fn add_new_branch_custom_name_creates_worktree() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("add-branch-name-repo");
+
+    let ws_name = "add-ws";
+    std::fs::create_dir_all(env.workspaces_dir.join(ws_name)).unwrap();
+
+    let config = config_from_env(&env);
+    let workspaces = vec![Workspace {
+        name: ws_name.to_string(),
+        path: env.workspaces_dir.join(ws_name),
+        repos: vec![],
+    }];
+    let mut app = test_app_with_config(config, workspaces, vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('a')));
+    if let Screen::AddRepos(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.stage = space::tui::screens::add::AddStage::EnterBranchName;
+        st.branch_name_input =
+            tui_input::Input::default().with_value("feature/DEV-9999".to_string());
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "expected Dashboard after add with custom branch name"
+    );
+    assert!(
+        env.workspaces_dir.join(ws_name).join("add-branch-name-repo").exists(),
+        "worktree should have been created"
     );
 }
 
