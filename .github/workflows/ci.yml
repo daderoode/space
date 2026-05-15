@@ -18,6 +18,13 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # On macOS runner image >= 20260511 both `cargo` and `rustup` in PATH
+      # resolve to the rustup-init proxy, which is broken and rejects
+      # subcommand arguments. The actual binaries live in the rustup toolchain
+      # directory. Prepend that to PATH so cargo/rustfmt/clippy come from the
+      # real installation, not the broken proxy.
+      - name: Add real toolchain bin to PATH
+        run: echo "$(ls -d "$HOME"/.rustup/toolchains/stable-*/bin | head -1)" >> "$GITHUB_PATH"
       - name: fmt
         run: cargo fmt --check
       - name: clippy

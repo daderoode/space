@@ -1301,6 +1301,8 @@ pub(crate) fn build_branch_picker(
                 (false, false) => "local".to_string(),
             },
             full_path: std::path::PathBuf::new(), // unused for branch picker
+            branch: None,
+            remote_url: None,
         })
         .collect();
 

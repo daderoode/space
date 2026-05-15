@@ -3,11 +3,13 @@ use crate::tui::actions::{ScreenAction, ScreenContext, WorktreeParams};
 use crate::tui::widgets::fuzzy_picker::{FuzzyPicker, PickerItem};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
+use tui_input::Input;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AddStage {
     PickRepos,
     PickBranchStrategy,
+    EnterBranchName, // edit the new-branch name
     PickBranch,
     Creating,
 }
@@ -16,6 +18,7 @@ pub struct AddState {
     pub stage: AddStage,
     pub workspace_name: String,
     pub picker: FuzzyPicker,
+    pub branch_name_input: Input,
     pub selected_repos: Vec<PathBuf>,
     pub branch_strategy_idx: usize,
     pub branch_picker: Option<FuzzyPicker>,
@@ -33,7 +36,14 @@ impl AddState {
     ) -> Self {
         let items: Vec<PickerItem> = available_repos
             .into_iter()
-            .map(PickerItem::from_path)
+            .map(|path| {
+                let (branch, remote_url) = crate::core::git::repo_display_info(&path);
+                PickerItem {
+                    branch,
+                    remote_url,
+                    ..PickerItem::from_path(path)
+                }
+            })
             .collect();
         let mut picker = FuzzyPicker::new(
             "Add repos  TAB=toggle  ENTER=confirm  ESC=cancel",
@@ -49,6 +59,7 @@ impl AddState {
             stage: AddStage::PickRepos,
             workspace_name: ws_name,
             picker,
+            branch_name_input: Input::default(),
             selected_repos: vec![],
             branch_strategy_idx: 0,
             branch_picker: None,
@@ -68,7 +79,17 @@ impl AddState {
                     .clone()
                     .unwrap_or_else(|| self.workspace_name.clone()),
             ),
-            _ => BranchStrategy::NewBranch(self.workspace_name.clone()),
+            // idx 0 — New Branch; name comes from the EnterBranchName stage input.
+            // Fall back to workspace_name if branch_name_input is empty (direct callers
+            // before the stage gate has run).
+            _ => {
+                let name = self.branch_name_input.value().trim().to_string();
+                BranchStrategy::NewBranch(if name.is_empty() {
+                    self.workspace_name.clone()
+                } else {
+                    name
+                })
+            }
         }
     }
 
@@ -76,6 +97,7 @@ impl AddState {
         match self.stage {
             AddStage::PickRepos => self.handle_pick_repos(key),
             AddStage::PickBranchStrategy => self.handle_branch_strategy(key, ctx),
+            AddStage::EnterBranchName => self.handle_enter_branch_name(key, ctx),
             AddStage::PickBranch => self.handle_pick_branch(key, ctx),
             AddStage::Creating => self.handle_creating(key),
         }
@@ -190,8 +212,19 @@ impl AddState {
                         branch_strategy: BranchStrategy::ExistingBranch(branch_name),
                         is_new: false,
                     })
+                } else if self.branch_strategy_idx == 0 {
+                    // New branch — open branch name editing stage.
+                    // Only pre-fill when the field is empty; preserve whatever the
+                    // user typed if they Esc'd back and re-selected "New branch".
+                    if self.branch_name_input.value().is_empty() {
+                        self.branch_name_input =
+                            Input::default().with_value(self.workspace_name.clone());
+                    }
+                    self.error = None;
+                    self.stage = AddStage::EnterBranchName;
+                    ScreenAction::Continue
                 } else {
-                    // idx 0, 1, or 2 — fixed options
+                    // idx 1 (ExistingBranch) or idx 2 (DetachedHead)
                     self.stage = AddStage::Creating;
                     ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
                         workspace_name: self.workspace_name.clone(),
@@ -203,6 +236,39 @@ impl AddState {
                 }
             }
             _ => ScreenAction::Continue,
+        }
+    }
+
+    fn handle_enter_branch_name(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
+        match key.code {
+            KeyCode::Esc => {
+                self.error = None;
+                self.stage = AddStage::PickBranchStrategy;
+                ScreenAction::Continue
+            }
+            KeyCode::Enter => {
+                let name = self.branch_name_input.value().trim().to_string();
+                if name.is_empty() {
+                    self.error = Some("Branch name cannot be empty".to_string());
+                    return ScreenAction::Continue;
+                }
+                self.error = None;
+                self.stage = AddStage::Creating;
+                ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
+                    workspace_name: self.workspace_name.clone(),
+                    workspace_dir: ctx.config.workspaces.dir.clone(),
+                    repos: self.selected_repos.clone(),
+                    branch_strategy: BranchStrategy::NewBranch(name),
+                    is_new: false,
+                })
+            }
+            _ => {
+                if let Some(req) = crate::tui::app::key_to_input_request(&key) {
+                    self.branch_name_input.handle(req);
+                }
+                self.error = None;
+                ScreenAction::Continue
+            }
         }
     }
 
