@@ -36,13 +36,14 @@ impl PickerItem {
 }
 
 /// Shorten a remote URL for display:
-/// - Strips `https://`, `http://`, `git://` scheme prefixes.
-/// - Strips embedded credentials (`user:pass@`) from HTTP(S) URLs.
+/// - Strips `https://`, `http://`, `git://`, `ssh://` scheme prefixes.
+/// - Strips embedded credentials (`user:pass@`) from the authority component
+///   of all scheme-prefixed URLs (`ssh://token@host/repo` → `host/repo`).
 /// - Strips `git@` prefix (e.g. `git@github.com:org/repo` → `github.com:org/repo`).
 /// - Strips trailing `.git` suffix.
 /// - Unknown schemes are returned as-is.
 fn shorten_remote_url(url: &str) -> String {
-    for prefix in &["https://", "http://", "git://"] {
+    for prefix in &["https://", "http://", "git://", "ssh://"] {
         if let Some(rest) = url.strip_prefix(prefix) {
             // Strip embedded credentials (user:token@host) if present.
             // Only search within the authority (before the first '/') so that
@@ -522,11 +523,23 @@ mod tests {
     }
 
     #[test]
-    fn shorten_remote_url_passthrough_for_unknown() {
+    fn shorten_remote_url_strips_ssh_scheme_and_credentials() {
+        // ssh:// scheme is stripped like https://
         assert_eq!(
-            shorten_remote_url("ssh://user@host/repo"),
-            "ssh://user@host/repo"
+            shorten_remote_url("ssh://192.168.1.1/org/repo"),
+            "192.168.1.1/org/repo"
         );
+        // user:password credentials in the authority are stripped
+        assert_eq!(
+            shorten_remote_url("ssh://user:p4ssw0rd@192.168.1.1/org/repo"),
+            "192.168.1.1/org/repo"
+        );
+    }
+
+    #[test]
+    fn shorten_remote_url_passthrough_for_unknown() {
+        // Truly unknown schemes (not https/http/git/ssh) pass through unchanged
+        assert_eq!(shorten_remote_url("ftp://host/repo"), "ftp://host/repo");
     }
 
     #[test]
