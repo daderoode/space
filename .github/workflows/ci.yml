@@ -18,9 +18,20 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # On macOS runners where rustup is pre-installed, dtolnay/rust-toolchain
+      # skips adding $CARGO_HOME/bin to PATH, and the Swatinem cache can restore
+      # a stale cargo shim that dispatches to rustup-init instead of the real
+      # binary (broken on macOS runner image ≥ 20260511).
+      #
+      # `rustup run stable` invokes cargo/rustfmt/clippy directly from the
+      # installed toolchain, bypassing the shim entirely.
+      #
+      # NOTE: keep the toolchain pin in dtolnay/rust-toolchain@stable in sync
+      # with the `rustup run stable` here. If the pin changes to e.g. @1.85,
+      # change `stable` → `1.85` in all three commands below.
       - name: fmt
-        run: cargo fmt --check
+        run: rustup run stable cargo fmt --check
       - name: clippy
-        run: cargo clippy -- -D warnings
+        run: rustup run stable cargo clippy -- -D warnings
       - name: test
-        run: cargo test
+        run: rustup run stable cargo test
