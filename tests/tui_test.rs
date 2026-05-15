@@ -222,7 +222,10 @@ fn create_enter_name_advances_to_pick_repos() {
     app.handle_key(key(KeyCode::Char('c')));
 
     if let Screen::CreateWorkspace(ref mut st) = app.screen {
-        assert_eq!(st.stage, space::tui::screens::create::CreateStage::EnterName);
+        assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::EnterName
+        );
     } else {
         panic!("expected CreateWorkspace screen");
     }
@@ -2875,6 +2878,42 @@ fn create_new_branch_enters_name_stage() {
 }
 
 #[test]
+fn create_new_branch_name_preserved_on_reentry() {
+    // User types a custom name, Escs back, re-selects "New branch" — input must be preserved.
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![PathBuf::from("/tmp/repos/foo")];
+        st.ws_name = tui_input::Input::default().with_value("my-ws".to_string());
+        st.stage = space::tui::screens::create::CreateStage::EnterBranchName;
+        st.branch_name_input =
+            tui_input::Input::default().with_value("feature/DEV-9999".to_string());
+    }
+
+    // Esc back to PickBranchStrategy
+    app.handle_key(key(KeyCode::Esc));
+    // Re-select "New branch" (idx 0)
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.branch_strategy_idx = 0;
+    }
+    app.handle_key(key(KeyCode::Enter));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::EnterBranchName,
+        );
+        assert_eq!(
+            st.branch_name_input.value(),
+            "feature/DEV-9999",
+            "custom branch name must be preserved after Esc-then-reentry"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+#[test]
 fn create_new_branch_esc_returns_to_strategy() {
     let mut app = test_app(vec![], vec![]);
     app.handle_key(key(KeyCode::Char('c')));
@@ -2948,7 +2987,11 @@ fn create_new_branch_custom_name_creates_worktree() {
         matches!(app.screen, Screen::Dashboard),
         "expected Dashboard after creating with custom branch name"
     );
-    assert!(env.workspaces_dir.join("my-ws").join("branch-name-repo").exists());
+    assert!(env
+        .workspaces_dir
+        .join("my-ws")
+        .join("branch-name-repo")
+        .exists());
 }
 
 #[test]
@@ -3004,7 +3047,10 @@ fn add_new_branch_esc_returns_to_strategy() {
     app.handle_key(key(KeyCode::Esc));
 
     if let Screen::AddRepos(ref st) = app.screen {
-        assert_eq!(st.stage, space::tui::screens::add::AddStage::PickBranchStrategy);
+        assert_eq!(
+            st.stage,
+            space::tui::screens::add::AddStage::PickBranchStrategy
+        );
         assert!(st.error.is_none(), "error should be cleared on Esc");
     } else {
         panic!("expected AddRepos screen");
@@ -3035,7 +3081,10 @@ fn add_new_branch_empty_name_rejected() {
             space::tui::screens::add::AddStage::EnterBranchName,
             "empty branch name should be rejected"
         );
-        assert!(st.error.is_some(), "error should be set for empty branch name");
+        assert!(
+            st.error.is_some(),
+            "error should be set for empty branch name"
+        );
     } else {
         panic!("expected AddRepos screen");
     }
@@ -3072,7 +3121,10 @@ fn add_new_branch_custom_name_creates_worktree() {
         "expected Dashboard after add with custom branch name"
     );
     assert!(
-        env.workspaces_dir.join(ws_name).join("add-branch-name-repo").exists(),
+        env.workspaces_dir
+            .join(ws_name)
+            .join("add-branch-name-repo")
+            .exists(),
         "worktree should have been created"
     );
 }
@@ -3085,7 +3137,8 @@ fn add_new_branch_custom_name_creates_worktree() {
 fn git_remote_url_returns_origin_url() {
     let dir = tempfile::tempdir().unwrap();
     let repo = git2::Repository::init(dir.path()).unwrap();
-    repo.remote("origin", "https://github.com/test/my-repo").unwrap();
+    repo.remote("origin", "https://github.com/test/my-repo")
+        .unwrap();
     let url = space::core::git::remote_url(dir.path());
     assert_eq!(url, Some("https://github.com/test/my-repo".to_string()));
 }

@@ -37,8 +37,7 @@ impl AddState {
         let items: Vec<PickerItem> = available_repos
             .into_iter()
             .map(|path| {
-                let branch = crate::core::git::current_branch(&path).ok();
-                let remote_url = crate::core::git::remote_url(&path);
+                let (branch, remote_url) = crate::core::git::repo_display_info(&path);
                 PickerItem {
                     branch,
                     remote_url,
@@ -214,9 +213,13 @@ impl AddState {
                         is_new: false,
                     })
                 } else if self.branch_strategy_idx == 0 {
-                    // New branch — open branch name editing stage
-                    let ws_name = self.workspace_name.clone();
-                    self.branch_name_input = Input::default().with_value(ws_name);
+                    // New branch — open branch name editing stage.
+                    // Only pre-fill when the field is empty; preserve whatever the
+                    // user typed if they Esc'd back and re-selected "New branch".
+                    if self.branch_name_input.value().is_empty() {
+                        self.branch_name_input =
+                            Input::default().with_value(self.workspace_name.clone());
+                    }
                     self.error = None;
                     self.stage = AddStage::EnterBranchName;
                     ScreenAction::Continue

@@ -44,8 +44,12 @@ impl PickerItem {
 fn shorten_remote_url(url: &str) -> String {
     for prefix in &["https://", "http://", "git://"] {
         if let Some(rest) = url.strip_prefix(prefix) {
-            // Strip embedded credentials (user:token@host/...) if present
-            let rest = if let Some(at_pos) = rest.find('@') {
+            // Strip embedded credentials (user:token@host) if present.
+            // Only search within the authority (before the first '/') so that
+            // '@' characters in the path (e.g. /org/foo@v1) are not treated as
+            // credential separators.
+            let authority_end = rest.find('/').unwrap_or(rest.len());
+            let rest = if let Some(at_pos) = rest[..authority_end].find('@') {
                 &rest[at_pos + 1..]
             } else {
                 rest
@@ -505,6 +509,15 @@ mod tests {
         assert_eq!(
             shorten_remote_url("https://token@github.com/org/repo"),
             "github.com/org/repo"
+        );
+    }
+
+    #[test]
+    fn shorten_remote_url_at_in_path_not_treated_as_credential() {
+        // '@' after the first '/' is in the path, not the authority — must not be stripped
+        assert_eq!(
+            shorten_remote_url("https://github.com/org/foo@v1"),
+            "github.com/org/foo@v1"
         );
     }
 

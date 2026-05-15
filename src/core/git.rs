@@ -172,10 +172,34 @@ pub fn recent_branches(repo_path: &std::path::Path, limit: usize) -> Vec<BranchI
 }
 
 /// Return the `origin` remote URL for a repo, or `None` if unavailable.
+#[allow(dead_code)] // public API; called from integration tests and future callers
 pub fn remote_url(repo_path: &Path) -> Option<String> {
     let repo = Repository::open(repo_path).ok()?;
     let remote = repo.find_remote("origin").ok()?;
     remote.url().map(String::from)
+}
+
+/// Return the current branch name and origin remote URL for a repo,
+/// opening the repository only once. Used by the picker to avoid two
+/// `Repository::open` calls per item.
+pub fn repo_display_info(repo_path: &Path) -> (Option<String>, Option<String>) {
+    let repo = match Repository::open(repo_path) {
+        Ok(r) => r,
+        Err(_) => return (None, None),
+    };
+    let branch = repo.head().ok().and_then(|head| {
+        if head.is_branch() {
+            head.shorthand().map(String::from)
+        } else {
+            head.target()
+                .map(|oid| format!("({})", &oid.to_string()[..8]))
+        }
+    });
+    let remote_url = repo
+        .find_remote("origin")
+        .ok()
+        .and_then(|r| r.url().map(String::from));
+    (branch, remote_url)
 }
 
 /// Return the current checked-out branch name (or short hash for detached HEAD).
