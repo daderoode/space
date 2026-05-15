@@ -10,6 +10,9 @@ use space::core::workspace::{Workspace, WorkspaceRepo};
 use space::tui::app::{App, Pane, Screen};
 use std::path::PathBuf;
 use unicode_width::UnicodeWidthStr;
+// git::remote_url tests use these directly
+use git2;
+use tempfile;
 
 /// Build a SpaceConfig pointing at a TestEnv's directories.
 fn config_from_env(env: &TestEnv) -> SpaceConfig {
@@ -3069,6 +3072,27 @@ fn add_new_branch_custom_name_creates_worktree() {
         env.workspaces_dir.join(ws_name).join("add-branch-name-repo").exists(),
         "worktree should have been created"
     );
+}
+
+// ---------------------------------------------------------------------------
+// git::remote_url tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn git_remote_url_returns_origin_url() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(dir.path()).unwrap();
+    repo.remote("origin", "https://github.com/test/my-repo").unwrap();
+    let url = space::core::git::remote_url(dir.path());
+    assert_eq!(url, Some("https://github.com/test/my-repo".to_string()));
+}
+
+#[test]
+fn git_remote_url_returns_none_when_no_remote() {
+    let dir = tempfile::tempdir().unwrap();
+    git2::Repository::init(dir.path()).unwrap();
+    let url = space::core::git::remote_url(dir.path());
+    assert!(url.is_none());
 }
 
 #[test]

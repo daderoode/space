@@ -36,7 +36,15 @@ impl AddState {
     ) -> Self {
         let items: Vec<PickerItem> = available_repos
             .into_iter()
-            .map(PickerItem::from_path)
+            .map(|path| {
+                let branch = crate::core::git::current_branch(&path).ok();
+                let remote_url = crate::core::git::remote_url(&path);
+                PickerItem {
+                    branch,
+                    remote_url,
+                    ..PickerItem::from_path(path)
+                }
+            })
             .collect();
         let mut picker = FuzzyPicker::new(
             "Add repos  TAB=toggle  ENTER=confirm  ESC=cancel",

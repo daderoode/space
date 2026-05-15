@@ -171,6 +171,13 @@ pub fn recent_branches(repo_path: &std::path::Path, limit: usize) -> Vec<BranchI
         .unwrap_or_default()
 }
 
+/// Return the `origin` remote URL for a repo, or `None` if unavailable.
+pub fn remote_url(repo_path: &Path) -> Option<String> {
+    let repo = Repository::open(repo_path).ok()?;
+    let remote = repo.find_remote("origin").ok()?;
+    remote.url().map(String::from)
+}
+
 /// Return the current checked-out branch name (or short hash for detached HEAD).
 pub fn current_branch(repo_path: &Path) -> Result<String> {
     let repo = Repository::open(repo_path)?;

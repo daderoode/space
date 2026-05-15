@@ -14,6 +14,8 @@ impl GoState {
                 name: ws.name.clone(),
                 parent: "workspaces".to_string(),
                 full_path: ws.path.clone(),
+                branch: None,
+                remote_url: None,
             })
             .collect();
         GoState {

@@ -10,6 +10,8 @@ pub struct PickerItem {
     pub name: String,
     pub parent: String,
     pub full_path: PathBuf,
+    pub branch: Option<String>,     // current branch of this repo
+    pub remote_url: Option<String>, // origin remote URL (raw)
 }
 
 impl PickerItem {
@@ -27,8 +29,35 @@ impl PickerItem {
             name,
             parent,
             full_path: path,
+            branch: None,
+            remote_url: None,
         }
     }
+}
+
+/// Shorten a remote URL for display:
+/// - Strips `https://`, `http://`, `git://` scheme prefixes.
+/// - Strips embedded credentials (`user:pass@`) from HTTP(S) URLs.
+/// - Strips `git@` prefix (e.g. `git@github.com:org/repo` → `github.com:org/repo`).
+/// - Strips trailing `.git` suffix.
+/// - Unknown schemes are returned as-is.
+fn shorten_remote_url(url: &str) -> String {
+    for prefix in &["https://", "http://", "git://"] {
+        if let Some(rest) = url.strip_prefix(prefix) {
+            // Strip embedded credentials (user:token@host/...) if present
+            let rest = if let Some(at_pos) = rest.find('@') {
+                &rest[at_pos + 1..]
+            } else {
+                rest
+            };
+            return rest.trim_end_matches(".git").to_string();
+        }
+    }
+    // git@github.com:org/repo → github.com:org/repo
+    if let Some(rest) = url.strip_prefix("git@") {
+        return rest.trim_end_matches(".git").to_string();
+    }
+    url.to_string()
 }
 
 pub struct FuzzyPicker {
@@ -342,6 +371,19 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
             let mut line_spans = vec![Span::styled(dot, Style::default().fg(theme::TEAL))];
             line_spans.extend(name_spans);
             line_spans.push(Span::styled(format!("  ({})", item.parent), theme::muted()));
+            if let Some(ref branch) = item.branch {
+                line_spans.push(Span::styled(format!("  {}", branch), theme::branch()));
+            }
+            if let Some(ref raw_url) = item.remote_url {
+                let short = shorten_remote_url(raw_url);
+                // Cap at 50 chars to prevent overflow on narrow terminals
+                let display = if short.chars().count() > 50 {
+                    format!("{}…", short.chars().take(49).collect::<String>())
+                } else {
+                    short
+                };
+                line_spans.push(Span::styled(format!("  {}", display), theme::muted()));
+            }
 
             ListItem::new(Line::from(line_spans))
         })
@@ -400,6 +442,78 @@ mod tests {
             .iter()
             .map(|p| PickerItem::from_path(PathBuf::from(p)))
             .collect()
+    }
+
+    #[test]
+    fn picker_item_from_path_has_no_metadata() {
+        let item = PickerItem::from_path(PathBuf::from("/work/org/my-repo"));
+        assert!(item.branch.is_none());
+        assert!(item.remote_url.is_none());
+    }
+
+    #[test]
+    fn shorten_remote_url_strips_https() {
+        assert_eq!(
+            shorten_remote_url("https://github.com/org/repo"),
+            "github.com/org/repo"
+        );
+    }
+
+    #[test]
+    fn shorten_remote_url_strips_http() {
+        assert_eq!(
+            shorten_remote_url("http://gitlab.example.com/org/repo"),
+            "gitlab.example.com/org/repo"
+        );
+    }
+
+    #[test]
+    fn shorten_remote_url_strips_git_at() {
+        // git@github.com:org/repo → github.com:org/repo
+        assert_eq!(
+            shorten_remote_url("git@github.com:org/repo"),
+            "github.com:org/repo"
+        );
+    }
+
+    #[test]
+    fn shorten_remote_url_strips_git_scheme() {
+        assert_eq!(
+            shorten_remote_url("git://github.com/org/repo"),
+            "github.com/org/repo"
+        );
+    }
+
+    #[test]
+    fn shorten_remote_url_strips_git_suffix() {
+        assert_eq!(
+            shorten_remote_url("https://github.com/org/repo.git"),
+            "github.com/org/repo"
+        );
+        assert_eq!(
+            shorten_remote_url("git@github.com:org/repo.git"),
+            "github.com:org/repo"
+        );
+    }
+
+    #[test]
+    fn shorten_remote_url_strips_credentials() {
+        assert_eq!(
+            shorten_remote_url("https://user:secret-token@github.com/org/repo"),
+            "github.com/org/repo"
+        );
+        assert_eq!(
+            shorten_remote_url("https://token@github.com/org/repo"),
+            "github.com/org/repo"
+        );
+    }
+
+    #[test]
+    fn shorten_remote_url_passthrough_for_unknown() {
+        assert_eq!(
+            shorten_remote_url("ssh://user@host/repo"),
+            "ssh://user@host/repo"
+        );
     }
 
     #[test]

@@ -43,7 +43,18 @@ impl std::fmt::Debug for CreateState {
 
 impl CreateState {
     pub fn new(all_repos: Vec<PathBuf>, initial_queries: Vec<String>) -> Self {
-        let items: Vec<PickerItem> = all_repos.into_iter().map(PickerItem::from_path).collect();
+        let items: Vec<PickerItem> = all_repos
+            .into_iter()
+            .map(|path| {
+                let branch = crate::core::git::current_branch(&path).ok();
+                let remote_url = crate::core::git::remote_url(&path);
+                PickerItem {
+                    branch,
+                    remote_url,
+                    ..PickerItem::from_path(path)
+                }
+            })
+            .collect();
         let mut picker = FuzzyPicker::new(
             "Select repos  TAB=toggle  ENTER=confirm  ESC=cancel",
             items,
