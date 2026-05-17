@@ -27,7 +27,8 @@ pub struct LoadRequest {
 /// Sent from the background thread back to the App.
 pub struct LoadResult {
     pub generation: u64,
-    pub workspace: crate::core::workspace::Workspace,
+    /// `Some(ws)` on success, `None` if `workspace_detail` returned an error.
+    pub workspace: Option<crate::core::workspace::Workspace>,
 }
 
 const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(5);
@@ -212,12 +213,15 @@ impl App {
                 while let Ok(newer) = load_rx.try_recv() {
                     req = newer;
                 }
-                if let Ok(ws) = crate::core::workspace::workspace_detail(&req.ws_dir, &req.name) {
-                    let _ = result_tx.send(LoadResult {
-                        generation: req.generation,
-                        workspace: ws,
-                    });
-                }
+                // Always send a result so the app can clear ws_loading.
+                // workspace is None when workspace_detail returns Err (e.g. directory
+                // deleted, transient git error) — the app surfaces a status message.
+                let workspace =
+                    crate::core::workspace::workspace_detail(&req.ws_dir, &req.name).ok();
+                let _ = result_tx.send(LoadResult {
+                    generation: req.generation,
+                    workspace,
+                });
             }
         });
 
@@ -421,19 +425,38 @@ impl App {
             "background load requested"
         );
         if let Some(tx) = &self.ws_load_tx {
-            // try_send: drop the request if the channel is full (bounded at 32)
-            let _ = tx.try_send(req);
+            match tx.try_send(req) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => {
+                    // Channel is full — the request is dropped. The next debounce
+                    // fire will retry with a fresh request. Acceptable: channel
+                    // capacity (32) makes this extremely unlikely in normal use.
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    // Worker thread died — clear loading state so the spinner
+                    // doesn't freeze. poll_background_result handles the same
+                    // case via TryRecvError::Disconnected on the receive side.
+                    tracing::error!("background loader thread disconnected on send");
+                    self.ws_loading = false;
+                    self.ws_loading_since = None;
+                }
+            }
         }
     }
 
     /// Called on workspace navigation (`j`/`k`). Populates the repos pane with
     /// skeletons immediately (fast, no git I/O), sets loading state, and starts
     /// the 150ms debounce timer. The background load fires once the user pauses.
+    ///
+    /// Increments `ws_generation` immediately to invalidate any in-flight result
+    /// from the previous workspace — the new generation won't match until
+    /// `check_debounce_timer` fires and sends a fresh request.
     pub fn begin_workspace_load(&mut self) {
         tracing::info!(ws_index = self.selected_ws, "workspace navigation");
         self.apply_skeleton_repos();
         self.ws_loading = true;
         self.ws_loading_since = Some(Instant::now());
+        self.ws_generation += 1; // invalidate any in-flight result immediately
         self.nav_pending = Some(Instant::now());
     }
 
@@ -477,17 +500,29 @@ impl App {
             );
             return;
         }
-        // Match by workspace name to find the correct slot
-        if let Some(idx) = self
-            .workspaces
-            .iter()
-            .position(|w| w.name == result.workspace.name)
-        {
-            self.workspaces[idx] = result.workspace;
-        }
+        // Always clear loading state — the request for this generation is done
+        // regardless of whether it succeeded or failed.
         self.ws_loading = false;
         self.ws_loading_since = None;
-        tracing::info!(generation = self.ws_generation, "background load applied");
+
+        match result.workspace {
+            Some(ws) => {
+                // Match by workspace name to find the correct slot
+                if let Some(idx) = self.workspaces.iter().position(|w| w.name == ws.name) {
+                    self.workspaces[idx] = ws;
+                }
+                tracing::info!(generation = self.ws_generation, "background load applied");
+            }
+            None => {
+                // workspace_detail returned an error (deleted directory, transient git failure)
+                tracing::warn!(
+                    generation = self.ws_generation,
+                    ws_index = self.selected_ws,
+                    "background load failed"
+                );
+                self.set_status("Could not load workspace detail", StatusKind::Error);
+            }
+        }
     }
 
     /// Poll the result channel once. Called every frame in `run_loop`. Non-blocking.
@@ -1660,6 +1695,7 @@ mod tests {
             repos: vec![],
         };
         let mut app = make_app(vec![ws]);
+        let gen_before = app.ws_generation;
 
         app.begin_workspace_load();
 
@@ -1674,6 +1710,11 @@ mod tests {
         assert!(
             app.ws_loading_since.is_some(),
             "ws_loading_since must be set for the spinner grace period"
+        );
+        assert_eq!(
+            app.ws_generation,
+            gen_before + 1,
+            "ws_generation must increment immediately to invalidate any in-flight result"
         );
     }
 
@@ -1803,6 +1844,45 @@ mod tests {
     }
 
     #[test]
+    fn apply_workspace_result_failed_load_clears_loading_and_sets_status() {
+        let ws = Workspace {
+            name: "my-ws".into(),
+            path: std::path::PathBuf::from("/tmp/my-ws"),
+            repos: vec![stub_repo("alpha")],
+        };
+        let mut app = make_app(vec![ws]);
+        app.ws_generation = 1;
+        app.ws_loading = true;
+        app.ws_loading_since = Some(Instant::now());
+
+        // workspace=None simulates workspace_detail() returning Err
+        let failed = LoadResult {
+            generation: 1,
+            workspace: None,
+        };
+        app.apply_workspace_result(failed);
+
+        assert!(
+            !app.ws_loading,
+            "ws_loading must be cleared even when the load failed"
+        );
+        assert!(
+            app.ws_loading_since.is_none(),
+            "ws_loading_since must be cleared on failed load"
+        );
+        assert!(
+            app.status_message.is_some(),
+            "a status error message must be set when the load fails"
+        );
+        // Workspace repos must be unchanged (failed result must not wipe out skeletons)
+        assert_eq!(
+            app.workspaces[0].repos.len(),
+            1,
+            "workspace repos must be unchanged after a failed load"
+        );
+    }
+
+    #[test]
     fn apply_workspace_result_discards_stale_generation() {
         let ws = Workspace {
             name: "my-ws".into(),
@@ -1816,11 +1896,11 @@ mod tests {
         // Result with an old generation (stale — should be discarded)
         let stale = LoadResult {
             generation: 3,
-            workspace: Workspace {
+            workspace: Some(Workspace {
                 name: "my-ws".into(),
                 path: std::path::PathBuf::from("/tmp/my-ws"),
                 repos: vec![stub_repo("new-repo")],
-            },
+            }),
         };
         app.apply_workspace_result(stale);
 
@@ -1848,11 +1928,11 @@ mod tests {
 
         let result = LoadResult {
             generation: 2,
-            workspace: Workspace {
+            workspace: Some(Workspace {
                 name: "my-ws".into(),
                 path: std::path::PathBuf::from("/tmp/my-ws"),
                 repos: vec![stub_repo("alpha"), stub_repo("beta")],
-            },
+            }),
         };
         app.apply_workspace_result(result);
 
@@ -1930,11 +2010,11 @@ mod tests {
 
         tx.send(LoadResult {
             generation: 1,
-            workspace: Workspace {
+            workspace: Some(Workspace {
                 name: "my-ws".into(),
                 path: std::path::PathBuf::from("/tmp/my-ws"),
                 repos: vec![stub_repo("alpha")],
-            },
+            }),
         })
         .unwrap();
 
