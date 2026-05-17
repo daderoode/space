@@ -1205,3 +1205,125 @@ fn repo_status_counts_conflicted_files() {
         status.conflicted
     );
 }
+
+#[test]
+fn current_branch_from_repo_matches_path_version() {
+    let dir = tempfile::tempdir().unwrap();
+    common::init_repo(dir.path());
+    let repo = git2::Repository::open(dir.path()).unwrap();
+    let via_path = space::core::git::current_branch(dir.path()).unwrap();
+    let via_repo = space::core::git::current_branch_from_repo(&repo).unwrap();
+    assert_eq!(via_path, via_repo);
+}
+
+#[test]
+fn repo_status_from_repo_matches_path_version() {
+    let dir = tempfile::tempdir().unwrap();
+    common::init_repo(dir.path());
+    std::fs::write(dir.path().join("new.txt"), "hello").unwrap();
+    let repo = git2::Repository::open(dir.path()).unwrap();
+    let via_path = space::core::git::repo_status(dir.path()).unwrap();
+    let via_repo = space::core::git::repo_status_from_repo(&repo).unwrap();
+    assert_eq!(via_path.modified, via_repo.modified);
+    assert_eq!(via_path.staged, via_repo.staged);
+    assert_eq!(via_path.untracked, via_repo.untracked);
+    assert_eq!(via_path.conflicted, via_repo.conflicted);
+}
+
+#[test]
+fn ahead_behind_from_repo_matches_path_version() {
+    let dir = tempfile::tempdir().unwrap();
+    common::init_repo(dir.path());
+    let repo = git2::Repository::open(dir.path()).unwrap();
+    let via_path = space::core::git::ahead_behind(dir.path()).unwrap();
+    let via_repo = space::core::git::ahead_behind_from_repo(&repo).unwrap();
+    assert_eq!(via_path, via_repo);
+}
+
+#[test]
+fn ahead_behind_from_repo_matches_path_version_with_remote() {
+    // Create a bare repo to act as "origin"
+    let bare_dir = tempfile::tempdir().unwrap();
+    let out = Command::new("git")
+        .args(["init", "--bare", "-b", "main"])
+        .current_dir(bare_dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git init --bare failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Clone it to get a repo with a remote
+    let clone_dir = tempfile::tempdir().unwrap();
+    let out = Command::new("git")
+        .args(["clone", &bare_dir.path().to_string_lossy(), "."])
+        .current_dir(clone_dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git clone failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Configure user
+    for args in [
+        vec!["config", "user.email", "test@local"],
+        vec!["config", "user.name", "Test"],
+    ] {
+        let out = Command::new("git")
+            .args(&args)
+            .current_dir(clone_dir.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+    }
+
+    // Make initial commit + push to establish tracking
+    let out = Command::new("git")
+        .args(["commit", "--allow-empty", "-m", "init"])
+        .current_dir(clone_dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = Command::new("git")
+        .args(["push", "-u", "origin", "main"])
+        .current_dir(clone_dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git push failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Make a second local commit (not pushed) -> ahead=1, behind=0
+    let out = Command::new("git")
+        .args(["commit", "--allow-empty", "-m", "local only"])
+        .current_dir(clone_dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "second commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Both path-based and repo-based functions must agree
+    let via_path = space::core::git::ahead_behind(clone_dir.path()).unwrap();
+    let repo = git2::Repository::open(clone_dir.path()).unwrap();
+    let via_repo = space::core::git::ahead_behind_from_repo(&repo).unwrap();
+
+    assert_eq!(
+        via_path, via_repo,
+        "path and repo variants must return the same value"
+    );
+    assert_eq!(via_path.0, 1, "one unpushed commit => ahead=1");
+    assert_eq!(via_path.1, 0, "nothing to pull => behind=0");
+}

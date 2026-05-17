@@ -7,6 +7,7 @@ mod shell;
 mod tui;
 
 fn main() -> anyhow::Result<()> {
+    let _log_guard = space::logging::init();
     let cli_args = Cli::parse();
     match cli_args.command {
         None => {

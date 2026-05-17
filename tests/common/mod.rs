@@ -145,6 +145,13 @@ pub fn test_app(workspaces: Vec<Workspace>, repos_cache: Vec<PathBuf>) -> App {
         status_message: None,
         status_kind: space::tui::actions::StatusKind::Info,
         status_message_set_at: None,
+        ws_load_tx: None,
+        ws_result_rx: None,
+        ws_generation: 0,
+        nav_pending: None,
+        ws_loading: false,
+        ws_loading_since: None,
+        spinner_tick: 0,
     }
 }
 
@@ -175,6 +182,13 @@ pub fn test_app_with_config(
         status_message: None,
         status_kind: space::tui::actions::StatusKind::Info,
         status_message_set_at: None,
+        ws_load_tx: None,
+        ws_result_rx: None,
+        ws_generation: 0,
+        nav_pending: None,
+        ws_loading: false,
+        ws_loading_since: None,
+        spinner_tick: 0,
     }
 }
 

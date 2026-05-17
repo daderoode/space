@@ -85,6 +85,7 @@ pub fn detect_base_branch(repo_path: &Path) -> String {
 }
 
 /// Count modified, staged, and untracked files using git2.
+#[allow(dead_code)] // used by integration tests (space::core::git); bin crate has private mod core
 pub fn repo_status(repo_path: &Path) -> Result<RepoStatus> {
     let repo = Repository::open(repo_path)
         .with_context(|| format!("opening repo at {}", repo_path.display()))?;
@@ -203,6 +204,7 @@ pub fn repo_display_info(repo_path: &Path) -> (Option<String>, Option<String>) {
 }
 
 /// Return the current checked-out branch name (or short hash for detached HEAD).
+#[allow(dead_code)] // used by integration tests (space::core::git); bin crate has private mod core
 pub fn current_branch(repo_path: &Path) -> Result<String> {
     let repo = Repository::open(repo_path)?;
     let head = repo.head()?;
@@ -214,8 +216,76 @@ pub fn current_branch(repo_path: &Path) -> Result<String> {
     }
 }
 
+/// Like `current_branch` but reuses an already-open `Repository`.
+/// Avoids a second `Repository::open` when the caller already has one.
+pub fn current_branch_from_repo(repo: &Repository) -> Result<String> {
+    let head = repo.head()?;
+    if head.is_branch() {
+        Ok(head.shorthand().unwrap_or("HEAD").to_string())
+    } else {
+        let oid = head.target().unwrap_or(git2::Oid::zero());
+        Ok(format!("({})", &oid.to_string()[..8]))
+    }
+}
+
+/// Like `repo_status` but reuses an already-open `Repository`.
+pub fn repo_status_from_repo(repo: &Repository) -> Result<RepoStatus> {
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false);
+
+    let statuses = repo.statuses(Some(&mut opts))?;
+    let mut result = RepoStatus::default();
+
+    for entry in statuses.iter() {
+        let s = entry.status();
+        if s.intersects(
+            git2::Status::INDEX_NEW
+                | git2::Status::INDEX_MODIFIED
+                | git2::Status::INDEX_DELETED
+                | git2::Status::INDEX_RENAMED,
+        ) {
+            result.staged += 1;
+        }
+        if s.intersects(
+            git2::Status::WT_MODIFIED | git2::Status::WT_DELETED | git2::Status::WT_RENAMED,
+        ) {
+            result.modified += 1;
+        }
+        if s.contains(git2::Status::WT_NEW) {
+            result.untracked += 1;
+        }
+        if s.contains(git2::Status::CONFLICTED) {
+            result.conflicted += 1;
+        }
+    }
+    Ok(result)
+}
+
+/// Like `ahead_behind` but reuses an already-open `Repository`.
+pub fn ahead_behind_from_repo(repo: &Repository) -> Result<(usize, usize)> {
+    let head = repo.head()?;
+    let local_oid = match head.target() {
+        Some(o) => o,
+        None => return Ok((0, 0)),
+    };
+    let branch_name = match head.shorthand() {
+        Some(n) => n.to_string(),
+        None => return Ok((0, 0)),
+    };
+    let upstream_ref = format!("refs/remotes/origin/{}", branch_name);
+    let upstream_oid = match repo.refname_to_id(&upstream_ref) {
+        Ok(o) => o,
+        Err(_) => return Ok((0, 0)),
+    };
+    let (ahead, behind) = repo.graph_ahead_behind(local_oid, upstream_oid)?;
+    Ok((ahead, behind))
+}
+
 /// Return (ahead, behind) relative to the upstream tracking branch.
 /// Returns (0, 0) if there is no upstream or the repo has no remote.
+#[allow(dead_code)] // used by integration tests (space::core::git); bin crate has private mod core
 pub fn ahead_behind(repo_path: &Path) -> Result<(usize, usize)> {
     let repo = Repository::open(repo_path)?;
     let head = repo.head()?;
@@ -304,12 +374,19 @@ fn format_delta(delta: i64) -> String {
 
 /// Return per-file diff entries for a repo.
 ///
-/// Returns uncommitted changes: staged entries (tree→index) and
-/// unstaged entries (index→workdir), each with the correct `staged` flag.
+/// Returns uncommitted changes: staged entries (tree->index) and
+/// unstaged entries (index->workdir), each with the correct `staged` flag.
 pub fn file_diff(repo_path: &Path) -> Result<Vec<FileEntry>> {
+    let t = std::time::Instant::now();
     let repo = Repository::open(repo_path)
         .with_context(|| format!("opening repo at {}", repo_path.display()))?;
-    file_diff_vs_head(&repo)
+    let result = file_diff_vs_head(&repo)?;
+    tracing::info!(
+        elapsed_ms = t.elapsed().as_millis() as u64,
+        entry_count = result.len(),
+        "file_diff completed"
+    );
+    Ok(result)
 }
 
 fn file_diff_vs_head(repo: &Repository) -> Result<Vec<FileEntry>> {
