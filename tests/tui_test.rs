@@ -2105,16 +2105,16 @@ fn shift_u_on_repo_row_unstages_all_staged() {
     let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
     app.load_selected_workspace_detail();
 
-    // Verify file is staged before we unstage
+    // Focus right pane and expand repo (cache is populated lazily on expand)
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Enter));
+
+    // Verify file is staged before we unstage (cache now populated after expand)
     let files_before = app.repo_file_cache.get(&0).expect("cache should exist");
     assert!(
         files_before.iter().any(|e| e.staged),
         "should have at least one staged file before U"
     );
-
-    // Focus right pane and expand repo
-    app.focus = Pane::Right;
-    app.handle_key(key(KeyCode::Enter));
 
     // Cursor is on repo row (row 0). Press U to unstage all
     assert_eq!(app.cursor_row, 0);

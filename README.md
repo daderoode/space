@@ -172,6 +172,26 @@ runs `git worktree add` for each selected repo, placing the worktrees at
 
 There is no metadata database — the filesystem is the state.
 
+## Diagnostics
+
+`space` writes diagnostic logs by default to help with bug reports:
+
+| Platform | Default log directory |
+|---|---|
+| macOS | `~/Library/Application Support/space/` |
+| Linux | `~/.local/share/space/` |
+
+Files are named `space.log.YYYY-MM-DD`. The last 3 days are kept.
+
+| Variable | Effect |
+|---|---|
+| `SPACE_LOG=off` | Disable logging entirely |
+| `SPACE_LOG=/path/to/dir` | Write logs to a custom directory |
+| `SPACE_LOG_LEVEL=debug` | Verbose logging (default: `info`) |
+| `SPACE_LOG_LEVEL=off` | Disable logging (alternative to `SPACE_LOG=off`) |
+
+When filing a bug report, include the log file from the day the issue occurred.
+
 ## Development
 
 Before pushing changes, run the same local verification sequence used by CI:

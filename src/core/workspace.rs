@@ -54,10 +54,46 @@ pub fn list_workspaces(ws_dir: &Path) -> Result<Vec<Workspace>> {
     Ok(workspaces)
 }
 
+/// Return lightweight repo stubs for a workspace without opening any git repos.
+/// Used to populate the repos pane immediately on navigation while
+/// `workspace_detail` loads in the background.
+pub fn workspace_repo_skeletons(ws_dir: &Path, name: &str) -> Vec<WorkspaceRepo> {
+    let ws_path = ws_dir.join(name);
+    let mut repos = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&ws_path) else {
+        return repos;
+    };
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        if !ft.is_dir() {
+            continue;
+        }
+        let repo_path = entry.path();
+        if !repo_path.join(".git").exists() {
+            continue;
+        }
+        let repo_name = entry.file_name().to_string_lossy().to_string();
+        repos.push(WorkspaceRepo {
+            name: repo_name,
+            path: repo_path,
+            branch: "...".to_string(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        });
+    }
+    repos.sort_by(|a, b| a.name.cmp(&b.name));
+    repos
+}
+
 /// Return a workspace with populated repo details (branch, status, ahead/behind).
 pub fn workspace_detail(ws_dir: &Path, name: &str) -> Result<Workspace> {
+    let t = std::time::Instant::now();
     let ws_path = ws_dir.join(name);
     if !ws_path.exists() {
+        tracing::warn!(kind = "not_found", "workspace_detail failed");
         anyhow::bail!("workspace '{}' not found", name);
     }
     let mut repos = Vec::new();
@@ -71,9 +107,16 @@ pub fn workspace_detail(ws_dir: &Path, name: &str) -> Result<Workspace> {
         if !repo_path.join(".git").exists() {
             continue;
         }
-        let branch = git::current_branch(&repo_path).unwrap_or_else(|_| "?".to_string());
-        let status = git::repo_status(&repo_path).unwrap_or_default();
-        let (ahead, behind) = git::ahead_behind(&repo_path).unwrap_or((0, 0));
+        let (branch, status, ahead, behind) = match git2::Repository::open(&repo_path) {
+            Ok(repo) => {
+                let branch =
+                    git::current_branch_from_repo(&repo).unwrap_or_else(|_| "?".to_string());
+                let status = git::repo_status_from_repo(&repo).unwrap_or_default();
+                let (ahead, behind) = git::ahead_behind_from_repo(&repo).unwrap_or((0, 0));
+                (branch, status, ahead, behind)
+            }
+            Err(_) => ("?".to_string(), git::RepoStatus::default(), 0, 0),
+        };
         repos.push(WorkspaceRepo {
             name: repo_name,
             path: repo_path,
@@ -84,6 +127,11 @@ pub fn workspace_detail(ws_dir: &Path, name: &str) -> Result<Workspace> {
         });
     }
     repos.sort_by(|a, b| a.name.cmp(&b.name));
+    tracing::info!(
+        elapsed_ms = t.elapsed().as_millis() as u64,
+        repo_count = repos.len(),
+        "workspace_detail completed"
+    );
     Ok(Workspace {
         name: name.to_string(),
         path: ws_path,

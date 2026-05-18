@@ -354,7 +354,18 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
 
     let left_ind = if scroll_x > 0 { " <" } else { "" };
     let right_ind = if scroll_x < max_scroll { " >" } else { "" };
-    let title = format!(" {}{}{} ", ws_name, left_ind, right_ind);
+    let title = if app.ws_loading
+        && app
+            .ws_loading_since
+            .map(|t| t.elapsed() > std::time::Duration::from_millis(200))
+            .unwrap_or(false)
+    {
+        let frames = ["·  ", "·· ", "···"];
+        let frame = frames[(app.spinner_tick as usize / 30) % 3];
+        format!(" {}{}{} {} ", ws_name, left_ind, right_ind, frame)
+    } else {
+        format!(" {}{}{} ", ws_name, left_ind, right_ind)
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -400,13 +411,16 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
                         })
                     })
                     .unwrap_or((0, 0));
+                let branch_cell = if app.ws_loading && r.branch == "..." {
+                    Cell::from("...").style(theme::muted())
+                } else {
+                    let b = skip_display_width(&r.branch, branch_offset);
+                    let b = truncate_for_width(b, branch_display);
+                    Cell::from(Span::styled(b, theme::branch()))
+                };
                 Row::new(vec![
                     Cell::from(Span::raw(name)),
-                    {
-                        let b = skip_display_width(&r.branch, branch_offset);
-                        let b = truncate_for_width(b, branch_display);
-                        Cell::from(Span::styled(b, theme::branch()))
-                    },
+                    branch_cell,
                     {
                         let s = skip_display_width(&status_str, status_offset);
                         let s = truncate_for_width(s, status_display);

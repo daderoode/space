@@ -1,5 +1,6 @@
 mod common;
 
+use common::TestEnv;
 use space::core::workspace::{create_worktree, list_workspaces, BranchStrategy};
 use std::process::Command;
 use tempfile::TempDir;
@@ -280,4 +281,35 @@ fn list_workspaces_nonexistent_dir_returns_empty() {
         workspaces.is_empty(),
         "nonexistent dir should return empty list"
     );
+}
+
+#[test]
+fn workspace_repo_skeletons_returns_placeholder_branch() {
+    let env = TestEnv::new();
+    let ws_dir = env.workspaces_dir.join("my-ws");
+    std::fs::create_dir_all(&ws_dir).unwrap();
+    // Create a subdirectory with a .git entry (sufficient for skeleton detection)
+    let repo_dir = ws_dir.join("alpha");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::write(repo_dir.join(".git"), "gitdir: /fake").unwrap();
+
+    let skeletons = space::core::workspace::workspace_repo_skeletons(&env.workspaces_dir, "my-ws");
+
+    assert_eq!(skeletons.len(), 1);
+    assert_eq!(skeletons[0].name, "alpha");
+    assert_eq!(skeletons[0].branch, "...");
+    assert_eq!(skeletons[0].status.modified, 0);
+    assert_eq!(skeletons[0].ahead, 0);
+}
+
+#[test]
+fn workspace_repo_skeletons_skips_non_git_dirs() {
+    let env = TestEnv::new();
+    let ws_dir = env.workspaces_dir.join("my-ws");
+    std::fs::create_dir_all(ws_dir.join("not-a-repo")).unwrap();
+    std::fs::write(env.workspaces_dir.join("my-ws").join("some-file.txt"), "x").unwrap();
+
+    // The workspace dir exists but has no .git subdirs
+    let skeletons = space::core::workspace::workspace_repo_skeletons(&env.workspaces_dir, "my-ws");
+    assert!(skeletons.is_empty());
 }
