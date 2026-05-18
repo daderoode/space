@@ -7,8 +7,14 @@ mod shell;
 mod tui;
 
 fn main() -> anyhow::Result<()> {
-    let _log_guard = space::logging::init();
     let cli_args = Cli::parse();
+    // `space mcp` installs its own stderr subscriber inside mcp::run().
+    // Initializing the file subscriber first would cause that fmt().init()
+    // call to panic (subscriber already set). Skip file logging for Mcp.
+    let _log_guard = match &cli_args.command {
+        Some(Commands::Mcp) => None,
+        _ => space::logging::init(),
+    };
     match cli_args.command {
         None => {
             // No args → TUI dashboard
