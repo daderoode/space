@@ -354,21 +354,18 @@ fn render_repo_table(app: &App, frame: &mut Frame, area: Rect) {
 
     let left_ind = if scroll_x > 0 { " <" } else { "" };
     let right_ind = if scroll_x < max_scroll { " >" } else { "" };
-    let pane_title = {
-        if app.ws_loading
-            && app
-                .ws_loading_since
-                .map(|t| t.elapsed() > std::time::Duration::from_millis(200))
-                .unwrap_or(false)
-        {
-            let frames = ["·  ", "·· ", "···"];
-            let frame = frames[(app.spinner_tick as usize / 30) % 3];
-            format!(" {}{}{} {} ", ws_name, left_ind, right_ind, frame)
-        } else {
-            format!(" {}{}{} ", ws_name, left_ind, right_ind)
-        }
+    let title = if app.ws_loading
+        && app
+            .ws_loading_since
+            .map(|t| t.elapsed() > std::time::Duration::from_millis(200))
+            .unwrap_or(false)
+    {
+        let frames = ["·  ", "·· ", "···"];
+        let frame = frames[(app.spinner_tick as usize / 30) % 3];
+        format!(" {}{}{} {} ", ws_name, left_ind, right_ind, frame)
+    } else {
+        format!(" {}{}{} ", ws_name, left_ind, right_ind)
     };
-    let title = pane_title;
 
     let block = Block::default()
         .borders(Borders::ALL)

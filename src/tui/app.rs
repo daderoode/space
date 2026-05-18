@@ -185,7 +185,6 @@ pub struct App {
     // Loading display
     pub ws_loading: bool,
     pub ws_loading_since: Option<Instant>,
-    #[allow(dead_code)]
     pub spinner_tick: u64,
 }
 
@@ -428,9 +427,11 @@ impl App {
             match tx.try_send(req) {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Full(_)) => {
-                    // Channel is full — the request is dropped. The next debounce
-                    // fire will retry with a fresh request. Acceptable: channel
-                    // capacity (32) makes this extremely unlikely in normal use.
+                    // Channel is full (32 unprocessed requests). Reset nav_pending so
+                    // check_debounce_timer retries on the next frame rather than
+                    // leaving ws_loading stuck. Requires sustained rapid scrolling
+                    // while git is very slow — rare, but must not freeze the UI.
+                    self.nav_pending = Some(Instant::now() - Duration::from_millis(200));
                 }
                 Err(mpsc::TrySendError::Disconnected(_)) => {
                     // Worker thread died — clear loading state so the spinner
@@ -477,11 +478,15 @@ impl App {
     /// Populate the selected workspace's repos with lightweight skeleton entries
     /// (branch = "...") from a fast filesystem scan. No git operations.
     fn apply_skeleton_repos(&mut self) {
-        let skeletons = crate::core::workspace::workspace_repo_skeletons(
-            &self.config.workspaces.dir,
-            &self.workspaces[self.selected_ws].name,
-        );
-        self.workspaces[self.selected_ws].repos = skeletons;
+        let Some(ws) = self.workspaces.get(self.selected_ws) else {
+            return;
+        };
+        let name = ws.name.clone();
+        let skeletons =
+            crate::core::workspace::workspace_repo_skeletons(&self.config.workspaces.dir, &name);
+        if let Some(ws) = self.workspaces.get_mut(self.selected_ws) {
+            ws.repos = skeletons;
+        }
     }
 
     /// Apply a completed background result. Only accepted if the generation matches
@@ -554,11 +559,23 @@ impl App {
 
     /// Check the debounce timer. If 150ms has elapsed since the last navigation key
     /// and a load is pending, fire the background load request.
+    ///
+    /// # Generation counter protocol
+    ///
+    /// `ws_generation` is incremented in **two** places by design:
+    ///
+    /// 1. `begin_workspace_load` — increments immediately on navigation to
+    ///    invalidate any in-flight result from the *previous* workspace.
+    /// 2. `check_debounce_timer` (here) — increments again just before firing
+    ///    the actual load request, so the result the worker sends back carries
+    ///    the generation value the app will be waiting for.
+    ///
+    /// Both increments are required. Removing either one opens a race window.
     pub fn check_debounce_timer(&mut self) {
         if let Some(t) = self.nav_pending {
             if t.elapsed() > Duration::from_millis(150) {
                 self.nav_pending = None;
-                self.ws_generation += 1;
+                self.ws_generation += 1; // see generation counter protocol above
                 tracing::debug!(generation = self.ws_generation, "debounce timer fired");
                 self.fire_load_request();
             }
@@ -709,6 +726,8 @@ impl App {
                 self.workspaces = ws;
                 self.selected_ws = 0;
                 self.reset_repo_pane_state();
+                // Intentionally synchronous: worktree deletion is infrequent and
+                // the user expects up-to-date data before seeing the dashboard.
                 self.load_selected_workspace_detail();
             }
         }
@@ -823,6 +842,8 @@ impl App {
                     self.selected_ws = idx;
                 }
                 self.reset_repo_pane_state();
+                // Intentionally synchronous: worktree creation is infrequent and
+                // the user expects the new workspace to appear fully loaded.
                 self.load_selected_workspace_detail();
             }
             let verb = if params.is_new {
@@ -866,6 +887,8 @@ impl App {
                             self.selected_ws = 0;
                         }
                         self.reset_repo_pane_state();
+                        // Intentionally synchronous: workspace deletion is infrequent
+                        // and the user expects the dashboard to reflect the new state.
                         self.load_selected_workspace_detail();
                         self.screen = Screen::Dashboard;
                         self.set_status(

@@ -824,6 +824,30 @@ The server runs on stdio (stdin/stdout). Logs go to stderr at INFO level. No add
 
 ---
 
+## Diagnostics
+
+`space` writes diagnostic logs by default to assist with bug reports.
+
+**Default log location:**
+
+| Platform | Path |
+|---|---|
+| macOS | `~/Library/Application Support/space/space.log.YYYY-MM-DD` |
+| Linux | `~/.local/share/space/space.log.YYYY-MM-DD` |
+
+The last 3 days of logs are kept. Logs include workspace load timings, navigation events, and errors — no workspace names, file paths, or file content.
+
+**Environment variables:**
+
+| Variable | Effect |
+|---|---|
+| `SPACE_LOG=off` | Disable logging entirely |
+| `SPACE_LOG=/path/to/dir` | Write logs to a custom directory |
+| `SPACE_LOG_LEVEL=debug` | Enable verbose logging (default: `info`) |
+| `SPACE_LOG_LEVEL=off` | Disable logging |
+
+When filing a bug report, include the log file from the day the issue occurred.
+
 ## Development
 
 Before pushing changes:
