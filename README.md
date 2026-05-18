@@ -38,20 +38,20 @@ panes:
 
 ```
 ┌─ Workspaces (25%) ──────────┬─ my-feature ──────────────────────────────┐
-│  my-feature                 │  ▶ api-service  feat/x  clean  +142 -20   │
+│  my-feature                 │  ▶ api-service  feat/x  clean             │
 │  hotfix-payment             │  ▼ sak          feat/x  2 modified  +38 -4 │
 │  ...                        │    ── Unstaged ──                           │
 │                             │    M src/main.rs                   +12 -4  │
 │                             │    A src/new.rs                    +26 -0  │
 └─────────────────────────────┴───────────────────────────────────────────┘
- enter expand · ←/esc back · h/l scroll · q quit
+ enter expand · ←/esc back · h/l scroll · ? help · q quit
 ```
 
-Repos show total line changes across uncommitted files (`+N -M` in green/red).
 The `STATUS` column uses plain-language summaries like `2 modified` or
 `14 modified, 3 new`.
 Press `→` or `Enter` on a repo to expand it and see per-file diffs grouped
-into Conflicts, Unstaged, and Staged sections.
+into Conflicts, Unstaged, and Staged sections. Expanded repos show total line
+changes (`+N -M` in green/red) per file and in aggregate.
 Press `Enter` on a file row to open a scrollable diff viewer. Stage/unstage
 files with `s`/`space`, or bulk stage/unstage all files in the selected repo with `S`/`U`.
 
@@ -67,6 +67,7 @@ files with `s`/`space`, or bulk stage/unstage all files in the selected repo wit
 | `d` | Delete selected workspace |
 | `r` | Refresh repo cache |
 | `/` | Search all repos |
+| `?` | Open help overlay |
 | `S` | Open config editor |
 | `q` / `Esc` | Quit |
 
