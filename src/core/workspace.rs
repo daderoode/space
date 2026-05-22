@@ -202,23 +202,16 @@ fn run_git_in(cwd: &Path, args: &[&str]) -> Result<()> {
 /// - `new_branch = false`: checks for a local branch first; if absent, looks for
 ///   `origin/<branch>` and creates a local tracking branch; if neither, passes through
 ///   to git (which will error with a clear message).
-///
-/// Auto-fetches `origin` before resolving remote refs (errors silently ignored for offline use).
 #[allow(dead_code)] // public API; called from integration tests and future callers
 pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) -> Result<()> {
-    // Auto-fetch — ignore errors for offline use
-    let _ = Command::new("git")
-        .args(["fetch", "--quiet", "origin"])
-        .current_dir(wt_path)
-        .status();
-
     if new_branch {
         return run_git_in(wt_path, &["switch", "-c", branch]);
     }
 
-    // Check local branch
+    // Check local branch (refs/heads/ scopes the lookup to branches only, not tags)
+    let local_ref = format!("refs/heads/{}", branch);
     let local_exists = Command::new("git")
-        .args(["rev-parse", "--verify", branch])
+        .args(["rev-parse", "--verify", &local_ref])
         .current_dir(wt_path)
         .output()
         .map(|o| o.status.success())

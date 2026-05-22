@@ -379,3 +379,28 @@ fn switch_worktree_branch_nonexistent_branch_errors() {
         "switching to nonexistent branch should fail"
     );
 }
+
+#[test]
+fn recent_branches_excludes_remote_refs() {
+    let repo_dir = TempDir::new().unwrap();
+    common::init_repo(repo_dir.path());
+
+    let head_out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_dir.path())
+        .output()
+        .unwrap();
+    let sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+
+    Command::new("git")
+        .args(["update-ref", "refs/remotes/origin/remote-only", &sha])
+        .current_dir(repo_dir.path())
+        .status()
+        .unwrap();
+
+    let branches = space::core::git::recent_branches(repo_dir.path(), 10);
+    assert!(
+        branches.iter().all(|b| !b.is_remote),
+        "recent_branches must not include remote-tracking refs"
+    );
+}

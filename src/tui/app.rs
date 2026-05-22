@@ -943,7 +943,6 @@ impl App {
             }
             ScreenAction::SwitchRepoBranch {
                 repo_path,
-                repo_index: _,
                 branch,
                 new_branch,
             } => {
@@ -1330,7 +1329,6 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 let state = crate::tui::screens::switch_branch::SwitchBranchState::new(
                     repo.name.clone(),
                     repo.path.clone(),
-                    repo_index,
                 );
                 app.screen = Screen::SwitchBranch(state);
             }

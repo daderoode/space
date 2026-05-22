@@ -16,7 +16,6 @@ pub struct SwitchBranchState {
     pub stage: SwitchBranchStage,
     pub repo_name: String,
     pub repo_path: PathBuf,
-    pub repo_index: usize,
     pub strategy_idx: usize,
     pub branch_name_input: Input,
     pub branch_picker: Option<FuzzyPicker>,
@@ -35,13 +34,12 @@ impl std::fmt::Debug for SwitchBranchState {
 }
 
 impl SwitchBranchState {
-    pub fn new(repo_name: String, repo_path: PathBuf, repo_index: usize) -> Self {
+    pub fn new(repo_name: String, repo_path: PathBuf) -> Self {
         let recent_branches = crate::core::git::recent_branches(&repo_path, 5);
         Self {
             stage: SwitchBranchStage::PickStrategy,
             repo_name,
             repo_path,
-            repo_index,
             strategy_idx: 0,
             branch_name_input: Input::default(),
             branch_picker: None,
@@ -106,7 +104,6 @@ impl SwitchBranchState {
                     let branch = self.recent_branches[self.strategy_idx - 1].name.clone();
                     ScreenAction::SwitchRepoBranch {
                         repo_path: self.repo_path.clone(),
-                        repo_index: self.repo_index,
                         branch,
                         new_branch: false,
                     }
@@ -132,7 +129,6 @@ impl SwitchBranchState {
                 self.error = None;
                 ScreenAction::SwitchRepoBranch {
                     repo_path: self.repo_path.clone(),
-                    repo_index: self.repo_index,
                     branch: name,
                     new_branch: true,
                 }
@@ -153,13 +149,35 @@ impl SwitchBranchState {
                 self.stage = SwitchBranchStage::PickStrategy;
                 ScreenAction::Continue
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 if let Some(ref mut bp) = self.branch_picker {
                     bp.move_up();
                 }
                 ScreenAction::Continue
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Char('k')
+                if self
+                    .branch_picker
+                    .as_ref()
+                    .map_or(false, |bp| bp.input.value().is_empty()) =>
+            {
+                if let Some(ref mut bp) = self.branch_picker {
+                    bp.move_up();
+                }
+                ScreenAction::Continue
+            }
+            KeyCode::Down => {
+                if let Some(ref mut bp) = self.branch_picker {
+                    bp.move_down();
+                }
+                ScreenAction::Continue
+            }
+            KeyCode::Char('j')
+                if self
+                    .branch_picker
+                    .as_ref()
+                    .map_or(false, |bp| bp.input.value().is_empty()) =>
+            {
                 if let Some(ref mut bp) = self.branch_picker {
                     bp.move_down();
                 }
@@ -180,7 +198,6 @@ impl SwitchBranchState {
                         self.error = None;
                         ScreenAction::SwitchRepoBranch {
                             repo_path: self.repo_path.clone(),
-                            repo_index: self.repo_index,
                             branch,
                             new_branch: false,
                         }

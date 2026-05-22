@@ -1306,7 +1306,8 @@ fn render_switch_strategy_picker(
     let n = recent_branches.len();
     // Rows: "New branch..." (1) + if n>0: "Recent:" header (1) + n branches + "Show more" (1); else "Pick a branch..." (1)
     let branch_rows: u16 = 1 + if n > 0 { 1 + n as u16 + 1 } else { 1 };
-    let height: u16 = branch_rows + 2 + if has_error { 3 } else { 1 };
+    let height: u16 = (branch_rows + 2 + if has_error { 3 } else { 1 })
+        .min(frame.area().height.saturating_sub(2));
     let dialog_w = (frame.area().width * 70 / 100).max(60);
     let area = centered_rect_fixed(dialog_w, height, frame.area());
     frame.render_widget(Clear, area);

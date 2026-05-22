@@ -3211,8 +3211,20 @@ mod switch_branch_tests {
         SwitchBranchState::new(
             "my-repo".to_string(),
             std::path::PathBuf::from("/tmp/my-repo"),
-            0,
         )
+    }
+
+    fn real_repo_state() -> (tempfile::TempDir, SwitchBranchState) {
+        let dir = tempfile::TempDir::new().unwrap();
+        common::init_repo(dir.path());
+        let status = std::process::Command::new("git")
+            .args(["branch", "feature-a"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git branch feature-a failed");
+        let state = SwitchBranchState::new("my-repo".to_string(), dir.path().to_path_buf());
+        (dir, state)
     }
 
     fn make_ctx() -> space::tui::actions::ScreenContext<'static> {
@@ -3303,6 +3315,35 @@ mod switch_branch_tests {
             matches!(app.screen, Screen::SwitchBranch(_)),
             "b on a repo row should open SwitchBranch screen"
         );
+    }
+
+    #[test]
+    fn enter_on_recent_branch_returns_switch_action() {
+        use ratatui::crossterm::event::KeyCode;
+        let (_dir, mut state) = real_repo_state();
+        // Index 0 = New branch, index 1 = first recent branch
+        state.handle_key(common::key(KeyCode::Down), &make_ctx());
+        assert_eq!(state.strategy_idx, 1);
+        let action = state.handle_key(common::key(KeyCode::Enter), &make_ctx());
+        assert!(
+            matches!(action, ScreenAction::SwitchRepoBranch { new_branch: false, .. }),
+            "selecting a recent branch should return SwitchRepoBranch with new_branch=false"
+        );
+    }
+
+    #[test]
+    fn navigation_bounds_with_real_branches() {
+        use ratatui::crossterm::event::KeyCode;
+        let (_dir, mut state) = real_repo_state();
+        let max_idx = state.max_idx();
+        assert!(
+            max_idx >= 2,
+            "real repo with feature-a branch should have at least 2 navigation entries"
+        );
+        for _ in 0..max_idx + 5 {
+            state.handle_key(common::key(KeyCode::Down), &make_ctx());
+        }
+        assert_eq!(state.strategy_idx, max_idx);
     }
 
     #[test]

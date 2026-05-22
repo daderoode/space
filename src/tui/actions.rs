@@ -58,8 +58,6 @@ pub enum ScreenAction {
     /// Switch an existing worktree to a different branch.
     SwitchRepoBranch {
         repo_path: PathBuf,
-        #[allow(dead_code)]
-        repo_index: usize,
         branch: String,
         /// true = create new branch from current HEAD; false = checkout existing (local or remote)
         new_branch: bool,

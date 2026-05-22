@@ -161,10 +161,11 @@ pub fn list_branches(repo_path: &Path) -> Result<Vec<BranchInfo>> {
     Ok(branches)
 }
 
-/// Return the N most recently committed-to branches for a repo.
+/// Return the N most recently committed-to local branches for a repo.
 pub fn recent_branches(repo_path: &std::path::Path, limit: usize) -> Vec<BranchInfo> {
     list_branches(repo_path)
         .map(|mut branches| {
+            branches.retain(|b| !b.is_remote);
             branches.sort_by_key(|b| Reverse(b.last_commit_time));
             branches.truncate(limit);
             branches
