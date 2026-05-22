@@ -438,8 +438,7 @@ fn switch_worktree_branch_origin_prefix_creates_local_tracking_branch() {
 
     let branch = space::core::git::current_branch(&wt_path).unwrap();
     assert_eq!(
-        branch,
-        "feature-x",
+        branch, "feature-x",
         "should create local 'feature-x' from origin/feature-x"
     );
 }
