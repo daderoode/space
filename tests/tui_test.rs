@@ -3326,7 +3326,13 @@ mod switch_branch_tests {
         assert_eq!(state.strategy_idx, 1);
         let action = state.handle_key(common::key(KeyCode::Enter), &make_ctx());
         assert!(
-            matches!(action, ScreenAction::SwitchRepoBranch { new_branch: false, .. }),
+            matches!(
+                action,
+                ScreenAction::SwitchRepoBranch {
+                    new_branch: false,
+                    ..
+                }
+            ),
             "selecting a recent branch should return SwitchRepoBranch with new_branch=false"
         );
     }

@@ -238,7 +238,10 @@ pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) ->
         .unwrap_or(false);
 
     if remote_exists {
-        return run_git_in(wt_path, &["switch", "-c", local_name, "--track", &remote_ref]);
+        return run_git_in(
+            wt_path,
+            &["switch", "-c", local_name, "--track", &remote_ref],
+        );
     }
 
     // Let git provide the error message
