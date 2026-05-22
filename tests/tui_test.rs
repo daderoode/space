@@ -3196,3 +3196,129 @@ fn scroll_x_past_branch_virtual_offsets_status_content() {
         rendered
     );
 }
+
+// ---------------------------------------------------------------------------
+// SwitchBranch screen tests (Task 2)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod switch_branch_tests {
+    use super::*;
+    use space::tui::actions::ScreenAction;
+    use space::tui::screens::switch_branch::{SwitchBranchStage, SwitchBranchState};
+
+    fn stub_state() -> SwitchBranchState {
+        SwitchBranchState::new(
+            "my-repo".to_string(),
+            std::path::PathBuf::from("/tmp/my-repo"),
+            0,
+        )
+    }
+
+    fn make_ctx() -> space::tui::actions::ScreenContext<'static> {
+        use space::core::config::SpaceConfig;
+        static CFG: std::sync::OnceLock<SpaceConfig> = std::sync::OnceLock::new();
+        let cfg = CFG.get_or_init(SpaceConfig::default);
+        space::tui::actions::ScreenContext { config: cfg }
+    }
+
+    #[test]
+    fn esc_from_pick_strategy_returns_back() {
+        let mut state = stub_state();
+        let action = state.handle_key(
+            common::key(ratatui::crossterm::event::KeyCode::Esc),
+            &make_ctx(),
+        );
+        assert!(matches!(action, ScreenAction::Back));
+    }
+
+    #[test]
+    fn down_then_up_stays_in_bounds() {
+        let mut state = stub_state();
+        let max_idx = state.max_idx();
+        for _ in 0..max_idx + 5 {
+            state.handle_key(
+                common::key(ratatui::crossterm::event::KeyCode::Down),
+                &make_ctx(),
+            );
+        }
+        assert_eq!(state.strategy_idx, max_idx);
+        for _ in 0..max_idx + 5 {
+            state.handle_key(
+                common::key(ratatui::crossterm::event::KeyCode::Up),
+                &make_ctx(),
+            );
+        }
+        assert_eq!(state.strategy_idx, 0);
+    }
+
+    #[test]
+    fn enter_on_new_branch_transitions_to_enter_branch_name() {
+        let mut state = stub_state();
+        state.handle_key(
+            common::key(ratatui::crossterm::event::KeyCode::Enter),
+            &make_ctx(),
+        );
+        assert_eq!(state.stage, SwitchBranchStage::EnterBranchName);
+    }
+
+    #[test]
+    fn enter_branch_name_empty_shows_error() {
+        let mut state = stub_state();
+        state.stage = SwitchBranchStage::EnterBranchName;
+        let action = state.handle_key(
+            common::key(ratatui::crossterm::event::KeyCode::Enter),
+            &make_ctx(),
+        );
+        assert!(matches!(action, ScreenAction::Continue));
+        assert!(state.error.is_some());
+    }
+
+    #[test]
+    fn enter_branch_name_returns_switch_action() {
+        use ratatui::crossterm::event::KeyCode;
+        let mut state = stub_state();
+        state.stage = SwitchBranchStage::EnterBranchName;
+        for ch in "new-feature".chars() {
+            state.handle_key(common::key(KeyCode::Char(ch)), &make_ctx());
+        }
+        let action = state.handle_key(common::key(KeyCode::Enter), &make_ctx());
+        assert!(
+            matches!(action, ScreenAction::SwitchRepoBranch { ref branch, new_branch: true, .. } if branch == "new-feature")
+        );
+    }
+
+    #[test]
+    fn b_key_on_repo_row_opens_switch_branch_screen() {
+        use ratatui::crossterm::event::KeyCode;
+        use space::tui::app::{Pane, Screen};
+
+        let ws = common::workspace_with_repos(&["alpha", "beta"]);
+        let mut app = common::test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+
+        app.handle_key(common::key(KeyCode::Char('b')));
+
+        assert!(
+            matches!(app.screen, Screen::SwitchBranch(_)),
+            "b on a repo row should open SwitchBranch screen"
+        );
+    }
+
+    #[test]
+    fn b_key_on_left_pane_does_nothing() {
+        use ratatui::crossterm::event::KeyCode;
+        use space::tui::app::{Pane, Screen};
+
+        let ws = common::workspace_with_repos(&["alpha"]);
+        let mut app = common::test_app(vec![ws], vec![]);
+        app.focus = Pane::Left;
+
+        app.handle_key(common::key(KeyCode::Char('b')));
+
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "b on left pane should not open SwitchBranch screen"
+        );
+    }
+}
