@@ -162,7 +162,7 @@ impl SwitchBranchState {
                 if self
                     .branch_picker
                     .as_ref()
-                    .map_or(false, |bp| bp.input.value().is_empty()) =>
+                    .is_some_and(|bp| bp.input.value().is_empty()) =>
             {
                 if let Some(ref mut bp) = self.branch_picker {
                     bp.move_up();
@@ -179,7 +179,7 @@ impl SwitchBranchState {
                 if self
                     .branch_picker
                     .as_ref()
-                    .map_or(false, |bp| bp.input.value().is_empty()) =>
+                    .is_some_and(|bp| bp.input.value().is_empty()) =>
             {
                 if let Some(ref mut bp) = self.branch_picker {
                     bp.move_down();
@@ -193,10 +193,7 @@ impl SwitchBranchState {
                     .and_then(|bp| bp.confirmed_items().into_iter().next())
                     .map(|item| item.name.clone());
                 match picked {
-                    None => {
-                        self.error = Some("Select a branch".to_string());
-                        ScreenAction::Continue
-                    }
+                    None => ScreenAction::Continue,
                     Some(branch) => {
                         self.error = None;
                         ScreenAction::SwitchRepoBranch {

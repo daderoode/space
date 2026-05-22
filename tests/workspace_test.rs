@@ -390,13 +390,15 @@ fn recent_branches_excludes_remote_refs() {
         .current_dir(repo_dir.path())
         .output()
         .unwrap();
+    assert!(head_out.status.success(), "git rev-parse HEAD failed");
     let sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
 
-    Command::new("git")
+    let status = Command::new("git")
         .args(["update-ref", "refs/remotes/origin/remote-only", &sha])
         .current_dir(repo_dir.path())
         .status()
         .unwrap();
+    assert!(status.success(), "git update-ref failed");
 
     let branches = space::core::git::recent_branches(repo_dir.path(), 10);
     assert!(
@@ -415,14 +417,16 @@ fn switch_worktree_branch_origin_prefix_creates_local_tracking_branch() {
         .current_dir(repo_dir.path())
         .output()
         .unwrap();
+    assert!(head_out.status.success(), "git rev-parse HEAD failed");
     let sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
 
     // Create a remote-tracking ref without a real remote
-    Command::new("git")
+    let status = Command::new("git")
         .args(["update-ref", "refs/remotes/origin/feature-x", &sha])
         .current_dir(repo_dir.path())
         .status()
         .unwrap();
+    assert!(status.success(), "git update-ref failed");
 
     let ws_dir = TempDir::new().unwrap();
     let wt_path = create_worktree(

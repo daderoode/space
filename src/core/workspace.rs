@@ -226,7 +226,7 @@ pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) ->
         .unwrap_or(false);
 
     if local_exists {
-        return run_git_in(wt_path, &["switch", local_name]);
+        return run_git_in(wt_path, &["switch", "--", local_name]);
     }
 
     // Check remote branch
@@ -245,7 +245,7 @@ pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) ->
     }
 
     // Let git provide the error message
-    run_git_in(wt_path, &["switch", local_name])
+    run_git_in(wt_path, &["switch", "--", local_name])
 }
 
 /// Returns the path to the created worktree.
