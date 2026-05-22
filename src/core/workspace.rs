@@ -208,8 +208,16 @@ pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) ->
         return run_git_in(wt_path, &["switch", "-c", branch]);
     }
 
+    // Normalize: if the caller passes "origin/<name>" (from the full branch picker),
+    // strip the prefix so we check/create the local name and avoid "origin/origin/<name>".
+    let (local_name, remote_ref) = if let Some(name) = branch.strip_prefix("origin/") {
+        (name, branch.to_string())
+    } else {
+        (branch, format!("origin/{}", branch))
+    };
+
     // Check local branch (refs/heads/ scopes the lookup to branches only, not tags)
-    let local_ref = format!("refs/heads/{}", branch);
+    let local_ref = format!("refs/heads/{}", local_name);
     let local_exists = Command::new("git")
         .args(["rev-parse", "--verify", &local_ref])
         .current_dir(wt_path)
@@ -218,11 +226,10 @@ pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) ->
         .unwrap_or(false);
 
     if local_exists {
-        return run_git_in(wt_path, &["switch", branch]);
+        return run_git_in(wt_path, &["switch", local_name]);
     }
 
     // Check remote branch
-    let remote_ref = format!("origin/{}", branch);
     let remote_exists = Command::new("git")
         .args(["rev-parse", "--verify", &remote_ref])
         .current_dir(wt_path)
@@ -231,11 +238,11 @@ pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) ->
         .unwrap_or(false);
 
     if remote_exists {
-        return run_git_in(wt_path, &["switch", "-c", branch, "--track", &remote_ref]);
+        return run_git_in(wt_path, &["switch", "-c", local_name, "--track", &remote_ref]);
     }
 
     // Let git provide the error message
-    run_git_in(wt_path, &["switch", branch])
+    run_git_in(wt_path, &["switch", local_name])
 }
 
 /// Returns the path to the created worktree.

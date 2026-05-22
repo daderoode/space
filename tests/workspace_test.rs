@@ -404,3 +404,38 @@ fn recent_branches_excludes_remote_refs() {
         "recent_branches must not include remote-tracking refs"
     );
 }
+
+#[test]
+fn switch_worktree_branch_origin_prefix_creates_local_tracking_branch() {
+    let repo_dir = TempDir::new().unwrap();
+    common::init_repo(repo_dir.path());
+
+    let head_out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_dir.path())
+        .output()
+        .unwrap();
+    let sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+
+    // Create a remote-tracking ref without a real remote
+    Command::new("git")
+        .args(["update-ref", "refs/remotes/origin/feature-x", &sha])
+        .current_dir(repo_dir.path())
+        .status()
+        .unwrap();
+
+    let ws_dir = TempDir::new().unwrap();
+    let wt_path = create_worktree(
+        repo_dir.path(),
+        ws_dir.path(),
+        "test-ws",
+        &BranchStrategy::DetachedHead,
+    )
+    .unwrap();
+
+    // Pass the branch as "origin/feature-x" (as the full picker emits it)
+    space::core::workspace::switch_worktree_branch(&wt_path, "origin/feature-x", false).unwrap();
+
+    let branch = space::core::git::current_branch(&wt_path).unwrap();
+    assert_eq!(branch, "feature-x", "should create local 'feature-x' from origin/feature-x");
+}

@@ -67,7 +67,7 @@ impl SwitchBranchState {
     fn handle_pick_strategy(&mut self, key: KeyEvent, _ctx: &ScreenContext) -> ScreenAction {
         let max = self.max_idx();
         match key.code {
-            KeyCode::Esc => ScreenAction::Back,
+            KeyCode::Esc | KeyCode::Char('q') => ScreenAction::Back,
             KeyCode::Up | KeyCode::Char('k') => {
                 self.error = None;
                 if self.strategy_idx > 0 {
@@ -115,6 +115,7 @@ impl SwitchBranchState {
 
     fn handle_enter_branch_name(&mut self, key: KeyEvent, _ctx: &ScreenContext) -> ScreenAction {
         match key.code {
+            KeyCode::Char('q') => ScreenAction::Back,
             KeyCode::Esc => {
                 self.error = None;
                 self.stage = SwitchBranchStage::PickStrategy;
@@ -145,7 +146,9 @@ impl SwitchBranchState {
 
     fn handle_pick_branch(&mut self, key: KeyEvent, _ctx: &ScreenContext) -> ScreenAction {
         match key.code {
+            KeyCode::Char('q') => ScreenAction::Back,
             KeyCode::Esc => {
+                self.error = None;
                 self.stage = SwitchBranchStage::PickStrategy;
                 ScreenAction::Continue
             }
