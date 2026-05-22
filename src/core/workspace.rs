@@ -173,6 +173,78 @@ fn git_worktree_add(args: &[&str], cwd: &Path) -> Result<()> {
     anyhow::bail!("{}", msg)
 }
 
+/// Helper: run a git command inside `cwd`, capturing stderr.
+/// On non-zero exit, returns an error with the first meaningful git error line.
+#[allow(dead_code)] // used by switch_worktree_branch; bin crate has private mod core
+fn run_git_in(cwd: &Path, args: &[&str]) -> Result<()> {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .with_context(|| "failed to spawn git")?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let msg = stderr
+        .lines()
+        .find(|l| l.starts_with("error:") || l.starts_with("fatal:"))
+        .and_then(|l| l.split_once(':').map(|(_, r)| r.trim()))
+        .or_else(|| stderr.lines().map(|l| l.trim()).find(|l| !l.is_empty()))
+        .unwrap_or("git switch failed");
+    anyhow::bail!("{}", msg)
+}
+
+/// Switch an existing worktree to a different branch.
+///
+/// - `new_branch = true`:  creates the branch from the current HEAD (`git switch -c <branch>`).
+///   This works even from detached HEAD.
+/// - `new_branch = false`: checks for a local branch first; if absent, looks for
+///   `origin/<branch>` and creates a local tracking branch; if neither, passes through
+///   to git (which will error with a clear message).
+///
+/// Auto-fetches `origin` before resolving remote refs (errors silently ignored for offline use).
+#[allow(dead_code)] // public API; called from integration tests and future callers
+pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) -> Result<()> {
+    // Auto-fetch — ignore errors for offline use
+    let _ = Command::new("git")
+        .args(["fetch", "--quiet", "origin"])
+        .current_dir(wt_path)
+        .status();
+
+    if new_branch {
+        return run_git_in(wt_path, &["switch", "-c", branch]);
+    }
+
+    // Check local branch
+    let local_exists = Command::new("git")
+        .args(["rev-parse", "--verify", branch])
+        .current_dir(wt_path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if local_exists {
+        return run_git_in(wt_path, &["switch", branch]);
+    }
+
+    // Check remote branch
+    let remote_ref = format!("origin/{}", branch);
+    let remote_exists = Command::new("git")
+        .args(["rev-parse", "--verify", &remote_ref])
+        .current_dir(wt_path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if remote_exists {
+        return run_git_in(wt_path, &["switch", "-c", branch, "--track", &remote_ref]);
+    }
+
+    // Let git provide the error message
+    run_git_in(wt_path, &["switch", branch])
+}
+
 /// Returns the path to the created worktree.
 pub fn create_worktree(
     repo_path: &Path,

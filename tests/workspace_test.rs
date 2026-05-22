@@ -313,3 +313,69 @@ fn workspace_repo_skeletons_skips_non_git_dirs() {
     let skeletons = space::core::workspace::workspace_repo_skeletons(&env.workspaces_dir, "my-ws");
     assert!(skeletons.is_empty());
 }
+
+#[test]
+fn switch_worktree_branch_new_branch_from_detached_head() {
+    let repo_dir = TempDir::new().unwrap();
+    common::init_repo(repo_dir.path());
+    let ws_dir = TempDir::new().unwrap();
+
+    let wt_path = create_worktree(
+        repo_dir.path(),
+        ws_dir.path(),
+        "test-ws",
+        &BranchStrategy::DetachedHead,
+    )
+    .unwrap();
+
+    space::core::workspace::switch_worktree_branch(&wt_path, "my-feature", true).unwrap();
+
+    let branch = space::core::git::current_branch(&wt_path).unwrap();
+    assert_eq!(branch, "my-feature");
+}
+
+#[test]
+fn switch_worktree_branch_existing_local_branch() {
+    let repo_dir = TempDir::new().unwrap();
+    common::init_repo(repo_dir.path());
+
+    Command::new("git")
+        .args(["branch", "existing-branch"])
+        .current_dir(repo_dir.path())
+        .output()
+        .unwrap();
+
+    let ws_dir = TempDir::new().unwrap();
+    let wt_path = create_worktree(
+        repo_dir.path(),
+        ws_dir.path(),
+        "test-ws",
+        &BranchStrategy::DetachedHead,
+    )
+    .unwrap();
+
+    space::core::workspace::switch_worktree_branch(&wt_path, "existing-branch", false).unwrap();
+
+    let branch = space::core::git::current_branch(&wt_path).unwrap();
+    assert_eq!(branch, "existing-branch");
+}
+
+#[test]
+fn switch_worktree_branch_nonexistent_branch_errors() {
+    let repo_dir = TempDir::new().unwrap();
+    common::init_repo(repo_dir.path());
+    let ws_dir = TempDir::new().unwrap();
+    let wt_path = create_worktree(
+        repo_dir.path(),
+        ws_dir.path(),
+        "test-ws",
+        &BranchStrategy::DetachedHead,
+    )
+    .unwrap();
+
+    let result = space::core::workspace::switch_worktree_branch(&wt_path, "ghost-branch", false);
+    assert!(
+        result.is_err(),
+        "switching to nonexistent branch should fail"
+    );
+}
