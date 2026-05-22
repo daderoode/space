@@ -83,6 +83,7 @@ files with `s`/`space`, or bulk stage/unstage all files in the selected repo wit
 | `s` / `space` | Stage / unstage file |
 | `S` | Stage all unstaged files in repo |
 | `U` | Unstage all staged files in repo |
+| `b` | Switch branch for selected repo |
 | `q` | Quit |
 
 Interactive commands (`go`, `create`, `add`, `config`, `rm` without `--force`)
