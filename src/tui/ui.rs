@@ -218,6 +218,10 @@ pub fn view(app: &App, frame: &mut Frame) {
             render_dashboard(app, frame);
             render_help_overlay(frame);
         }
+        Screen::SwitchBranch(state) => {
+            render_dashboard(app, frame);
+            render_switch_branch_overlay(state, frame);
+        }
     }
 }
 
@@ -1259,6 +1263,148 @@ fn render_help_overlay(frame: &mut Frame) {
             .alignment(Alignment::Center),
         sections[1],
     );
+}
+
+fn render_switch_branch_overlay(
+    state: &crate::tui::screens::switch_branch::SwitchBranchState,
+    frame: &mut Frame,
+) {
+    use crate::tui::screens::switch_branch::SwitchBranchStage;
+    match &state.stage {
+        SwitchBranchStage::PickStrategy => render_switch_strategy_picker(
+            frame,
+            &state.repo_name,
+            state.strategy_idx,
+            state.error.as_deref(),
+            &state.recent_branches,
+        ),
+        SwitchBranchStage::EnterBranchName => render_text_input_dialog(
+            "New Branch",
+            "Branch name:",
+            &state.branch_name_input,
+            state.error.as_deref(),
+            frame,
+        ),
+        SwitchBranchStage::PickBranch => {
+            if let Some(ref picker) = state.branch_picker {
+                crate::tui::widgets::fuzzy_picker::render(picker, frame);
+            }
+        }
+    }
+}
+
+fn render_switch_strategy_picker(
+    frame: &mut Frame,
+    repo_name: &str,
+    strategy_idx: usize,
+    error: Option<&str>,
+    recent_branches: &[crate::core::git::BranchInfo],
+) {
+    use ratatui::widgets::Clear;
+
+    let has_error = error.is_some();
+    let n = recent_branches.len();
+    // Rows: "New branch..." (1) + if n>0: "Recent:" header (1) + n branches + "Show more" (1); else "Pick a branch..." (1)
+    let branch_rows: u16 = 1 + if n > 0 { 1 + n as u16 + 1 } else { 1 };
+    let height: u16 = (branch_rows + 2 + if has_error { 3 } else { 1 })
+        .min(frame.area().height.saturating_sub(2));
+    let dialog_w = (frame.area().width * 70 / 100).max(60);
+    let area = centered_rect_fixed(dialog_w, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let border_style = if has_error {
+        theme::border_danger()
+    } else {
+        theme::border_focused()
+    };
+    let title = format!(" Switch Branch: {} ", repo_name);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border_style)
+        .title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let sections = if has_error {
+        Layout::vertical([
+            Constraint::Length(branch_rows),
+            Constraint::Length(1),
+            Constraint::Length(2),
+        ])
+        .split(inner)
+    } else {
+        Layout::vertical([Constraint::Length(branch_rows), Constraint::Min(0)]).split(inner)
+    };
+
+    let opt_max_w = dialog_w.saturating_sub(2 + 4) as usize;
+    let mut items: Vec<ListItem> = Vec::new();
+
+    // Index 0: New branch
+    if strategy_idx == 0 {
+        items.push(
+            ListItem::new(format!(
+                "> {}",
+                truncate_for_width("New branch...", opt_max_w)
+            ))
+            .style(theme::selected()),
+        );
+    } else {
+        items.push(ListItem::new(format!(
+            "  {}",
+            truncate_for_width("New branch...", opt_max_w)
+        )));
+    }
+
+    if n > 0 {
+        // Non-selectable "Recent:" header
+        items.push(ListItem::new("  Recent:").style(theme::muted()));
+
+        // Indices 1..=n: recent branches
+        for (i, branch) in recent_branches.iter().enumerate() {
+            let sel_idx = 1 + i;
+            let time_str = crate::core::git::relative_time(branch.last_commit_time);
+            let inner_w = dialog_w.saturating_sub(2) as usize;
+            let time_w = line_width(&time_str);
+            let max_name = inner_w.saturating_sub(6).saturating_sub(time_w + 2);
+            let display_name = truncate_for_width(&branch.name, max_name);
+            let display_w = line_width(&display_name);
+            let content_w = inner_w.saturating_sub(6);
+            let padding = content_w.saturating_sub(display_w + time_w);
+            let line = format!("{}{}{}", display_name, " ".repeat(padding), time_str);
+            if sel_idx == strategy_idx {
+                items.push(ListItem::new(format!("  > {}", line)).style(theme::selected()));
+            } else {
+                items.push(ListItem::new(format!("    {}", line)));
+            }
+        }
+
+        // Index n+1: "Show more..."
+        let show_more_idx = 1 + n;
+        if show_more_idx == strategy_idx {
+            items.push(ListItem::new("  > Show more...").style(theme::selected()));
+        } else {
+            items.push(ListItem::new("    Show more..."));
+        }
+    } else {
+        // No recent branches: index 1 = "Pick a branch..."
+        if 1 == strategy_idx {
+            items.push(ListItem::new("> Pick a branch...").style(theme::selected()));
+        } else {
+            items.push(ListItem::new("  Pick a branch..."));
+        }
+    }
+
+    frame.render_widget(List::new(items), sections[0]);
+
+    if let Some(err) = error {
+        frame.render_widget(
+            Paragraph::new(format!("\u{26a0}  {}", err))
+                .style(theme::error())
+                .wrap(Wrap { trim: false }),
+            sections[2],
+        );
+    }
 }
 
 fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {

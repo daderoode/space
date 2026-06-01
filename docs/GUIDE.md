@@ -190,6 +190,7 @@ Press `Enter` on a file row in the expanded repo list to open a full-screen scro
 | `s` or `space` | Stage / unstage file |
 | `S` | Stage all unstaged files in repo |
 | `U` | Unstage all staged files in repo |
+| `b` | Switch branch for selected repo |
 | `q` | Quit |
 
 ### Key Bindings — Diff Viewer

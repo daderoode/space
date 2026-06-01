@@ -90,6 +90,7 @@ pub enum Screen {
     RepoSearch(crate::tui::screens::search::SearchState),
     ConfigEditor(crate::tui::screens::config::ConfigState),
     DiffViewer(crate::tui::screens::diff::DiffViewerState),
+    SwitchBranch(crate::tui::screens::switch_branch::SwitchBranchState),
     Help,
 }
 
@@ -128,6 +129,9 @@ pub enum Message {
     },
     ScrollTableLeft,
     ScrollTableRight,
+    StartSwitchBranch {
+        repo_index: usize,
+    },
 }
 
 /// A row in the flattened repo table (repo header or file entry).
@@ -937,6 +941,34 @@ impl App {
                 self.do_stage(repo_index, &repo_path, &path, currently_staged);
                 self.screen = Screen::Dashboard;
             }
+            ScreenAction::SwitchRepoBranch {
+                repo_path,
+                branch,
+                new_branch,
+            } => {
+                let repo_name = repo_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "?".to_string());
+
+                match crate::core::workspace::switch_worktree_branch(
+                    &repo_path, &branch, new_branch,
+                ) {
+                    Ok(()) => {
+                        self.reset_repo_pane_state();
+                        self.load_selected_workspace_detail();
+                        self.screen = Screen::Dashboard;
+                        self.set_status(
+                            format!("Switched {} to {}", repo_name, branch),
+                            StatusKind::Success,
+                        );
+                    }
+                    Err(e) => {
+                        self.screen = Screen::Dashboard;
+                        self.set_status(format!("Switch failed: {}", e), StatusKind::Error);
+                    }
+                }
+            }
         }
     }
 
@@ -973,6 +1005,7 @@ impl App {
             Screen::AddRepos(state) => state.handle_key(key, &ctx),
             Screen::ConfigEditor(state) => state.handle_key(key, &ctx),
             Screen::DiffViewer(state) => state.handle_key(key, &ctx),
+            Screen::SwitchBranch(state) => state.handle_key(key, &ctx),
             Screen::Dashboard => {
                 drop(ctx);
                 // Dashboard key-to-message mapping
@@ -1016,6 +1049,14 @@ impl App {
                                 path: entry.path.clone(),
                                 currently_staged: entry.staged,
                             })
+                        } else {
+                            None
+                        }
+                    }
+                    (KeyCode::Char('b'), _) if self.focus == Pane::Right => {
+                        let rows = self.flattened_rows();
+                        if let Some(RepoRow::Repo { index, .. }) = rows.get(self.cursor_row) {
+                            Some(Message::StartSwitchBranch { repo_index: *index })
                         } else {
                             None
                         }
@@ -1278,6 +1319,19 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
         Message::StartConfig => {
             let state = crate::tui::screens::config::ConfigState::from_config(&app.config);
             app.screen = Screen::ConfigEditor(state);
+            None
+        }
+        Message::StartSwitchBranch { repo_index } => {
+            if let Some(repo) = app
+                .selected_workspace()
+                .and_then(|ws| ws.repos.get(repo_index))
+            {
+                let state = crate::tui::screens::switch_branch::SwitchBranchState::new(
+                    repo.name.clone(),
+                    repo.path.clone(),
+                );
+                app.screen = Screen::SwitchBranch(state);
+            }
             None
         }
         Message::ToggleRepoExpand => {

@@ -6,3 +6,4 @@ pub mod diff;
 pub mod go;
 pub mod help;
 pub mod search;
+pub mod switch_branch;

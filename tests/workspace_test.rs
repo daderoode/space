@@ -313,3 +313,136 @@ fn workspace_repo_skeletons_skips_non_git_dirs() {
     let skeletons = space::core::workspace::workspace_repo_skeletons(&env.workspaces_dir, "my-ws");
     assert!(skeletons.is_empty());
 }
+
+#[test]
+fn switch_worktree_branch_new_branch_from_detached_head() {
+    let repo_dir = TempDir::new().unwrap();
+    common::init_repo(repo_dir.path());
+    let ws_dir = TempDir::new().unwrap();
+
+    let wt_path = create_worktree(
+        repo_dir.path(),
+        ws_dir.path(),
+        "test-ws",
+        &BranchStrategy::DetachedHead,
+    )
+    .unwrap();
+
+    space::core::workspace::switch_worktree_branch(&wt_path, "my-feature", true).unwrap();
+
+    let branch = space::core::git::current_branch(&wt_path).unwrap();
+    assert_eq!(branch, "my-feature");
+}
+
+#[test]
+fn switch_worktree_branch_existing_local_branch() {
+    let repo_dir = TempDir::new().unwrap();
+    common::init_repo(repo_dir.path());
+
+    Command::new("git")
+        .args(["branch", "existing-branch"])
+        .current_dir(repo_dir.path())
+        .output()
+        .unwrap();
+
+    let ws_dir = TempDir::new().unwrap();
+    let wt_path = create_worktree(
+        repo_dir.path(),
+        ws_dir.path(),
+        "test-ws",
+        &BranchStrategy::DetachedHead,
+    )
+    .unwrap();
+
+    space::core::workspace::switch_worktree_branch(&wt_path, "existing-branch", false).unwrap();
+
+    let branch = space::core::git::current_branch(&wt_path).unwrap();
+    assert_eq!(branch, "existing-branch");
+}
+
+#[test]
+fn switch_worktree_branch_nonexistent_branch_errors() {
+    let repo_dir = TempDir::new().unwrap();
+    common::init_repo(repo_dir.path());
+    let ws_dir = TempDir::new().unwrap();
+    let wt_path = create_worktree(
+        repo_dir.path(),
+        ws_dir.path(),
+        "test-ws",
+        &BranchStrategy::DetachedHead,
+    )
+    .unwrap();
+
+    let result = space::core::workspace::switch_worktree_branch(&wt_path, "ghost-branch", false);
+    assert!(
+        result.is_err(),
+        "switching to nonexistent branch should fail"
+    );
+}
+
+#[test]
+fn recent_branches_excludes_remote_refs() {
+    let repo_dir = TempDir::new().unwrap();
+    common::init_repo(repo_dir.path());
+
+    let head_out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_dir.path())
+        .output()
+        .unwrap();
+    assert!(head_out.status.success(), "git rev-parse HEAD failed");
+    let sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+
+    let status = Command::new("git")
+        .args(["update-ref", "refs/remotes/origin/remote-only", &sha])
+        .current_dir(repo_dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "git update-ref failed");
+
+    let branches = space::core::git::recent_branches(repo_dir.path(), 10);
+    assert!(
+        branches.iter().all(|b| !b.is_remote),
+        "recent_branches must not include remote-tracking refs"
+    );
+}
+
+#[test]
+fn switch_worktree_branch_origin_prefix_creates_local_tracking_branch() {
+    let repo_dir = TempDir::new().unwrap();
+    common::init_repo(repo_dir.path());
+
+    let head_out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_dir.path())
+        .output()
+        .unwrap();
+    assert!(head_out.status.success(), "git rev-parse HEAD failed");
+    let sha = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
+
+    // Create a remote-tracking ref without a real remote
+    let status = Command::new("git")
+        .args(["update-ref", "refs/remotes/origin/feature-x", &sha])
+        .current_dir(repo_dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "git update-ref failed");
+
+    let ws_dir = TempDir::new().unwrap();
+    let wt_path = create_worktree(
+        repo_dir.path(),
+        ws_dir.path(),
+        "test-ws",
+        &BranchStrategy::DetachedHead,
+    )
+    .unwrap();
+
+    // Pass the branch as "origin/feature-x" (as the full picker emits it)
+    space::core::workspace::switch_worktree_branch(&wt_path, "origin/feature-x", false).unwrap();
+
+    let branch = space::core::git::current_branch(&wt_path).unwrap();
+    assert_eq!(
+        branch, "feature-x",
+        "should create local 'feature-x' from origin/feature-x"
+    );
+}

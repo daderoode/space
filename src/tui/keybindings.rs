@@ -105,6 +105,10 @@ const REPO_PANE: BindingGroup = BindingGroup {
             key: "U",
             desc: "Unstage all staged",
         },
+        Binding {
+            key: "b",
+            desc: "Switch branch",
+        },
     ],
 };
 
@@ -208,7 +212,7 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
             desc: "quit",
         },
     ];
-    static RIGHT: [Binding; 8] = [
+    static RIGHT: [Binding; 9] = [
         Binding {
             key: "enter",
             desc: "expand/diff",
@@ -232,6 +236,10 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
         Binding {
             key: "U",
             desc: "unstage all",
+        },
+        Binding {
+            key: "b",
+            desc: "switch branch",
         },
         Binding {
             key: "?",
