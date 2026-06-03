@@ -344,9 +344,11 @@ pub fn create_worktree(
                     repo_path,
                 )?;
             } else {
-                // Prefer origin/<base> so the new branch starts at the remote tip, not a
-                // potentially stale local ref. Fall back to local only if the remote ref
-                // doesn't exist (e.g. offline, no remote configured).
+                // Prefer origin/<base> so the new branch starts at the remote tip rather than
+                // a potentially stale local ref. Trade-off: if <base> has unpushed local
+                // commits they are NOT included in the new worktree. That is intentional —
+                // the sync step guarantees origin/<base> is the freshest shared state.
+                // Fall back to local only if the remote ref doesn't exist (offline / no remote).
                 let origin_base = format!("origin/{}", base_branch);
                 let origin_base_exists = Command::new("git")
                     .args(["rev-parse", "--verify", &origin_base])
@@ -425,6 +427,137 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
     std::fs::remove_dir_all(&ws_path)
         .with_context(|| format!("removing workspace directory {}", ws_path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command as Cmd;
+
+    fn git(args: &[&str], dir: &Path) {
+        let out = Cmd::new("git").args(args).current_dir(dir).output().unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed:\n{}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn git_setup(dir: &Path) {
+        git(&["config", "user.email", "t@local"], dir);
+        git(&["config", "user.name", "T"], dir);
+        git(&["config", "commit.gpgsign", "false"], dir);
+    }
+
+    fn get_sha(dir: &Path, refname: &str) -> String {
+        let out = Cmd::new("git")
+            .args(["rev-parse", refname])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Returns `(tmp, local_path)` where:
+    /// - `local/main` is checked out and 1 behind `origin/main`
+    /// - `local/dev` is NOT checked out and 1 behind `origin/dev`
+    fn make_behind_repo() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("local");
+
+        Cmd::new("git")
+            .args(["init", "--bare", "-b", "main", "origin.git"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["clone", "origin.git", "local"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        git_setup(&local);
+
+        git(&["commit", "--allow-empty", "-m", "init"], &local);
+        git(&["push", "-u", "origin", "main"], &local);
+
+        git(&["checkout", "-b", "dev"], &local);
+        git(&["commit", "--allow-empty", "-m", "dev-init"], &local);
+        git(&["push", "-u", "origin", "dev"], &local);
+        git(&["checkout", "main"], &local);
+
+        let helper = tmp.path().join("helper");
+        Cmd::new("git")
+            .args(["clone", "origin.git", "helper"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        git_setup(&helper);
+
+        git(&["commit", "--allow-empty", "-m", "main-remote"], &helper);
+        git(&["push", "origin", "main"], &helper);
+
+        Cmd::new("git")
+            .args(["checkout", "-b", "dev", "origin/dev"])
+            .current_dir(&helper)
+            .output()
+            .unwrap();
+        git(&["commit", "--allow-empty", "-m", "dev-remote"], &helper);
+        git(&["push", "origin", "dev"], &helper);
+
+        // Do NOT fetch in local — sync_repo's internal fetch handles that
+        (tmp, local)
+    }
+
+    #[test]
+    fn sync_repo_returns_fetch_failed_without_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        Cmd::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        git_setup(tmp.path());
+        git(&["commit", "--allow-empty", "-m", "init"], tmp.path());
+
+        let result = sync_repo(tmp.path());
+        assert!(!result.fetch_ok, "fetch_ok must be false when no remote");
+        assert!(result.forwarded.is_empty(), "forwarded must be empty when fetch fails");
+    }
+
+    #[test]
+    fn sync_repo_fast_forwards_non_checked_out_branch_behind_remote() {
+        let (_tmp, local) = make_behind_repo();
+
+        let sha_before = get_sha(&local, "dev");
+        let result = sync_repo(&local);
+
+        assert!(result.fetch_ok, "fetch must succeed");
+        assert!(
+            result.forwarded.contains(&"dev".to_string()),
+            "dev must be fast-forwarded: {:?}",
+            result.forwarded
+        );
+
+        let sha_after = get_sha(&local, "dev");
+        let origin_sha = get_sha(&local, "origin/dev");
+        assert_ne!(sha_before, sha_after, "dev must have advanced");
+        assert_eq!(sha_after, origin_sha, "dev must equal origin/dev after fast-forward");
+    }
+
+    #[test]
+    fn sync_repo_does_not_fast_forward_checked_out_branch() {
+        let (_tmp, local) = make_behind_repo();
+
+        let result = sync_repo(&local);
+
+        assert!(result.fetch_ok, "fetch must succeed");
+        assert!(
+            !result.forwarded.contains(&"main".to_string()),
+            "main must not be fast-forwarded when checked out: {:?}",
+            result.forwarded
+        );
+    }
 }
 
 /// Given a worktree path, read its `.git` file to find the main repo root.

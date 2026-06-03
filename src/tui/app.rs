@@ -920,6 +920,11 @@ impl App {
                 if st.stage == crate::tui::screens::add::AddStage::Syncing
         );
         if !is_syncing {
+            // Drop the receiver. The background worker may still be running git subprocesses;
+            // subsequent tx.send() calls will return Err immediately (dropped receiver on a
+            // sync_channel does not block the sender), so the thread exits cleanly on its own.
+            // If the user cancels and immediately restarts, two workers can briefly overlap on
+            // the same repos — that is safe because git fetch/branch operations are idempotent.
             self.sync_rx = None;
             return;
         }
@@ -2380,6 +2385,66 @@ mod tests {
             app.sync_rx.is_none(),
             "sync_rx must be dropped after Done"
         );
+    }
+
+    #[test]
+    fn poll_sync_result_add_repos_appends_step_to_progress() {
+        use crate::tui::screens::add::{AddStage, AddState};
+        let mut app = make_app(vec![]);
+        let mut state = AddState::new("my-ws".to_string(), vec![], vec![]);
+        state.stage = AddStage::Syncing;
+        app.screen = Screen::AddRepos(state);
+
+        let (tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
+        app.sync_rx = Some(rx);
+        tx.send(SyncProgress::Step("Syncing my-repo...".to_string()))
+            .unwrap();
+
+        app.poll_sync_result();
+
+        match &app.screen {
+            Screen::AddRepos(st) => {
+                assert_eq!(
+                    st.stage,
+                    AddStage::Syncing,
+                    "stage must remain Syncing while channel is open"
+                );
+                assert_eq!(
+                    st.progress,
+                    vec!["Syncing my-repo..."],
+                    "Step message must be appended to progress"
+                );
+            }
+            _ => panic!("expected AddRepos screen"),
+        }
+        assert!(app.sync_rx.is_some(), "sync_rx must be kept while Syncing is active");
+    }
+
+    #[test]
+    fn poll_sync_result_add_repos_done_advances_to_pick_branch_strategy() {
+        use crate::tui::screens::add::{AddStage, AddState};
+        let mut app = make_app(vec![]);
+        let mut state = AddState::new("my-ws".to_string(), vec![], vec![]);
+        state.stage = AddStage::Syncing;
+        app.screen = Screen::AddRepos(state);
+
+        let (tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
+        app.sync_rx = Some(rx);
+        tx.send(SyncProgress::Done).unwrap();
+
+        app.poll_sync_result();
+
+        match &app.screen {
+            Screen::AddRepos(st) => {
+                assert_eq!(
+                    st.stage,
+                    AddStage::PickBranchStrategy,
+                    "Done must advance stage to PickBranchStrategy"
+                );
+            }
+            _ => panic!("expected AddRepos screen"),
+        }
+        assert!(app.sync_rx.is_none(), "sync_rx must be dropped after Done");
     }
 
     #[test]

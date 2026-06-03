@@ -155,12 +155,13 @@ impl CreateState {
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
     ) -> crate::tui::actions::ScreenAction {
+        use crate::tui::actions::ScreenAction;
         use ratatui::crossterm::event::KeyCode;
         if key.code == KeyCode::Esc {
             self.progress.clear();
             self.stage = CreateStage::PickRepos;
         }
-        crate::tui::actions::ScreenAction::Continue
+        ScreenAction::Continue
     }
 
     fn handle_enter_name(
