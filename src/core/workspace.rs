@@ -245,6 +245,49 @@ pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) ->
     run_git_in(wt_path, &["switch", "--", local_name])
 }
 
+/// Result from syncing a single repo with its remote.
+pub struct SyncRepoResult {
+    pub fetch_ok: bool,
+    pub forwarded: Vec<String>, // names of branches that were fast-forwarded
+}
+
+/// Fetch from `origin` and fast-forward all local branches that are strictly
+/// behind their upstream (0 ahead, N behind). Branches with local commits ahead,
+/// diverged, or currently checked out are left untouched.
+/// If the fetch fails (offline / no remote), returns `fetch_ok: false` and an
+/// empty `forwarded` list — the caller should warn and continue.
+pub fn sync_repo(repo_path: &Path) -> SyncRepoResult {
+    let fetch_ok = Command::new("git")
+        .args(["fetch", "--quiet", "origin"])
+        .current_dir(repo_path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    if !fetch_ok {
+        return SyncRepoResult { fetch_ok: false, forwarded: vec![] };
+    }
+
+    let behind = git::branches_behind_upstream(repo_path);
+    let mut forwarded = vec![];
+
+    for branch in behind {
+        let remote_ref = format!("origin/{}", branch);
+        let success = Command::new("git")
+            .args(["branch", "-f", &branch, &remote_ref])
+            .current_dir(repo_path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if success {
+            forwarded.push(branch);
+        }
+        // Silently ignore failures (e.g. branch is currently checked out)
+    }
+
+    SyncRepoResult { fetch_ok: true, forwarded }
+}
+
 /// Returns the path to the created worktree.
 pub fn create_worktree(
     repo_path: &Path,
