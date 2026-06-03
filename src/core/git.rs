@@ -310,6 +310,42 @@ pub fn ahead_behind(repo_path: &Path) -> Result<(usize, usize)> {
     Ok((ahead, behind))
 }
 
+/// Return the names of all local branches that are strictly behind their upstream
+/// (0 commits ahead, 1+ commits behind). Branches with no upstream, equal to
+/// upstream, ahead, or diverged are excluded. Used by `sync_repo` to identify
+/// which branches are safe to fast-forward without losing local work.
+pub fn branches_behind_upstream(repo_path: &Path) -> Vec<String> {
+    let repo = match Repository::open(repo_path) {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    let mut result = vec![];
+    let Ok(branches) = repo.branches(Some(git2::BranchType::Local)) else {
+        return vec![];
+    };
+    for branch_result in branches {
+        let Ok((branch, _)) = branch_result else { continue };
+        let Ok(Some(name)) = branch.name() else { continue };
+        let name = name.to_string();
+        let local_oid = match branch.get().target() {
+            Some(o) => o,
+            None => continue,
+        };
+        let upstream_ref = format!("refs/remotes/origin/{}", name);
+        let upstream_oid = match repo.refname_to_id(&upstream_ref) {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+        let Ok((ahead, behind)) = repo.graph_ahead_behind(local_oid, upstream_oid) else {
+            continue
+        };
+        if ahead == 0 && behind > 0 {
+            result.push(name);
+        }
+    }
+    result
+}
+
 /// Human-readable relative time string from a unix timestamp.
 /// Returns "unknown" for timestamps <= 0 (failed peel, unset field).
 pub fn relative_time(unix_ts: i64) -> String {
