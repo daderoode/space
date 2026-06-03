@@ -319,7 +319,7 @@ pub fn branches_behind_upstream(repo_path: &Path) -> Vec<String> {
         Ok(r) => r,
         Err(_) => return vec![],
     };
-    let mut result = vec![];
+    let mut result = Vec::new();
     let Ok(branches) = repo.branches(Some(git2::BranchType::Local)) else {
         return vec![];
     };
@@ -327,10 +327,7 @@ pub fn branches_behind_upstream(repo_path: &Path) -> Vec<String> {
         let Ok((branch, _)) = branch_result else { continue };
         let Ok(Some(name)) = branch.name() else { continue };
         let name = name.to_string();
-        let local_oid = match branch.get().target() {
-            Some(o) => o,
-            None => continue,
-        };
+        let Some(local_oid) = branch.get().target() else { continue };
         let upstream_ref = format!("refs/remotes/origin/{}", name);
         let upstream_oid = match repo.refname_to_id(&upstream_ref) {
             Ok(o) => o,
