@@ -41,6 +41,8 @@ pub enum ScreenAction {
     CdAndQuit(PathBuf),
     /// Execute worktree creation/addition.
     ExecuteWorktreeFlow(WorktreeParams),
+    /// Fetch + fast-forward the given repos, then transition to branch picker.
+    ExecuteSyncFlow(Vec<std::path::PathBuf>),
     /// Delete a workspace.
     DeleteWorkspace { name: String, force: bool },
     /// Save config and reload.
