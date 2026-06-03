@@ -344,8 +344,23 @@ pub fn create_worktree(
                     repo_path,
                 )?;
             } else {
+                // Prefer origin/<base> so the new branch starts at the remote tip, not a
+                // potentially stale local ref. Fall back to local only if the remote ref
+                // doesn't exist (e.g. offline, no remote configured).
+                let origin_base = format!("origin/{}", base_branch);
+                let origin_base_exists = Command::new("git")
+                    .args(["rev-parse", "--verify", &origin_base])
+                    .current_dir(repo_path)
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                let start_point: &str = if origin_base_exists {
+                    &origin_base
+                } else {
+                    &base_branch
+                };
                 git_worktree_add(
-                    &["worktree", "add", "-b", branch_name, &wt, &base_branch],
+                    &["worktree", "add", "-b", branch_name, &wt, start_point],
                     repo_path,
                 )?;
             }
