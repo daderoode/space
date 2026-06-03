@@ -276,8 +276,8 @@ pub fn sync_repo(repo_path: &Path) -> SyncRepoResult {
         let success = Command::new("git")
             .args(["branch", "-f", &branch, &remote_ref])
             .current_dir(repo_path)
-            .status()
-            .map(|s| s.success())
+            .output()
+            .map(|o| o.status.success())
             .unwrap_or(false);
         if success {
             forwarded.push(branch);
