@@ -7,6 +7,7 @@ use tui_input::Input;
 pub enum CreateStage {
     EnterName,
     PickRepos,
+    Syncing, // running git fetch + fast-forward before showing the branch picker
     PickBranchStrategy,
     EnterBranchName, // edit the new-branch name
     PickBranch,
@@ -87,6 +88,7 @@ impl CreateState {
         match self.stage {
             CreateStage::EnterName => self.handle_enter_name(key),
             CreateStage::PickRepos => self.handle_pick_repos(key),
+            CreateStage::Syncing => self.handle_syncing(key),
             CreateStage::PickBranchStrategy => self.handle_branch_strategy(key, ctx),
             CreateStage::EnterBranchName => self.handle_enter_branch_name(key, ctx),
             CreateStage::PickBranch => self.handle_pick_branch(key, ctx),
@@ -119,12 +121,9 @@ impl CreateState {
                 }
                 self.selected_repos = confirmed;
                 self.error = None;
-                if let Some(repo_path) = self.selected_repos.first() {
-                    self.recent_branches = crate::core::git::recent_branches(repo_path, 5);
-                }
-                self.branch_strategy_idx = 0;
-                self.stage = CreateStage::PickBranchStrategy;
-                ScreenAction::Continue
+                self.progress.clear();
+                self.stage = CreateStage::Syncing;
+                ScreenAction::ExecuteSyncFlow(self.selected_repos.clone())
             }
             KeyCode::Tab => {
                 self.picker.toggle_highlighted();
@@ -150,6 +149,18 @@ impl CreateState {
                 ScreenAction::Continue
             }
         }
+    }
+
+    fn handle_syncing(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> crate::tui::actions::ScreenAction {
+        use ratatui::crossterm::event::KeyCode;
+        if key.code == KeyCode::Esc {
+            self.progress.clear();
+            self.stage = CreateStage::PickRepos;
+        }
+        crate::tui::actions::ScreenAction::Continue
     }
 
     fn handle_enter_name(
