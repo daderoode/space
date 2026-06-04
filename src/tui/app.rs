@@ -2381,10 +2381,7 @@ mod tests {
             }
             _ => panic!("expected CreateWorkspace screen"),
         }
-        assert!(
-            app.sync_rx.is_none(),
-            "sync_rx must be dropped after Done"
-        );
+        assert!(app.sync_rx.is_none(), "sync_rx must be dropped after Done");
     }
 
     #[test]
@@ -2417,7 +2414,10 @@ mod tests {
             }
             _ => panic!("expected AddRepos screen"),
         }
-        assert!(app.sync_rx.is_some(), "sync_rx must be kept while Syncing is active");
+        assert!(
+            app.sync_rx.is_some(),
+            "sync_rx must be kept while Syncing is active"
+        );
     }
 
     #[test]

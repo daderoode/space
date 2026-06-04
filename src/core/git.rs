@@ -324,17 +324,23 @@ pub fn branches_behind_upstream(repo_path: &Path) -> Vec<String> {
         return vec![];
     };
     for branch_result in branches {
-        let Ok((branch, _)) = branch_result else { continue };
-        let Ok(Some(name)) = branch.name() else { continue };
+        let Ok((branch, _)) = branch_result else {
+            continue;
+        };
+        let Ok(Some(name)) = branch.name() else {
+            continue;
+        };
         let name = name.to_string();
-        let Some(local_oid) = branch.get().target() else { continue };
+        let Some(local_oid) = branch.get().target() else {
+            continue;
+        };
         let upstream_ref = format!("refs/remotes/origin/{}", name);
         let upstream_oid = match repo.refname_to_id(&upstream_ref) {
             Ok(o) => o,
             Err(_) => continue,
         };
         let Ok((ahead, behind)) = repo.graph_ahead_behind(local_oid, upstream_oid) else {
-            continue
+            continue;
         };
         if ahead == 0 && behind > 0 {
             result.push(name);
@@ -777,7 +783,11 @@ mod tests {
     use std::process::Command as Cmd;
 
     fn git(args: &[&str], dir: &std::path::Path) {
-        let out = Cmd::new("git").args(args).current_dir(dir).output().unwrap();
+        let out = Cmd::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
         assert!(
             out.status.success(),
             "git {:?} failed:\n{}",

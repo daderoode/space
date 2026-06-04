@@ -265,7 +265,10 @@ pub fn sync_repo(repo_path: &Path) -> SyncRepoResult {
         .unwrap_or(false);
 
     if !fetch_ok {
-        return SyncRepoResult { fetch_ok: false, forwarded: vec![] };
+        return SyncRepoResult {
+            fetch_ok: false,
+            forwarded: vec![],
+        };
     }
 
     let behind = git::branches_behind_upstream(repo_path);
@@ -285,7 +288,10 @@ pub fn sync_repo(repo_path: &Path) -> SyncRepoResult {
         // Silently ignore failures (e.g. branch is currently checked out)
     }
 
-    SyncRepoResult { fetch_ok: true, forwarded }
+    SyncRepoResult {
+        fetch_ok: true,
+        forwarded,
+    }
 }
 
 /// Returns the path to the created worktree.
@@ -435,7 +441,11 @@ mod tests {
     use std::process::Command as Cmd;
 
     fn git(args: &[&str], dir: &Path) {
-        let out = Cmd::new("git").args(args).current_dir(dir).output().unwrap();
+        let out = Cmd::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
         assert!(
             out.status.success(),
             "git {:?} failed:\n{}",
@@ -522,7 +532,10 @@ mod tests {
 
         let result = sync_repo(tmp.path());
         assert!(!result.fetch_ok, "fetch_ok must be false when no remote");
-        assert!(result.forwarded.is_empty(), "forwarded must be empty when fetch fails");
+        assert!(
+            result.forwarded.is_empty(),
+            "forwarded must be empty when fetch fails"
+        );
     }
 
     #[test]
@@ -542,7 +555,10 @@ mod tests {
         let sha_after = get_sha(&local, "dev");
         let origin_sha = get_sha(&local, "origin/dev");
         assert_ne!(sha_before, sha_after, "dev must have advanced");
-        assert_eq!(sha_after, origin_sha, "dev must equal origin/dev after fast-forward");
+        assert_eq!(
+            sha_after, origin_sha,
+            "dev must equal origin/dev after fast-forward"
+        );
     }
 
     #[test]

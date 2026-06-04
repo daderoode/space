@@ -829,10 +829,7 @@ fn render_worktree_progress(
             sections[1],
         );
     } else if let Some(hint) = footer_hint {
-        frame.render_widget(
-            Paragraph::new(hint).style(theme::muted()),
-            sections[1],
-        );
+        frame.render_widget(Paragraph::new(hint).style(theme::muted()), sections[1]);
     } else {
         frame.render_widget(
             Paragraph::new("Done! [ENTER to continue]").style(theme::success()),
