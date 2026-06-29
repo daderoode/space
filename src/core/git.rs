@@ -310,10 +310,13 @@ pub fn ahead_behind(repo_path: &Path) -> Result<(usize, usize)> {
     Ok((ahead, behind))
 }
 
-/// Return the names of all local branches that are strictly behind their upstream
-/// (0 commits ahead, 1+ commits behind). Branches with no upstream, equal to
-/// upstream, ahead, or diverged are excluded. Used by `sync_repo` to identify
-/// which branches are safe to fast-forward without losing local work.
+/// Return the names of all local branches that are strictly behind their
+/// `origin/<branch>` ref (0 commits ahead, 1+ commits behind). The comparison is
+/// always against `refs/remotes/origin/<name>`, not any configured upstream, so
+/// this assumes a single remote named `origin`. Branches with no matching
+/// `origin/<branch>` ref, equal, ahead, or diverged are excluded. Used by
+/// `sync_repo` to identify which branches are safe to fast-forward without
+/// losing local work.
 pub fn branches_behind_upstream(repo_path: &Path) -> Vec<String> {
     let repo = match Repository::open(repo_path) {
         Ok(r) => r,

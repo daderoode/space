@@ -252,8 +252,10 @@ pub struct SyncRepoResult {
 }
 
 /// Fetch from `origin` and fast-forward all local branches that are strictly
-/// behind their upstream (0 ahead, N behind). Branches with local commits ahead,
-/// diverged, or currently checked out are left untouched.
+/// behind their `origin/<branch>` ref (0 ahead, N behind); this assumes a single
+/// remote named `origin` rather than each branch's configured upstream. Branches
+/// with local commits ahead, diverged, or currently checked out are left
+/// untouched.
 /// If the fetch fails (offline / no remote), returns `fetch_ok: false` and an
 /// empty `forwarded` list — the caller should warn and continue.
 pub fn sync_repo(repo_path: &Path) -> SyncRepoResult {
@@ -435,6 +437,22 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
+/// Given a worktree path, read its `.git` file to find the main repo root.
+fn find_main_repo(wt_path: &Path) -> Option<PathBuf> {
+    let git_file = wt_path.join(".git");
+    if git_file.is_file() {
+        let content = std::fs::read_to_string(&git_file).ok()?;
+        let gitdir = content.trim().strip_prefix("gitdir: ")?;
+        let path = PathBuf::from(gitdir);
+        path.ancestors()
+            .find(|p| p.join("config").exists() && p.ends_with(".git"))
+            .and_then(|p| p.parent())
+            .map(PathBuf::from)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,21 +591,5 @@ mod tests {
             "main must not be fast-forwarded when checked out: {:?}",
             result.forwarded
         );
-    }
-}
-
-/// Given a worktree path, read its `.git` file to find the main repo root.
-fn find_main_repo(wt_path: &Path) -> Option<PathBuf> {
-    let git_file = wt_path.join(".git");
-    if git_file.is_file() {
-        let content = std::fs::read_to_string(&git_file).ok()?;
-        let gitdir = content.trim().strip_prefix("gitdir: ")?;
-        let path = PathBuf::from(gitdir);
-        path.ancestors()
-            .find(|p| p.join("config").exists() && p.ends_with(".git"))
-            .and_then(|p| p.parent())
-            .map(PathBuf::from)
-    } else {
-        None
     }
 }

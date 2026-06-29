@@ -57,6 +57,32 @@ fn max_rendered_width(rendered: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// Drive the background sync worker (Syncing stage) to completion by polling
+/// `poll_sync_result`, mirroring what the real run loop does each frame.
+fn drain_sync(app: &mut App) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        app.poll_sync_result();
+        let syncing = matches!(
+            app.screen,
+            Screen::CreateWorkspace(ref st)
+                if st.stage == space::tui::screens::create::CreateStage::Syncing
+        ) || matches!(
+            app.screen,
+            Screen::AddRepos(ref st)
+                if st.stage == space::tui::screens::add::AddStage::Syncing
+        );
+        if !syncing {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sync worker did not complete within timeout"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Dashboard navigation tests
 // ---------------------------------------------------------------------------
@@ -375,6 +401,7 @@ fn create_populates_recent_branches_on_pick_repos_enter() {
     }
 
     app.handle_key(key(KeyCode::Enter));
+    drain_sync(&mut app);
 
     if let Screen::CreateWorkspace(ref st) = app.screen {
         assert_eq!(
@@ -977,6 +1004,7 @@ fn create_reentry_resets_branch_strategy_idx() {
         st.picker.toggle_highlighted();
     }
     app.handle_key(key(KeyCode::Enter));
+    drain_sync(&mut app);
 
     if let Screen::CreateWorkspace(ref st) = app.screen {
         assert_eq!(
