@@ -7,7 +7,9 @@ use crate::tui::actions::StatusKind;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -191,6 +193,7 @@ pub struct App {
 
     // Background sync worker (Syncing stage)
     pub sync_rx: Option<mpsc::Receiver<SyncProgress>>,
+    pub sync_cancel: Option<Arc<AtomicBool>>,
 
     // Debounce
     pub nav_pending: Option<Instant>,
@@ -261,6 +264,7 @@ impl App {
             ws_result_rx: Some(result_rx),
             ws_generation: 0,
             sync_rx: None,
+            sync_cancel: None,
             nav_pending: None,
             ws_loading: false,
             ws_loading_since: None,
@@ -920,11 +924,16 @@ impl App {
                 if st.stage == crate::tui::screens::add::AddStage::Syncing
         );
         if !is_syncing {
-            // Drop the receiver. The background worker may still be running git subprocesses;
-            // subsequent tx.send() calls will return Err immediately (dropped receiver on a
-            // sync_channel does not block the sender), so the thread exits cleanly on its own.
+            // Signal cancellation so the worker stops before starting the next repo.
+            // Dropping the receiver below is a backstop: if the worker is mid-repo when we
+            // cancel, its next tx.send() returns Err immediately (a dropped receiver on a
+            // sync_channel does not block the sender), so the thread still exits cleanly.
             // If the user cancels and immediately restarts, two workers can briefly overlap on
             // the same repos — that is safe because git fetch/branch operations are idempotent.
+            if let Some(c) = &self.sync_cancel {
+                c.store(true, Ordering::Relaxed);
+            }
+            self.sync_cancel = None;
             self.sync_rx = None;
             return;
         }
@@ -938,10 +947,12 @@ impl App {
                         _ => {}
                     },
                     Ok(SyncProgress::Done) => {
+                        self.sync_cancel = None;
                         self.advance_to_branch_strategy();
                         return;
                     }
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        self.sync_cancel = None;
                         self.advance_to_branch_strategy();
                         return;
                     }
@@ -999,37 +1010,10 @@ impl App {
             }
             ScreenAction::ExecuteSyncFlow(repos) => {
                 let (tx, rx) = mpsc::sync_channel::<SyncProgress>(64);
+                let cancel = Arc::new(AtomicBool::new(false));
                 self.sync_rx = Some(rx);
-                std::thread::spawn(move || {
-                    for repo_path in &repos {
-                        let repo_name = repo_path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "?".to_string());
-                        let _ = tx.send(SyncProgress::Step(format!("Syncing {}...", repo_name)));
-                        let result = crate::core::workspace::sync_repo(repo_path);
-                        if result.fetch_ok {
-                            if result.forwarded.is_empty() {
-                                let _ = tx.send(SyncProgress::Step(format!(
-                                    "  \u{2713} {} up to date",
-                                    repo_name
-                                )));
-                            } else {
-                                let _ = tx.send(SyncProgress::Step(format!(
-                                    "  \u{2713} {} (fast-forwarded: {})",
-                                    repo_name,
-                                    result.forwarded.join(", ")
-                                )));
-                            }
-                        } else {
-                            let _ = tx.send(SyncProgress::Step(format!(
-                                "  ~ {} (fetch failed, using local)",
-                                repo_name
-                            )));
-                        }
-                    }
-                    let _ = tx.send(SyncProgress::Done);
-                });
+                self.sync_cancel = Some(cancel.clone());
+                std::thread::spawn(move || run_sync_worker(repos, tx, cancel));
             }
             ScreenAction::SaveConfig(new_config) => {
                 self.config = new_config;
@@ -1261,6 +1245,51 @@ impl App {
 
         self.process_action(action);
     }
+}
+
+/// Background worker for the Syncing stage: fetch + fast-forward each repo,
+/// reporting progress over `tx`.
+///
+/// Cancellation is checked between repos: when `cancel` is set, the worker
+/// returns immediately without sending `Done`. An in-flight git subprocess for
+/// the current repo cannot be interrupted, so cancellation takes effect only at
+/// the next repo boundary.
+fn run_sync_worker(
+    repos: Vec<PathBuf>,
+    tx: mpsc::SyncSender<SyncProgress>,
+    cancel: Arc<AtomicBool>,
+) {
+    for repo_path in &repos {
+        if cancel.load(Ordering::Relaxed) {
+            return; // do NOT send Done — user cancelled
+        }
+        let repo_name = repo_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "?".to_string());
+        let _ = tx.send(SyncProgress::Step(format!("Syncing {}...", repo_name)));
+        let result = crate::core::workspace::sync_repo(repo_path);
+        if result.fetch_ok {
+            if result.forwarded.is_empty() {
+                let _ = tx.send(SyncProgress::Step(format!(
+                    "  \u{2713} {} up to date",
+                    repo_name
+                )));
+            } else {
+                let _ = tx.send(SyncProgress::Step(format!(
+                    "  \u{2713} {} (fast-forwarded: {})",
+                    repo_name,
+                    result.forwarded.join(", ")
+                )));
+            }
+        } else {
+            let _ = tx.send(SyncProgress::Step(format!(
+                "  ~ {} (fetch failed, using local)",
+                repo_name
+            )));
+        }
+    }
+    let _ = tx.send(SyncProgress::Done);
 }
 
 /// Advance `cursor_row` in the given direction, skipping `SectionHeader` rows.
@@ -1817,6 +1846,7 @@ mod tests {
             ws_result_rx: None,
             ws_generation: 0,
             sync_rx: None,
+            sync_cancel: None,
             nav_pending: None,
             ws_loading: false,
             ws_loading_since: None,
@@ -1960,6 +1990,7 @@ mod tests {
             ws_result_rx: None,
             ws_generation: 0,
             sync_rx: None,
+            sync_cancel: None,
             nav_pending: None,
             ws_loading: false,
             ws_loading_since: None,
@@ -2318,6 +2349,46 @@ mod tests {
         assert!(
             app.sync_rx.is_none(),
             "sync_rx must be dropped when not in Syncing stage"
+        );
+    }
+
+    #[test]
+    fn run_sync_worker_honors_preset_cancel_flag() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = mpsc::sync_channel::<SyncProgress>(64);
+        run_sync_worker(
+            vec![
+                PathBuf::from("/nonexistent/repo-a"),
+                PathBuf::from("/nonexistent/repo-b"),
+            ],
+            tx,
+            cancel,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no Step or Done must be sent when cancel is preset — repos skipped"
+        );
+    }
+
+    #[test]
+    fn poll_sync_result_signals_cancel_when_leaving_syncing_stage() {
+        let mut app = make_app(vec![]);
+        // Dashboard screen — not in Syncing stage
+        let flag = Arc::new(AtomicBool::new(false));
+        let (_tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
+        app.sync_rx = Some(rx);
+        app.sync_cancel = Some(flag.clone());
+
+        app.poll_sync_result();
+
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "cancel flag must be set when leaving the Syncing stage"
+        );
+        assert!(app.sync_rx.is_none(), "sync_rx must be dropped");
+        assert!(
+            app.sync_cancel.is_none(),
+            "sync_cancel handle must be dropped"
         );
     }
 
