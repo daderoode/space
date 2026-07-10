@@ -193,6 +193,8 @@ pub struct App {
 
     // Background sync worker (Syncing stage)
     pub sync_rx: Option<mpsc::Receiver<SyncProgress>>,
+    // Relaxed ordering is sufficient: this flag guards no other shared state, so
+    // there is no happens-before relationship to establish with the worker thread.
     pub sync_cancel: Option<Arc<AtomicBool>>,
 
     // Debounce
@@ -1009,6 +1011,12 @@ impl App {
                 self.execute_worktree_flow(params);
             }
             ScreenAction::ExecuteSyncFlow(repos) => {
+                // Cancel any worker still live from a previous sync before dropping its
+                // handle, so it stops at its next repo boundary rather than running on
+                // untracked.
+                if let Some(old) = &self.sync_cancel {
+                    old.store(true, Ordering::Relaxed);
+                }
                 let (tx, rx) = mpsc::sync_channel::<SyncProgress>(64);
                 let cancel = Arc::new(AtomicBool::new(false));
                 self.sync_rx = Some(rx);
@@ -2389,6 +2397,27 @@ mod tests {
         assert!(
             app.sync_cancel.is_none(),
             "sync_cancel handle must be dropped"
+        );
+    }
+
+    #[test]
+    fn reentering_execute_sync_flow_cancels_previous_worker() {
+        use crate::tui::actions::ScreenAction;
+        let mut app = make_app(vec![]);
+
+        app.process_action(ScreenAction::ExecuteSyncFlow(vec![]));
+        let first = app.sync_cancel.clone().expect("first cancel flag set");
+        assert!(!first.load(Ordering::Relaxed), "first flag starts unset");
+
+        // Re-entry must signal the previous worker before replacing the handle.
+        app.process_action(ScreenAction::ExecuteSyncFlow(vec![]));
+        assert!(
+            first.load(Ordering::Relaxed),
+            "previous worker's cancel flag must be set on re-entry"
+        );
+        assert!(
+            app.sync_cancel.is_some(),
+            "a fresh cancel handle must be stored for the new worker"
         );
     }
 
