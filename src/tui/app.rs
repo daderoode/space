@@ -7,7 +7,9 @@ use crate::tui::actions::StatusKind;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -29,6 +31,12 @@ pub struct LoadResult {
     pub generation: u64,
     /// `Some(ws)` on success, `None` if `workspace_detail` returned an error.
     pub workspace: Option<crate::core::workspace::Workspace>,
+}
+
+/// Sent from the sync worker thread back to the App during the Syncing stage.
+pub enum SyncProgress {
+    Step(String),
+    Done,
 }
 
 const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(5);
@@ -183,6 +191,12 @@ pub struct App {
     pub ws_result_rx: Option<mpsc::Receiver<LoadResult>>,
     pub ws_generation: u64,
 
+    // Background sync worker (Syncing stage)
+    pub sync_rx: Option<mpsc::Receiver<SyncProgress>>,
+    // Relaxed ordering is sufficient: this flag guards no other shared state, so
+    // there is no happens-before relationship to establish with the worker thread.
+    pub sync_cancel: Option<Arc<AtomicBool>>,
+
     // Debounce
     pub nav_pending: Option<Instant>,
 
@@ -251,6 +265,8 @@ impl App {
             ws_load_tx: Some(load_tx),
             ws_result_rx: Some(result_rx),
             ws_generation: 0,
+            sync_rx: None,
+            sync_cancel: None,
             nav_pending: None,
             ws_loading: false,
             ws_loading_since: None,
@@ -864,6 +880,91 @@ impl App {
         // If error, stay on Creating stage so user can see the log
     }
 
+    /// Load recent branches for the first selected repo and advance the active
+    /// screen from Syncing to PickBranchStrategy.
+    fn advance_to_branch_strategy(&mut self) {
+        let repo_path = match &self.screen {
+            Screen::CreateWorkspace(st) => st.selected_repos.first().cloned(),
+            Screen::AddRepos(st) => st.selected_repos.first().cloned(),
+            _ => return,
+        };
+        let recent = repo_path
+            .as_ref()
+            .map(|p| crate::core::git::recent_branches(p, 5))
+            .unwrap_or_default();
+        match &mut self.screen {
+            Screen::CreateWorkspace(st) => {
+                st.recent_branches = recent;
+                st.branch_strategy_idx = 0;
+                st.progress.clear();
+                st.stage = crate::tui::screens::create::CreateStage::PickBranchStrategy;
+            }
+            Screen::AddRepos(st) => {
+                st.recent_branches = recent;
+                st.branch_strategy_idx = 0;
+                st.progress.clear();
+                st.stage = crate::tui::screens::add::AddStage::PickBranchStrategy;
+            }
+            _ => {}
+        }
+    }
+
+    /// Poll the sync worker channel once per frame. Non-blocking.
+    ///
+    /// Drains `Step` messages into the active screen's progress log, and
+    /// calls `advance_to_branch_strategy` on `Done` or channel disconnect.
+    /// Drops `sync_rx` whenever the screen is no longer in the Syncing stage
+    /// (e.g. the user pressed Esc).
+    pub fn poll_sync_result(&mut self) {
+        let is_syncing = matches!(
+            &self.screen,
+            Screen::CreateWorkspace(st)
+                if st.stage == crate::tui::screens::create::CreateStage::Syncing
+        ) || matches!(
+            &self.screen,
+            Screen::AddRepos(st)
+                if st.stage == crate::tui::screens::add::AddStage::Syncing
+        );
+        if !is_syncing {
+            // Signal cancellation so the worker stops before starting the next repo.
+            // Dropping the receiver below is a backstop: if the worker is mid-repo when we
+            // cancel, its next tx.send() returns Err immediately (a dropped receiver on a
+            // sync_channel does not block the sender), so the thread still exits cleanly.
+            // If the user cancels and immediately restarts, two workers can briefly overlap on
+            // the same repos — that is safe because git fetch/branch operations are idempotent.
+            if let Some(c) = &self.sync_cancel {
+                c.store(true, Ordering::Relaxed);
+            }
+            self.sync_cancel = None;
+            self.sync_rx = None;
+            return;
+        }
+        let rx = self.sync_rx.take();
+        if let Some(ref r) = rx {
+            loop {
+                match r.try_recv() {
+                    Ok(SyncProgress::Step(msg)) => match &mut self.screen {
+                        Screen::CreateWorkspace(st) => st.progress.push(msg),
+                        Screen::AddRepos(st) => st.progress.push(msg),
+                        _ => {}
+                    },
+                    Ok(SyncProgress::Done) => {
+                        self.sync_cancel = None;
+                        self.advance_to_branch_strategy();
+                        return;
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.sync_cancel = None;
+                        self.advance_to_branch_strategy();
+                        return;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                }
+            }
+        }
+        self.sync_rx = rx;
+    }
+
     fn process_action(&mut self, action: crate::tui::actions::ScreenAction) {
         use crate::tui::actions::ScreenAction;
         match action {
@@ -908,6 +1009,19 @@ impl App {
             }
             ScreenAction::ExecuteWorktreeFlow(params) => {
                 self.execute_worktree_flow(params);
+            }
+            ScreenAction::ExecuteSyncFlow(repos) => {
+                // Cancel any worker still live from a previous sync before dropping its
+                // handle, so it stops at its next repo boundary rather than running on
+                // untracked.
+                if let Some(old) = &self.sync_cancel {
+                    old.store(true, Ordering::Relaxed);
+                }
+                let (tx, rx) = mpsc::sync_channel::<SyncProgress>(64);
+                let cancel = Arc::new(AtomicBool::new(false));
+                self.sync_rx = Some(rx);
+                self.sync_cancel = Some(cancel.clone());
+                std::thread::spawn(move || run_sync_worker(repos, tx, cancel));
             }
             ScreenAction::SaveConfig(new_config) => {
                 self.config = new_config;
@@ -1139,6 +1253,51 @@ impl App {
 
         self.process_action(action);
     }
+}
+
+/// Background worker for the Syncing stage: fetch + fast-forward each repo,
+/// reporting progress over `tx`.
+///
+/// Cancellation is checked between repos: when `cancel` is set, the worker
+/// returns immediately without sending `Done`. An in-flight git subprocess for
+/// the current repo cannot be interrupted, so cancellation takes effect only at
+/// the next repo boundary.
+fn run_sync_worker(
+    repos: Vec<PathBuf>,
+    tx: mpsc::SyncSender<SyncProgress>,
+    cancel: Arc<AtomicBool>,
+) {
+    for repo_path in &repos {
+        if cancel.load(Ordering::Relaxed) {
+            return; // do NOT send Done — user cancelled
+        }
+        let repo_name = repo_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "?".to_string());
+        let _ = tx.send(SyncProgress::Step(format!("Syncing {}...", repo_name)));
+        let result = crate::core::workspace::sync_repo(repo_path);
+        if result.fetch_ok {
+            if result.forwarded.is_empty() {
+                let _ = tx.send(SyncProgress::Step(format!(
+                    "  \u{2713} {} up to date",
+                    repo_name
+                )));
+            } else {
+                let _ = tx.send(SyncProgress::Step(format!(
+                    "  \u{2713} {} (fast-forwarded: {})",
+                    repo_name,
+                    result.forwarded.join(", ")
+                )));
+            }
+        } else {
+            let _ = tx.send(SyncProgress::Step(format!(
+                "  ~ {} (fetch failed, using local)",
+                repo_name
+            )));
+        }
+    }
+    let _ = tx.send(SyncProgress::Done);
 }
 
 /// Advance `cursor_row` in the given direction, skipping `SectionHeader` rows.
@@ -1632,6 +1791,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()
         // Check debounce timer and poll background results each frame
         app.check_debounce_timer();
         app.poll_background_result();
+        app.poll_sync_result();
         app.spinner_tick = app.spinner_tick.wrapping_add(1);
 
         app.expire_status_message(Instant::now());
@@ -1693,6 +1853,8 @@ mod tests {
             ws_load_tx: None,
             ws_result_rx: None,
             ws_generation: 0,
+            sync_rx: None,
+            sync_cancel: None,
             nav_pending: None,
             ws_loading: false,
             ws_loading_since: None,
@@ -1835,6 +1997,8 @@ mod tests {
             ws_load_tx: None,
             ws_result_rx: None,
             ws_generation: 0,
+            sync_rx: None,
+            sync_cancel: None,
             nav_pending: None,
             ws_loading: false,
             ws_loading_since: None,
@@ -2170,6 +2334,218 @@ mod tests {
     }
 
     // ── O1 regression guard ───────────────────────────────────────────────────
+
+    // ── Sync flow tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn execute_sync_flow_creates_channel() {
+        let mut app = make_app(vec![]);
+        app.process_action(crate::tui::actions::ScreenAction::ExecuteSyncFlow(vec![]));
+        assert!(
+            app.sync_rx.is_some(),
+            "sync_rx must be set after ExecuteSyncFlow"
+        );
+    }
+
+    #[test]
+    fn poll_sync_result_drops_rx_when_not_syncing() {
+        let mut app = make_app(vec![]);
+        // Dashboard screen — not in Syncing stage
+        let (_tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
+        app.sync_rx = Some(rx);
+        app.poll_sync_result();
+        assert!(
+            app.sync_rx.is_none(),
+            "sync_rx must be dropped when not in Syncing stage"
+        );
+    }
+
+    #[test]
+    fn run_sync_worker_honors_preset_cancel_flag() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = mpsc::sync_channel::<SyncProgress>(64);
+        run_sync_worker(
+            vec![
+                PathBuf::from("/nonexistent/repo-a"),
+                PathBuf::from("/nonexistent/repo-b"),
+            ],
+            tx,
+            cancel,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no Step or Done must be sent when cancel is preset — repos skipped"
+        );
+    }
+
+    #[test]
+    fn poll_sync_result_signals_cancel_when_leaving_syncing_stage() {
+        let mut app = make_app(vec![]);
+        // Dashboard screen — not in Syncing stage
+        let flag = Arc::new(AtomicBool::new(false));
+        let (_tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
+        app.sync_rx = Some(rx);
+        app.sync_cancel = Some(flag.clone());
+
+        app.poll_sync_result();
+
+        assert!(
+            flag.load(Ordering::Relaxed),
+            "cancel flag must be set when leaving the Syncing stage"
+        );
+        assert!(app.sync_rx.is_none(), "sync_rx must be dropped");
+        assert!(
+            app.sync_cancel.is_none(),
+            "sync_cancel handle must be dropped"
+        );
+    }
+
+    #[test]
+    fn reentering_execute_sync_flow_cancels_previous_worker() {
+        use crate::tui::actions::ScreenAction;
+        let mut app = make_app(vec![]);
+
+        app.process_action(ScreenAction::ExecuteSyncFlow(vec![]));
+        let first = app.sync_cancel.clone().expect("first cancel flag set");
+        assert!(!first.load(Ordering::Relaxed), "first flag starts unset");
+
+        // Re-entry must signal the previous worker before replacing the handle.
+        app.process_action(ScreenAction::ExecuteSyncFlow(vec![]));
+        assert!(
+            first.load(Ordering::Relaxed),
+            "previous worker's cancel flag must be set on re-entry"
+        );
+        assert!(
+            app.sync_cancel.is_some(),
+            "a fresh cancel handle must be stored for the new worker"
+        );
+    }
+
+    #[test]
+    fn poll_sync_result_appends_step_to_progress() {
+        use crate::tui::screens::create::{CreateStage, CreateState};
+        let mut app = make_app(vec![]);
+        let mut state = CreateState::new(vec![], vec![]);
+        state.stage = CreateStage::Syncing;
+        app.screen = Screen::CreateWorkspace(state);
+
+        let (tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
+        app.sync_rx = Some(rx);
+        tx.send(SyncProgress::Step("Syncing my-repo...".to_string()))
+            .unwrap();
+
+        app.poll_sync_result();
+
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(
+                    st.stage,
+                    CreateStage::Syncing,
+                    "stage must remain Syncing while channel is open"
+                );
+                assert_eq!(
+                    st.progress,
+                    vec!["Syncing my-repo..."],
+                    "Step message must be appended to progress"
+                );
+            }
+            _ => panic!("expected CreateWorkspace screen"),
+        }
+        assert!(
+            app.sync_rx.is_some(),
+            "sync_rx must be kept while Syncing is active"
+        );
+    }
+
+    #[test]
+    fn poll_sync_result_done_advances_to_pick_branch_strategy() {
+        use crate::tui::screens::create::{CreateStage, CreateState};
+        let mut app = make_app(vec![]);
+        let mut state = CreateState::new(vec![], vec![]);
+        state.stage = CreateStage::Syncing;
+        app.screen = Screen::CreateWorkspace(state);
+
+        let (tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
+        app.sync_rx = Some(rx);
+        tx.send(SyncProgress::Done).unwrap();
+
+        app.poll_sync_result();
+
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(
+                    st.stage,
+                    CreateStage::PickBranchStrategy,
+                    "Done must advance stage to PickBranchStrategy"
+                );
+            }
+            _ => panic!("expected CreateWorkspace screen"),
+        }
+        assert!(app.sync_rx.is_none(), "sync_rx must be dropped after Done");
+    }
+
+    #[test]
+    fn poll_sync_result_add_repos_appends_step_to_progress() {
+        use crate::tui::screens::add::{AddStage, AddState};
+        let mut app = make_app(vec![]);
+        let mut state = AddState::new("my-ws".to_string(), vec![], vec![]);
+        state.stage = AddStage::Syncing;
+        app.screen = Screen::AddRepos(state);
+
+        let (tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
+        app.sync_rx = Some(rx);
+        tx.send(SyncProgress::Step("Syncing my-repo...".to_string()))
+            .unwrap();
+
+        app.poll_sync_result();
+
+        match &app.screen {
+            Screen::AddRepos(st) => {
+                assert_eq!(
+                    st.stage,
+                    AddStage::Syncing,
+                    "stage must remain Syncing while channel is open"
+                );
+                assert_eq!(
+                    st.progress,
+                    vec!["Syncing my-repo..."],
+                    "Step message must be appended to progress"
+                );
+            }
+            _ => panic!("expected AddRepos screen"),
+        }
+        assert!(
+            app.sync_rx.is_some(),
+            "sync_rx must be kept while Syncing is active"
+        );
+    }
+
+    #[test]
+    fn poll_sync_result_add_repos_done_advances_to_pick_branch_strategy() {
+        use crate::tui::screens::add::{AddStage, AddState};
+        let mut app = make_app(vec![]);
+        let mut state = AddState::new("my-ws".to_string(), vec![], vec![]);
+        state.stage = AddStage::Syncing;
+        app.screen = Screen::AddRepos(state);
+
+        let (tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
+        app.sync_rx = Some(rx);
+        tx.send(SyncProgress::Done).unwrap();
+
+        app.poll_sync_result();
+
+        match &app.screen {
+            Screen::AddRepos(st) => {
+                assert_eq!(
+                    st.stage,
+                    AddStage::PickBranchStrategy,
+                    "Done must advance stage to PickBranchStrategy"
+                );
+            }
+            _ => panic!("expected AddRepos screen"),
+        }
+        assert!(app.sync_rx.is_none(), "sync_rx must be dropped after Done");
+    }
 
     #[test]
     fn workspace_nav_does_not_populate_file_cache() {

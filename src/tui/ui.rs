@@ -552,11 +552,19 @@ fn render_create_overlay(state: &crate::tui::screens::create::CreateState, frame
                 crate::tui::widgets::fuzzy_picker::render(picker, frame);
             }
         }
+        CreateStage::Syncing => render_worktree_progress(
+            frame,
+            " Syncing Repos ",
+            &state.progress,
+            state.error.as_deref(),
+            Some("ESC = cancel"),
+        ),
         CreateStage::Creating => render_worktree_progress(
             frame,
             " Creating Workspace ",
             &state.progress,
             state.error.as_deref(),
+            None,
         ),
     }
 }
@@ -783,6 +791,7 @@ fn render_worktree_progress(
     title: &str,
     progress: &[String],
     error: Option<&str>,
+    footer_hint: Option<&str>,
 ) {
     use ratatui::widgets::Clear;
     let dialog_w = (frame.area().width * 70 / 100).max(60);
@@ -819,6 +828,8 @@ fn render_worktree_progress(
             Paragraph::new(format!("Error: {}  [ESC to dismiss]", err)).style(theme::error()),
             sections[1],
         );
+    } else if let Some(hint) = footer_hint {
+        frame.render_widget(Paragraph::new(hint).style(theme::muted()), sections[1]);
     } else {
         frame.render_widget(
             Paragraph::new("Done! [ENTER to continue]").style(theme::success()),
@@ -852,11 +863,19 @@ fn render_add_overlay(state: &crate::tui::screens::add::AddState, frame: &mut Fr
                 crate::tui::widgets::fuzzy_picker::render(picker, frame);
             }
         }
+        AddStage::Syncing => render_worktree_progress(
+            frame,
+            " Syncing Repos ",
+            &state.progress,
+            state.error.as_deref(),
+            Some("ESC = cancel"),
+        ),
         AddStage::Creating => render_worktree_progress(
             frame,
             " Adding Repos ",
             &state.progress,
             state.error.as_deref(),
+            None,
         ),
     }
 }

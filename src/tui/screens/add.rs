@@ -8,6 +8,7 @@ use tui_input::Input;
 #[derive(Debug, Clone, PartialEq)]
 pub enum AddStage {
     PickRepos,
+    Syncing,
     PickBranchStrategy,
     EnterBranchName, // edit the new-branch name
     PickBranch,
@@ -96,6 +97,7 @@ impl AddState {
     pub fn handle_key(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
         match self.stage {
             AddStage::PickRepos => self.handle_pick_repos(key),
+            AddStage::Syncing => self.handle_syncing(key),
             AddStage::PickBranchStrategy => self.handle_branch_strategy(key, ctx),
             AddStage::EnterBranchName => self.handle_enter_branch_name(key, ctx),
             AddStage::PickBranch => self.handle_pick_branch(key, ctx),
@@ -119,12 +121,9 @@ impl AddState {
                 }
                 self.selected_repos = confirmed;
                 self.error = None;
-                self.stage = AddStage::PickBranchStrategy;
-                if let Some(repo_path) = self.selected_repos.first() {
-                    self.recent_branches = crate::core::git::recent_branches(repo_path, 5);
-                }
-                self.branch_strategy_idx = 0;
-                ScreenAction::Continue
+                self.progress.clear();
+                self.stage = AddStage::Syncing;
+                ScreenAction::ExecuteSyncFlow(self.selected_repos.clone())
             }
             KeyCode::Tab => {
                 self.picker.toggle_highlighted();
@@ -150,6 +149,14 @@ impl AddState {
                 ScreenAction::Continue
             }
         }
+    }
+
+    fn handle_syncing(&mut self, key: KeyEvent) -> ScreenAction {
+        if key.code == KeyCode::Esc {
+            self.progress.clear();
+            self.stage = AddStage::PickRepos;
+        }
+        ScreenAction::Continue
     }
 
     fn handle_branch_strategy(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {

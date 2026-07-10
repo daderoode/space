@@ -310,6 +310,48 @@ pub fn ahead_behind(repo_path: &Path) -> Result<(usize, usize)> {
     Ok((ahead, behind))
 }
 
+/// Return the names of all local branches that are strictly behind their
+/// `origin/<branch>` ref (0 commits ahead, 1+ commits behind). The comparison is
+/// always against `refs/remotes/origin/<name>`, not any configured upstream, so
+/// this assumes a single remote named `origin`. Branches with no matching
+/// `origin/<branch>` ref, equal, ahead, or diverged are excluded. Used by
+/// `sync_repo` to identify which branches are safe to fast-forward without
+/// losing local work.
+pub fn branches_behind_upstream(repo_path: &Path) -> Vec<String> {
+    let repo = match Repository::open(repo_path) {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    let mut result = Vec::new();
+    let Ok(branches) = repo.branches(Some(git2::BranchType::Local)) else {
+        return vec![];
+    };
+    for branch_result in branches {
+        let Ok((branch, _)) = branch_result else {
+            continue;
+        };
+        let Ok(Some(name)) = branch.name() else {
+            continue;
+        };
+        let name = name.to_string();
+        let Some(local_oid) = branch.get().target() else {
+            continue;
+        };
+        let upstream_ref = format!("refs/remotes/origin/{}", name);
+        let upstream_oid = match repo.refname_to_id(&upstream_ref) {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+        let Ok((ahead, behind)) = repo.graph_ahead_behind(local_oid, upstream_oid) else {
+            continue;
+        };
+        if ahead == 0 && behind > 0 {
+            result.push(name);
+        }
+    }
+    result
+}
+
 /// Human-readable relative time string from a unix timestamp.
 /// Returns "unknown" for timestamps <= 0 (failed peel, unset field).
 pub fn relative_time(unix_ts: i64) -> String {
@@ -741,6 +783,125 @@ pub fn git_index_mtime(repo_path: &Path) -> Option<std::time::SystemTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command as Cmd;
+
+    fn git(args: &[&str], dir: &std::path::Path) {
+        let out = Cmd::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed:\n{}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn git_setup(dir: &std::path::Path) {
+        git(&["config", "user.email", "t@local"], dir);
+        git(&["config", "user.name", "T"], dir);
+        git(&["config", "commit.gpgsign", "false"], dir);
+    }
+
+    /// Returns `(tmp, local_path)` where:
+    /// - `local/main` is checked out and 1 behind `origin/main`
+    /// - `local/dev` is NOT checked out and 1 behind `origin/dev`
+    fn make_behind_repo() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("local");
+
+        Cmd::new("git")
+            .args(["init", "--bare", "-b", "main", "origin.git"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["clone", "origin.git", "local"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        git_setup(&local);
+
+        git(&["commit", "--allow-empty", "-m", "init"], &local);
+        git(&["push", "-u", "origin", "main"], &local);
+
+        git(&["checkout", "-b", "dev"], &local);
+        git(&["commit", "--allow-empty", "-m", "dev-init"], &local);
+        git(&["push", "-u", "origin", "dev"], &local);
+        git(&["checkout", "main"], &local);
+
+        // Helper clone to push new commits to origin without touching local
+        let helper = tmp.path().join("helper");
+        Cmd::new("git")
+            .args(["clone", "origin.git", "helper"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        git_setup(&helper);
+
+        git(&["commit", "--allow-empty", "-m", "main-remote"], &helper);
+        git(&["push", "origin", "main"], &helper);
+
+        Cmd::new("git")
+            .args(["checkout", "-b", "dev", "origin/dev"])
+            .current_dir(&helper)
+            .output()
+            .unwrap();
+        git(&["commit", "--allow-empty", "-m", "dev-remote"], &helper);
+        git(&["push", "origin", "dev"], &helper);
+
+        // Fetch in local to update remote-tracking refs (simulates sync_repo's fetch)
+        git(&["fetch", "origin"], &local);
+
+        (tmp, local)
+    }
+
+    #[test]
+    fn branches_behind_upstream_returns_branches_behind_remote() {
+        let (_tmp, local) = make_behind_repo();
+        let behind = branches_behind_upstream(&local);
+        assert!(
+            behind.contains(&"main".to_string()),
+            "main should be behind: {:?}",
+            behind
+        );
+        assert!(
+            behind.contains(&"dev".to_string()),
+            "dev should be behind: {:?}",
+            behind
+        );
+    }
+
+    #[test]
+    fn branches_behind_upstream_ignores_branch_with_local_commits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("local");
+        Cmd::new("git")
+            .args(["init", "--bare", "-b", "main", "origin.git"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["clone", "origin.git", "local"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        git_setup(&local);
+
+        git(&["commit", "--allow-empty", "-m", "init"], &local);
+        git(&["push", "-u", "origin", "main"], &local);
+        // Local-only commit — main is 1 ahead, 0 behind
+        git(&["commit", "--allow-empty", "-m", "local-only"], &local);
+
+        let behind = branches_behind_upstream(&local);
+        assert!(
+            !behind.contains(&"main".to_string()),
+            "main should NOT be behind when it has local-only commits: {:?}",
+            behind
+        );
+    }
 
     #[test]
     fn format_delta_just_now() {
