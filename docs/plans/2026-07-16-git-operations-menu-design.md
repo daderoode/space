@@ -13,8 +13,8 @@ push it, pull upstream), they drop back to a terminal.
 
 ## Solution
 
-A per-repo git operations overlay, opened with `g` on the selected repo in the
-dashboard repo pane. The overlay presents a menu of actions: fetch, pull, push,
+A per-repo git operations overlay, opened with `G` (Shift+g) on the selected
+repo in the dashboard repo pane. The overlay presents a menu of actions: fetch, pull, push,
 commit, and log. Rebase appears in the menu but is disabled (a placeholder for
 Tier 3 item 7, the dedicated safe-rebase flow).
 
@@ -27,7 +27,7 @@ output, reusing the async worker pattern established by the repo-sync feature
 | Decision | Choice | Rationale |
 |---|---|---|
 | Target | Single selected repo | Matches roadmap and every existing per-repo op (`s`, switch-branch). Workspace-wide ops have a dedicated home in Tier 4 `space sync`. |
-| Entry key | `g` (not `b`) | `b` is already bound to Switch-branch (added in #20, after the roadmap was written). `g` is free and mnemonic. Switch-branch is untouched. |
+| Entry key | `G` (Shift+g) | `b` is already bound to Switch-branch (#20) and `g` to the Go fuzzy picker, both added after the roadmap was written. `G` is free and mnemonic for Git. Both existing bindings are untouched. |
 | Menu input | Letter keys AND arrow/`j`/`k`+Enter | Fast for power users, discoverable for others. |
 | Network-op UX | Spinner while running; auto-close ~3s after success; stay open on error | Long output stays readable on failure; success gets out of the way. |
 | Pull semantics | Fast-forward when behind; real merge when diverged | Handles the common behind case cleanly and the diverged case functionally. |
@@ -177,10 +177,10 @@ Both input modes are active: pressing a letter fires that action directly;
 The design ships incrementally. Each phase is planned and implemented on its
 own; this document is the shared reference for all of them.
 
-1. **Skeleton.** Screen module, `Screen::GitOps`, `Message::StartGitOps`, the `g`
+1. **Skeleton.** Screen module, `Screen::GitOps`, `Message::StartGitOps`, the `G`
    entry key (repo pane, Right focus, on a `RepoRow::Repo`), the menu with dual
    input, `render_gitops_overlay`, keybinding-registry entries (new overlay
-   group + bump `GROUPS` to 6; add `g` to `REPO_PANE` and the status-bar `RIGHT`
+   group + bump `GROUPS` to 6; add `G` to `REPO_PANE` and the status-bar `RIGHT`
    array, bumping its length). Rebase shown-disabled. Every action routes to a
    handler that sets a "not yet implemented" status, so the wiring is testable
    before the sub-flows land.
@@ -198,7 +198,7 @@ own; this document is the shared reference for all of them.
 |---|---|
 | `src/tui/screens/gitops.rs` | New. `GitOpsState`, `GitOpsStage`, `handle_key`. |
 | `src/tui/screens/mod.rs` | Add `pub mod gitops;`. |
-| `src/tui/app.rs` | `Screen::GitOps` variant + dispatch; `Message::StartGitOps` variant + handler; `g` key arm (Right pane, repo row); `GitOpProgress`; `gitop_rx`/`gitop_cancel` fields (+ `None` in constructors/test helpers); `run_gitop_worker`; `poll_gitop_result` (+ call in run loop); `ExecuteGitOp`/`CommitRepo` in `process_action`. |
+| `src/tui/app.rs` | `Screen::GitOps` variant + dispatch; `Message::StartGitOps` variant + handler; `G` key arm (Right pane, repo row); `GitOpProgress`; `gitop_rx`/`gitop_cancel` fields (+ `None` in constructors/test helpers); `run_gitop_worker`; `poll_gitop_result` (+ call in run loop); `ExecuteGitOp`/`CommitRepo` in `process_action`. |
 | `src/tui/actions.rs` | `ExecuteGitOp { repo_path, op }` and `CommitRepo { repo_path, message }` variants; `GitOp` enum. |
 | `src/tui/ui.rs` | `Screen::GitOps` render arm; `render_gitops_overlay` and per-stage renderers. |
 | `src/tui/keybindings.rs` | `g` in `REPO_PANE` and status-bar `RIGHT` (bump length); new GitOps overlay group (bump `GROUPS` to 6). |
@@ -221,7 +221,7 @@ Per phase, mirroring the existing suite:
 
 ## Edge Cases
 
-- **Cursor not on a repo row** (file row / section header): `g` does nothing,
+- **Cursor not on a repo row** (file row / section header): `G` does nothing,
   matching how `b`/`StartSwitchBranch` guards on `RepoRow::Repo`.
 - **Repo with no remote:** fetch/pull/push report failure cleanly and stay open;
   the worker never panics (sends are `let _ = tx.send(...)`).

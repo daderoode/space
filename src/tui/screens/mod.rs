@@ -3,6 +3,7 @@ pub mod config;
 pub mod create;
 pub mod delete;
 pub mod diff;
+pub mod gitops;
 pub mod go;
 pub mod help;
 pub mod search;

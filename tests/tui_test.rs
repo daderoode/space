@@ -3397,3 +3397,242 @@ mod switch_branch_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Git operations menu tests (Phase 1: Skeleton)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod gitops_tests {
+    use super::*;
+
+    #[test]
+    fn g_key_on_repo_row_opens_gitops_menu() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+
+        // cursor_row = 0 is the repo row in the Right pane
+        app.handle_key(key(KeyCode::Char('G')));
+
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "G on a repo row should open the git ops menu"
+        );
+    }
+
+    #[test]
+    fn g_key_on_non_repo_row_does_nothing() {
+        use space::core::git::{FileEntry, FileStatus};
+
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.expanded_repos.insert(0);
+        app.repo_file_cache.insert(
+            0,
+            vec![FileEntry {
+                path: "a.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 1,
+                deletions: 0,
+            }],
+        );
+        // rows: [Repo(0), SectionHeader("Unstaged")(1), File(a.rs)(2)]
+        app.cursor_row = 2; // land on a file row, not a repo row
+
+        app.handle_key(key(KeyCode::Char('G')));
+
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "G on a file row should not open the git ops menu"
+        );
+
+        // Also: G in the Left pane must not open the menu
+        let ws2 = common::workspace_with_repos(&["repo-a"]);
+        let mut app2 = test_app(vec![ws2], vec![]);
+        app2.focus = Pane::Left;
+        app2.handle_key(key(KeyCode::Char('G')));
+        assert!(
+            matches!(app2.screen, Screen::Dashboard),
+            "G in the left pane should not open the git ops menu"
+        );
+    }
+
+    #[test]
+    fn gitops_menu_renders_repo_name_and_action_labels() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        let rendered = render_text(&app, 80, 24);
+
+        assert!(
+            rendered.contains("Git: repo-a"),
+            "menu title should name the repo, got:\n{}",
+            rendered
+        );
+        for label in ["fetch", "pull", "push", "commit", "log", "rebase"] {
+            assert!(
+                rendered.contains(label),
+                "menu should list the {:?} action, got:\n{}",
+                label,
+                rendered
+            );
+        }
+    }
+
+    #[test]
+    fn gitops_menu_j_k_move_the_highlight() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        // Initially the first item (fetch) is highlighted.
+        let r0 = render_text(&app, 80, 24);
+        assert!(
+            r0.contains("> f  fetch"),
+            "fetch should start highlighted, got:\n{}",
+            r0
+        );
+
+        // Down moves the highlight to pull.
+        app.handle_key(key(KeyCode::Char('j')));
+        let r1 = render_text(&app, 80, 24);
+        assert!(
+            r1.contains("> p  pull") && !r1.contains("> f  fetch"),
+            "j should move the highlight from fetch to pull, got:\n{}",
+            r1
+        );
+
+        // Up moves the highlight back to fetch.
+        app.handle_key(key(KeyCode::Char('k')));
+        let r2 = render_text(&app, 80, 24);
+        assert!(
+            r2.contains("> f  fetch") && !r2.contains("> p  pull"),
+            "k should move the highlight back to fetch, got:\n{}",
+            r2
+        );
+    }
+
+    #[test]
+    fn gitops_menu_f_fires_fetch_placeholder_and_stays_open() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        app.handle_key(key(KeyCode::Char('f')));
+
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "firing fetch should keep the git ops menu open"
+        );
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Fetch: not yet implemented"),
+            "firing fetch should show its placeholder status, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn gitops_menu_commit_disabled_when_nothing_staged() {
+        // workspace_with_repos uses a fake /tmp path, so file_diff fails and
+        // has_staged is false -> commit is disabled.
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        app.handle_key(key(KeyCode::Char('c')));
+
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "firing a disabled commit should keep the menu open"
+        );
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Stage files first with s/S"),
+            "commit with nothing staged should show the stage-first hint, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn gitops_menu_rebase_always_disabled() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        app.handle_key(key(KeyCode::Char('r')));
+
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "firing rebase should keep the menu open"
+        );
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Rebase coming soon (item 7)"),
+            "rebase should show the coming-soon hint, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn gitops_menu_esc_closes_to_dashboard() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+        assert!(matches!(app.screen, Screen::GitOps(_)));
+
+        app.handle_key(key(KeyCode::Esc));
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "Esc should close the git ops menu back to the dashboard"
+        );
+    }
+
+    #[test]
+    fn gitops_menu_q_closes_to_dashboard() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+        assert!(matches!(app.screen, Screen::GitOps(_)));
+
+        app.handle_key(key(KeyCode::Char('q')));
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "q should close the git ops menu back to the dashboard"
+        );
+    }
+
+    #[test]
+    fn gitops_menu_enter_fires_highlighted_item() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        // Move highlight to pull (index 1), then Enter fires it.
+        app.handle_key(key(KeyCode::Char('j')));
+        app.handle_key(key(KeyCode::Enter));
+
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "Enter should keep the menu open"
+        );
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Pull: not yet implemented"),
+            "Enter on the highlighted pull item should fire its placeholder, got:\n{}",
+            rendered
+        );
+    }
+}

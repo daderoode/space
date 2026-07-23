@@ -99,6 +99,7 @@ pub enum Screen {
     ConfigEditor(crate::tui::screens::config::ConfigState),
     DiffViewer(crate::tui::screens::diff::DiffViewerState),
     SwitchBranch(crate::tui::screens::switch_branch::SwitchBranchState),
+    GitOps(crate::tui::screens::gitops::GitOpsState),
     Help,
 }
 
@@ -138,6 +139,9 @@ pub enum Message {
     ScrollTableLeft,
     ScrollTableRight,
     StartSwitchBranch {
+        repo_index: usize,
+    },
+    StartGitOps {
         repo_index: usize,
     },
 }
@@ -1120,6 +1124,7 @@ impl App {
             Screen::ConfigEditor(state) => state.handle_key(key, &ctx),
             Screen::DiffViewer(state) => state.handle_key(key, &ctx),
             Screen::SwitchBranch(state) => state.handle_key(key, &ctx),
+            Screen::GitOps(state) => state.handle_key(key, &ctx),
             Screen::Dashboard => {
                 drop(ctx);
                 // Dashboard key-to-message mapping
@@ -1171,6 +1176,14 @@ impl App {
                         let rows = self.flattened_rows();
                         if let Some(RepoRow::Repo { index, .. }) = rows.get(self.cursor_row) {
                             Some(Message::StartSwitchBranch { repo_index: *index })
+                        } else {
+                            None
+                        }
+                    }
+                    (KeyCode::Char('G'), _) if self.focus == Pane::Right => {
+                        let rows = self.flattened_rows();
+                        if let Some(RepoRow::Repo { index, .. }) = rows.get(self.cursor_row) {
+                            Some(Message::StartGitOps { repo_index: *index })
                         } else {
                             None
                         }
@@ -1490,6 +1503,19 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                     repo.path.clone(),
                 );
                 app.screen = Screen::SwitchBranch(state);
+            }
+            None
+        }
+        Message::StartGitOps { repo_index } => {
+            if let Some(repo) = app
+                .selected_workspace()
+                .and_then(|ws| ws.repos.get(repo_index))
+            {
+                let state = crate::tui::screens::gitops::GitOpsState::new(
+                    repo.name.clone(),
+                    repo.path.clone(),
+                );
+                app.screen = Screen::GitOps(state);
             }
             None
         }

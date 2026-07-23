@@ -222,6 +222,10 @@ pub fn view(app: &App, frame: &mut Frame) {
             render_dashboard(app, frame);
             render_switch_branch_overlay(state, frame);
         }
+        Screen::GitOps(state) => {
+            render_dashboard(app, frame);
+            render_gitops_overlay(state, frame);
+        }
     }
 }
 
@@ -1422,6 +1426,66 @@ fn render_switch_strategy_picker(
                 .style(theme::error())
                 .wrap(Wrap { trim: false }),
             sections[2],
+        );
+    }
+}
+
+fn render_gitops_overlay(
+    state: &crate::tui::screens::gitops::GitOpsState,
+    frame: &mut Frame,
+) {
+    use ratatui::widgets::Clear;
+
+    // (key, label, enabled). Order matches GitOpsState menu indices 0..=5.
+    let items: [(char, &str, bool); 6] = [
+        ('f', "fetch", true),
+        ('p', "pull", true),
+        ('P', "push", true),
+        ('c', "commit", state.has_staged),
+        ('l', "log", true),
+        ('r', "rebase", false),
+    ];
+
+    let has_status = state.status.is_some();
+    let content_rows = 6u16 + if has_status { 1 } else { 0 };
+    let dialog_w = (frame.area().width * 50 / 100).max(40);
+    let height: u16 = (content_rows + 2).min(frame.area().height.saturating_sub(2));
+    let area = centered_rect_fixed(dialog_w, height, frame.area());
+    frame.render_widget(Clear, area);
+
+    let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border_focused())
+        .title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows: Vec<ListItem> = items
+        .iter()
+        .enumerate()
+        .map(|(i, (keych, label, enabled))| {
+            let marker = if i == state.selected { "> " } else { "  " };
+            let text = format!("{}{}  {}", marker, keych, label);
+            let style = if !enabled {
+                theme::dim_text()
+            } else if i == state.selected {
+                theme::selected()
+            } else {
+                Style::default()
+            };
+            ListItem::new(text).style(style)
+        })
+        .collect();
+
+    let sections =
+        Layout::vertical([Constraint::Length(6), Constraint::Min(0)]).split(inner);
+    frame.render_widget(List::new(rows), sections[0]);
+    if let Some(status) = &state.status {
+        frame.render_widget(
+            Paragraph::new(status.as_str()).style(theme::muted()),
+            sections[1],
         );
     }
 }
