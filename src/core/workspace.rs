@@ -400,7 +400,10 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
         if ok {
             return PullResult {
                 outcome: PullOutcome::FastForwarded,
-                message: format!("Fast-forwarded {} to {} ({} commit(s)).", branch, remote_ref, behind),
+                message: format!(
+                    "Fast-forwarded {} to {} ({} commit(s)).",
+                    branch, remote_ref, behind
+                ),
             };
         }
     }
@@ -416,7 +419,10 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
         if merged {
             return PullResult {
                 outcome: PullOutcome::Merged,
-                message: format!("Merged {} into {} ({} ahead, {} behind).", remote_ref, branch, ahead, behind),
+                message: format!(
+                    "Merged {} into {} ({} ahead, {} behind).",
+                    remote_ref, branch, ahead, behind
+                ),
             };
         }
         // Merge left conflicts: restore the pre-merge worktree so `space` never
@@ -437,7 +443,10 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
     if ahead > 0 && behind == 0 {
         return PullResult {
             outcome: PullOutcome::Ahead,
-            message: format!("{} is {} commit(s) ahead of upstream; nothing to pull.", branch, ahead),
+            message: format!(
+                "{} is {} commit(s) ahead of upstream; nothing to pull.",
+                branch, ahead
+            ),
         };
     }
 

@@ -3984,18 +3984,15 @@ mod gitops_tests {
     #[test]
     fn gitops_log_l_transitions_to_log_and_shows_commit_subject() {
         use space::tui::screens::gitops::GitOpsStage;
-        let (_env, _repo, mut app) =
-            setup_gitops_log_app("log-open-repo", &["logtest-subject"]);
+        let (_env, _repo, mut app) = setup_gitops_log_app("log-open-repo", &["logtest-subject"]);
 
         app.handle_key(key(KeyCode::Char('G')));
         app.handle_key(key(KeyCode::Char('l')));
 
         match &app.screen {
-            Screen::GitOps(st) => assert_eq!(
-                st.stage,
-                GitOpsStage::Log,
-                "l must enter the Log stage"
-            ),
+            Screen::GitOps(st) => {
+                assert_eq!(st.stage, GitOpsStage::Log, "l must enter the Log stage")
+            }
             _ => panic!("expected the git ops overlay in the Log stage"),
         }
         let rendered = render_text(&app, 80, 24);
@@ -4009,8 +4006,7 @@ mod gitops_tests {
     #[test]
     fn gitops_log_esc_returns_to_menu() {
         use space::tui::screens::gitops::GitOpsStage;
-        let (_env, _repo, mut app) =
-            setup_gitops_log_app("log-esc-repo", &["only-commit"]);
+        let (_env, _repo, mut app) = setup_gitops_log_app("log-esc-repo", &["only-commit"]);
 
         app.handle_key(key(KeyCode::Char('G')));
         app.handle_key(key(KeyCode::Char('l')));

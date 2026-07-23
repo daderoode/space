@@ -1430,10 +1430,7 @@ fn render_switch_strategy_picker(
     }
 }
 
-fn render_gitops_overlay(
-    state: &crate::tui::screens::gitops::GitOpsState,
-    frame: &mut Frame,
-) {
+fn render_gitops_overlay(state: &crate::tui::screens::gitops::GitOpsState, frame: &mut Frame) {
     use ratatui::widgets::Clear;
 
     // Running stage: a network op (Phase 2: fetch) streaming live output.
@@ -1458,13 +1455,13 @@ fn render_gitops_overlay(
         let header = match state.finished {
             None => Span::styled(format!("{}ing...", op), theme::muted()),
             Some(true) => Span::styled(format!("\u{2713} {} complete", op), theme::success()),
-            Some(false) => {
-                Span::styled(format!("\u{2717} {} failed (Esc to close)", op), theme::error())
-            }
+            Some(false) => Span::styled(
+                format!("\u{2717} {} failed (Esc to close)", op),
+                theme::error(),
+            ),
         };
 
-        let sections =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+        let sections = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
         frame.render_widget(Paragraph::new(Line::from(header)), sections[0]);
 
         // Show the tail of the output that fits in the viewport.
@@ -1474,7 +1471,10 @@ fn render_gitops_overlay(
             .iter()
             .map(|l| Line::from(Span::styled(l.clone(), theme::muted())))
             .collect();
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), sections[1]);
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            sections[1],
+        );
         return;
     }
 
@@ -1497,8 +1497,7 @@ fn render_gitops_overlay(
         frame.render_widget(block, area);
 
         // Reserve the last row for a key hint; the commit list fills the rest.
-        let sections =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
+        let sections = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
         let list_area = sections[0];
 
         if state.commits.is_empty() {
@@ -1560,10 +1559,7 @@ fn render_gitops_overlay(
             "Branch {} has no upstream. Push and set upstream to origin/{}?  [y/N]",
             state.branch, state.branch
         );
-        frame.render_widget(
-            Paragraph::new(prompt).wrap(Wrap { trim: false }),
-            inner,
-        );
+        frame.render_widget(Paragraph::new(prompt).wrap(Wrap { trim: false }), inner);
         return;
     }
 
@@ -1672,8 +1668,7 @@ fn render_gitops_overlay(
         })
         .collect();
 
-    let sections =
-        Layout::vertical([Constraint::Length(6), Constraint::Min(0)]).split(inner);
+    let sections = Layout::vertical([Constraint::Length(6), Constraint::Min(0)]).split(inner);
     frame.render_widget(List::new(rows), sections[0]);
     if let Some(status) = &state.status {
         frame.render_widget(

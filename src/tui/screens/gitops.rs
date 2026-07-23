@@ -244,7 +244,9 @@ impl GitOpsState {
                 // With an upstream, push straight away; otherwise confirm before
                 // publishing the branch (push -u origin <branch>).
                 if self.has_upstream {
-                    self.start_network_op(GitOp::Push { set_upstream: false })
+                    self.start_network_op(GitOp::Push {
+                        set_upstream: false,
+                    })
                 } else {
                     self.stage = GitOpsStage::ConfirmPush;
                     self.status = None;
