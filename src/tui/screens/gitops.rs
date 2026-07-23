@@ -4,8 +4,8 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::path::PathBuf;
 use tui_input::Input;
 
-/// Stage of the git-operations overlay. Phase 1 ships only the action menu;
-/// later phases add Committing / Log / Running / ConfirmPush.
+/// Stage of the git-operations overlay: the action menu plus one stage per
+/// sub-flow (commit entry, log view, a running network op, push confirmation).
 #[derive(Debug, Clone, PartialEq)]
 pub enum GitOpsStage {
     Menu,
@@ -107,7 +107,7 @@ impl GitOpsState {
         match self.stage {
             GitOpsStage::Running => match key.code {
                 // Close early; while running other keys are no-ops.
-                KeyCode::Esc => ScreenAction::Back,
+                KeyCode::Esc | KeyCode::Char('q') => ScreenAction::Back,
                 _ => ScreenAction::Continue,
             },
             GitOpsStage::ConfirmPush => self.handle_confirm_push_key(key),

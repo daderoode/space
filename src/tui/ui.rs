@@ -224,7 +224,7 @@ pub fn view(app: &App, frame: &mut Frame) {
         }
         Screen::GitOps(state) => {
             render_dashboard(app, frame);
-            render_gitops_overlay(state, frame);
+            render_gitops_overlay(state, app.spinner_tick, frame);
         }
     }
 }
@@ -1430,7 +1430,11 @@ fn render_switch_strategy_picker(
     }
 }
 
-fn render_gitops_overlay(state: &crate::tui::screens::gitops::GitOpsState, frame: &mut Frame) {
+fn render_gitops_overlay(
+    state: &crate::tui::screens::gitops::GitOpsState,
+    spinner_tick: u64,
+    frame: &mut Frame,
+) {
     use ratatui::widgets::Clear;
 
     // Running stage: a network op (Phase 2: fetch) streaming live output.
@@ -1453,10 +1457,15 @@ fn render_gitops_overlay(state: &crate::tui::screens::gitops::GitOpsState, frame
 
         let op = state.op_label;
         let header = match state.finished {
-            None => Span::styled(format!("{}ing...", op), theme::muted()),
+            None => {
+                // Animated ellipsis, same cadence as the dashboard spinner.
+                let frames = ["\u{b7}  ", "\u{b7}\u{b7} ", "\u{b7}\u{b7}\u{b7}"];
+                let dots = frames[(spinner_tick as usize / 30) % 3];
+                Span::styled(format!("{}ing {}", op, dots), theme::muted())
+            }
             Some(true) => Span::styled(format!("\u{2713} {} complete", op), theme::success()),
             Some(false) => Span::styled(
-                format!("\u{2717} {} failed (Esc to close)", op),
+                format!("\u{2717} {} failed (Esc/q to close)", op),
                 theme::error(),
             ),
         };
@@ -1567,9 +1576,11 @@ fn render_gitops_overlay(state: &crate::tui::screens::gitops::GitOpsState, frame
     if state.stage == crate::tui::screens::gitops::GitOpsStage::Committing {
         let dialog_w = (frame.area().width * 60 / 100).max(48);
         let staged_n = state.staged_files.len() as u16;
-        let has_status = state.status.is_some();
-        // header + staged list + prompt + input (+ status), plus the border.
-        let content_rows = 1 + staged_n.max(1) + 1 + 1 + if has_status { 1 } else { 0 };
+        // header + staged list + prompt + input + status row, plus the border.
+        // The status row is always reserved because the layout below always
+        // allocates it; counting it conditionally clipped the staged list by
+        // one row whenever no status was shown.
+        let content_rows = 1 + staged_n.max(1) + 1 + 1 + 1;
         let dialog_h = (content_rows + 2)
             .max(9)
             .min(frame.area().height.saturating_sub(2));

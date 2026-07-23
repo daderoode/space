@@ -1505,7 +1505,11 @@ fn run_gitop_worker(
         // reports its single summary line plus the success flag.
         crate::tui::actions::GitOp::Pull => {
             let result = crate::core::workspace::pull_repo(&repo_path);
-            let _ = tx.send(GitOpProgress::Line(result.message.clone()));
+            // Git output can be multi-line (e.g. overwrite warnings); one
+            // GitOpProgress::Line per visual line keeps the tail window honest.
+            for line in result.message.lines() {
+                let _ = tx.send(GitOpProgress::Line(line.to_string()));
+            }
             let _ = tx.send(GitOpProgress::Done {
                 success: result.success(),
             });
@@ -1514,7 +1518,10 @@ fn run_gitop_worker(
         // has no upstream), reporting git's summary/rejection plus the flag.
         crate::tui::actions::GitOp::Push { set_upstream } => {
             let result = crate::core::workspace::push_repo(&repo_path, set_upstream);
-            let _ = tx.send(GitOpProgress::Line(result.message.clone()));
+            // Push rejections are multi-line; send each line separately.
+            for line in result.message.lines() {
+                let _ = tx.send(GitOpProgress::Line(line.to_string()));
+            }
             let _ = tx.send(GitOpProgress::Done {
                 success: result.success,
             });
