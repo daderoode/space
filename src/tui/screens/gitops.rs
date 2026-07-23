@@ -1,3 +1,4 @@
+use crate::core::git::CommitInfo;
 use crate::tui::actions::{GitOp, ScreenAction, ScreenContext};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::path::PathBuf;
@@ -10,6 +11,8 @@ pub enum GitOpsStage {
     Menu,
     /// Single-line commit-message entry for the staged changes.
     Committing,
+    /// Read-only scrollable list of recent commits.
+    Log,
     /// A network op (fetch / pull / push) is running, showing live output lines.
     Running,
     /// Confirm publishing a branch that has no upstream yet (push -u origin).
@@ -42,6 +45,12 @@ pub struct GitOpsState {
     pub finished: Option<bool>,
     /// When set (success only), the overlay auto-closes at this instant.
     pub close_at: Option<std::time::Instant>,
+    /// Recent commits loaded synchronously when the Log stage opens.
+    pub commits: Vec<CommitInfo>,
+    /// Scroll offset (top row index) for the Log stage. The renderer applies a
+    /// viewport-aware upper clamp so it can never scroll past the last full
+    /// screenful.
+    pub log_scroll: u16,
 }
 
 impl std::fmt::Debug for GitOpsState {
@@ -86,6 +95,8 @@ impl GitOpsState {
             output: Vec::new(),
             finished: None,
             close_at: None,
+            commits: Vec::new(),
+            log_scroll: 0,
         }
     }
 
@@ -101,7 +112,48 @@ impl GitOpsState {
             },
             GitOpsStage::ConfirmPush => self.handle_confirm_push_key(key),
             GitOpsStage::Committing => self.handle_committing_key(key),
+            GitOpsStage::Log => self.handle_log_key(key),
             GitOpsStage::Menu => self.handle_menu_key(key),
+        }
+    }
+
+    /// Handle keys in the read-only Log stage. `Esc`/`q` return to the menu;
+    /// the arrow / `j`/`k` / PageUp/PageDown / Home / End keys scroll
+    /// `log_scroll` with saturating add/sub. The down/end direction is clamped
+    /// to the last commit index here; the renderer applies the viewport-aware
+    /// clamp so no blank screenful is shown.
+    fn handle_log_key(&mut self, key: KeyEvent) -> ScreenAction {
+        let max = self.commits.len().saturating_sub(1) as u16;
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.stage = GitOpsStage::Menu;
+                ScreenAction::Continue
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.log_scroll = self.log_scroll.saturating_sub(1);
+                ScreenAction::Continue
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.log_scroll = self.log_scroll.saturating_add(1).min(max);
+                ScreenAction::Continue
+            }
+            KeyCode::PageUp => {
+                self.log_scroll = self.log_scroll.saturating_sub(10);
+                ScreenAction::Continue
+            }
+            KeyCode::PageDown => {
+                self.log_scroll = self.log_scroll.saturating_add(10).min(max);
+                ScreenAction::Continue
+            }
+            KeyCode::Home => {
+                self.log_scroll = 0;
+                ScreenAction::Continue
+            }
+            KeyCode::End => {
+                self.log_scroll = max;
+                ScreenAction::Continue
+            }
+            _ => ScreenAction::Continue,
         }
     }
 
@@ -210,7 +262,11 @@ impl GitOpsState {
                 ScreenAction::Continue
             }
             4 => {
-                self.status = Some("Log: not yet implemented".to_string());
+                // Log is a local read-only op: load the commits synchronously.
+                self.commits = crate::core::git::recent_commits(&self.repo_path, 50);
+                self.log_scroll = 0;
+                self.status = None;
+                self.stage = GitOpsStage::Log;
                 ScreenAction::Continue
             }
             5 => {

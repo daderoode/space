@@ -1478,6 +1478,68 @@ fn render_gitops_overlay(
         return;
     }
 
+    // Log stage: read-only scrollable list of recent commits.
+    if state.stage == crate::tui::screens::gitops::GitOpsStage::Log {
+        let dialog_w = (frame.area().width * 70 / 100).max(56);
+        let dialog_h = (frame.area().height * 70 / 100)
+            .max(10)
+            .min(frame.area().height.saturating_sub(2));
+        let area = centered_rect_fixed(dialog_w, dialog_h, frame.area());
+        frame.render_widget(Clear, area);
+
+        let title = format!(" Git log: {} ({}) ", state.repo_name, state.branch);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(theme::border_focused())
+            .title(title);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        // Reserve the last row for a key hint; the commit list fills the rest.
+        let sections =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
+        let list_area = sections[0];
+
+        if state.commits.is_empty() {
+            frame.render_widget(
+                Paragraph::new("No commits.").style(theme::muted()),
+                list_area,
+            );
+        } else {
+            // Viewport-aware upper clamp: never start so far down that a blank
+            // screenful shows below the last commit (the fix for the diff
+            // viewer's over-scroll).
+            let viewport_rows = list_area.height as usize;
+            let max_start = state.commits.len().saturating_sub(viewport_rows);
+            let start = (state.log_scroll as usize).min(max_start);
+            let end = (start + viewport_rows).min(state.commits.len());
+            let lines: Vec<Line> = state.commits[start..end]
+                .iter()
+                .map(|c| {
+                    let text = format!(
+                        "{}  {}  {}  {}",
+                        c.short_hash,
+                        crate::core::git::relative_time(c.time),
+                        c.author,
+                        c.subject
+                    );
+                    Line::from(Span::styled(text, theme::text()))
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(lines), list_area);
+        }
+
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "j/k scroll \u{00b7} Esc close",
+                theme::muted(),
+            ))),
+            sections[1],
+        );
+        return;
+    }
+
     // ConfirmPush stage: confirm publishing a branch that has no upstream.
     if state.stage == crate::tui::screens::gitops::GitOpsStage::ConfirmPush {
         let dialog_w = (frame.area().width * 60 / 100).max(48);

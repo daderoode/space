@@ -3938,4 +3938,121 @@ mod gitops_tests {
             rendered
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 6: Log (synchronous read-only revwalk)
+    // -----------------------------------------------------------------------
+
+    /// Build a TestEnv-backed app whose single workspace repo is a real git
+    /// repo with `extra_commits` empty commits layered on top of the init
+    /// commit. Focused on the Right pane with the cursor on the repo row so
+    /// `G` then `l` opens the Log stage.
+    fn setup_gitops_log_app(name: &str, extra_commits: &[&str]) -> (TestEnv, PathBuf, App) {
+        let env = TestEnv::new();
+        let repo_path = env.create_repo(name);
+        for msg in extra_commits {
+            let out = std::process::Command::new("git")
+                .args(["commit", "--allow-empty", "-m", msg])
+                .current_dir(&repo_path)
+                .output()
+                .expect("git commit failed to run");
+            assert!(
+                out.status.success(),
+                "git commit failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let ws = Workspace {
+            name: "test-ws".into(),
+            path: env.workspaces_dir.clone(),
+            repos: vec![WorkspaceRepo {
+                name: name.into(),
+                path: repo_path.clone(),
+                branch: "main".into(),
+                status: RepoStatus::default(),
+                ahead: 0,
+                behind: 0,
+            }],
+        };
+        let config = config_from_env(&env);
+        let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
+        app.load_selected_workspace_detail();
+        app.focus = Pane::Right; // cursor_row = 0 is the repo row
+        (env, repo_path, app)
+    }
+
+    #[test]
+    fn gitops_log_l_transitions_to_log_and_shows_commit_subject() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let (_env, _repo, mut app) =
+            setup_gitops_log_app("log-open-repo", &["logtest-subject"]);
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('l')));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Log,
+                "l must enter the Log stage"
+            ),
+            _ => panic!("expected the git ops overlay in the Log stage"),
+        }
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("logtest-subject"),
+            "the Log stage must show a known commit subject, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn gitops_log_esc_returns_to_menu() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let (_env, _repo, mut app) =
+            setup_gitops_log_app("log-esc-repo", &["only-commit"]);
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('l')));
+        app.handle_key(key(KeyCode::Esc));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Menu,
+                "Esc in the Log stage must return to the Menu stage"
+            ),
+            _ => panic!("expected the git ops overlay back on the Menu stage"),
+        }
+    }
+
+    #[test]
+    fn gitops_log_j_scrolls_down() {
+        // Many more commits than can fit on screen, so a down press has room to
+        // move the scroll offset.
+        let msgs: Vec<String> = (0..40).map(|i| format!("commit-{}", i)).collect();
+        let msg_refs: Vec<&str> = msgs.iter().map(String::as_str).collect();
+        let (_env, _repo, mut app) = setup_gitops_log_app("log-scroll-repo", &msg_refs);
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('l')));
+
+        let before = match &app.screen {
+            Screen::GitOps(st) => st.log_scroll,
+            _ => panic!("expected the Log stage"),
+        };
+        app.handle_key(key(KeyCode::Char('j')));
+        let after = match &app.screen {
+            Screen::GitOps(st) => st.log_scroll,
+            _ => panic!("expected the Log stage"),
+        };
+
+        assert_eq!(before, 0, "log_scroll should start at the top");
+        assert!(
+            after > before,
+            "j must increase log_scroll (was {}, now {})",
+            before,
+            after
+        );
+    }
 }
