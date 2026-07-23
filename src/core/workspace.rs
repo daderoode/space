@@ -348,16 +348,29 @@ impl PullResult {
 /// - up to date / only ahead → no-op (`UpToDate`/`Ahead`)
 /// - detached HEAD / no upstream / fetch failure → report without acting.
 pub fn pull_repo(repo_path: &Path) -> PullResult {
-    let fetch_ok = Command::new("git")
+    // `.output()` (not `.status()`): capture stderr both to surface the real
+    // failure cause (auth, DNS, missing remote) and to keep git from writing
+    // to the inherited stderr, which would scribble over the raw-mode TUI.
+    let fetch = Command::new("git")
         .args(["fetch", "--quiet", "origin"])
         .current_dir(repo_path)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !fetch_ok {
+        .output();
+    let fetch_failed_message = match &fetch {
+        Ok(o) if o.status.success() => None,
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            Some(if stderr.is_empty() {
+                "Fetch failed: no remote or offline.".to_string()
+            } else {
+                format!("Fetch failed: {}", stderr)
+            })
+        }
+        Err(err) => Some(format!("Fetch failed: {}", err)),
+    };
+    if let Some(message) = fetch_failed_message {
         return PullResult {
             outcome: PullOutcome::FetchFailed,
-            message: "Fetch failed: no remote or offline.".to_string(),
+            message,
         };
     }
 
@@ -984,6 +997,12 @@ mod tests {
         git(&["commit", "--allow-empty", "-m", "init"], tmp.path());
 
         let result = pull_repo(tmp.path());
+        assert!(
+            result.message.contains("origin"),
+            "the fetch failure must surface git's actual error (naming the \
+             missing remote), got: {}",
+            result.message
+        );
         assert!(
             matches!(result.outcome, PullOutcome::FetchFailed),
             "no remote must yield FetchFailed, got {:?}: {}",

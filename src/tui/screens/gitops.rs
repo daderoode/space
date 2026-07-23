@@ -193,11 +193,18 @@ impl GitOpsState {
     /// `y`/Enter confirms and pushes with `-u origin <branch>`.
     fn handle_confirm_push_key(&mut self, key: KeyEvent) -> ScreenAction {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            // Only an explicit `y` confirms publishing the branch; Enter
+            // declines, matching the [y/N] prompt (default No) so the remote
+            // is never mutated by a reflexive keypress.
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
                 self.start_network_op(GitOp::Push { set_upstream: true })
             }
             // Decline: back to the menu without touching the remote.
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => {
+            KeyCode::Char('n')
+            | KeyCode::Char('N')
+            | KeyCode::Enter
+            | KeyCode::Esc
+            | KeyCode::Char('q') => {
                 self.stage = GitOpsStage::Menu;
                 ScreenAction::Continue
             }

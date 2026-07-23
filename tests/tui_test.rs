@@ -3733,6 +3733,33 @@ mod gitops_tests {
     }
 
     #[test]
+    fn gitops_confirm_push_enter_declines_matching_y_n_prompt() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('P'))); // no upstream => ConfirmPush
+
+        // The prompt reads [y/N]: Enter is the default No and must never
+        // publish the branch.
+        app.handle_key(key(KeyCode::Enter));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Menu,
+                "Enter must decline (default No) and return to the menu"
+            ),
+            _ => panic!("expected the git ops overlay to stay open on the Menu"),
+        }
+        assert!(
+            app.gitop_rx.is_none(),
+            "Enter must not start the push worker"
+        );
+    }
+
+    #[test]
     fn gitops_confirm_push_n_returns_to_menu() {
         use space::tui::screens::gitops::GitOpsStage;
         let ws = common::workspace_with_repos(&["repo-a"]);
