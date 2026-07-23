@@ -231,9 +231,10 @@ impl GitOpsState {
         }
     }
 
-    /// Fire the menu item at `idx`, moving the highlight to it. Fetch and pull
-    /// stand up the async Running stage; the other actions keep their Phase-1
-    /// placeholder status until their own phases land.
+    /// Fire the menu item at `idx`, moving the highlight to it. Fetch/pull/push
+    /// run through the async Running stage (push confirms first when the branch
+    /// has no upstream); commit and log open their own stages synchronously;
+    /// rebase is a disabled placeholder (Tier 3 item 7).
     fn fire(&mut self, idx: usize) -> ScreenAction {
         self.selected = idx;
         match idx {

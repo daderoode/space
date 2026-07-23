@@ -4055,4 +4055,28 @@ mod gitops_tests {
             after
         );
     }
+
+    #[test]
+    fn gitops_log_over_scroll_with_few_commits_does_not_panic_or_blank() {
+        // Fewer commits than the viewport: the down-scroll clamp must never
+        // underflow (usize) or reveal a blank screenful past the last commit.
+        let (_env, _repo, mut app) = setup_gitops_log_app("log-few-repo", &["only-extra"]);
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('l')));
+
+        // Hammer Down/End well past the number of commits.
+        for _ in 0..50 {
+            app.handle_key(key(KeyCode::Char('j')));
+        }
+        app.handle_key(key(KeyCode::End));
+
+        // Render at a tall viewport (many more rows than commits): must not
+        // panic, and a real commit must still be visible (no blank over-scroll).
+        let rendered = render_text(&app, 80, 40);
+        assert!(
+            rendered.contains("only-extra") || rendered.contains("init"),
+            "the log must still show a commit after over-scrolling, got:\n{}",
+            rendered
+        );
+    }
 }
