@@ -314,6 +314,9 @@ pub enum PullOutcome {
     /// Local and upstream diverged with conflicts; the merge was aborted and
     /// the worktree restored to its pre-merge state.
     Conflicted,
+    /// The pull could not be applied (e.g. a blocked fast-forward); git's
+    /// error output is in the message.
+    Failed,
 }
 
 /// Result of pulling a single repo: the outcome plus a human-readable message.
@@ -391,20 +394,45 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
 
     if behind > 0 && ahead == 0 {
         let remote_ref = format!("origin/{}", branch);
-        let ok = Command::new("git")
+        let output = Command::new("git")
             .args(["merge", "--ff-only", &remote_ref])
             .current_dir(repo_path)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            return PullResult {
-                outcome: PullOutcome::FastForwarded,
-                message: format!(
-                    "Fast-forwarded {} to {} ({} commit(s)).",
-                    branch, remote_ref, behind
-                ),
-            };
+            .output();
+        match output {
+            Ok(o) if o.status.success() => {
+                return PullResult {
+                    outcome: PullOutcome::FastForwarded,
+                    message: format!(
+                        "Fast-forwarded {} to {} ({} commit(s)).",
+                        branch, remote_ref, behind
+                    ),
+                };
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let detail = stderr.trim();
+                let detail = if detail.is_empty() {
+                    "git reported no error output"
+                } else {
+                    detail
+                };
+                return PullResult {
+                    outcome: PullOutcome::Failed,
+                    message: format!(
+                        "Fast-forward of {} to {} failed: {}",
+                        branch, remote_ref, detail
+                    ),
+                };
+            }
+            Err(err) => {
+                return PullResult {
+                    outcome: PullOutcome::Failed,
+                    message: format!(
+                        "Fast-forward of {} to {} failed: {}",
+                        branch, remote_ref, err
+                    ),
+                };
+            }
         }
     }
 
@@ -1099,6 +1127,44 @@ mod tests {
             sha_before,
             get_sha(&local, "main"),
             "aborted merge must leave main at its pre-merge commit"
+        );
+    }
+
+    #[test]
+    fn pull_repo_reports_failure_when_fast_forward_is_blocked() {
+        let (tmp, local) = origin_and_local();
+        // Remote advances base.txt; local has an UNCOMMITTED edit to the same
+        // file, so `git merge --ff-only` refuses (local changes would be
+        // overwritten). Reported by Copilot on PR #23: this used to fall
+        // through to UpToDate and auto-close the overlay claiming success.
+        advance_origin(tmp.path(), |helper| {
+            std::fs::write(helper.join("base.txt"), "remote-version\n").unwrap();
+            git(&["add", "."], helper);
+            git(&["commit", "-m", "remote-edit"], helper);
+        });
+        std::fs::write(local.join("base.txt"), "dirty-local\n").unwrap();
+
+        let result = pull_repo(&local);
+
+        assert!(
+            !result.success(),
+            "a blocked fast-forward must not report success, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(
+            !matches!(result.outcome, PullOutcome::UpToDate),
+            "a blocked fast-forward must not report UpToDate"
+        );
+        assert!(
+            !result.message.is_empty(),
+            "the failure must surface git's error output"
+        );
+        // The dirty local edit must survive untouched.
+        assert_eq!(
+            std::fs::read_to_string(local.join("base.txt")).unwrap(),
+            "dirty-local\n",
+            "the blocked pull must not clobber the local uncommitted change"
         );
     }
 
