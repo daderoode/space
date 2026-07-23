@@ -310,6 +310,33 @@ pub fn ahead_behind(repo_path: &Path) -> Result<(usize, usize)> {
     Ok((ahead, behind))
 }
 
+/// Returns true iff the current branch has a configured upstream tracking
+/// branch (`branch.upstream()` resolves). Returns false on detached HEAD, no
+/// upstream, a missing branch, or any error (e.g. the path is not a git repo).
+/// Used to decide whether a push must set the upstream with `-u origin
+/// <branch>` or can be a plain `git push`.
+pub fn has_upstream(repo_path: &Path) -> bool {
+    let Ok(repo) = Repository::open(repo_path) else {
+        return false;
+    };
+    let Ok(head) = repo.head() else {
+        return false;
+    };
+    if !head.is_branch() {
+        return false;
+    }
+    let Some(name) = head.shorthand() else {
+        return false;
+    };
+    // Bind to a `bool` so the temporary `Result<Branch>` is dropped before
+    // `repo` at the end of the function (avoids an E0597 borrow-lifetime error).
+    let has = match repo.find_branch(name, git2::BranchType::Local) {
+        Ok(branch) => branch.upstream().is_ok(),
+        Err(_) => false,
+    };
+    has
+}
+
 /// Return the names of all local branches that are strictly behind their
 /// `origin/<branch>` ref (0 commits ahead, 1+ commits behind). The comparison is
 /// always against `refs/remotes/origin/<name>`, not any configured upstream, so

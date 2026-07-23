@@ -3569,6 +3569,13 @@ mod gitops_tests {
             app.gitop_rx.is_some(),
             "pressing p must start the pull worker (gitop_rx set)"
         );
+        // The Running header must reflect the actual op, not a hardcoded "Fetch".
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Pulling"),
+            "the pull Running header should say Pulling, got:\n{}",
+            rendered
+        );
     }
 
     #[test]
@@ -3652,12 +3659,14 @@ mod gitops_tests {
         app.focus = Pane::Right;
         app.handle_key(key(KeyCode::Char('G')));
 
-        // Move highlight to push (index 2), then Enter fires it. Push is still a
-        // placeholder, so this verifies Enter dispatches the highlighted item
-        // (distinct from a letter-key press) without depending on pull, which
-        // now starts the async worker.
-        app.handle_key(key(KeyCode::Char('j')));
-        app.handle_key(key(KeyCode::Char('j')));
+        // Move highlight to rebase (index 5), then Enter fires it. Rebase stays a
+        // permanent placeholder (out of scope for the whole feature), so this
+        // durably verifies Enter dispatches the highlighted item (distinct from a
+        // letter-key press) without depending on push/pull, which now start
+        // real flows.
+        for _ in 0..5 {
+            app.handle_key(key(KeyCode::Char('j')));
+        }
         app.handle_key(key(KeyCode::Enter));
 
         assert!(
@@ -3666,9 +3675,85 @@ mod gitops_tests {
         );
         let rendered = render_text(&app, 80, 24);
         assert!(
-            rendered.contains("Push: not yet implemented"),
-            "Enter on the highlighted push item should fire its placeholder, got:\n{}",
+            rendered.contains("Rebase coming soon (item 7)"),
+            "Enter on the highlighted rebase item should fire its placeholder, got:\n{}",
             rendered
+        );
+    }
+
+    #[test]
+    fn gitops_push_no_upstream_transitions_to_confirm() {
+        use space::tui::screens::gitops::GitOpsStage;
+        // workspace_with_repos uses a fake /tmp path, so has_upstream is false
+        // and push must ask for confirmation before publishing the branch.
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        app.handle_key(key(KeyCode::Char('P')));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::ConfirmPush,
+                "push with no upstream must transition to ConfirmPush, not Running"
+            ),
+            _ => panic!("expected the git ops overlay to stay open on ConfirmPush"),
+        }
+        assert!(
+            app.gitop_rx.is_none(),
+            "ConfirmPush must not start the push worker yet"
+        );
+    }
+
+    #[test]
+    fn gitops_confirm_push_y_starts_push_worker() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('P'))); // no upstream => ConfirmPush
+
+        app.handle_key(key(KeyCode::Char('y')));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Running,
+                "confirming push with y must start the worker (Running stage)"
+            ),
+            _ => panic!("expected the git ops overlay to stay open in the Running stage"),
+        }
+        assert!(
+            app.gitop_rx.is_some(),
+            "confirming push must start the push worker (gitop_rx set)"
+        );
+    }
+
+    #[test]
+    fn gitops_confirm_push_n_returns_to_menu() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('P'))); // no upstream => ConfirmPush
+
+        app.handle_key(key(KeyCode::Char('n')));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Menu,
+                "declining push with n must return to the menu stage"
+            ),
+            _ => panic!("expected the git ops overlay to stay open on the Menu"),
+        }
+        assert!(
+            app.gitop_rx.is_none(),
+            "declining push must not start any worker"
         );
     }
 }

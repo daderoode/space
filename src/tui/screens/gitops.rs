@@ -7,8 +7,10 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq)]
 pub enum GitOpsStage {
     Menu,
-    /// A network op (Phase 2: fetch) is running, showing live output lines.
+    /// A network op (fetch / pull / push) is running, showing live output lines.
     Running,
+    /// Confirm publishing a branch that has no upstream yet (push -u origin).
+    ConfirmPush,
 }
 
 pub struct GitOpsState {
@@ -18,7 +20,13 @@ pub struct GitOpsState {
     pub branch: String,
     pub selected: usize,
     pub has_staged: bool,
+    /// Whether the current branch already has a configured upstream. Drives the
+    /// push routing: plain push when true, ConfirmPush (set upstream) when false.
+    pub has_upstream: bool,
     pub status: Option<String>,
+    /// Label of the network op currently running ("Fetch"/"Pull"/"Push"),
+    /// used by the Running-stage header. Empty when no op has run.
+    pub op_label: &'static str,
     /// Live output lines captured while a Running network op streams.
     pub output: Vec<String>,
     /// None while running; `Some(success)` once the op completes.
@@ -47,6 +55,7 @@ impl GitOpsState {
         let has_staged = crate::core::git::file_diff(&repo_path)
             .map(|v| v.iter().any(|e| e.staged))
             .unwrap_or(false);
+        let has_upstream = crate::core::git::has_upstream(&repo_path);
         Self {
             stage: GitOpsStage::Menu,
             repo_name,
@@ -54,7 +63,9 @@ impl GitOpsState {
             branch,
             selected: 0,
             has_staged,
+            has_upstream,
             status: None,
+            op_label: "",
             output: Vec::new(),
             finished: None,
             close_at: None,
@@ -71,7 +82,24 @@ impl GitOpsState {
                 KeyCode::Esc => ScreenAction::Back,
                 _ => ScreenAction::Continue,
             },
+            GitOpsStage::ConfirmPush => self.handle_confirm_push_key(key),
             GitOpsStage::Menu => self.handle_menu_key(key),
+        }
+    }
+
+    /// Handle keys in the ConfirmPush stage (branch has no upstream).
+    /// `y`/Enter confirms and pushes with `-u origin <branch>`.
+    fn handle_confirm_push_key(&mut self, key: KeyEvent) -> ScreenAction {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                self.start_network_op(GitOp::Push { set_upstream: true })
+            }
+            // Decline: back to the menu without touching the remote.
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => {
+                self.stage = GitOpsStage::Menu;
+                ScreenAction::Continue
+            }
+            _ => ScreenAction::Continue,
         }
     }
 
@@ -110,8 +138,15 @@ impl GitOpsState {
             0 => self.start_network_op(GitOp::Fetch),
             1 => self.start_network_op(GitOp::Pull),
             2 => {
-                self.status = Some("Push: not yet implemented".to_string());
-                ScreenAction::Continue
+                // With an upstream, push straight away; otherwise confirm before
+                // publishing the branch (push -u origin <branch>).
+                if self.has_upstream {
+                    self.start_network_op(GitOp::Push { set_upstream: false })
+                } else {
+                    self.stage = GitOpsStage::ConfirmPush;
+                    self.status = None;
+                    ScreenAction::Continue
+                }
             }
             3 if !self.has_staged => {
                 self.status = Some("Stage files first with s/S".to_string());
@@ -136,6 +171,11 @@ impl GitOpsState {
     /// Reset the run buffers, enter the Running stage, and dispatch `op` to the
     /// background git-ops worker.
     fn start_network_op(&mut self, op: GitOp) -> ScreenAction {
+        self.op_label = match op {
+            GitOp::Fetch => "Fetch",
+            GitOp::Pull => "Pull",
+            GitOp::Push { .. } => "Push",
+        };
         self.stage = GitOpsStage::Running;
         self.output.clear();
         self.finished = None;

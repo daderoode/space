@@ -447,6 +447,74 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
     }
 }
 
+/// Result of pushing the current branch: whether git accepted the push, plus a
+/// human-readable message. On rejection the message carries git's own output so
+/// the non-fast-forward reason surfaces verbatim.
+pub struct PushResult {
+    pub success: bool,
+    pub message: String,
+}
+
+/// Push the current branch of `repo_path` to `origin`.
+///
+/// - `set_upstream == true`  → `git push -u origin <branch>` (first publish of a
+///   branch with no upstream; also records the tracking ref).
+/// - `set_upstream == false` → `git push` (branch already has an upstream).
+///
+/// Never forces. A rejected push (remote ahead / non-fast-forward) returns
+/// `success == false` with git's rejection text in `message`, so the overlay
+/// stays open and the user can pull first.
+pub fn push_repo(repo_path: &Path, set_upstream: bool) -> PushResult {
+    let branch = match current_branch_name(repo_path) {
+        Some(b) => b,
+        None => {
+            return PushResult {
+                success: false,
+                message: "Detached HEAD: no branch to push.".to_string(),
+            };
+        }
+    };
+
+    let args: Vec<String> = if set_upstream {
+        vec![
+            "push".to_string(),
+            "-u".to_string(),
+            "origin".to_string(),
+            branch.clone(),
+        ]
+    } else {
+        vec!["push".to_string()]
+    };
+
+    let out = Command::new("git")
+        .args(&args)
+        .current_dir(repo_path)
+        .output();
+
+    match out {
+        Ok(o) => {
+            // git writes both its success summary and rejection details to stderr.
+            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let message = if !stderr.is_empty() {
+                stderr
+            } else if !stdout.is_empty() {
+                stdout
+            } else {
+                format!("Pushed {}.", branch)
+            };
+            PushResult {
+                success: o.status.success(),
+                message,
+            }
+        }
+        Err(e) => PushResult {
+            success: false,
+            message: format!("Failed to run git push: {}", e),
+        },
+    }
+}
+
 /// The current checked-out branch name, or `None` when HEAD is detached (no
 /// symbolic branch ref).
 fn current_branch_name(repo_path: &Path) -> Option<String> {
@@ -998,6 +1066,109 @@ mod tests {
             sha_before,
             get_sha(&local, "HEAD"),
             "detached-HEAD pull must not move HEAD"
+        );
+    }
+
+    #[test]
+    fn push_repo_sets_upstream_on_new_branch() {
+        let (tmp, local) = origin_and_local();
+        let bare = tmp.path().join("origin.git");
+
+        // A new local branch with no upstream, carrying a distinct commit.
+        git(&["checkout", "-b", "feature"], &local);
+        git(&["commit", "--allow-empty", "-m", "feature-work"], &local);
+        let feature_sha = get_sha(&local, "feature");
+
+        let result = push_repo(&local, true);
+
+        assert!(
+            result.success,
+            "pushing a new branch with -u must succeed: {}",
+            result.message
+        );
+        // origin/feature now exists in the bare remote at the pushed commit.
+        assert_eq!(
+            feature_sha,
+            get_sha(&bare, "refs/heads/feature"),
+            "bare origin must have refs/heads/feature at the pushed commit"
+        );
+        // The local branch now tracks origin/feature.
+        let upstream = Cmd::new("git")
+            .args(["rev-parse", "--abbrev-ref", "feature@{upstream}"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&upstream.stdout).trim(),
+            "origin/feature",
+            "feature must track origin/feature after push -u"
+        );
+    }
+
+    #[test]
+    fn push_repo_plain_push_succeeds_when_ahead_with_upstream() {
+        let (tmp, local) = origin_and_local();
+        let bare = tmp.path().join("origin.git");
+
+        // Local advances main (already tracked) by one commit, then plain-pushes.
+        git(&["commit", "--allow-empty", "-m", "local-ahead"], &local);
+        let local_sha = get_sha(&local, "main");
+
+        let result = push_repo(&local, false);
+
+        assert!(
+            result.success,
+            "plain push of an ahead branch must succeed: {}",
+            result.message
+        );
+        assert_eq!(
+            local_sha,
+            get_sha(&bare, "refs/heads/main"),
+            "bare origin/main must equal local main after push"
+        );
+    }
+
+    #[test]
+    fn push_repo_reports_failure_on_rejected_non_fast_forward() {
+        let (tmp, local) = origin_and_local();
+        let bare = tmp.path().join("origin.git");
+
+        // Remote advances main via a helper clone (local never sees this commit).
+        advance_origin(tmp.path(), |helper| {
+            git(&["commit", "--allow-empty", "-m", "remote-ahead"], helper);
+        });
+        let remote_sha = get_sha(&bare, "refs/heads/main");
+
+        // Local also advances main with its own commit → diverged / non-fast-forward.
+        git(&["commit", "--allow-empty", "-m", "local-ahead"], &local);
+        let local_sha = get_sha(&local, "main");
+
+        let result = push_repo(&local, false);
+
+        assert!(
+            !result.success,
+            "a non-fast-forward push must be rejected, message: {}",
+            result.message
+        );
+        assert!(
+            !result.message.is_empty(),
+            "a rejected push must carry a message"
+        );
+        assert!(
+            result.message.to_lowercase().contains("reject"),
+            "message should include git's rejection, got: {}",
+            result.message
+        );
+        // The bare remote's main must NOT have moved to local's commit.
+        assert_eq!(
+            remote_sha,
+            get_sha(&bare, "refs/heads/main"),
+            "rejected push must not move origin/main"
+        );
+        assert_ne!(
+            local_sha,
+            get_sha(&bare, "refs/heads/main"),
+            "origin/main must not equal local's rejected commit"
         );
     }
 }

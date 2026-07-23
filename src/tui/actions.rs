@@ -20,11 +20,14 @@ pub struct WorktreeParams {
 }
 
 /// A git operation dispatched to the background git-ops worker.
-/// Phases 2–3 ship `Fetch` and `Pull`; `Push` arrives in a later phase.
+/// `Fetch` streams git's progress; `Pull` summarizes the classify/merge result;
+/// `Push { set_upstream }` publishes the current branch (with `-u origin
+/// <branch>` when it has no upstream yet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitOp {
     Fetch,
     Pull,
+    Push { set_upstream: bool },
 }
 
 /// Severity of a transient status message shown in the status bar.

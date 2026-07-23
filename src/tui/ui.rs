@@ -1454,10 +1454,13 @@ fn render_gitops_overlay(
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
+        let op = state.op_label;
         let header = match state.finished {
-            None => Span::styled("Fetching...", theme::muted()),
-            Some(true) => Span::styled("\u{2713} Fetch complete", theme::success()),
-            Some(false) => Span::styled("\u{2717} Fetch failed (Esc to close)", theme::error()),
+            None => Span::styled(format!("{}ing...", op), theme::muted()),
+            Some(true) => Span::styled(format!("\u{2713} {} complete", op), theme::success()),
+            Some(false) => {
+                Span::styled(format!("\u{2717} {} failed (Esc to close)", op), theme::error())
+            }
         };
 
         let sections =
@@ -1472,6 +1475,33 @@ fn render_gitops_overlay(
             .map(|l| Line::from(Span::styled(l.clone(), theme::muted())))
             .collect();
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), sections[1]);
+        return;
+    }
+
+    // ConfirmPush stage: confirm publishing a branch that has no upstream.
+    if state.stage == crate::tui::screens::gitops::GitOpsStage::ConfirmPush {
+        let dialog_w = (frame.area().width * 60 / 100).max(48);
+        let dialog_h = 7u16.min(frame.area().height.saturating_sub(2));
+        let area = centered_rect_fixed(dialog_w, dialog_h, frame.area());
+        frame.render_widget(Clear, area);
+
+        let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(theme::border_focused())
+            .title(title);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let prompt = format!(
+            "Branch {} has no upstream. Push and set upstream to origin/{}?  [y/N]",
+            state.branch, state.branch
+        );
+        frame.render_widget(
+            Paragraph::new(prompt).wrap(Wrap { trim: false }),
+            inner,
+        );
         return;
     }
 
