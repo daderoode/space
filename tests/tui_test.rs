@@ -3756,4 +3756,186 @@ mod gitops_tests {
             "declining push must not start any worker"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 5: Commit (synchronous local op)
+    // -----------------------------------------------------------------------
+
+    /// Build a TestEnv-backed app whose single workspace repo is a real git repo
+    /// with one staged file, focused on the Right pane with the cursor on the
+    /// repo row. `G` opens the git ops menu with `has_staged == true`.
+    fn setup_gitops_staged_app(name: &str) -> (TestEnv, PathBuf, App) {
+        let env = TestEnv::new();
+        let repo_path = env.create_repo(name);
+
+        // Create and stage a file so has_staged is true.
+        std::fs::write(repo_path.join("staged.txt"), "content\n").unwrap();
+        let out = std::process::Command::new("git")
+            .args(["add", "staged.txt"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git add failed to run");
+        assert!(
+            out.status.success(),
+            "git add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let ws = Workspace {
+            name: "test-ws".into(),
+            path: env.workspaces_dir.clone(),
+            repos: vec![WorkspaceRepo {
+                name: name.into(),
+                path: repo_path.clone(),
+                branch: "main".into(),
+                status: RepoStatus::default(),
+                ahead: 0,
+                behind: 0,
+            }],
+        };
+        let config = config_from_env(&env);
+        let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
+        app.load_selected_workspace_detail();
+        app.focus = Pane::Right; // cursor_row = 0 is the repo row
+        (env, repo_path, app)
+    }
+
+    /// Current HEAD sha of `repo`, or empty when HEAD is unborn.
+    fn head_sha(repo: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Subject line of the HEAD commit of `repo`.
+    fn head_subject(repo: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["log", "-1", "--pretty=%s"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn gitops_commit_c_transitions_to_committing_when_staged() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let (_env, _repo, mut app) = setup_gitops_staged_app("commit-stage-repo");
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('c')));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Committing,
+                "c with staged files must enter the Committing stage"
+            ),
+            _ => panic!("expected the git ops overlay in the Committing stage"),
+        }
+    }
+
+    #[test]
+    fn gitops_committing_empty_message_does_not_commit() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let (_env, repo, mut app) = setup_gitops_staged_app("commit-empty-repo");
+        let head_before = head_sha(&repo);
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('c')));
+        app.handle_key(key(KeyCode::Enter)); // empty message
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Committing,
+                "Enter with an empty message must stay in the Committing stage"
+            ),
+            _ => panic!("expected the git ops overlay still in the Committing stage"),
+        }
+        assert_eq!(
+            head_before,
+            head_sha(&repo),
+            "an empty commit message must not create a commit"
+        );
+    }
+
+    #[test]
+    fn gitops_committing_enter_commits_and_returns_to_dashboard() {
+        let (_env, repo, mut app) = setup_gitops_staged_app("commit-ok-repo");
+        let head_before = head_sha(&repo);
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('c')));
+        // Type the commit subject one char at a time, then Enter.
+        for ch in "hello world".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "a successful commit must return to the dashboard"
+        );
+        assert_ne!(
+            head_before,
+            head_sha(&repo),
+            "a successful commit must advance HEAD"
+        );
+        assert_eq!(
+            head_subject(&repo),
+            "hello world",
+            "the new commit's subject must match the typed message"
+        );
+    }
+
+    #[test]
+    fn gitops_committing_esc_returns_to_menu() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let (_env, repo, mut app) = setup_gitops_staged_app("commit-esc-repo");
+        let head_before = head_sha(&repo);
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('c')));
+        app.handle_key(key(KeyCode::Esc));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Menu,
+                "Esc in the Committing stage must return to the Menu stage"
+            ),
+            _ => panic!("expected the git ops overlay back on the Menu stage"),
+        }
+        assert_eq!(
+            head_before,
+            head_sha(&repo),
+            "Esc in the Committing stage must not create a commit"
+        );
+    }
+
+    #[test]
+    fn gitops_committing_renders_staged_files_and_typed_message() {
+        let (_env, _repo, mut app) = setup_gitops_staged_app("commit-render-repo");
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('c')));
+        for ch in "wip".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("staged.txt"),
+            "the Committing stage must list the staged file, got:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("wip"),
+            "the Committing stage must show the typed message, got:\n{}",
+            rendered
+        );
+    }
 }

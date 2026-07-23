@@ -1,12 +1,15 @@
 use crate::tui::actions::{GitOp, ScreenAction, ScreenContext};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::path::PathBuf;
+use tui_input::Input;
 
 /// Stage of the git-operations overlay. Phase 1 ships only the action menu;
 /// later phases add Committing / Log / Running / ConfirmPush.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GitOpsStage {
     Menu,
+    /// Single-line commit-message entry for the staged changes.
+    Committing,
     /// A network op (fetch / pull / push) is running, showing live output lines.
     Running,
     /// Confirm publishing a branch that has no upstream yet (push -u origin).
@@ -20,6 +23,12 @@ pub struct GitOpsState {
     pub branch: String,
     pub selected: usize,
     pub has_staged: bool,
+    /// Paths of the currently staged files, listed above the commit-message
+    /// input in the Committing stage. Captured in `new()` so the renderer needs
+    /// no git call.
+    pub staged_files: Vec<String>,
+    /// Single-line commit message entered in the Committing stage.
+    pub message_input: Input,
     /// Whether the current branch already has a configured upstream. Drives the
     /// push routing: plain push when true, ConfirmPush (set upstream) when false.
     pub has_upstream: bool,
@@ -52,9 +61,15 @@ impl GitOpsState {
     pub fn new(repo_name: String, repo_path: PathBuf) -> Self {
         let branch =
             crate::core::git::current_branch(&repo_path).unwrap_or_else(|_| "?".to_string());
-        let has_staged = crate::core::git::file_diff(&repo_path)
-            .map(|v| v.iter().any(|e| e.staged))
-            .unwrap_or(false);
+        let staged_files: Vec<String> = crate::core::git::file_diff(&repo_path)
+            .map(|v| {
+                v.iter()
+                    .filter(|e| e.staged)
+                    .map(|e| e.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let has_staged = !staged_files.is_empty();
         let has_upstream = crate::core::git::has_upstream(&repo_path);
         Self {
             stage: GitOpsStage::Menu,
@@ -63,6 +78,8 @@ impl GitOpsState {
             branch,
             selected: 0,
             has_staged,
+            staged_files,
+            message_input: Input::default(),
             has_upstream,
             status: None,
             op_label: "",
@@ -83,7 +100,40 @@ impl GitOpsState {
                 _ => ScreenAction::Continue,
             },
             GitOpsStage::ConfirmPush => self.handle_confirm_push_key(key),
+            GitOpsStage::Committing => self.handle_committing_key(key),
             GitOpsStage::Menu => self.handle_menu_key(key),
+        }
+    }
+
+    /// Handle keys in the Committing stage (single-line commit-message entry).
+    /// `Esc` returns to the menu; `Enter` commits a non-empty message; every
+    /// other key (including `q`) feeds the text input.
+    fn handle_committing_key(&mut self, key: KeyEvent) -> ScreenAction {
+        match key.code {
+            KeyCode::Esc => {
+                self.status = None;
+                self.stage = GitOpsStage::Menu;
+                ScreenAction::Continue
+            }
+            KeyCode::Enter => {
+                let message = self.message_input.value().trim().to_string();
+                if message.is_empty() {
+                    self.status = Some("Commit message cannot be empty".to_string());
+                    return ScreenAction::Continue;
+                }
+                self.status = None;
+                ScreenAction::CommitRepo {
+                    repo_path: self.repo_path.clone(),
+                    message,
+                }
+            }
+            _ => {
+                if let Some(req) = crate::tui::app::key_to_input_request(&key) {
+                    self.message_input.handle(req);
+                }
+                self.status = None;
+                ScreenAction::Continue
+            }
         }
     }
 
@@ -153,7 +203,10 @@ impl GitOpsState {
                 ScreenAction::Continue
             }
             3 => {
-                self.status = Some("Commit: not yet implemented".to_string());
+                // Enter the commit-message stage with a fresh input.
+                self.stage = GitOpsStage::Committing;
+                self.message_input = Input::default();
+                self.status = None;
                 ScreenAction::Continue
             }
             4 => {

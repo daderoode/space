@@ -1505,6 +1505,68 @@ fn render_gitops_overlay(
         return;
     }
 
+    // Committing stage: staged-file summary above a single-line message input.
+    if state.stage == crate::tui::screens::gitops::GitOpsStage::Committing {
+        let dialog_w = (frame.area().width * 60 / 100).max(48);
+        let staged_n = state.staged_files.len() as u16;
+        let has_status = state.status.is_some();
+        // header + staged list + prompt + input (+ status), plus the border.
+        let content_rows = 1 + staged_n.max(1) + 1 + 1 + if has_status { 1 } else { 0 };
+        let dialog_h = (content_rows + 2)
+            .max(9)
+            .min(frame.area().height.saturating_sub(2));
+        let area = centered_rect_fixed(dialog_w, dialog_h, frame.area());
+        frame.render_widget(Clear, area);
+
+        let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(theme::border_focused())
+            .title(title);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let sections = Layout::vertical([
+            Constraint::Length(1), // header
+            Constraint::Min(1),    // staged file list
+            Constraint::Length(1), // prompt
+            Constraint::Length(1), // input row
+            Constraint::Length(1), // status / error
+        ])
+        .split(inner);
+
+        frame.render_widget(
+            Paragraph::new("Commit staged files:").style(theme::muted()),
+            sections[0],
+        );
+        let staged: Vec<Line> = state
+            .staged_files
+            .iter()
+            .map(|p| Line::from(Span::styled(format!("  {}", p), theme::text())))
+            .collect();
+        frame.render_widget(
+            Paragraph::new(staged).wrap(Wrap { trim: false }),
+            sections[1],
+        );
+
+        frame.render_widget(
+            Paragraph::new("Message (Enter to commit, Esc to cancel):").style(theme::muted()),
+            sections[2],
+        );
+        frame.render_widget(
+            Paragraph::new(state.message_input.value()).style(theme::input_style()),
+            sections[3],
+        );
+        if let Some(status) = &state.status {
+            frame.render_widget(
+                Paragraph::new(status.as_str()).style(theme::error()),
+                sections[4],
+            );
+        }
+        return;
+    }
+
     // (key, label, enabled). Order matches GitOpsState menu indices 0..=5.
     let items: [(char, &str, bool); 6] = [
         ('f', "fetch", true),

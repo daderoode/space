@@ -515,6 +515,51 @@ pub fn push_repo(repo_path: &Path, set_upstream: bool) -> PushResult {
     }
 }
 
+/// Result of committing staged changes: whether git accepted the commit, plus a
+/// human-readable summary (git's own stdout/stderr) so the overlay can surface
+/// the outcome verbatim on both success and failure.
+pub struct CommitResult {
+    pub success: bool,
+    pub message: String,
+}
+
+/// Commit the currently staged changes in `repo_path` with `message`.
+///
+/// Shells out to `git commit -m <message>`, letting git build the tree, resolve
+/// the parent (or create the initial commit on an unborn HEAD), and apply the
+/// user's signature/gpg settings. A commit with nothing staged returns
+/// `success == false` with git's "nothing to commit" text in `message`.
+pub fn commit_repo(repo_path: &Path, message: &str) -> CommitResult {
+    let out = Command::new("git")
+        .args(["commit", "-m", message])
+        .current_dir(repo_path)
+        .output();
+
+    match out {
+        Ok(o) => {
+            // git writes the commit summary to stdout; refusals ("nothing to
+            // commit") also land on stdout, so prefer it and fall back to stderr.
+            let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            let message = if !stdout.is_empty() {
+                stdout
+            } else if !stderr.is_empty() {
+                stderr
+            } else {
+                "Committed.".to_string()
+            };
+            CommitResult {
+                success: o.status.success(),
+                message,
+            }
+        }
+        Err(e) => CommitResult {
+            success: false,
+            message: format!("Failed to run git commit: {}", e),
+        },
+    }
+}
+
 /// The current checked-out branch name, or `None` when HEAD is detached (no
 /// symbolic branch ref).
 fn current_branch_name(repo_path: &Path) -> Option<String> {
@@ -1169,6 +1214,106 @@ mod tests {
             local_sha,
             get_sha(&bare, "refs/heads/main"),
             "origin/main must not equal local's rejected commit"
+        );
+    }
+
+    #[test]
+    fn commit_repo_commits_staged_changes() {
+        let (_tmp, local) = origin_and_local();
+        let sha_before = get_sha(&local, "HEAD");
+
+        // Stage a new file, then commit it via commit_repo.
+        std::fs::write(local.join("new.txt"), "hello\n").unwrap();
+        git(&["add", "."], &local);
+
+        let result = commit_repo(&local, "add new file");
+
+        assert!(result.success, "commit must succeed: {}", result.message);
+        let sha_after = get_sha(&local, "HEAD");
+        assert_ne!(sha_before, sha_after, "HEAD must advance after commit");
+
+        // The new commit's subject is exactly the message.
+        let subject = Cmd::new("git")
+            .args(["log", "-1", "--pretty=%s"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&subject.stdout).trim(),
+            "add new file",
+            "the new commit's subject must be the message"
+        );
+
+        // The staged change is now committed: clean porcelain.
+        let porcelain = Cmd::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&porcelain.stdout).trim().is_empty(),
+            "worktree must be clean after committing the staged change"
+        );
+    }
+
+    #[test]
+    fn commit_repo_creates_initial_commit_on_unborn_head() {
+        // Fresh repo, a file staged, no commits yet (unborn HEAD).
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        Cmd::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        git_setup(repo);
+        std::fs::write(repo.join("first.txt"), "first\n").unwrap();
+        git(&["add", "."], repo);
+
+        // No commits yet: rev-parse HEAD fails.
+        let before = Cmd::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            !before.status.success(),
+            "HEAD must be unborn before the initial commit"
+        );
+
+        let result = commit_repo(repo, "initial");
+
+        assert!(
+            result.success,
+            "initial commit on unborn HEAD must succeed: {}",
+            result.message
+        );
+        let after = Cmd::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            after.status.success(),
+            "HEAD must resolve after the initial commit"
+        );
+    }
+
+    #[test]
+    fn commit_repo_fails_when_nothing_staged() {
+        // Clean repo with an existing commit and nothing staged: git refuses.
+        let (_tmp, local) = origin_and_local();
+
+        let result = commit_repo(&local, "nothing to do");
+
+        assert!(
+            !result.success,
+            "commit with nothing staged must fail, message: {}",
+            result.message
+        );
+        assert!(
+            !result.message.is_empty(),
+            "a failed commit must carry a message"
         );
     }
 }

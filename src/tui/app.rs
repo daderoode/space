@@ -1128,6 +1128,20 @@ impl App {
                 self.gitop_cancel = Some(cancel.clone());
                 std::thread::spawn(move || run_gitop_worker(repo_path, op, tx, cancel));
             }
+            ScreenAction::CommitRepo { repo_path, message } => {
+                // Synchronous local op: commit, then refresh the repo pane. On
+                // failure keep the overlay in the Committing stage with an inline
+                // error so the user can fix the message (or staging) and retry.
+                let result = crate::core::workspace::commit_repo(&repo_path, &message);
+                if result.success {
+                    self.reset_repo_pane_state();
+                    self.load_selected_workspace_detail();
+                    self.screen = Screen::Dashboard;
+                    self.set_status("Committed", StatusKind::Success);
+                } else if let Screen::GitOps(st) = &mut self.screen {
+                    st.status = Some(format!("Commit failed: {}", result.message));
+                }
+            }
             ScreenAction::SaveConfig(new_config) => {
                 self.config = new_config;
                 self.screen = Screen::Dashboard;

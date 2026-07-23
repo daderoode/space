@@ -56,6 +56,8 @@ pub enum ScreenAction {
     ExecuteSyncFlow(Vec<std::path::PathBuf>),
     /// Run a git operation on a single repo via the background git-ops worker.
     ExecuteGitOp { repo_path: PathBuf, op: GitOp },
+    /// Commit the staged changes of a single repo (synchronous local op).
+    CommitRepo { repo_path: PathBuf, message: String },
     /// Delete a workspace.
     DeleteWorkspace { name: String, force: bool },
     /// Save config and reload.
