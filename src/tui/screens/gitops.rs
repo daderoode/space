@@ -1,4 +1,4 @@
-use crate::tui::actions::{ScreenAction, ScreenContext};
+use crate::tui::actions::{GitOp, ScreenAction, ScreenContext};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::path::PathBuf;
 
@@ -7,18 +7,24 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq)]
 pub enum GitOpsStage {
     Menu,
+    /// A network op (Phase 2: fetch) is running, showing live output lines.
+    Running,
 }
 
 pub struct GitOpsState {
     pub stage: GitOpsStage,
     pub repo_name: String,
-    // Retained for the network/commit sub-flows added in later phases.
-    #[allow(dead_code)]
     pub repo_path: PathBuf,
     pub branch: String,
     pub selected: usize,
     pub has_staged: bool,
     pub status: Option<String>,
+    /// Live output lines captured while a Running network op streams.
+    pub output: Vec<String>,
+    /// None while running; `Some(success)` once the op completes.
+    pub finished: Option<bool>,
+    /// When set (success only), the overlay auto-closes at this instant.
+    pub close_at: Option<std::time::Instant>,
 }
 
 impl std::fmt::Debug for GitOpsState {
@@ -49,6 +55,9 @@ impl GitOpsState {
             selected: 0,
             has_staged,
             status: None,
+            output: Vec::new(),
+            finished: None,
+            close_at: None,
         }
     }
 
@@ -56,6 +65,17 @@ impl GitOpsState {
     const MAX_IDX: usize = 5;
 
     pub fn handle_key(&mut self, key: KeyEvent, _ctx: &ScreenContext) -> ScreenAction {
+        match self.stage {
+            GitOpsStage::Running => match key.code {
+                // Close early; while running other keys are no-ops.
+                KeyCode::Esc => ScreenAction::Back,
+                _ => ScreenAction::Continue,
+            },
+            GitOpsStage::Menu => self.handle_menu_key(key),
+        }
+    }
+
+    fn handle_menu_key(&mut self, key: KeyEvent) -> ScreenAction {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => ScreenAction::Back,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -70,53 +90,60 @@ impl GitOpsState {
                 }
                 ScreenAction::Continue
             }
-            KeyCode::Enter => {
-                self.fire(self.selected);
-                ScreenAction::Continue
-            }
-            KeyCode::Char('f') => {
-                self.fire(0);
-                ScreenAction::Continue
-            }
-            KeyCode::Char('p') => {
-                self.fire(1);
-                ScreenAction::Continue
-            }
-            KeyCode::Char('P') => {
-                self.fire(2);
-                ScreenAction::Continue
-            }
-            KeyCode::Char('c') => {
-                self.fire(3);
-                ScreenAction::Continue
-            }
-            KeyCode::Char('l') => {
-                self.fire(4);
-                ScreenAction::Continue
-            }
-            KeyCode::Char('r') => {
-                self.fire(5);
-                ScreenAction::Continue
-            }
+            KeyCode::Enter => self.fire(self.selected),
+            KeyCode::Char('f') => self.fire(0),
+            KeyCode::Char('p') => self.fire(1),
+            KeyCode::Char('P') => self.fire(2),
+            KeyCode::Char('c') => self.fire(3),
+            KeyCode::Char('l') => self.fire(4),
+            KeyCode::Char('r') => self.fire(5),
             _ => ScreenAction::Continue,
         }
     }
 
-    /// Fire the menu item at `idx`, moving the highlight to it and setting a
-    /// placeholder status. Real sub-flows land in later phases; every action
-    /// stays inside the menu.
-    fn fire(&mut self, idx: usize) {
+    /// Fire the menu item at `idx`, moving the highlight to it. Fetch stands up
+    /// the async Running stage; the other actions keep their Phase-1
+    /// placeholder status until their own phases land.
+    fn fire(&mut self, idx: usize) -> ScreenAction {
         self.selected = idx;
-        let msg = match idx {
-            0 => "Fetch: not yet implemented",
-            1 => "Pull: not yet implemented",
-            2 => "Push: not yet implemented",
-            3 if !self.has_staged => "Stage files first with s/S",
-            3 => "Commit: not yet implemented",
-            4 => "Log: not yet implemented",
-            5 => "Rebase coming soon (item 7)",
-            _ => return,
-        };
-        self.status = Some(msg.to_string());
+        match idx {
+            0 => {
+                // Fetch: reset the run buffers and dispatch the async worker.
+                self.stage = GitOpsStage::Running;
+                self.output.clear();
+                self.finished = None;
+                self.close_at = None;
+                self.status = None;
+                ScreenAction::ExecuteGitOp {
+                    repo_path: self.repo_path.clone(),
+                    op: GitOp::Fetch,
+                }
+            }
+            1 => {
+                self.status = Some("Pull: not yet implemented".to_string());
+                ScreenAction::Continue
+            }
+            2 => {
+                self.status = Some("Push: not yet implemented".to_string());
+                ScreenAction::Continue
+            }
+            3 if !self.has_staged => {
+                self.status = Some("Stage files first with s/S".to_string());
+                ScreenAction::Continue
+            }
+            3 => {
+                self.status = Some("Commit: not yet implemented".to_string());
+                ScreenAction::Continue
+            }
+            4 => {
+                self.status = Some("Log: not yet implemented".to_string());
+                ScreenAction::Continue
+            }
+            5 => {
+                self.status = Some("Rebase coming soon (item 7)".to_string());
+                ScreenAction::Continue
+            }
+            _ => ScreenAction::Continue,
+        }
     }
 }

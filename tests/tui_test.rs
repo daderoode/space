@@ -3519,7 +3519,8 @@ mod gitops_tests {
     }
 
     #[test]
-    fn gitops_menu_f_fires_fetch_placeholder_and_stays_open() {
+    fn gitops_menu_f_starts_fetch_and_transitions_to_running() {
+        use space::tui::screens::gitops::GitOpsStage;
         let ws = common::workspace_with_repos(&["repo-a"]);
         let mut app = test_app(vec![ws], vec![]);
         app.focus = Pane::Right;
@@ -3527,15 +3528,20 @@ mod gitops_tests {
 
         app.handle_key(key(KeyCode::Char('f')));
 
+        // Assert on the transition + rx immediately after the keypress: the
+        // worker's git fetch is asynchronous, so the stage/rx are set now even
+        // though the fetch against a fake path will later fail.
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Running,
+                "pressing f must transition the git ops overlay to the Running stage"
+            ),
+            _ => panic!("expected the git ops overlay to stay open in the Running stage"),
+        }
         assert!(
-            matches!(app.screen, Screen::GitOps(_)),
-            "firing fetch should keep the git ops menu open"
-        );
-        let rendered = render_text(&app, 80, 24);
-        assert!(
-            rendered.contains("Fetch: not yet implemented"),
-            "firing fetch should show its placeholder status, got:\n{}",
-            rendered
+            app.gitop_rx.is_some(),
+            "pressing f must start the fetch worker (gitop_rx set)"
         );
     }
 

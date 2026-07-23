@@ -19,6 +19,13 @@ pub struct WorktreeParams {
     pub is_new: bool,
 }
 
+/// A git operation dispatched to the background git-ops worker.
+/// Phase 2 ships only `Fetch`; `Pull`/`Push` arrive in later phases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitOp {
+    Fetch,
+}
+
 /// Severity of a transient status message shown in the status bar.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum StatusKind {
@@ -43,6 +50,8 @@ pub enum ScreenAction {
     ExecuteWorktreeFlow(WorktreeParams),
     /// Fetch + fast-forward the given repos, then transition to branch picker.
     ExecuteSyncFlow(Vec<std::path::PathBuf>),
+    /// Run a git operation on a single repo via the background git-ops worker.
+    ExecuteGitOp { repo_path: PathBuf, op: GitOp },
     /// Delete a workspace.
     DeleteWorkspace { name: String, force: bool },
     /// Save config and reload.

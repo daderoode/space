@@ -1436,6 +1436,45 @@ fn render_gitops_overlay(
 ) {
     use ratatui::widgets::Clear;
 
+    // Running stage: a network op (Phase 2: fetch) streaming live output.
+    if state.stage == crate::tui::screens::gitops::GitOpsStage::Running {
+        let dialog_w = (frame.area().width * 60 / 100).max(48);
+        let dialog_h = (frame.area().height * 60 / 100)
+            .max(10)
+            .min(frame.area().height.saturating_sub(2));
+        let area = centered_rect_fixed(dialog_w, dialog_h, frame.area());
+        frame.render_widget(Clear, area);
+
+        let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(theme::border_focused())
+            .title(title);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let header = match state.finished {
+            None => Span::styled("Fetching...", theme::muted()),
+            Some(true) => Span::styled("\u{2713} Fetch complete", theme::success()),
+            Some(false) => Span::styled("\u{2717} Fetch failed (Esc to close)", theme::error()),
+        };
+
+        let sections =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+        frame.render_widget(Paragraph::new(Line::from(header)), sections[0]);
+
+        // Show the tail of the output that fits in the viewport.
+        let viewport = sections[1].height as usize;
+        let start = state.output.len().saturating_sub(viewport);
+        let lines: Vec<Line> = state.output[start..]
+            .iter()
+            .map(|l| Line::from(Span::styled(l.clone(), theme::muted())))
+            .collect();
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), sections[1]);
+        return;
+    }
+
     // (key, label, enabled). Order matches GitOpsState menu indices 0..=5.
     let items: [(char, &str, bool); 6] = [
         ('f', "fetch", true),
