@@ -1435,53 +1435,68 @@ fn run_gitop_worker(
         return; // do NOT send Done — user cancelled before we started
     }
 
-    let args: &[&str] = match op {
-        crate::tui::actions::GitOp::Fetch => &["fetch"],
-    };
+    match op {
+        // Fetch streams git's live progress lines straight through.
+        crate::tui::actions::GitOp::Fetch => {
+            let args: &[&str] = &["fetch"];
+            let child = Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
 
-    let child = Command::new("git")
-        .args(args)
-        .current_dir(&repo_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
+            let mut child = match child {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(GitOpProgress::Line(format!(
+                        "git {} failed to start: {}",
+                        args.join(" "),
+                        e
+                    )));
+                    let _ = tx.send(GitOpProgress::Done { success: false });
+                    return;
+                }
+            };
 
-    let mut child = match child {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx.send(GitOpProgress::Line(format!("git {} failed to start: {}", args.join(" "), e)));
-            let _ = tx.send(GitOpProgress::Done { success: false });
-            return;
-        }
-    };
+            // git fetch writes its progress to stderr, so both pipes must be
+            // drained. Drain stderr on a helper thread and stdout on this thread
+            // so neither pipe can fill and deadlock the child.
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
 
-    // git fetch writes its progress to stderr, so both pipes must be drained.
-    // Drain stderr on a helper thread and stdout on this thread so neither pipe
-    // can fill and deadlock the child.
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+            let tx_err = tx.clone();
+            let err_handle = std::thread::spawn(move || {
+                if let Some(err) = stderr {
+                    let reader = BufReader::new(err);
+                    for line in reader.lines().map_while(Result::ok) {
+                        let _ = tx_err.send(GitOpProgress::Line(line));
+                    }
+                }
+            });
 
-    let tx_err = tx.clone();
-    let err_handle = std::thread::spawn(move || {
-        if let Some(err) = stderr {
-            let reader = BufReader::new(err);
-            for line in reader.lines().map_while(Result::ok) {
-                let _ = tx_err.send(GitOpProgress::Line(line));
+            if let Some(out) = stdout {
+                let reader = BufReader::new(out);
+                for line in reader.lines().map_while(Result::ok) {
+                    let _ = tx.send(GitOpProgress::Line(line));
+                }
             }
-        }
-    });
 
-    if let Some(out) = stdout {
-        let reader = BufReader::new(out);
-        for line in reader.lines().map_while(Result::ok) {
-            let _ = tx.send(GitOpProgress::Line(line));
+            let _ = err_handle.join();
+            let success = child.wait().map(|s| s.success()).unwrap_or(false);
+            let _ = tx.send(GitOpProgress::Done { success });
+        }
+        // Pull runs the multi-step classify/merge logic in `pull_repo`, then
+        // reports its single summary line plus the success flag.
+        crate::tui::actions::GitOp::Pull => {
+            let result = crate::core::workspace::pull_repo(&repo_path);
+            let _ = tx.send(GitOpProgress::Line(result.message.clone()));
+            let _ = tx.send(GitOpProgress::Done {
+                success: result.success(),
+            });
         }
     }
-
-    let _ = err_handle.join();
-    let success = child.wait().map(|s| s.success()).unwrap_or(false);
-    let _ = tx.send(GitOpProgress::Done { success });
 }
 
 /// Advance `cursor_row` in the given direction, skipping `SectionHeader` rows.

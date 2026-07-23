@@ -3546,6 +3546,32 @@ mod gitops_tests {
     }
 
     #[test]
+    fn gitops_menu_p_starts_pull_and_transitions_to_running() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        app.handle_key(key(KeyCode::Char('p')));
+
+        // As with fetch, the pull worker runs asynchronously: the stage/rx are
+        // set immediately even though the pull against a fake path later fails.
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Running,
+                "pressing p must transition the git ops overlay to the Running stage"
+            ),
+            _ => panic!("expected the git ops overlay to stay open in the Running stage"),
+        }
+        assert!(
+            app.gitop_rx.is_some(),
+            "pressing p must start the pull worker (gitop_rx set)"
+        );
+    }
+
+    #[test]
     fn gitops_menu_commit_disabled_when_nothing_staged() {
         // workspace_with_repos uses a fake /tmp path, so file_diff fails and
         // has_staged is false -> commit is disabled.
@@ -3626,7 +3652,11 @@ mod gitops_tests {
         app.focus = Pane::Right;
         app.handle_key(key(KeyCode::Char('G')));
 
-        // Move highlight to pull (index 1), then Enter fires it.
+        // Move highlight to push (index 2), then Enter fires it. Push is still a
+        // placeholder, so this verifies Enter dispatches the highlighted item
+        // (distinct from a letter-key press) without depending on pull, which
+        // now starts the async worker.
+        app.handle_key(key(KeyCode::Char('j')));
         app.handle_key(key(KeyCode::Char('j')));
         app.handle_key(key(KeyCode::Enter));
 
@@ -3636,8 +3666,8 @@ mod gitops_tests {
         );
         let rendered = render_text(&app, 80, 24);
         assert!(
-            rendered.contains("Pull: not yet implemented"),
-            "Enter on the highlighted pull item should fire its placeholder, got:\n{}",
+            rendered.contains("Push: not yet implemented"),
+            "Enter on the highlighted push item should fire its placeholder, got:\n{}",
             rendered
         );
     }

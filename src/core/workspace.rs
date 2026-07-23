@@ -296,6 +296,172 @@ pub fn sync_repo(repo_path: &Path) -> SyncRepoResult {
     }
 }
 
+/// The classification of what `pull_repo` did (or why it did nothing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullOutcome {
+    /// `git fetch` failed (offline / no remote).
+    FetchFailed,
+    /// No current branch or no upstream to pull from.
+    DetachedHead,
+    /// Local already matches upstream (0 ahead, 0 behind).
+    UpToDate,
+    /// Local is only ahead of upstream — nothing to pull.
+    Ahead,
+    /// Local was behind and was fast-forwarded to the upstream.
+    FastForwarded,
+    /// Local and upstream diverged and were merged cleanly (merge commit).
+    Merged,
+    /// Local and upstream diverged with conflicts; the merge was aborted and
+    /// the worktree restored to its pre-merge state.
+    Conflicted,
+}
+
+/// Result of pulling a single repo: the outcome plus a human-readable message.
+pub struct PullResult {
+    pub outcome: PullOutcome,
+    pub message: String,
+}
+
+impl PullResult {
+    /// Whether the pull left the repo in a good state. Success outcomes let the
+    /// worker auto-close the overlay; failures keep it open so the user can read
+    /// the message.
+    pub fn success(&self) -> bool {
+        matches!(
+            self.outcome,
+            PullOutcome::UpToDate
+                | PullOutcome::Ahead
+                | PullOutcome::FastForwarded
+                | PullOutcome::Merged
+        )
+    }
+}
+
+/// Pull the current branch of `repo_path` from its `origin/<branch>` upstream.
+///
+/// Fetches first, then classifies the branch state and acts:
+/// - behind only  → fast-forward (`FastForwarded`)
+/// - diverged     → real merge; on conflict, `git merge --abort` (`Merged`/`Conflicted`)
+/// - up to date / only ahead → no-op (`UpToDate`/`Ahead`)
+/// - detached HEAD / no upstream / fetch failure → report without acting.
+pub fn pull_repo(repo_path: &Path) -> PullResult {
+    let fetch_ok = Command::new("git")
+        .args(["fetch", "--quiet", "origin"])
+        .current_dir(repo_path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !fetch_ok {
+        return PullResult {
+            outcome: PullOutcome::FetchFailed,
+            message: "Fetch failed: no remote or offline.".to_string(),
+        };
+    }
+
+    let branch = match current_branch_name(repo_path) {
+        Some(b) => b,
+        None => {
+            return PullResult {
+                outcome: PullOutcome::DetachedHead,
+                message: "Detached HEAD: no branch to pull.".to_string(),
+            };
+        }
+    };
+
+    // No `origin/<branch>` upstream to pull from.
+    let remote_exists = Command::new("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/origin/{}", branch),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !remote_exists {
+        return PullResult {
+            outcome: PullOutcome::DetachedHead,
+            message: format!("{} has no upstream (origin/{}) to pull.", branch, branch),
+        };
+    }
+
+    let (ahead, behind) = git::ahead_behind(repo_path).unwrap_or((0, 0));
+
+    if behind > 0 && ahead == 0 {
+        let remote_ref = format!("origin/{}", branch);
+        let ok = Command::new("git")
+            .args(["merge", "--ff-only", &remote_ref])
+            .current_dir(repo_path)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            return PullResult {
+                outcome: PullOutcome::FastForwarded,
+                message: format!("Fast-forwarded {} to {} ({} commit(s)).", branch, remote_ref, behind),
+            };
+        }
+    }
+
+    if ahead > 0 && behind > 0 {
+        let remote_ref = format!("origin/{}", branch);
+        let merged = Command::new("git")
+            .args(["merge", "--no-edit", &remote_ref])
+            .current_dir(repo_path)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if merged {
+            return PullResult {
+                outcome: PullOutcome::Merged,
+                message: format!("Merged {} into {} ({} ahead, {} behind).", remote_ref, branch, ahead, behind),
+            };
+        }
+        // Merge left conflicts: restore the pre-merge worktree so `space` never
+        // leaves the repo half-merged.
+        let _ = Command::new("git")
+            .args(["merge", "--abort"])
+            .current_dir(repo_path)
+            .status();
+        return PullResult {
+            outcome: PullOutcome::Conflicted,
+            message: format!(
+                "Merge of {} into {} conflicted; aborted and restored a clean worktree.",
+                remote_ref, branch
+            ),
+        };
+    }
+
+    if ahead > 0 && behind == 0 {
+        return PullResult {
+            outcome: PullOutcome::Ahead,
+            message: format!("{} is {} commit(s) ahead of upstream; nothing to pull.", branch, ahead),
+        };
+    }
+
+    PullResult {
+        outcome: PullOutcome::UpToDate,
+        message: format!("{} is already up to date.", branch),
+    }
+}
+
+/// The current checked-out branch name, or `None` when HEAD is detached (no
+/// symbolic branch ref).
+fn current_branch_name(repo_path: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+    if out.status.success() {
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
 /// Returns the path to the created worktree.
 pub fn create_worktree(
     repo_path: &Path,
@@ -537,6 +703,45 @@ mod tests {
         (tmp, local)
     }
 
+    /// Bare `origin.git` + a `local` clone with a single pushed commit on
+    /// `main` (tracked as `origin/main`), containing `base.txt`. `local` is up
+    /// to date with `origin/main` on return.
+    fn origin_and_local() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("local");
+        Cmd::new("git")
+            .args(["init", "--bare", "-b", "main", "origin.git"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["clone", "origin.git", "local"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        git_setup(&local);
+        std::fs::write(local.join("base.txt"), "base\n").unwrap();
+        git(&["add", "."], &local);
+        git(&["commit", "-m", "init"], &local);
+        git(&["push", "-u", "origin", "main"], &local);
+        (tmp, local)
+    }
+
+    /// Clone `origin.git` (already created by `origin_and_local`) into a fresh
+    /// `helper` worktree on `main`, run `edit` to stage/commit a change, and
+    /// push it to `origin/main` — advancing the remote so `local` falls behind.
+    fn advance_origin(tmp: &Path, edit: impl FnOnce(&Path)) {
+        let helper = tmp.join("helper");
+        Cmd::new("git")
+            .args(["clone", "origin.git", "helper"])
+            .current_dir(tmp)
+            .output()
+            .unwrap();
+        git_setup(&helper);
+        edit(&helper);
+        git(&["push", "origin", "main"], &helper);
+    }
+
     #[test]
     fn sync_repo_returns_fetch_failed_without_remote() {
         let tmp = tempfile::tempdir().unwrap();
@@ -590,6 +795,209 @@ mod tests {
             !result.forwarded.contains(&"main".to_string()),
             "main must not be fast-forwarded when checked out: {:?}",
             result.forwarded
+        );
+    }
+
+    #[test]
+    fn pull_repo_fast_forwards_checked_out_branch_behind_remote() {
+        // make_behind_repo leaves `local` on `main`, one commit behind
+        // origin/main (0 ahead). pull_repo fetches then fast-forwards.
+        let (_tmp, local) = make_behind_repo();
+
+        let sha_before = get_sha(&local, "main");
+        let result = pull_repo(&local);
+
+        assert!(
+            matches!(result.outcome, PullOutcome::FastForwarded),
+            "behind branch must fast-forward, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        let sha_after = get_sha(&local, "main");
+        let origin_sha = get_sha(&local, "origin/main");
+        assert_ne!(sha_before, sha_after, "main must have advanced");
+        assert_eq!(
+            sha_after, origin_sha,
+            "main must equal origin/main after fast-forward"
+        );
+    }
+
+    #[test]
+    fn pull_repo_reports_fetch_failed_without_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        Cmd::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        git_setup(tmp.path());
+        git(&["commit", "--allow-empty", "-m", "init"], tmp.path());
+
+        let result = pull_repo(tmp.path());
+        assert!(
+            matches!(result.outcome, PullOutcome::FetchFailed),
+            "no remote must yield FetchFailed, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+    }
+
+    #[test]
+    fn pull_repo_reports_up_to_date_when_synced() {
+        let (_tmp, local) = origin_and_local();
+        let sha_before = get_sha(&local, "main");
+
+        let result = pull_repo(&local);
+
+        assert!(
+            matches!(result.outcome, PullOutcome::UpToDate),
+            "synced branch must report UpToDate, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert_eq!(
+            sha_before,
+            get_sha(&local, "main"),
+            "up-to-date pull must not move main"
+        );
+    }
+
+    #[test]
+    fn pull_repo_reports_ahead_when_local_has_unpushed_commit() {
+        let (_tmp, local) = origin_and_local();
+        let init_sha = get_sha(&local, "main");
+
+        // Local advances but does not push — 1 ahead, 0 behind.
+        git(&["commit", "--allow-empty", "-m", "local-only"], &local);
+        let ahead_sha = get_sha(&local, "main");
+
+        let result = pull_repo(&local);
+
+        assert!(
+            matches!(result.outcome, PullOutcome::Ahead),
+            "ahead-only branch must report Ahead, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert_eq!(
+            ahead_sha,
+            get_sha(&local, "main"),
+            "ahead-only pull must not move main"
+        );
+        assert_eq!(
+            init_sha,
+            get_sha(&local, "origin/main"),
+            "ahead-only pull must not push (origin/main unchanged)"
+        );
+    }
+
+    #[test]
+    fn pull_repo_merges_diverged_non_conflicting_changes() {
+        let (tmp, local) = origin_and_local();
+
+        // Remote advances main with a new file the local side never touches.
+        advance_origin(tmp.path(), |helper| {
+            std::fs::write(helper.join("helper.txt"), "helper\n").unwrap();
+            git(&["add", "."], helper);
+            git(&["commit", "-m", "helper-side"], helper);
+        });
+
+        // Local advances main with a different, non-conflicting file.
+        std::fs::write(local.join("local.txt"), "local\n").unwrap();
+        git(&["add", "."], &local);
+        git(&["commit", "-m", "local-side"], &local);
+
+        let result = pull_repo(&local);
+
+        assert!(
+            matches!(result.outcome, PullOutcome::Merged),
+            "clean diverge must merge, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(
+            local.join("local.txt").exists() && local.join("helper.txt").exists(),
+            "merged worktree must contain both sides' files"
+        );
+        // A real merge commit has two parents (HEAD^2 resolves).
+        let two_parents = Cmd::new("git")
+            .args(["rev-parse", "--verify", "HEAD^2"])
+            .current_dir(&local)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(two_parents, "a merge commit (two parents) must exist");
+    }
+
+    #[test]
+    fn pull_repo_aborts_conflicting_merge_and_leaves_clean_worktree() {
+        let (tmp, local) = origin_and_local();
+
+        // Remote and local change the SAME file to different content.
+        advance_origin(tmp.path(), |helper| {
+            std::fs::write(helper.join("base.txt"), "helper-version\n").unwrap();
+            git(&["add", "."], helper);
+            git(&["commit", "-m", "helper-edit"], helper);
+        });
+        std::fs::write(local.join("base.txt"), "local-version\n").unwrap();
+        git(&["add", "."], &local);
+        git(&["commit", "-m", "local-edit"], &local);
+        let sha_before = get_sha(&local, "main");
+
+        let result = pull_repo(&local);
+
+        assert!(
+            matches!(result.outcome, PullOutcome::Conflicted),
+            "conflicting diverge must report Conflicted, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        // The merge must have been aborted: no MERGE_HEAD, clean status,
+        // no conflict markers, and HEAD back where it started.
+        assert!(
+            !local.join(".git/MERGE_HEAD").exists(),
+            "MERGE_HEAD must be gone after abort"
+        );
+        let porcelain = Cmd::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&porcelain.stdout).trim().is_empty(),
+            "worktree must be clean after merge --abort"
+        );
+        let base = std::fs::read_to_string(local.join("base.txt")).unwrap();
+        assert!(
+            !base.contains("<<<<<<<"),
+            "base.txt must not contain conflict markers after abort"
+        );
+        assert_eq!(
+            sha_before,
+            get_sha(&local, "main"),
+            "aborted merge must leave main at its pre-merge commit"
+        );
+    }
+
+    #[test]
+    fn pull_repo_reports_detached_head_without_acting() {
+        let (_tmp, local) = origin_and_local();
+        git(&["checkout", "--detach"], &local);
+        let sha_before = get_sha(&local, "HEAD");
+
+        let result = pull_repo(&local);
+
+        assert!(
+            matches!(result.outcome, PullOutcome::DetachedHead),
+            "detached HEAD must report DetachedHead, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert_eq!(
+            sha_before,
+            get_sha(&local, "HEAD"),
+            "detached-HEAD pull must not move HEAD"
         );
     }
 }

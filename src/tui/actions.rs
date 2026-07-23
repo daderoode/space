@@ -20,10 +20,11 @@ pub struct WorktreeParams {
 }
 
 /// A git operation dispatched to the background git-ops worker.
-/// Phase 2 ships only `Fetch`; `Pull`/`Push` arrive in later phases.
+/// Phases 2–3 ship `Fetch` and `Pull`; `Push` arrives in a later phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitOp {
     Fetch,
+    Pull,
 }
 
 /// Severity of a transient status message shown in the status bar.

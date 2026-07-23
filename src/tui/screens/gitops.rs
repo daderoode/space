@@ -101,28 +101,14 @@ impl GitOpsState {
         }
     }
 
-    /// Fire the menu item at `idx`, moving the highlight to it. Fetch stands up
-    /// the async Running stage; the other actions keep their Phase-1
+    /// Fire the menu item at `idx`, moving the highlight to it. Fetch and pull
+    /// stand up the async Running stage; the other actions keep their Phase-1
     /// placeholder status until their own phases land.
     fn fire(&mut self, idx: usize) -> ScreenAction {
         self.selected = idx;
         match idx {
-            0 => {
-                // Fetch: reset the run buffers and dispatch the async worker.
-                self.stage = GitOpsStage::Running;
-                self.output.clear();
-                self.finished = None;
-                self.close_at = None;
-                self.status = None;
-                ScreenAction::ExecuteGitOp {
-                    repo_path: self.repo_path.clone(),
-                    op: GitOp::Fetch,
-                }
-            }
-            1 => {
-                self.status = Some("Pull: not yet implemented".to_string());
-                ScreenAction::Continue
-            }
+            0 => self.start_network_op(GitOp::Fetch),
+            1 => self.start_network_op(GitOp::Pull),
             2 => {
                 self.status = Some("Push: not yet implemented".to_string());
                 ScreenAction::Continue
@@ -144,6 +130,20 @@ impl GitOpsState {
                 ScreenAction::Continue
             }
             _ => ScreenAction::Continue,
+        }
+    }
+
+    /// Reset the run buffers, enter the Running stage, and dispatch `op` to the
+    /// background git-ops worker.
+    fn start_network_op(&mut self, op: GitOp) -> ScreenAction {
+        self.stage = GitOpsStage::Running;
+        self.output.clear();
+        self.finished = None;
+        self.close_at = None;
+        self.status = None;
+        ScreenAction::ExecuteGitOp {
+            repo_path: self.repo_path.clone(),
+            op,
         }
     }
 }
