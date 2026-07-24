@@ -1065,6 +1065,20 @@ impl App {
             ScreenAction::Back => {
                 // Refresh workspaces when leaving Creating stage (catches partial creates)
                 self.refresh_if_leaving_creating_stage();
+                // Closing a *successful* git op early (Esc before the ~3s
+                // auto-close) must leave the same refreshed repo pane the
+                // auto-close path produces — otherwise the dashboard shows
+                // stale ahead/behind/file state.
+                let leaving_successful_gitop = matches!(
+                    &self.screen,
+                    Screen::GitOps(st)
+                        if st.stage == crate::tui::screens::gitops::GitOpsStage::Running
+                            && st.finished == Some(true)
+                );
+                if leaving_successful_gitop {
+                    self.reset_repo_pane_state();
+                    self.load_selected_workspace_detail();
+                }
                 self.screen = Screen::Dashboard;
             }
             ScreenAction::BackWithStatus(msg, kind) => {

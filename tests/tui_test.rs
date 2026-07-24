@@ -3733,6 +3733,39 @@ mod gitops_tests {
     }
 
     #[test]
+    fn gitops_esc_after_successful_op_refreshes_like_auto_close() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        // Simulate a finished, successful network op in the Running stage,
+        // with stale repo-pane state that the close must refresh away.
+        if let Screen::GitOps(ref mut st) = app.screen {
+            st.stage = GitOpsStage::Running;
+            st.finished = Some(true);
+        } else {
+            panic!("expected the git ops overlay");
+        }
+        app.expanded_repos.insert(0);
+
+        // Story 12: Esc closes a successful op sooner than the ~3s timer —
+        // and must leave the same refreshed state the auto-close produces.
+        app.handle_key(key(KeyCode::Esc));
+
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "Esc after success must return to the dashboard"
+        );
+        assert!(
+            app.expanded_repos.is_empty(),
+            "closing a successful op early must refresh the repo pane exactly \
+             like the auto-close path (stale expansion state must be gone)"
+        );
+    }
+
+    #[test]
     fn gitops_confirm_push_enter_declines_matching_y_n_prompt() {
         use space::tui::screens::gitops::GitOpsStage;
         let ws = common::workspace_with_repos(&["repo-a"]);

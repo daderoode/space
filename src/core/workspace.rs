@@ -301,8 +301,10 @@ pub fn sync_repo(repo_path: &Path) -> SyncRepoResult {
 pub enum PullOutcome {
     /// `git fetch` failed (offline / no remote).
     FetchFailed,
-    /// No current branch or no upstream to pull from.
+    /// No current branch (detached HEAD) — nothing to pull onto.
     DetachedHead,
+    /// The current branch has no `origin/<branch>` upstream to pull from.
+    NoUpstream,
     /// Local already matches upstream (0 ahead, 0 behind).
     UpToDate,
     /// Local is only ahead of upstream — nothing to pull.
@@ -348,6 +350,18 @@ impl PullResult {
 /// - up to date / only ahead → no-op (`UpToDate`/`Ahead`)
 /// - detached HEAD / no upstream / fetch failure → report without acting.
 pub fn pull_repo(repo_path: &Path) -> PullResult {
+    // Detached HEAD is checked BEFORE the fetch: a detached-HEAD pull must
+    // report without acting at all (not even mutating remote-tracking refs).
+    let branch = match current_branch_name(repo_path) {
+        Some(b) => b,
+        None => {
+            return PullResult {
+                outcome: PullOutcome::DetachedHead,
+                message: "Detached HEAD: no branch to pull.".to_string(),
+            };
+        }
+    };
+
     // `.output()` (not `.status()`): capture stderr both to surface the real
     // failure cause (auth, DNS, missing remote) and to keep git from writing
     // to the inherited stderr, which would scribble over the raw-mode TUI.
@@ -374,17 +388,8 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
         };
     }
 
-    let branch = match current_branch_name(repo_path) {
-        Some(b) => b,
-        None => {
-            return PullResult {
-                outcome: PullOutcome::DetachedHead,
-                message: "Detached HEAD: no branch to pull.".to_string(),
-            };
-        }
-    };
-
-    // No `origin/<branch>` upstream to pull from.
+    // No `origin/<branch>` upstream to pull from (checked post-fetch so the
+    // remote-tracking refs are fresh).
     let remote_exists = Command::new("git")
         .args([
             "rev-parse",
@@ -398,7 +403,7 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
         .unwrap_or(false);
     if !remote_exists {
         return PullResult {
-            outcome: PullOutcome::DetachedHead,
+            outcome: PullOutcome::NoUpstream,
             message: format!("{} has no upstream (origin/{}) to pull.", branch, branch),
         };
     }
@@ -1188,10 +1193,44 @@ mod tests {
     }
 
     #[test]
-    fn pull_repo_reports_detached_head_without_acting() {
+    fn pull_repo_reports_no_upstream_for_unpublished_branch() {
         let (_tmp, local) = origin_and_local();
+        // A local-only branch: fetch succeeds (remote exists) but there is no
+        // origin/feature to pull from.
+        git(&["checkout", "-b", "feature"], &local);
+        let sha_before = get_sha(&local, "feature");
+
+        let result = pull_repo(&local);
+
+        assert!(
+            matches!(result.outcome, PullOutcome::NoUpstream),
+            "an unpublished branch must report NoUpstream (not DetachedHead), got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(!result.success(), "NoUpstream is not a success");
+        assert_eq!(
+            sha_before,
+            get_sha(&local, "feature"),
+            "a NoUpstream pull must not move the branch"
+        );
+    }
+
+    #[test]
+    fn pull_repo_reports_detached_head_without_acting() {
+        let (tmp, local) = origin_and_local();
         git(&["checkout", "--detach"], &local);
         let sha_before = get_sha(&local, "HEAD");
+        // The remote advances after we detach; a detached-HEAD pull must
+        // report WITHOUT acting (story 37), so not even the fetch may run —
+        // local's origin/main remote-tracking ref must stay where it was.
+        let origin_ref_before = get_sha(&local, "origin/main");
+        advance_origin(tmp.path(), |helper| {
+            git(
+                &["commit", "--allow-empty", "-m", "remote-moves-on"],
+                helper,
+            );
+        });
 
         let result = pull_repo(&local);
 
@@ -1205,6 +1244,12 @@ mod tests {
             sha_before,
             get_sha(&local, "HEAD"),
             "detached-HEAD pull must not move HEAD"
+        );
+        assert_eq!(
+            origin_ref_before,
+            get_sha(&local, "origin/main"),
+            "detached-HEAD pull must not act at all — no fetch, so the \
+             remote-tracking ref must be unchanged"
         );
     }
 
