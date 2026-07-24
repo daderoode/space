@@ -4,6 +4,17 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::path::PathBuf;
 use tui_input::Input;
 
+/// The git-ops menu items in display order: (hotkey, label). Indices match
+/// `GitOpsState::fire` and `item_enabled`. Hotkeys are case-sensitive.
+pub const MENU: [(char, &str); 6] = [
+    ('f', "fetch"),
+    ('p', "pull"),
+    ('P', "push"),
+    ('c', "commit"),
+    ('l', "log"),
+    ('r', "rebase"),
+];
+
 /// Stage of the git-operations overlay: the action menu plus one stage per
 /// sub-flow (commit entry, log view, a running network op, push confirmation).
 #[derive(Debug, Clone, PartialEq)]
@@ -36,9 +47,9 @@ pub struct GitOpsState {
     /// push routing: plain push when true, ConfirmPush (set upstream) when false.
     pub has_upstream: bool,
     pub status: Option<String>,
-    /// Label of the network op currently running ("Fetch"/"Pull"/"Push"),
-    /// used by the Running-stage header. Empty when no op has run.
-    pub op_label: &'static str,
+    /// The network op currently running (fetch / pull / push), used by the
+    /// Running-stage header. `None` when no op has run.
+    pub running_op: Option<GitOp>,
     /// Live output lines captured while a Running network op streams.
     pub output: Vec<String>,
     /// None while running; `Some(success)` once the op completes.
@@ -91,7 +102,7 @@ impl GitOpsState {
             message_input: Input::default(),
             has_upstream,
             status: None,
-            op_label: "",
+            running_op: None,
             output: Vec::new(),
             finished: None,
             close_at: None,
@@ -102,6 +113,16 @@ impl GitOpsState {
 
     /// Highest selectable menu index (six items, 0..=5).
     const MAX_IDX: usize = 5;
+
+    /// Whether the menu item at `idx` is enabled: commit requires staged
+    /// files, rebase is a disabled placeholder, everything else is always on.
+    pub fn item_enabled(&self, idx: usize) -> bool {
+        match idx {
+            3 => self.has_staged,
+            5 => false,
+            _ => true,
+        }
+    }
 
     pub fn handle_key(&mut self, key: KeyEvent, _ctx: &ScreenContext) -> ScreenAction {
         match self.stage {
@@ -228,12 +249,14 @@ impl GitOpsState {
                 ScreenAction::Continue
             }
             KeyCode::Enter => self.fire(self.selected),
-            KeyCode::Char('f') => self.fire(0),
-            KeyCode::Char('p') => self.fire(1),
-            KeyCode::Char('P') => self.fire(2),
-            KeyCode::Char('c') => self.fire(3),
-            KeyCode::Char('l') => self.fire(4),
-            KeyCode::Char('r') => self.fire(5),
+            // Case-sensitive hotkey lookup over the menu table ('p' pull vs
+            // 'P' push).
+            KeyCode::Char(c) => {
+                if let Some(idx) = MENU.iter().position(|(k, _)| *k == c) {
+                    return self.fire(idx);
+                }
+                ScreenAction::Continue
+            }
             _ => ScreenAction::Continue,
         }
     }
@@ -290,11 +313,7 @@ impl GitOpsState {
     /// Reset the run buffers, enter the Running stage, and dispatch `op` to the
     /// background git-ops worker.
     fn start_network_op(&mut self, op: GitOp) -> ScreenAction {
-        self.op_label = match op {
-            GitOp::Fetch => "Fetch",
-            GitOp::Pull => "Pull",
-            GitOp::Push { .. } => "Push",
-        };
+        self.running_op = Some(op);
         self.stage = GitOpsStage::Running;
         self.output.clear();
         self.finished = None;

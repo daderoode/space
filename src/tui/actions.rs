@@ -30,6 +30,17 @@ pub enum GitOp {
     Push { set_upstream: bool },
 }
 
+impl GitOp {
+    /// Display label for this op, used e.g. by the Running-stage header.
+    pub fn label(self) -> &'static str {
+        match self {
+            GitOp::Fetch => "Fetch",
+            GitOp::Pull => "Pull",
+            GitOp::Push { .. } => "Push",
+        }
+    }
+}
+
 /// Severity of a transient status message shown in the status bar.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum StatusKind {

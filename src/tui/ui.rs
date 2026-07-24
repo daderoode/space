@@ -1435,27 +1435,21 @@ fn render_gitops_overlay(
     spinner_tick: u64,
     frame: &mut Frame,
 ) {
-    use ratatui::widgets::Clear;
-
     // Running stage: a network op (Phase 2: fetch) streaming live output.
     if state.stage == crate::tui::screens::gitops::GitOpsStage::Running {
         let dialog_w = (frame.area().width * 60 / 100).max(48);
         let dialog_h = (frame.area().height * 60 / 100)
             .max(10)
             .min(frame.area().height.saturating_sub(2));
-        let area = centered_rect_fixed(dialog_w, dialog_h, frame.area());
-        frame.render_widget(Clear, area);
-
         let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(theme::border_focused())
-            .title(title);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
 
-        let op = state.op_label;
+        // The Running stage is only entered via `start_network_op`, which
+        // always sets `running_op`; the fallback is unreachable.
+        let op = state
+            .running_op
+            .map(crate::tui::actions::GitOp::label)
+            .unwrap_or("Git op");
         let header = match state.finished {
             None => {
                 // Animated ellipsis, same cadence as the dashboard spinner.
@@ -1493,17 +1487,8 @@ fn render_gitops_overlay(
         let dialog_h = (frame.area().height * 70 / 100)
             .max(10)
             .min(frame.area().height.saturating_sub(2));
-        let area = centered_rect_fixed(dialog_w, dialog_h, frame.area());
-        frame.render_widget(Clear, area);
-
         let title = format!(" Git log: {} ({}) ", state.repo_name, state.branch);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(theme::border_focused())
-            .title(title);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
 
         // Reserve the last row for a key hint; the commit list fills the rest.
         let sections = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
@@ -1552,17 +1537,8 @@ fn render_gitops_overlay(
     if state.stage == crate::tui::screens::gitops::GitOpsStage::ConfirmPush {
         let dialog_w = (frame.area().width * 60 / 100).max(48);
         let dialog_h = 7u16.min(frame.area().height.saturating_sub(2));
-        let area = centered_rect_fixed(dialog_w, dialog_h, frame.area());
-        frame.render_widget(Clear, area);
-
         let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(theme::border_focused())
-            .title(title);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
 
         let prompt = format!(
             "Branch {} has no upstream. Push and set upstream to origin/{}?  [y/N]",
@@ -1584,17 +1560,8 @@ fn render_gitops_overlay(
         let dialog_h = (content_rows + 2)
             .max(9)
             .min(frame.area().height.saturating_sub(2));
-        let area = centered_rect_fixed(dialog_w, dialog_h, frame.area());
-        frame.render_widget(Clear, area);
-
         let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(theme::border_focused())
-            .title(title);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
 
         let sections = Layout::vertical([
             Constraint::Length(1), // header
@@ -1636,36 +1603,19 @@ fn render_gitops_overlay(
         return;
     }
 
-    // (key, label, enabled). Order matches GitOpsState menu indices 0..=5.
-    let items: [(char, &str, bool); 6] = [
-        ('f', "fetch", true),
-        ('p', "pull", true),
-        ('P', "push", true),
-        ('c', "commit", state.has_staged),
-        ('l', "log", true),
-        ('r', "rebase", false),
-    ];
-
     let has_status = state.status.is_some();
     let content_rows = 6u16 + if has_status { 1 } else { 0 };
     let dialog_w = (frame.area().width * 50 / 100).max(40);
     let height: u16 = (content_rows + 2).min(frame.area().height.saturating_sub(2));
-    let area = centered_rect_fixed(dialog_w, height, frame.area());
-    frame.render_widget(Clear, area);
-
     let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(theme::border_focused())
-        .title(title);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = gitops_dialog(title, dialog_w, height, frame);
 
-    let rows: Vec<ListItem> = items
+    // Menu order and hotkeys come from the single source of truth in gitops.rs.
+    let rows: Vec<ListItem> = crate::tui::screens::gitops::MENU
         .iter()
         .enumerate()
-        .map(|(i, (keych, label, enabled))| {
+        .map(|(i, (keych, label))| {
+            let enabled = state.item_enabled(i);
             let marker = if i == state.selected { "> " } else { "  " };
             let text = format!("{}{}  {}", marker, keych, label);
             let style = if !enabled {
@@ -1687,6 +1637,24 @@ fn render_gitops_overlay(
             sections[1],
         );
     }
+}
+
+/// Shared chrome for every git-ops overlay stage: center a `dialog_w` x
+/// `dialog_h` dialog, clear it, draw the rounded focused border with `title`,
+/// and return the inner content area.
+fn gitops_dialog(title: String, dialog_w: u16, dialog_h: u16, frame: &mut Frame) -> Rect {
+    use ratatui::widgets::Clear;
+
+    let area = centered_rect_fixed(dialog_w, dialog_h, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border_focused())
+        .title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    inner
 }
 
 fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {

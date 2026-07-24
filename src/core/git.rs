@@ -70,7 +70,7 @@ pub struct BranchInfo {
     pub last_commit_time: i64,
 }
 
-/// A single commit as shown in the read-only Log stage of the git-ops overlay.
+/// A single commit from a repo's recent history (see `recent_commits`).
 /// `time` is the commit's unix timestamp, formatted for display via
 /// `relative_time`.
 #[derive(Debug, Clone)]

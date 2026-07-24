@@ -328,9 +328,9 @@ pub struct PullResult {
 }
 
 impl PullResult {
-    /// Whether the pull left the repo in a good state. Success outcomes let the
-    /// worker auto-close the overlay; failures keep it open so the user can read
-    /// the message.
+    /// Whether the pull left the repo in a good state: true for up to date,
+    /// ahead, fast-forwarded, or merged; false for fetch failures, detached
+    /// HEAD, no upstream, conflicts, and failed fast-forwards.
     pub fn success(&self) -> bool {
         matches!(
             self.outcome,
@@ -517,8 +517,8 @@ pub struct PushResult {
 /// - `set_upstream == false` → `git push` (branch already has an upstream).
 ///
 /// Never forces. A rejected push (remote ahead / non-fast-forward) returns
-/// `success == false` with git's rejection text in `message`, so the overlay
-/// stays open and the user can pull first.
+/// `success == false` with git's rejection text in `message`, so callers can
+/// surface why the push was refused (typically: pull first).
 pub fn push_repo(repo_path: &Path, set_upstream: bool) -> PushResult {
     let branch = match current_branch_name(repo_path) {
         Some(b) => b,
@@ -571,8 +571,8 @@ pub fn push_repo(repo_path: &Path, set_upstream: bool) -> PushResult {
 }
 
 /// Result of committing staged changes: whether git accepted the commit, plus a
-/// human-readable summary (git's own stdout/stderr) so the overlay can surface
-/// the outcome verbatim on both success and failure.
+/// human-readable summary (git's own stdout/stderr) callers can surface
+/// verbatim on both success and failure.
 pub struct CommitResult {
     pub success: bool,
     pub message: String,
