@@ -222,6 +222,10 @@ pub fn view(app: &App, frame: &mut Frame) {
             render_dashboard(app, frame);
             render_switch_branch_overlay(state, frame);
         }
+        Screen::GitOps(state) => {
+            render_dashboard(app, frame);
+            render_gitops_overlay(state, app.spinner_tick, frame);
+        }
     }
 }
 
@@ -1424,6 +1428,233 @@ fn render_switch_strategy_picker(
             sections[2],
         );
     }
+}
+
+fn render_gitops_overlay(
+    state: &crate::tui::screens::gitops::GitOpsState,
+    spinner_tick: u64,
+    frame: &mut Frame,
+) {
+    // Running stage: a network op (Phase 2: fetch) streaming live output.
+    if state.stage == crate::tui::screens::gitops::GitOpsStage::Running {
+        let dialog_w = (frame.area().width * 60 / 100).max(48);
+        let dialog_h = (frame.area().height * 60 / 100)
+            .max(10)
+            .min(frame.area().height.saturating_sub(2));
+        let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
+        let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
+
+        // The Running stage is only entered via `start_network_op`, which
+        // always sets `running_op`; the fallback is unreachable.
+        let op = state
+            .running_op
+            .map(crate::tui::actions::GitOp::label)
+            .unwrap_or("Git op");
+        let header = match state.finished {
+            None => {
+                // Animated ellipsis, same cadence as the dashboard spinner.
+                let frames = ["\u{b7}  ", "\u{b7}\u{b7} ", "\u{b7}\u{b7}\u{b7}"];
+                let dots = frames[(spinner_tick as usize / 30) % 3];
+                Span::styled(format!("{}ing {}", op, dots), theme::muted())
+            }
+            Some(true) => Span::styled(format!("\u{2713} {} complete", op), theme::success()),
+            Some(false) => Span::styled(
+                format!("\u{2717} {} failed (Esc/q to close)", op),
+                theme::error(),
+            ),
+        };
+
+        let sections = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+        frame.render_widget(Paragraph::new(Line::from(header)), sections[0]);
+
+        // Show the tail of the output that fits in the viewport.
+        let viewport = sections[1].height as usize;
+        let start = state.output.len().saturating_sub(viewport);
+        let lines: Vec<Line> = state.output[start..]
+            .iter()
+            .map(|l| Line::from(Span::styled(l.clone(), theme::muted())))
+            .collect();
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            sections[1],
+        );
+        return;
+    }
+
+    // Log stage: read-only scrollable list of recent commits.
+    if state.stage == crate::tui::screens::gitops::GitOpsStage::Log {
+        let dialog_w = (frame.area().width * 70 / 100).max(56);
+        let dialog_h = (frame.area().height * 70 / 100)
+            .max(10)
+            .min(frame.area().height.saturating_sub(2));
+        let title = format!(" Git log: {} ({}) ", state.repo_name, state.branch);
+        let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
+
+        // Reserve the last row for a key hint; the commit list fills the rest.
+        let sections = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(inner);
+        let list_area = sections[0];
+
+        if state.commits.is_empty() {
+            frame.render_widget(
+                Paragraph::new("No commits.").style(theme::muted()),
+                list_area,
+            );
+        } else {
+            // Viewport-aware upper clamp: never start so far down that a blank
+            // screenful shows below the last commit (the fix for the diff
+            // viewer's over-scroll).
+            let viewport_rows = list_area.height as usize;
+            let max_start = state.commits.len().saturating_sub(viewport_rows);
+            let start = (state.log_scroll as usize).min(max_start);
+            let end = (start + viewport_rows).min(state.commits.len());
+            let lines: Vec<Line> = state.commits[start..end]
+                .iter()
+                .map(|c| {
+                    let text = format!(
+                        "{}  {}  {}  {}",
+                        c.short_hash,
+                        crate::core::git::relative_time(c.time),
+                        c.author,
+                        c.subject
+                    );
+                    Line::from(Span::styled(text, theme::text()))
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(lines), list_area);
+        }
+
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "j/k scroll \u{00b7} Esc close",
+                theme::muted(),
+            ))),
+            sections[1],
+        );
+        return;
+    }
+
+    // ConfirmPush stage: confirm publishing a branch that has no upstream.
+    if state.stage == crate::tui::screens::gitops::GitOpsStage::ConfirmPush {
+        let dialog_w = (frame.area().width * 60 / 100).max(48);
+        let dialog_h = 7u16.min(frame.area().height.saturating_sub(2));
+        let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
+        let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
+
+        let prompt = format!(
+            "Branch {} has no upstream. Push and set upstream to origin/{}?  [y/N]",
+            state.branch, state.branch
+        );
+        frame.render_widget(Paragraph::new(prompt).wrap(Wrap { trim: false }), inner);
+        return;
+    }
+
+    // Committing stage: staged-file summary above a single-line message input.
+    if state.stage == crate::tui::screens::gitops::GitOpsStage::Committing {
+        let dialog_w = (frame.area().width * 60 / 100).max(48);
+        let staged_n = state.staged_files.len() as u16;
+        // header + staged list + prompt + input + status row, plus the border.
+        // The status row is always reserved because the layout below always
+        // allocates it; counting it conditionally clipped the staged list by
+        // one row whenever no status was shown.
+        let content_rows = 1 + staged_n.max(1) + 1 + 1 + 1;
+        let dialog_h = (content_rows + 2)
+            .max(9)
+            .min(frame.area().height.saturating_sub(2));
+        let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
+        let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
+
+        let sections = Layout::vertical([
+            Constraint::Length(1), // header
+            Constraint::Min(1),    // staged file list
+            Constraint::Length(1), // prompt
+            Constraint::Length(1), // input row
+            Constraint::Length(1), // status / error
+        ])
+        .split(inner);
+
+        frame.render_widget(
+            Paragraph::new("Commit staged files:").style(theme::muted()),
+            sections[0],
+        );
+        let staged: Vec<Line> = state
+            .staged_files
+            .iter()
+            .map(|p| Line::from(Span::styled(format!("  {}", p), theme::text())))
+            .collect();
+        frame.render_widget(
+            Paragraph::new(staged).wrap(Wrap { trim: false }),
+            sections[1],
+        );
+
+        frame.render_widget(
+            Paragraph::new("Message (Enter to commit, Esc to cancel):").style(theme::muted()),
+            sections[2],
+        );
+        frame.render_widget(
+            Paragraph::new(state.message_input.value()).style(theme::input_style()),
+            sections[3],
+        );
+        if let Some(status) = &state.status {
+            frame.render_widget(
+                Paragraph::new(status.as_str()).style(theme::error()),
+                sections[4],
+            );
+        }
+        return;
+    }
+
+    let has_status = state.status.is_some();
+    let content_rows = 6u16 + if has_status { 1 } else { 0 };
+    let dialog_w = (frame.area().width * 50 / 100).max(40);
+    let height: u16 = (content_rows + 2).min(frame.area().height.saturating_sub(2));
+    let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
+    let inner = gitops_dialog(title, dialog_w, height, frame);
+
+    // Menu order and hotkeys come from the single source of truth in gitops.rs.
+    let rows: Vec<ListItem> = crate::tui::screens::gitops::MENU
+        .iter()
+        .enumerate()
+        .map(|(i, (keych, label))| {
+            let enabled = state.item_enabled(i);
+            let marker = if i == state.selected { "> " } else { "  " };
+            let text = format!("{}{}  {}", marker, keych, label);
+            let style = if !enabled {
+                theme::dim_text()
+            } else if i == state.selected {
+                theme::selected()
+            } else {
+                Style::default()
+            };
+            ListItem::new(text).style(style)
+        })
+        .collect();
+
+    let sections = Layout::vertical([Constraint::Length(6), Constraint::Min(0)]).split(inner);
+    frame.render_widget(List::new(rows), sections[0]);
+    if let Some(status) = &state.status {
+        frame.render_widget(
+            Paragraph::new(status.as_str()).style(theme::muted()),
+            sections[1],
+        );
+    }
+}
+
+/// Shared chrome for every git-ops overlay stage: center a `dialog_w` x
+/// `dialog_h` dialog, clear it, draw the rounded focused border with `title`,
+/// and return the inner content area.
+fn gitops_dialog(title: String, dialog_w: u16, dialog_h: u16, frame: &mut Frame) -> Rect {
+    use ratatui::widgets::Clear;
+
+    let area = centered_rect_fixed(dialog_w, dialog_h, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border_focused())
+        .title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    inner
 }
 
 fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {

@@ -1327,3 +1327,78 @@ fn ahead_behind_from_repo_matches_path_version_with_remote() {
     assert_eq!(via_path.0, 1, "one unpushed commit => ahead=1");
     assert_eq!(via_path.1, 0, "nothing to pull => behind=0");
 }
+
+// ── recent_commits (Phase 6: Log) ─────────────────────────────────────
+
+/// Run a git command in `dir`, asserting success.
+fn git_in(dir: &std::path::Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Init a repo at `dir` with branch `main` and user config but NO initial
+/// commit, so callers can create an exact, known number of commits.
+fn init_repo_no_commit(dir: &std::path::Path) {
+    git_in(dir, &["init", "-b", "main"]);
+    git_in(dir, &["config", "user.email", "test@local"]);
+    git_in(dir, &["config", "user.name", "Test"]);
+}
+
+#[test]
+fn recent_commits_returns_newest_first_with_subjects() {
+    let tmp = TempDir::new().unwrap();
+    init_repo_no_commit(tmp.path());
+    for msg in ["first", "second", "third"] {
+        git_in(tmp.path(), &["commit", "--allow-empty", "-m", msg]);
+    }
+
+    let commits = space::core::git::recent_commits(tmp.path(), 50);
+
+    assert_eq!(commits.len(), 3, "should return all 3 commits");
+    assert_eq!(commits[0].subject, "third", "newest commit must be first");
+    assert_eq!(commits[1].subject, "second");
+    assert_eq!(commits[2].subject, "first", "oldest commit must be last");
+    assert!(
+        !commits[0].short_hash.is_empty(),
+        "short_hash should be populated"
+    );
+    assert_eq!(commits[0].author, "Test", "author name should be populated");
+}
+
+#[test]
+fn recent_commits_respects_limit() {
+    let tmp = TempDir::new().unwrap();
+    init_repo_no_commit(tmp.path());
+    for msg in ["c1", "c2", "c3", "c4", "c5"] {
+        git_in(tmp.path(), &["commit", "--allow-empty", "-m", msg]);
+    }
+
+    let commits = space::core::git::recent_commits(tmp.path(), 2);
+
+    assert_eq!(commits.len(), 2, "limit must cap the number of commits");
+    assert_eq!(commits[0].subject, "c5", "should return the 2 newest");
+    assert_eq!(commits[1].subject, "c4");
+}
+
+#[test]
+fn recent_commits_unborn_head_is_empty() {
+    let tmp = TempDir::new().unwrap();
+    // Freshly initialised repo with no commits (unborn HEAD).
+    init_repo_no_commit(tmp.path());
+
+    let commits = space::core::git::recent_commits(tmp.path(), 50);
+
+    assert!(
+        commits.is_empty(),
+        "unborn HEAD must yield an empty Vec, not panic"
+    );
+}

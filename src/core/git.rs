@@ -70,6 +70,17 @@ pub struct BranchInfo {
     pub last_commit_time: i64,
 }
 
+/// A single commit from a repo's recent history (see `recent_commits`).
+/// `time` is the commit's unix timestamp, formatted for display via
+/// `relative_time`.
+#[derive(Debug, Clone)]
+pub struct CommitInfo {
+    pub short_hash: String,
+    pub author: String,
+    pub time: i64,
+    pub subject: String,
+}
+
 /// Return the default branch name (main/master/etc.) by checking HEAD.
 pub fn detect_base_branch(repo_path: &Path) -> String {
     let repo = match Repository::open(repo_path) {
@@ -310,6 +321,33 @@ pub fn ahead_behind(repo_path: &Path) -> Result<(usize, usize)> {
     Ok((ahead, behind))
 }
 
+/// Returns true iff the current branch has a configured upstream tracking
+/// branch (`branch.upstream()` resolves). Returns false on detached HEAD, no
+/// upstream, a missing branch, or any error (e.g. the path is not a git repo).
+/// Used to decide whether a push must set the upstream with `-u origin
+/// <branch>` or can be a plain `git push`.
+pub fn has_upstream(repo_path: &Path) -> bool {
+    let Ok(repo) = Repository::open(repo_path) else {
+        return false;
+    };
+    let Ok(head) = repo.head() else {
+        return false;
+    };
+    if !head.is_branch() {
+        return false;
+    }
+    let Some(name) = head.shorthand() else {
+        return false;
+    };
+    // Bind to a `bool` so the temporary `Result<Branch>` is dropped before
+    // `repo` at the end of the function (avoids an E0597 borrow-lifetime error).
+    let has = match repo.find_branch(name, git2::BranchType::Local) {
+        Ok(branch) => branch.upstream().is_ok(),
+        Err(_) => false,
+    };
+    has
+}
+
 /// Return the names of all local branches that are strictly behind their
 /// `origin/<branch>` ref (0 commits ahead, 1+ commits behind). The comparison is
 /// always against `refs/remotes/origin/<name>`, not any configured upstream, so
@@ -350,6 +388,45 @@ pub fn branches_behind_upstream(repo_path: &Path) -> Vec<String> {
         }
     }
     result
+}
+
+/// Return up to `limit` commits reachable from HEAD, newest first (time
+/// sorted). Returns an empty `Vec` for an unborn HEAD, a repo with no commits,
+/// or a path that is not a git repository. Never panics: any git error
+/// (including `push_head` on an unborn branch) degrades to an empty list.
+pub fn recent_commits(repo_path: &Path, limit: usize) -> Vec<CommitInfo> {
+    recent_commits_inner(repo_path, limit).unwrap_or_default()
+}
+
+fn recent_commits_inner(repo_path: &Path, limit: usize) -> Result<Vec<CommitInfo>> {
+    let repo = Repository::open(repo_path)?;
+    let mut revwalk = repo.revwalk()?;
+    // TIME gives newest-first; TOPOLOGICAL breaks ties for commits that share
+    // the same second (rapid commits) so children always precede parents,
+    // matching `git log`'s order. TIME alone leaves same-second ties arbitrary.
+    revwalk.set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)?;
+    // Errors on an unborn HEAD (no commits) -> propagated -> empty Vec.
+    revwalk.push_head()?;
+
+    let mut commits = Vec::new();
+    for oid in revwalk {
+        if commits.len() >= limit {
+            break;
+        }
+        let oid = oid?;
+        let commit = repo.find_commit(oid)?;
+        let short_hash: String = oid.to_string().chars().take(7).collect();
+        let author = commit.author().name().unwrap_or("").to_string();
+        let time = commit.time().seconds();
+        let subject = commit.summary().unwrap_or("").to_string();
+        commits.push(CommitInfo {
+            short_hash,
+            author,
+            time,
+            subject,
+        });
+    }
+    Ok(commits)
 }
 
 /// Human-readable relative time string from a unix timestamp.

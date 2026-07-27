@@ -109,6 +109,48 @@ const REPO_PANE: BindingGroup = BindingGroup {
             key: "b",
             desc: "Switch branch",
         },
+        Binding {
+            key: "G",
+            desc: "Git operations",
+        },
+    ],
+};
+
+const GIT_OPS: BindingGroup = BindingGroup {
+    name: "Git Operations",
+    bindings: &[
+        Binding {
+            key: "f",
+            desc: "Fetch",
+        },
+        Binding {
+            key: "p",
+            desc: "Pull",
+        },
+        Binding {
+            key: "P",
+            desc: "Push",
+        },
+        Binding {
+            key: "c",
+            desc: "Commit",
+        },
+        Binding {
+            key: "l",
+            desc: "Log",
+        },
+        Binding {
+            key: "\u{2191}\u{2193}/jk",
+            desc: "Navigate",
+        },
+        Binding {
+            key: "enter",
+            desc: "Select",
+        },
+        Binding {
+            key: "esc/q",
+            desc: "Close",
+        },
     ],
 };
 
@@ -162,8 +204,14 @@ const GENERAL: BindingGroup = BindingGroup {
 
 /// All binding groups — consumed by the help overlay.
 pub fn all_groups() -> &'static [BindingGroup] {
-    static GROUPS: [BindingGroup; 5] =
-        [NAVIGATION, WORKSPACE_PANE, REPO_PANE, DIFF_VIEWER, GENERAL];
+    static GROUPS: [BindingGroup; 6] = [
+        NAVIGATION,
+        WORKSPACE_PANE,
+        REPO_PANE,
+        GIT_OPS,
+        DIFF_VIEWER,
+        GENERAL,
+    ];
     &GROUPS
 }
 
@@ -212,7 +260,7 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
             desc: "quit",
         },
     ];
-    static RIGHT: [Binding; 9] = [
+    static RIGHT: [Binding; 10] = [
         Binding {
             key: "enter",
             desc: "expand/diff",
@@ -240,6 +288,10 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
         Binding {
             key: "b",
             desc: "switch branch",
+        },
+        Binding {
+            key: "G",
+            desc: "git ops",
         },
         Binding {
             key: "?",

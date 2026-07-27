@@ -3397,3 +3397,742 @@ mod switch_branch_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Git operations menu tests (Phase 1: Skeleton)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod gitops_tests {
+    use super::*;
+
+    #[test]
+    fn g_key_on_repo_row_opens_gitops_menu() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+
+        // cursor_row = 0 is the repo row in the Right pane
+        app.handle_key(key(KeyCode::Char('G')));
+
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "G on a repo row should open the git ops menu"
+        );
+    }
+
+    #[test]
+    fn g_key_on_non_repo_row_does_nothing() {
+        use space::core::git::{FileEntry, FileStatus};
+
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.expanded_repos.insert(0);
+        app.repo_file_cache.insert(
+            0,
+            vec![FileEntry {
+                path: "a.rs".into(),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 1,
+                deletions: 0,
+            }],
+        );
+        // rows: [Repo(0), SectionHeader("Unstaged")(1), File(a.rs)(2)]
+        app.cursor_row = 2; // land on a file row, not a repo row
+
+        app.handle_key(key(KeyCode::Char('G')));
+
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "G on a file row should not open the git ops menu"
+        );
+
+        // Also: G in the Left pane must not open the menu
+        let ws2 = common::workspace_with_repos(&["repo-a"]);
+        let mut app2 = test_app(vec![ws2], vec![]);
+        app2.focus = Pane::Left;
+        app2.handle_key(key(KeyCode::Char('G')));
+        assert!(
+            matches!(app2.screen, Screen::Dashboard),
+            "G in the left pane should not open the git ops menu"
+        );
+    }
+
+    #[test]
+    fn gitops_menu_renders_repo_name_and_action_labels() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        let rendered = render_text(&app, 80, 24);
+
+        assert!(
+            rendered.contains("Git: repo-a"),
+            "menu title should name the repo, got:\n{}",
+            rendered
+        );
+        for label in ["fetch", "pull", "push", "commit", "log", "rebase"] {
+            assert!(
+                rendered.contains(label),
+                "menu should list the {:?} action, got:\n{}",
+                label,
+                rendered
+            );
+        }
+    }
+
+    #[test]
+    fn gitops_menu_j_k_move_the_highlight() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        // Initially the first item (fetch) is highlighted.
+        let r0 = render_text(&app, 80, 24);
+        assert!(
+            r0.contains("> f  fetch"),
+            "fetch should start highlighted, got:\n{}",
+            r0
+        );
+
+        // Down moves the highlight to pull.
+        app.handle_key(key(KeyCode::Char('j')));
+        let r1 = render_text(&app, 80, 24);
+        assert!(
+            r1.contains("> p  pull") && !r1.contains("> f  fetch"),
+            "j should move the highlight from fetch to pull, got:\n{}",
+            r1
+        );
+
+        // Up moves the highlight back to fetch.
+        app.handle_key(key(KeyCode::Char('k')));
+        let r2 = render_text(&app, 80, 24);
+        assert!(
+            r2.contains("> f  fetch") && !r2.contains("> p  pull"),
+            "k should move the highlight back to fetch, got:\n{}",
+            r2
+        );
+    }
+
+    #[test]
+    fn gitops_menu_f_starts_fetch_and_transitions_to_running() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        app.handle_key(key(KeyCode::Char('f')));
+
+        // Assert on the transition + rx immediately after the keypress: the
+        // worker's git fetch is asynchronous, so the stage/rx are set now even
+        // though the fetch against a fake path will later fail.
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Running,
+                "pressing f must transition the git ops overlay to the Running stage"
+            ),
+            _ => panic!("expected the git ops overlay to stay open in the Running stage"),
+        }
+        assert!(
+            app.gitop_rx.is_some(),
+            "pressing f must start the fetch worker (gitop_rx set)"
+        );
+    }
+
+    #[test]
+    fn gitops_menu_p_starts_pull_and_transitions_to_running() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        app.handle_key(key(KeyCode::Char('p')));
+
+        // As with fetch, the pull worker runs asynchronously: the stage/rx are
+        // set immediately even though the pull against a fake path later fails.
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Running,
+                "pressing p must transition the git ops overlay to the Running stage"
+            ),
+            _ => panic!("expected the git ops overlay to stay open in the Running stage"),
+        }
+        assert!(
+            app.gitop_rx.is_some(),
+            "pressing p must start the pull worker (gitop_rx set)"
+        );
+        // The Running header must reflect the actual op, not a hardcoded "Fetch".
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Pulling"),
+            "the pull Running header should say Pulling, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn gitops_menu_commit_disabled_when_nothing_staged() {
+        // workspace_with_repos uses a fake /tmp path, so file_diff fails and
+        // has_staged is false -> commit is disabled.
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        app.handle_key(key(KeyCode::Char('c')));
+
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "firing a disabled commit should keep the menu open"
+        );
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Stage files first with s/S"),
+            "commit with nothing staged should show the stage-first hint, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn gitops_menu_rebase_always_disabled() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        app.handle_key(key(KeyCode::Char('r')));
+
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "firing rebase should keep the menu open"
+        );
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Rebase coming soon (item 7)"),
+            "rebase should show the coming-soon hint, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn gitops_menu_esc_closes_to_dashboard() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+        assert!(matches!(app.screen, Screen::GitOps(_)));
+
+        app.handle_key(key(KeyCode::Esc));
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "Esc should close the git ops menu back to the dashboard"
+        );
+    }
+
+    #[test]
+    fn gitops_menu_q_closes_to_dashboard() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+        assert!(matches!(app.screen, Screen::GitOps(_)));
+
+        app.handle_key(key(KeyCode::Char('q')));
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "q should close the git ops menu back to the dashboard"
+        );
+    }
+
+    #[test]
+    fn gitops_menu_enter_fires_highlighted_item() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        // Move highlight to rebase (index 5), then Enter fires it. Rebase stays a
+        // permanent placeholder (out of scope for the whole feature), so this
+        // durably verifies Enter dispatches the highlighted item (distinct from a
+        // letter-key press) without depending on push/pull, which now start
+        // real flows.
+        for _ in 0..5 {
+            app.handle_key(key(KeyCode::Char('j')));
+        }
+        app.handle_key(key(KeyCode::Enter));
+
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "Enter should keep the menu open"
+        );
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Rebase coming soon (item 7)"),
+            "Enter on the highlighted rebase item should fire its placeholder, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn gitops_push_no_upstream_transitions_to_confirm() {
+        use space::tui::screens::gitops::GitOpsStage;
+        // workspace_with_repos uses a fake /tmp path, so has_upstream is false
+        // and push must ask for confirmation before publishing the branch.
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        app.handle_key(key(KeyCode::Char('P')));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::ConfirmPush,
+                "push with no upstream must transition to ConfirmPush, not Running"
+            ),
+            _ => panic!("expected the git ops overlay to stay open on ConfirmPush"),
+        }
+        assert!(
+            app.gitop_rx.is_none(),
+            "ConfirmPush must not start the push worker yet"
+        );
+    }
+
+    #[test]
+    fn gitops_confirm_push_y_starts_push_worker() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('P'))); // no upstream => ConfirmPush
+
+        app.handle_key(key(KeyCode::Char('y')));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Running,
+                "confirming push with y must start the worker (Running stage)"
+            ),
+            _ => panic!("expected the git ops overlay to stay open in the Running stage"),
+        }
+        assert!(
+            app.gitop_rx.is_some(),
+            "confirming push must start the push worker (gitop_rx set)"
+        );
+    }
+
+    #[test]
+    fn gitops_esc_after_successful_op_refreshes_like_auto_close() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+
+        // Simulate a finished, successful network op in the Running stage,
+        // with stale repo-pane state that the close must refresh away.
+        if let Screen::GitOps(ref mut st) = app.screen {
+            st.stage = GitOpsStage::Running;
+            st.finished = Some(true);
+        } else {
+            panic!("expected the git ops overlay");
+        }
+        app.expanded_repos.insert(0);
+
+        // Story 12: Esc closes a successful op sooner than the ~3s timer —
+        // and must leave the same refreshed state the auto-close produces.
+        app.handle_key(key(KeyCode::Esc));
+
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "Esc after success must return to the dashboard"
+        );
+        assert!(
+            app.expanded_repos.is_empty(),
+            "closing a successful op early must refresh the repo pane exactly \
+             like the auto-close path (stale expansion state must be gone)"
+        );
+    }
+
+    #[test]
+    fn gitops_confirm_push_enter_declines_matching_y_n_prompt() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('P'))); // no upstream => ConfirmPush
+
+        // The prompt reads [y/N]: Enter is the default No and must never
+        // publish the branch.
+        app.handle_key(key(KeyCode::Enter));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Menu,
+                "Enter must decline (default No) and return to the menu"
+            ),
+            _ => panic!("expected the git ops overlay to stay open on the Menu"),
+        }
+        assert!(
+            app.gitop_rx.is_none(),
+            "Enter must not start the push worker"
+        );
+    }
+
+    #[test]
+    fn gitops_confirm_push_n_returns_to_menu() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('P'))); // no upstream => ConfirmPush
+
+        app.handle_key(key(KeyCode::Char('n')));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Menu,
+                "declining push with n must return to the menu stage"
+            ),
+            _ => panic!("expected the git ops overlay to stay open on the Menu"),
+        }
+        assert!(
+            app.gitop_rx.is_none(),
+            "declining push must not start any worker"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 5: Commit (synchronous local op)
+    // -----------------------------------------------------------------------
+
+    /// Build a TestEnv-backed app whose single workspace repo is a real git repo
+    /// with one staged file, focused on the Right pane with the cursor on the
+    /// repo row. `G` opens the git ops menu with `has_staged == true`.
+    fn setup_gitops_staged_app(name: &str) -> (TestEnv, PathBuf, App) {
+        let env = TestEnv::new();
+        let repo_path = env.create_repo(name);
+
+        // Create and stage a file so has_staged is true.
+        std::fs::write(repo_path.join("staged.txt"), "content\n").unwrap();
+        let out = std::process::Command::new("git")
+            .args(["add", "staged.txt"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git add failed to run");
+        assert!(
+            out.status.success(),
+            "git add failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let ws = Workspace {
+            name: "test-ws".into(),
+            path: env.workspaces_dir.clone(),
+            repos: vec![WorkspaceRepo {
+                name: name.into(),
+                path: repo_path.clone(),
+                branch: "main".into(),
+                status: RepoStatus::default(),
+                ahead: 0,
+                behind: 0,
+            }],
+        };
+        let config = config_from_env(&env);
+        let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
+        app.load_selected_workspace_detail();
+        app.focus = Pane::Right; // cursor_row = 0 is the repo row
+        (env, repo_path, app)
+    }
+
+    /// Current HEAD sha of `repo`, or empty when HEAD is unborn.
+    fn head_sha(repo: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Subject line of the HEAD commit of `repo`.
+    fn head_subject(repo: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["log", "-1", "--pretty=%s"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn gitops_commit_c_transitions_to_committing_when_staged() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let (_env, _repo, mut app) = setup_gitops_staged_app("commit-stage-repo");
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('c')));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Committing,
+                "c with staged files must enter the Committing stage"
+            ),
+            _ => panic!("expected the git ops overlay in the Committing stage"),
+        }
+    }
+
+    #[test]
+    fn gitops_committing_empty_message_does_not_commit() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let (_env, repo, mut app) = setup_gitops_staged_app("commit-empty-repo");
+        let head_before = head_sha(&repo);
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('c')));
+        app.handle_key(key(KeyCode::Enter)); // empty message
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Committing,
+                "Enter with an empty message must stay in the Committing stage"
+            ),
+            _ => panic!("expected the git ops overlay still in the Committing stage"),
+        }
+        assert_eq!(
+            head_before,
+            head_sha(&repo),
+            "an empty commit message must not create a commit"
+        );
+    }
+
+    #[test]
+    fn gitops_committing_enter_commits_and_returns_to_dashboard() {
+        let (_env, repo, mut app) = setup_gitops_staged_app("commit-ok-repo");
+        let head_before = head_sha(&repo);
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('c')));
+        // Type the commit subject one char at a time, then Enter.
+        for ch in "hello world".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "a successful commit must return to the dashboard"
+        );
+        assert_ne!(
+            head_before,
+            head_sha(&repo),
+            "a successful commit must advance HEAD"
+        );
+        assert_eq!(
+            head_subject(&repo),
+            "hello world",
+            "the new commit's subject must match the typed message"
+        );
+    }
+
+    #[test]
+    fn gitops_committing_esc_returns_to_menu() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let (_env, repo, mut app) = setup_gitops_staged_app("commit-esc-repo");
+        let head_before = head_sha(&repo);
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('c')));
+        app.handle_key(key(KeyCode::Esc));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Menu,
+                "Esc in the Committing stage must return to the Menu stage"
+            ),
+            _ => panic!("expected the git ops overlay back on the Menu stage"),
+        }
+        assert_eq!(
+            head_before,
+            head_sha(&repo),
+            "Esc in the Committing stage must not create a commit"
+        );
+    }
+
+    #[test]
+    fn gitops_committing_renders_staged_files_and_typed_message() {
+        let (_env, _repo, mut app) = setup_gitops_staged_app("commit-render-repo");
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('c')));
+        for ch in "wip".chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("staged.txt"),
+            "the Committing stage must list the staged file, got:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("wip"),
+            "the Committing stage must show the typed message, got:\n{}",
+            rendered
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 6: Log (synchronous read-only revwalk)
+    // -----------------------------------------------------------------------
+
+    /// Build a TestEnv-backed app whose single workspace repo is a real git
+    /// repo with `extra_commits` empty commits layered on top of the init
+    /// commit. Focused on the Right pane with the cursor on the repo row so
+    /// `G` then `l` opens the Log stage.
+    fn setup_gitops_log_app(name: &str, extra_commits: &[&str]) -> (TestEnv, PathBuf, App) {
+        let env = TestEnv::new();
+        let repo_path = env.create_repo(name);
+        for msg in extra_commits {
+            let out = std::process::Command::new("git")
+                .args(["commit", "--allow-empty", "-m", msg])
+                .current_dir(&repo_path)
+                .output()
+                .expect("git commit failed to run");
+            assert!(
+                out.status.success(),
+                "git commit failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let ws = Workspace {
+            name: "test-ws".into(),
+            path: env.workspaces_dir.clone(),
+            repos: vec![WorkspaceRepo {
+                name: name.into(),
+                path: repo_path.clone(),
+                branch: "main".into(),
+                status: RepoStatus::default(),
+                ahead: 0,
+                behind: 0,
+            }],
+        };
+        let config = config_from_env(&env);
+        let mut app = test_app_with_config(config, vec![ws], vec![repo_path.clone()]);
+        app.load_selected_workspace_detail();
+        app.focus = Pane::Right; // cursor_row = 0 is the repo row
+        (env, repo_path, app)
+    }
+
+    #[test]
+    fn gitops_log_l_transitions_to_log_and_shows_commit_subject() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let (_env, _repo, mut app) = setup_gitops_log_app("log-open-repo", &["logtest-subject"]);
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('l')));
+
+        match &app.screen {
+            Screen::GitOps(st) => {
+                assert_eq!(st.stage, GitOpsStage::Log, "l must enter the Log stage")
+            }
+            _ => panic!("expected the git ops overlay in the Log stage"),
+        }
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("logtest-subject"),
+            "the Log stage must show a known commit subject, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn gitops_log_esc_returns_to_menu() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let (_env, _repo, mut app) = setup_gitops_log_app("log-esc-repo", &["only-commit"]);
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('l')));
+        app.handle_key(key(KeyCode::Esc));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Menu,
+                "Esc in the Log stage must return to the Menu stage"
+            ),
+            _ => panic!("expected the git ops overlay back on the Menu stage"),
+        }
+    }
+
+    #[test]
+    fn gitops_log_j_scrolls_down() {
+        // Many more commits than can fit on screen, so a down press has room to
+        // move the scroll offset.
+        let msgs: Vec<String> = (0..40).map(|i| format!("commit-{}", i)).collect();
+        let msg_refs: Vec<&str> = msgs.iter().map(String::as_str).collect();
+        let (_env, _repo, mut app) = setup_gitops_log_app("log-scroll-repo", &msg_refs);
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('l')));
+
+        let before = match &app.screen {
+            Screen::GitOps(st) => st.log_scroll,
+            _ => panic!("expected the Log stage"),
+        };
+        app.handle_key(key(KeyCode::Char('j')));
+        let after = match &app.screen {
+            Screen::GitOps(st) => st.log_scroll,
+            _ => panic!("expected the Log stage"),
+        };
+
+        assert_eq!(before, 0, "log_scroll should start at the top");
+        assert!(
+            after > before,
+            "j must increase log_scroll (was {}, now {})",
+            before,
+            after
+        );
+    }
+
+    #[test]
+    fn gitops_log_over_scroll_with_few_commits_does_not_panic_or_blank() {
+        // Fewer commits than the viewport: the down-scroll clamp must never
+        // underflow (usize) or reveal a blank screenful past the last commit.
+        let (_env, _repo, mut app) = setup_gitops_log_app("log-few-repo", &["only-extra"]);
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('l')));
+
+        // Hammer Down/End well past the number of commits.
+        for _ in 0..50 {
+            app.handle_key(key(KeyCode::Char('j')));
+        }
+        app.handle_key(key(KeyCode::End));
+
+        // Render at a tall viewport (many more rows than commits): must not
+        // panic, and a real commit must still be visible (no blank over-scroll).
+        let rendered = render_text(&app, 80, 40);
+        assert!(
+            rendered.contains("only-extra") || rendered.contains("init"),
+            "the log must still show a commit after over-scrolling, got:\n{}",
+            rendered
+        );
+    }
+}

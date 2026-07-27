@@ -39,6 +39,15 @@ pub enum SyncProgress {
     Done,
 }
 
+/// Sent from the git-ops worker thread back to the App during the Running stage.
+///
+/// Unlike `SyncProgress::Done`, the terminal `Done` here carries `success` so the
+/// UI can decide between auto-close (success) and stay-open (failure).
+pub enum GitOpProgress {
+    Line(String),
+    Done { success: bool },
+}
+
 const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(5);
 const SCROLL_STEP: u16 = 5;
 
@@ -99,6 +108,7 @@ pub enum Screen {
     ConfigEditor(crate::tui::screens::config::ConfigState),
     DiffViewer(crate::tui::screens::diff::DiffViewerState),
     SwitchBranch(crate::tui::screens::switch_branch::SwitchBranchState),
+    GitOps(crate::tui::screens::gitops::GitOpsState),
     Help,
 }
 
@@ -138,6 +148,9 @@ pub enum Message {
     ScrollTableLeft,
     ScrollTableRight,
     StartSwitchBranch {
+        repo_index: usize,
+    },
+    StartGitOps {
         repo_index: usize,
     },
 }
@@ -196,6 +209,10 @@ pub struct App {
     // Relaxed ordering is sufficient: this flag guards no other shared state, so
     // there is no happens-before relationship to establish with the worker thread.
     pub sync_cancel: Option<Arc<AtomicBool>>,
+
+    // Background git-ops worker (Running stage). Same shape as the sync worker.
+    pub gitop_rx: Option<mpsc::Receiver<GitOpProgress>>,
+    pub gitop_cancel: Option<Arc<AtomicBool>>,
 
     // Debounce
     pub nav_pending: Option<Instant>,
@@ -267,6 +284,8 @@ impl App {
             ws_generation: 0,
             sync_rx: None,
             sync_cancel: None,
+            gitop_rx: None,
+            gitop_cancel: None,
             nav_pending: None,
             ws_loading: false,
             ws_loading_since: None,
@@ -965,6 +984,80 @@ impl App {
         self.sync_rx = rx;
     }
 
+    /// Poll the git-ops worker channel once per frame. Non-blocking.
+    ///
+    /// Mirrors `poll_sync_result`: when the screen is no longer in the GitOps
+    /// Running stage it signals cancellation and drops the receiver. While
+    /// Running it drains `Line` output into the overlay buffer, records the
+    /// success/failure on `Done`, and fires the auto-close timer on success.
+    pub fn poll_gitop_result(&mut self) {
+        let is_running = matches!(
+            &self.screen,
+            Screen::GitOps(st)
+                if st.stage == crate::tui::screens::gitops::GitOpsStage::Running
+        );
+        if !is_running {
+            // Signal cancellation so the worker stops at its next boundary, then
+            // drop the receiver (a dropped sync_channel receiver makes the
+            // worker's next send return Err, so the thread still exits cleanly).
+            if let Some(c) = &self.gitop_cancel {
+                c.store(true, Ordering::Relaxed);
+            }
+            self.gitop_cancel = None;
+            self.gitop_rx = None;
+            return;
+        }
+
+        // Drain any worker output into the overlay's buffer.
+        let rx = self.gitop_rx.take();
+        if let Some(ref r) = rx {
+            loop {
+                match r.try_recv() {
+                    Ok(GitOpProgress::Line(s)) => {
+                        if let Screen::GitOps(st) = &mut self.screen {
+                            st.output.push(s);
+                        }
+                    }
+                    Ok(GitOpProgress::Done { success }) => {
+                        self.gitop_cancel = None;
+                        if let Screen::GitOps(st) = &mut self.screen {
+                            st.finished = Some(success);
+                            // Success gets out of the way after ~3s; failure stays
+                            // open so the error output remains readable.
+                            st.close_at = if success {
+                                Some(Instant::now() + Duration::from_secs(3))
+                            } else {
+                                None
+                            };
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        // Worker gone (e.g. cancelled) without a Done — stop polling.
+                        self.gitop_cancel = None;
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                }
+            }
+        }
+        self.gitop_rx = rx;
+
+        // Auto-close: once the success timer elapses, return to the dashboard
+        // and refresh the repo pane so newly fetched refs are reflected.
+        let should_close = matches!(
+            &self.screen,
+            Screen::GitOps(st)
+                if st.close_at.map(|t| Instant::now() >= t).unwrap_or(false)
+        );
+        if should_close {
+            self.reset_repo_pane_state();
+            self.load_selected_workspace_detail();
+            self.screen = Screen::Dashboard;
+            self.gitop_rx = None;
+            self.gitop_cancel = None;
+        }
+    }
+
     fn process_action(&mut self, action: crate::tui::actions::ScreenAction) {
         use crate::tui::actions::ScreenAction;
         match action {
@@ -972,6 +1065,20 @@ impl App {
             ScreenAction::Back => {
                 // Refresh workspaces when leaving Creating stage (catches partial creates)
                 self.refresh_if_leaving_creating_stage();
+                // Closing a *successful* git op early (Esc before the ~3s
+                // auto-close) must leave the same refreshed repo pane the
+                // auto-close path produces — otherwise the dashboard shows
+                // stale ahead/behind/file state.
+                let leaving_successful_gitop = matches!(
+                    &self.screen,
+                    Screen::GitOps(st)
+                        if st.stage == crate::tui::screens::gitops::GitOpsStage::Running
+                            && st.finished == Some(true)
+                );
+                if leaving_successful_gitop {
+                    self.reset_repo_pane_state();
+                    self.load_selected_workspace_detail();
+                }
                 self.screen = Screen::Dashboard;
             }
             ScreenAction::BackWithStatus(msg, kind) => {
@@ -1022,6 +1129,32 @@ impl App {
                 self.sync_rx = Some(rx);
                 self.sync_cancel = Some(cancel.clone());
                 std::thread::spawn(move || run_sync_worker(repos, tx, cancel));
+            }
+            ScreenAction::ExecuteGitOp { repo_path, op } => {
+                // Cancel any worker still live from a previous op before dropping
+                // its handle, so it stops at its boundary rather than running on.
+                if let Some(old) = &self.gitop_cancel {
+                    old.store(true, Ordering::Relaxed);
+                }
+                let (tx, rx) = mpsc::sync_channel::<GitOpProgress>(64);
+                let cancel = Arc::new(AtomicBool::new(false));
+                self.gitop_rx = Some(rx);
+                self.gitop_cancel = Some(cancel.clone());
+                std::thread::spawn(move || run_gitop_worker(repo_path, op, tx, cancel));
+            }
+            ScreenAction::CommitRepo { repo_path, message } => {
+                // Synchronous local op: commit, then refresh the repo pane. On
+                // failure keep the overlay in the Committing stage with an inline
+                // error so the user can fix the message (or staging) and retry.
+                let result = crate::core::workspace::commit_repo(&repo_path, &message);
+                if result.success {
+                    self.reset_repo_pane_state();
+                    self.load_selected_workspace_detail();
+                    self.screen = Screen::Dashboard;
+                    self.set_status("Committed", StatusKind::Success);
+                } else if let Screen::GitOps(st) = &mut self.screen {
+                    st.status = Some(format!("Commit failed: {}", result.message));
+                }
             }
             ScreenAction::SaveConfig(new_config) => {
                 self.config = new_config;
@@ -1120,6 +1253,7 @@ impl App {
             Screen::ConfigEditor(state) => state.handle_key(key, &ctx),
             Screen::DiffViewer(state) => state.handle_key(key, &ctx),
             Screen::SwitchBranch(state) => state.handle_key(key, &ctx),
+            Screen::GitOps(state) => state.handle_key(key, &ctx),
             Screen::Dashboard => {
                 drop(ctx);
                 // Dashboard key-to-message mapping
@@ -1171,6 +1305,14 @@ impl App {
                         let rows = self.flattened_rows();
                         if let Some(RepoRow::Repo { index, .. }) = rows.get(self.cursor_row) {
                             Some(Message::StartSwitchBranch { repo_index: *index })
+                        } else {
+                            None
+                        }
+                    }
+                    (KeyCode::Char('G'), _) if self.focus == Pane::Right => {
+                        let rows = self.flattened_rows();
+                        if let Some(RepoRow::Repo { index, .. }) = rows.get(self.cursor_row) {
+                            Some(Message::StartGitOps { repo_index: *index })
                         } else {
                             None
                         }
@@ -1298,6 +1440,107 @@ fn run_sync_worker(
         }
     }
     let _ = tx.send(SyncProgress::Done);
+}
+
+/// Background worker for the Running stage: run a single git operation in
+/// `repo_path`, forwarding stdout and stderr lines as `Line`, ending with
+/// `Done { success }`.
+///
+/// Cancellation is honored only at entry: if `cancel` is already set the worker
+/// returns immediately WITHOUT sending `Done`. An in-flight git subprocess
+/// cannot be interrupted, so cancellation takes effect at this boundary — the
+/// same semantics as `run_sync_worker`.
+fn run_gitop_worker(
+    repo_path: PathBuf,
+    op: crate::tui::actions::GitOp,
+    tx: mpsc::SyncSender<GitOpProgress>,
+    cancel: Arc<AtomicBool>,
+) {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+
+    if cancel.load(Ordering::Relaxed) {
+        return; // do NOT send Done — user cancelled before we started
+    }
+
+    match op {
+        // Fetch streams git's live progress lines straight through.
+        crate::tui::actions::GitOp::Fetch => {
+            let args: &[&str] = &["fetch"];
+            let child = Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
+
+            let mut child = match child {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(GitOpProgress::Line(format!(
+                        "git {} failed to start: {}",
+                        args.join(" "),
+                        e
+                    )));
+                    let _ = tx.send(GitOpProgress::Done { success: false });
+                    return;
+                }
+            };
+
+            // git fetch writes its progress to stderr, so both pipes must be
+            // drained. Drain stderr on a helper thread and stdout on this thread
+            // so neither pipe can fill and deadlock the child.
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+
+            let tx_err = tx.clone();
+            let err_handle = std::thread::spawn(move || {
+                if let Some(err) = stderr {
+                    let reader = BufReader::new(err);
+                    for line in reader.lines().map_while(Result::ok) {
+                        let _ = tx_err.send(GitOpProgress::Line(line));
+                    }
+                }
+            });
+
+            if let Some(out) = stdout {
+                let reader = BufReader::new(out);
+                for line in reader.lines().map_while(Result::ok) {
+                    let _ = tx.send(GitOpProgress::Line(line));
+                }
+            }
+
+            let _ = err_handle.join();
+            let success = child.wait().map(|s| s.success()).unwrap_or(false);
+            let _ = tx.send(GitOpProgress::Done { success });
+        }
+        // Pull runs the multi-step classify/merge logic in `pull_repo`, then
+        // reports its single summary line plus the success flag.
+        crate::tui::actions::GitOp::Pull => {
+            let result = crate::core::workspace::pull_repo(&repo_path);
+            // Git output can be multi-line (e.g. overwrite warnings); one
+            // GitOpProgress::Line per visual line keeps the tail window honest.
+            for line in result.message.lines() {
+                let _ = tx.send(GitOpProgress::Line(line.to_string()));
+            }
+            let _ = tx.send(GitOpProgress::Done {
+                success: result.success(),
+            });
+        }
+        // Push publishes the current branch (with `-u origin <branch>` when it
+        // has no upstream), reporting git's summary/rejection plus the flag.
+        crate::tui::actions::GitOp::Push { set_upstream } => {
+            let result = crate::core::workspace::push_repo(&repo_path, set_upstream);
+            // Push rejections are multi-line; send each line separately.
+            for line in result.message.lines() {
+                let _ = tx.send(GitOpProgress::Line(line.to_string()));
+            }
+            let _ = tx.send(GitOpProgress::Done {
+                success: result.success,
+            });
+        }
+    }
 }
 
 /// Advance `cursor_row` in the given direction, skipping `SectionHeader` rows.
@@ -1490,6 +1733,19 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                     repo.path.clone(),
                 );
                 app.screen = Screen::SwitchBranch(state);
+            }
+            None
+        }
+        Message::StartGitOps { repo_index } => {
+            if let Some(repo) = app
+                .selected_workspace()
+                .and_then(|ws| ws.repos.get(repo_index))
+            {
+                let state = crate::tui::screens::gitops::GitOpsState::new(
+                    repo.name.clone(),
+                    repo.path.clone(),
+                );
+                app.screen = Screen::GitOps(state);
             }
             None
         }
@@ -1792,6 +2048,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()
         app.check_debounce_timer();
         app.poll_background_result();
         app.poll_sync_result();
+        app.poll_gitop_result();
         app.spinner_tick = app.spinner_tick.wrapping_add(1);
 
         app.expire_status_message(Instant::now());
@@ -1855,6 +2112,8 @@ mod tests {
             ws_generation: 0,
             sync_rx: None,
             sync_cancel: None,
+            gitop_rx: None,
+            gitop_cancel: None,
             nav_pending: None,
             ws_loading: false,
             ws_loading_since: None,
@@ -1999,6 +2258,8 @@ mod tests {
             ws_generation: 0,
             sync_rx: None,
             sync_cancel: None,
+            gitop_rx: None,
+            gitop_cancel: None,
             nav_pending: None,
             ws_loading: false,
             ws_loading_since: None,
@@ -2375,6 +2636,85 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "no Step or Done must be sent when cancel is preset — repos skipped"
+        );
+    }
+
+    #[test]
+    fn poll_gitop_result_auto_closes_on_elapsed_success_timer() {
+        use crate::tui::screens::gitops::{GitOpsStage, GitOpsState};
+        let mut app = make_app(vec![]);
+        let mut st = GitOpsState::new("repo-a".to_string(), PathBuf::from("/tmp/repo-a"));
+        st.stage = GitOpsStage::Running;
+        st.finished = Some(true);
+        st.close_at = Some(Instant::now() - Duration::from_secs(1));
+        app.screen = Screen::GitOps(st);
+
+        app.poll_gitop_result();
+
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "an elapsed success close timer must return to the dashboard"
+        );
+    }
+
+    #[test]
+    fn poll_gitop_result_stays_open_on_failure() {
+        use crate::tui::screens::gitops::{GitOpsStage, GitOpsState};
+        let mut app = make_app(vec![]);
+        let mut st = GitOpsState::new("repo-a".to_string(), PathBuf::from("/tmp/repo-a"));
+        st.stage = GitOpsStage::Running;
+        st.finished = Some(false);
+        st.close_at = None;
+        app.screen = Screen::GitOps(st);
+
+        app.poll_gitop_result();
+
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "a failed op with no close timer must keep the overlay open until Esc"
+        );
+    }
+
+    #[test]
+    fn execute_gitop_creates_channel() {
+        use crate::tui::actions::{GitOp, ScreenAction};
+        let mut app = make_app(vec![]);
+        app.process_action(ScreenAction::ExecuteGitOp {
+            repo_path: PathBuf::from("/nonexistent/repo-a"),
+            op: GitOp::Fetch,
+        });
+        assert!(
+            app.gitop_rx.is_some(),
+            "gitop_rx must be set after ExecuteGitOp"
+        );
+    }
+
+    #[test]
+    fn poll_gitop_result_drops_rx_when_not_running() {
+        let mut app = make_app(vec![]);
+        // Dashboard screen — not in the GitOps Running stage.
+        let (_tx, rx) = mpsc::sync_channel::<GitOpProgress>(4);
+        app.gitop_rx = Some(rx);
+        app.poll_gitop_result();
+        assert!(
+            app.gitop_rx.is_none(),
+            "gitop_rx must be dropped when not in the Running stage"
+        );
+    }
+
+    #[test]
+    fn run_gitop_worker_honors_preset_cancel_flag() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = mpsc::sync_channel::<GitOpProgress>(64);
+        run_gitop_worker(
+            PathBuf::from("/nonexistent/repo-a"),
+            crate::tui::actions::GitOp::Fetch,
+            tx,
+            cancel,
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no Line or Done must be sent when cancel is preset — worker returns at the boundary"
         );
     }
 

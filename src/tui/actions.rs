@@ -19,6 +19,28 @@ pub struct WorktreeParams {
     pub is_new: bool,
 }
 
+/// A git operation dispatched to the background git-ops worker.
+/// `Fetch` streams git's progress; `Pull` summarizes the classify/merge result;
+/// `Push { set_upstream }` publishes the current branch (with `-u origin
+/// <branch>` when it has no upstream yet).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitOp {
+    Fetch,
+    Pull,
+    Push { set_upstream: bool },
+}
+
+impl GitOp {
+    /// Display label for this op, used e.g. by the Running-stage header.
+    pub fn label(self) -> &'static str {
+        match self {
+            GitOp::Fetch => "Fetch",
+            GitOp::Pull => "Pull",
+            GitOp::Push { .. } => "Push",
+        }
+    }
+}
+
 /// Severity of a transient status message shown in the status bar.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum StatusKind {
@@ -43,6 +65,10 @@ pub enum ScreenAction {
     ExecuteWorktreeFlow(WorktreeParams),
     /// Fetch + fast-forward the given repos, then transition to branch picker.
     ExecuteSyncFlow(Vec<std::path::PathBuf>),
+    /// Run a git operation on a single repo via the background git-ops worker.
+    ExecuteGitOp { repo_path: PathBuf, op: GitOp },
+    /// Commit the staged changes of a single repo (synchronous local op).
+    CommitRepo { repo_path: PathBuf, message: String },
     /// Delete a workspace.
     DeleteWorkspace { name: String, force: bool },
     /// Save config and reload.
