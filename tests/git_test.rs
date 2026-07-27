@@ -207,6 +207,7 @@ fn ahead_behind_with_remote_counts_commits() {
     for args in [
         vec!["config", "user.email", "test@local"],
         vec!["config", "user.name", "Test"],
+        vec!["config", "commit.gpgsign", "false"],
     ] {
         let out = Command::new("git")
             .args(&args)
@@ -253,6 +254,44 @@ fn ahead_behind_with_remote_counts_commits() {
     let (ahead, behind) = space::core::git::ahead_behind(clone_dir.path()).unwrap();
     assert_eq!(ahead, 1, "one unpushed commit");
     assert_eq!(behind, 0, "nothing to pull");
+}
+
+#[test]
+fn ahead_behind_vs_counts_commits_against_arbitrary_target() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    // feature: 2 commits ahead of the fork point; main: 1 commit ahead of it.
+    git(&["checkout", "-b", "feature"]);
+    git(&["commit", "--allow-empty", "-m", "f1"]);
+    git(&["commit", "--allow-empty", "-m", "f2"]);
+    git(&["checkout", "main"]);
+    git(&["commit", "--allow-empty", "-m", "m1"]);
+    git(&["checkout", "feature"]);
+
+    let (ahead, behind) = space::core::git::ahead_behind_vs(tmp.path(), "main")
+        .expect("a resolvable target must yield counts");
+    assert_eq!(ahead, 2, "feature has two commits to replay onto main");
+    assert_eq!(behind, 1, "main has one commit feature lacks");
+
+    assert!(
+        space::core::git::ahead_behind_vs(tmp.path(), "no-such-ref").is_none(),
+        "an unresolvable target must yield None"
+    );
 }
 
 #[test]
@@ -598,6 +637,7 @@ fn unstage_file_in_unborn_repo_uses_remove_path() {
     for args in [
         vec!["config", "user.email", "test@local"],
         vec!["config", "user.name", "Test"],
+        vec!["config", "commit.gpgsign", "false"],
     ] {
         Command::new("git")
             .args(&args)
@@ -1272,6 +1312,7 @@ fn ahead_behind_from_repo_matches_path_version_with_remote() {
     for args in [
         vec!["config", "user.email", "test@local"],
         vec!["config", "user.name", "Test"],
+        vec!["config", "commit.gpgsign", "false"],
     ] {
         let out = Command::new("git")
             .args(&args)
@@ -1351,6 +1392,8 @@ fn init_repo_no_commit(dir: &std::path::Path) {
     git_in(dir, &["init", "-b", "main"]);
     git_in(dir, &["config", "user.email", "test@local"]);
     git_in(dir, &["config", "user.name", "Test"]);
+    // Hermetic against a host-level `commit.gpgsign = true` (see common::init_repo).
+    git_in(dir, &["config", "commit.gpgsign", "false"]);
 }
 
 #[test]

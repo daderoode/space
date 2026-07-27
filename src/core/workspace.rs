@@ -615,6 +615,142 @@ pub fn commit_repo(repo_path: &Path, message: &str) -> CommitResult {
     }
 }
 
+/// The classification of what `rebase_repo` did (or why it did nothing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebaseOutcome {
+    /// HEAD is detached — no branch to rebase (defensive; the TUI pre-flight
+    /// already blocks this).
+    DetachedHead,
+    /// The branch was replayed onto the target.
+    Rebased,
+    /// The branch is already up to date with the target (nothing replayed).
+    UpToDate,
+    /// The rebase hit conflicts; it was aborted and the branch restored.
+    Conflicted,
+    /// The rebase could not start or apply (e.g. an unknown target ref); git's
+    /// error output is in the message.
+    Failed,
+}
+
+/// Result of rebasing a single repo: the outcome plus a human-readable message.
+pub struct RebaseResult {
+    pub outcome: RebaseOutcome,
+    pub message: String,
+}
+
+impl RebaseResult {
+    /// Whether the rebase left the branch in the intended state: true for a
+    /// completed rebase or an already-up-to-date branch; false for detached
+    /// HEAD, conflicts (aborted), and failures.
+    pub fn success(&self) -> bool {
+        matches!(
+            self.outcome,
+            RebaseOutcome::Rebased | RebaseOutcome::UpToDate
+        )
+    }
+}
+
+/// Rebase the current branch of `repo_path` onto `onto`, replaying local commits
+/// on top of the target.
+///
+/// Fetches `origin` best-effort first (non-fatal) so `origin/*` targets are
+/// current, then runs `git rebase <onto>`. On conflict the rebase is aborted
+/// (`git rebase --abort`) and the branch restored, so `space` never leaves a
+/// worktree mid-rebase.
+///
+/// Conflict vs. immediate failure is classified by the abort result rather than
+/// probing `.git/rebase-merge` (which is fragile under worktrees): if
+/// `git rebase --abort` succeeds, a rebase was in progress and hit conflicts;
+/// if it fails ("no rebase in progress"), the rebase never started (e.g. an
+/// unknown target) and the failure is reported verbatim.
+pub fn rebase_repo(repo_path: &Path, onto: &str) -> RebaseResult {
+    let branch = match current_branch_name(repo_path) {
+        Some(b) => b,
+        None => {
+            return RebaseResult {
+                outcome: RebaseOutcome::DetachedHead,
+                message: "Detached HEAD: no branch to rebase.".to_string(),
+            };
+        }
+    };
+
+    // Best-effort refresh so a rebase onto `origin/<x>` replays onto the latest
+    // remote state. A fetch failure (offline / no remote) is non-fatal: the
+    // rebase can still proceed onto a local target.
+    let _ = Command::new("git")
+        .args(["fetch", "--quiet", "origin"])
+        .current_dir(repo_path)
+        .output();
+
+    let out = Command::new("git")
+        .args(["rebase", onto])
+        .current_dir(repo_path)
+        .output();
+
+    match out {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            if stdout.contains("is up to date") {
+                RebaseResult {
+                    outcome: RebaseOutcome::UpToDate,
+                    message: format!("{} is already up to date with {}.", branch, onto),
+                }
+            } else {
+                RebaseResult {
+                    outcome: RebaseOutcome::Rebased,
+                    message: format!("Rebased {} onto {}.", branch, onto),
+                }
+            }
+        }
+        Ok(o) => {
+            // The rebase either hit a conflict mid-replay or failed to start.
+            // `git rebase --abort` succeeds only when a rebase is in progress,
+            // so its result cleanly distinguishes the two without touching the
+            // worktree's git-dir layout.
+            let aborted = Command::new("git")
+                .args(["rebase", "--abort"])
+                .current_dir(repo_path)
+                .output()
+                .map(|a| a.status.success())
+                .unwrap_or(false);
+            if aborted {
+                RebaseResult {
+                    outcome: RebaseOutcome::Conflicted,
+                    // Two lines: what happened, then the next step (the worker
+                    // streams each line separately in the Running overlay).
+                    message: format!(
+                        "Rebase of {} onto {} conflicted; aborted and restored the branch.\n\
+                         Resolve the conflicts manually: run 'git rebase {}' in a terminal.",
+                        branch, onto, onto
+                    ),
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let detail = stderr.trim();
+                let detail = if detail.is_empty() {
+                    stdout.trim()
+                } else {
+                    detail
+                };
+                let detail = if detail.is_empty() {
+                    "git reported no error output"
+                } else {
+                    detail
+                };
+                RebaseResult {
+                    outcome: RebaseOutcome::Failed,
+                    message: format!("Rebase of {} onto {} failed: {}", branch, onto, detail),
+                }
+            }
+        }
+        Err(err) => RebaseResult {
+            outcome: RebaseOutcome::Failed,
+            message: format!("Failed to run git rebase: {}", err),
+        },
+    }
+}
+
 /// The current checked-out branch name, or `None` when HEAD is detached (no
 /// symbolic branch ref).
 fn current_branch_name(repo_path: &Path) -> Option<String> {
@@ -1453,6 +1589,183 @@ mod tests {
         assert!(
             !result.message.is_empty(),
             "a failed commit must carry a message"
+        );
+    }
+
+    #[test]
+    fn rebase_repo_replays_branch_onto_advanced_target() {
+        let (tmp, local) = origin_and_local();
+
+        // Remote advances main with a new file; local advances main with a
+        // different, non-conflicting file — a diverge that rebases cleanly.
+        advance_origin(tmp.path(), |helper| {
+            std::fs::write(helper.join("helper.txt"), "helper\n").unwrap();
+            git(&["add", "."], helper);
+            git(&["commit", "-m", "helper-side"], helper);
+        });
+        std::fs::write(local.join("local.txt"), "local\n").unwrap();
+        git(&["add", "."], &local);
+        git(&["commit", "-m", "local-side"], &local);
+
+        // rebase_repo's internal fetch refreshes origin/main before replaying.
+        let result = rebase_repo(&local, "origin/main");
+
+        assert!(
+            matches!(result.outcome, RebaseOutcome::Rebased),
+            "clean diverge must rebase, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(
+            local.join("local.txt").exists() && local.join("helper.txt").exists(),
+            "rebased worktree must contain both sides' files"
+        );
+        // Linear history: no merge commit (HEAD^2 must not resolve) and the
+        // replayed commit must sit directly on top of origin/main.
+        let two_parents = Cmd::new("git")
+            .args(["rev-parse", "--verify", "HEAD^2"])
+            .current_dir(&local)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(!two_parents, "a rebase must not create a merge commit");
+        assert_eq!(
+            get_sha(&local, "HEAD^"),
+            get_sha(&local, "origin/main"),
+            "the replayed commit must sit directly on origin/main"
+        );
+    }
+
+    #[test]
+    fn rebase_repo_reports_up_to_date_when_target_is_ancestor() {
+        let (_tmp, local) = origin_and_local();
+        // Local is ahead of origin/main; rebasing onto an ancestor is a no-op.
+        git(&["commit", "--allow-empty", "-m", "local-only"], &local);
+        let sha_before = get_sha(&local, "main");
+
+        let result = rebase_repo(&local, "origin/main");
+
+        assert!(
+            matches!(result.outcome, RebaseOutcome::UpToDate),
+            "rebasing onto an ancestor must report UpToDate, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(result.success(), "UpToDate is a success");
+        assert_eq!(
+            sha_before,
+            get_sha(&local, "main"),
+            "an up-to-date rebase must not move the branch"
+        );
+    }
+
+    #[test]
+    fn rebase_repo_aborts_conflicting_rebase_and_restores_branch() {
+        let (tmp, local) = origin_and_local();
+
+        // Remote and local change the SAME file to different content.
+        advance_origin(tmp.path(), |helper| {
+            std::fs::write(helper.join("base.txt"), "helper-version\n").unwrap();
+            git(&["add", "."], helper);
+            git(&["commit", "-m", "helper-edit"], helper);
+        });
+        std::fs::write(local.join("base.txt"), "local-version\n").unwrap();
+        git(&["add", "."], &local);
+        git(&["commit", "-m", "local-edit"], &local);
+        let sha_before = get_sha(&local, "main");
+
+        let result = rebase_repo(&local, "origin/main");
+
+        assert!(
+            matches!(result.outcome, RebaseOutcome::Conflicted),
+            "conflicting rebase must report Conflicted, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(!result.success(), "Conflicted is not a success");
+        assert!(
+            result.message.contains("git rebase"),
+            "the conflict message must instruct the user to rebase manually, got: {}",
+            result.message
+        );
+        // The rebase must have been aborted: no rebase in progress, clean
+        // status, no conflict markers, and the branch back where it started.
+        let no_rebase_in_progress = !Cmd::new("git")
+            .args(["rebase", "--abort"])
+            .current_dir(&local)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(
+            no_rebase_in_progress,
+            "no rebase may be in progress after the auto-abort"
+        );
+        let porcelain = Cmd::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&porcelain.stdout).trim().is_empty(),
+            "worktree must be clean after rebase --abort"
+        );
+        let base = std::fs::read_to_string(local.join("base.txt")).unwrap();
+        assert!(
+            !base.contains("<<<<<<<"),
+            "base.txt must not contain conflict markers after abort"
+        );
+        assert_eq!(
+            sha_before,
+            get_sha(&local, "main"),
+            "aborted rebase must leave main at its pre-rebase commit"
+        );
+    }
+
+    #[test]
+    fn rebase_repo_reports_failure_on_unknown_target() {
+        let (_tmp, local) = origin_and_local();
+        let sha_before = get_sha(&local, "main");
+
+        let result = rebase_repo(&local, "no-such-branch");
+
+        assert!(
+            matches!(result.outcome, RebaseOutcome::Failed),
+            "an unknown target must report Failed (not Conflicted), got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(
+            !result.message.is_empty(),
+            "the failure must surface git's error output"
+        );
+        assert_eq!(
+            sha_before,
+            get_sha(&local, "main"),
+            "a failed rebase must not move the branch"
+        );
+    }
+
+    #[test]
+    fn rebase_repo_reports_detached_head_without_acting() {
+        let (_tmp, local) = origin_and_local();
+        git(&["checkout", "--detach"], &local);
+        let sha_before = get_sha(&local, "HEAD");
+
+        let result = rebase_repo(&local, "origin/main");
+
+        assert!(
+            matches!(result.outcome, RebaseOutcome::DetachedHead),
+            "detached HEAD must report DetachedHead, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(!result.success(), "DetachedHead is not a success");
+        assert_eq!(
+            sha_before,
+            get_sha(&local, "HEAD"),
+            "a detached-HEAD rebase must not move HEAD"
         );
     }
 }

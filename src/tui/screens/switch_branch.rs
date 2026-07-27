@@ -88,7 +88,11 @@ impl SwitchBranchState {
                     self.stage = SwitchBranchStage::EnterBranchName;
                     ScreenAction::Continue
                 } else if self.strategy_idx == max {
-                    match crate::tui::app::build_branch_picker(&self.repo_path, &self.repo_name) {
+                    match crate::tui::app::build_branch_picker(
+                        &self.repo_path,
+                        &self.repo_name,
+                        "Branch",
+                    ) {
                         Some(picker) => {
                             self.error = None;
                             self.branch_picker = Some(picker);

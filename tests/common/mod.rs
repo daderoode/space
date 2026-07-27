@@ -43,6 +43,20 @@ pub fn init_repo(dir: &Path) {
         String::from_utf8_lossy(&out.stderr)
     );
 
+    // Keep fixtures hermetic: a host-level `commit.gpgsign = true` (e.g. SSH
+    // signing) would make every fixture commit depend on the user's signing
+    // setup/agent. The in-crate workspace tests' git_setup does the same.
+    let out = Command::new("git")
+        .args(["config", "commit.gpgsign", "false"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git config commit.gpgsign failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
     let out = Command::new("git")
         .args(["commit", "--allow-empty", "-m", "init"])
         .current_dir(dir)

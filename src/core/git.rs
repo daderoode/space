@@ -321,6 +321,21 @@ pub fn ahead_behind(repo_path: &Path) -> Result<(usize, usize)> {
     Ok((ahead, behind))
 }
 
+/// Return `(ahead, behind)` of the current `HEAD` relative to an arbitrary
+/// `target` revision (e.g. `main`, `origin/main`, a SHA). `ahead` is the number
+/// of commits on `HEAD` not reachable from `target` (these get replayed by a
+/// rebase); `behind` is the number of commits on `target` not on `HEAD`.
+///
+/// Returns `None` on detached HEAD, an unresolvable `target`, or any git error,
+/// so callers can render a preview panel without a target being fatal. Used by
+/// the rebase-confirm summary.
+pub fn ahead_behind_vs(repo_path: &Path, target: &str) -> Option<(usize, usize)> {
+    let repo = Repository::open(repo_path).ok()?;
+    let local_oid = repo.head().ok()?.target()?;
+    let target_oid = repo.revparse_single(target).ok()?.id();
+    repo.graph_ahead_behind(local_oid, target_oid).ok()
+}
+
 /// Returns true iff the current branch has a configured upstream tracking
 /// branch (`branch.upstream()` resolves). Returns false on detached HEAD, no
 /// upstream, a missing branch, or any error (e.g. the path is not a git repo).

@@ -1,5 +1,6 @@
 use crate::core::git::CommitInfo;
 use crate::tui::actions::{GitOp, ScreenAction, ScreenContext};
+use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::path::PathBuf;
 use tui_input::Input;
@@ -24,10 +25,18 @@ pub enum GitOpsStage {
     Committing,
     /// Read-only scrollable list of recent commits.
     Log,
-    /// A network op (fetch / pull / push) is running, showing live output lines.
+    /// A network op (fetch / pull / push / rebase) is running, showing live
+    /// output lines.
     Running,
     /// Confirm publishing a branch that has no upstream yet (push -u origin).
     ConfirmPush,
+    /// Rebase pre-flight: shows the branch state and either a blocking reason
+    /// (detached HEAD / dirty tree) or a ready-to-continue prompt.
+    RebasePreflight,
+    /// Pick the branch to rebase onto (reuses the shared fuzzy branch picker).
+    RebasePickTarget,
+    /// Confirm the rebase with an ahead/behind preview before executing.
+    RebaseConfirm,
 }
 
 pub struct GitOpsState {
@@ -62,6 +71,18 @@ pub struct GitOpsState {
     /// viewport-aware upper clamp so it can never scroll past the last full
     /// screenful.
     pub log_scroll: u16,
+    /// `Some(reason)` when the rebase pre-flight failed (detached HEAD / dirty
+    /// tree); the RebasePreflight stage shows it and Enter cannot proceed.
+    pub rebase_block: Option<String>,
+    /// The branch picker for the RebasePickTarget stage.
+    pub rebase_picker: Option<FuzzyPicker>,
+    /// The target branch chosen to rebase onto, carried into the confirm stage
+    /// and the `GitOp::Rebase` dispatch.
+    pub rebase_onto: Option<String>,
+    /// `(ahead, behind)` of HEAD vs the chosen target, shown as a preview on the
+    /// RebaseConfirm stage. `ahead` = commits to replay; `behind` = commits the
+    /// target has that HEAD does not.
+    pub rebase_ahead_behind: Option<(usize, usize)>,
 }
 
 impl std::fmt::Debug for GitOpsState {
@@ -108,6 +129,10 @@ impl GitOpsState {
             close_at: None,
             commits: Vec::new(),
             log_scroll: 0,
+            rebase_block: None,
+            rebase_picker: None,
+            rebase_onto: None,
+            rebase_ahead_behind: None,
         }
     }
 
@@ -115,11 +140,10 @@ impl GitOpsState {
     const MAX_IDX: usize = 5;
 
     /// Whether the menu item at `idx` is enabled: commit requires staged
-    /// files, rebase is a disabled placeholder, everything else is always on.
+    /// files; everything else is always on.
     pub fn item_enabled(&self, idx: usize) -> bool {
         match idx {
             3 => self.has_staged,
-            5 => false,
             _ => true,
         }
     }
@@ -134,6 +158,9 @@ impl GitOpsState {
             GitOpsStage::ConfirmPush => self.handle_confirm_push_key(key),
             GitOpsStage::Committing => self.handle_committing_key(key),
             GitOpsStage::Log => self.handle_log_key(key),
+            GitOpsStage::RebasePreflight => self.handle_rebase_preflight_key(key),
+            GitOpsStage::RebasePickTarget => self.handle_rebase_pick_target_key(key),
+            GitOpsStage::RebaseConfirm => self.handle_rebase_confirm_key(key),
             GitOpsStage::Menu => self.handle_menu_key(key),
         }
     }
@@ -264,7 +291,7 @@ impl GitOpsState {
     /// Fire the menu item at `idx`, moving the highlight to it. Fetch/pull/push
     /// run through the async Running stage (push confirms first when the branch
     /// has no upstream); commit and log open their own stages synchronously;
-    /// rebase is a disabled placeholder (Tier 3 item 7).
+    /// rebase opens the guarded pre-flight/target/confirm sub-flow.
     fn fire(&mut self, idx: usize) -> ScreenAction {
         self.selected = idx;
         match idx {
@@ -302,10 +329,7 @@ impl GitOpsState {
                 self.stage = GitOpsStage::Log;
                 ScreenAction::Continue
             }
-            5 => {
-                self.status = Some("Rebase coming soon (item 7)".to_string());
-                ScreenAction::Continue
-            }
+            5 => self.start_rebase(),
             _ => ScreenAction::Continue,
         }
     }
@@ -313,7 +337,7 @@ impl GitOpsState {
     /// Reset the run buffers, enter the Running stage, and dispatch `op` to the
     /// background git-ops worker.
     fn start_network_op(&mut self, op: GitOp) -> ScreenAction {
-        self.running_op = Some(op);
+        self.running_op = Some(op.clone());
         self.stage = GitOpsStage::Running;
         self.output.clear();
         self.finished = None;
@@ -322,6 +346,171 @@ impl GitOpsState {
         ScreenAction::ExecuteGitOp {
             repo_path: self.repo_path.clone(),
             op,
+        }
+    }
+
+    /// Enter the rebase sub-flow: run the synchronous pre-flight (detached HEAD
+    /// / dirty working tree) and open the RebasePreflight summary. A blocking
+    /// state is recorded in `rebase_block`; the stage renders it and Enter
+    /// cannot proceed until the user clears it (commit/stash) and re-enters.
+    fn start_rebase(&mut self) -> ScreenAction {
+        self.rebase_onto = None;
+        self.rebase_ahead_behind = None;
+        self.rebase_picker = None;
+        self.status = None;
+
+        let detached = crate::core::git::current_branch(&self.repo_path).is_err();
+        // Untracked files do not block a rebase, so only tracked modifications,
+        // staged changes, and conflicts count as "dirty" here (matching what
+        // `git rebase` itself refuses).
+        let dirty = crate::core::git::repo_status(&self.repo_path)
+            .map(|s| s.modified > 0 || s.staged > 0 || s.conflicted > 0)
+            .unwrap_or(false);
+
+        self.rebase_block = if detached {
+            Some("Detached HEAD: checkout a branch before rebasing.".to_string())
+        } else if dirty {
+            Some(
+                "Working tree has uncommitted changes. Commit them (stage with s/S on the \
+                 dashboard, then c in this menu) or stash outside space."
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        self.stage = GitOpsStage::RebasePreflight;
+        ScreenAction::Continue
+    }
+
+    /// Pre-flight stage keys. `Esc`/`q` return to the menu; `Enter` proceeds to
+    /// the target picker only when the working tree is clean (no `rebase_block`).
+    fn handle_rebase_preflight_key(&mut self, key: KeyEvent) -> ScreenAction {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.stage = GitOpsStage::Menu;
+                ScreenAction::Continue
+            }
+            KeyCode::Enter => {
+                if self.rebase_block.is_some() {
+                    // Blocked: stay put until the user clears the tree.
+                    return ScreenAction::Continue;
+                }
+                match crate::tui::app::build_branch_picker(
+                    &self.repo_path,
+                    &self.repo_name,
+                    "Rebase onto",
+                ) {
+                    Some(picker) => {
+                        self.rebase_picker = Some(picker);
+                        self.stage = GitOpsStage::RebasePickTarget;
+                    }
+                    None => {
+                        self.status =
+                            Some(format!("Could not list branches for {}", self.repo_name));
+                    }
+                }
+                ScreenAction::Continue
+            }
+            _ => ScreenAction::Continue,
+        }
+    }
+
+    /// Target-picker stage keys. Follows the switch-branch picker's shape with
+    /// one deliberate difference: `q` types into the fuzzy filter (branch names
+    /// can contain it) instead of closing. `Esc` steps back to the pre-flight;
+    /// arrows / `j`/`k` (when the filter is empty) move the highlight; `Enter`
+    /// selects the target, computes the ahead/behind preview, and advances to
+    /// the confirm stage; anything else edits the fuzzy filter.
+    fn handle_rebase_pick_target_key(&mut self, key: KeyEvent) -> ScreenAction {
+        match key.code {
+            KeyCode::Esc => {
+                self.stage = GitOpsStage::RebasePreflight;
+                ScreenAction::Continue
+            }
+            KeyCode::Up => {
+                if let Some(ref mut bp) = self.rebase_picker {
+                    bp.move_up();
+                }
+                ScreenAction::Continue
+            }
+            KeyCode::Down => {
+                if let Some(ref mut bp) = self.rebase_picker {
+                    bp.move_down();
+                }
+                ScreenAction::Continue
+            }
+            KeyCode::Char('k')
+                if self
+                    .rebase_picker
+                    .as_ref()
+                    .is_some_and(|bp| bp.input.value().is_empty()) =>
+            {
+                if let Some(ref mut bp) = self.rebase_picker {
+                    bp.move_up();
+                }
+                ScreenAction::Continue
+            }
+            KeyCode::Char('j')
+                if self
+                    .rebase_picker
+                    .as_ref()
+                    .is_some_and(|bp| bp.input.value().is_empty()) =>
+            {
+                if let Some(ref mut bp) = self.rebase_picker {
+                    bp.move_down();
+                }
+                ScreenAction::Continue
+            }
+            KeyCode::Enter => {
+                let picked = self
+                    .rebase_picker
+                    .as_ref()
+                    .and_then(|bp| bp.confirmed_items().into_iter().next())
+                    .map(|item| item.name.clone());
+                match picked {
+                    None => ScreenAction::Continue,
+                    Some(onto) => {
+                        self.rebase_ahead_behind =
+                            crate::core::git::ahead_behind_vs(&self.repo_path, &onto);
+                        self.rebase_onto = Some(onto);
+                        self.stage = GitOpsStage::RebaseConfirm;
+                        ScreenAction::Continue
+                    }
+                }
+            }
+            _ => {
+                if let Some(ref mut bp) = self.rebase_picker {
+                    if let Some(req) = crate::tui::app::key_to_input_request(&key) {
+                        bp.input.handle(req);
+                    }
+                    bp.refilter();
+                }
+                ScreenAction::Continue
+            }
+        }
+    }
+
+    /// Confirm-stage keys. `y` executes the rebase on the git-ops worker;
+    /// `n`/`Enter`/`Esc`/`q` decline back to the target picker. Enter declines
+    /// (default No) so a reflexive keypress never rewrites history.
+    fn handle_rebase_confirm_key(&mut self, key: KeyEvent) -> ScreenAction {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => match self.rebase_onto.clone() {
+                Some(onto) => self.start_network_op(GitOp::Rebase { onto }),
+                None => {
+                    self.stage = GitOpsStage::RebasePickTarget;
+                    ScreenAction::Continue
+                }
+            },
+            KeyCode::Char('n')
+            | KeyCode::Char('N')
+            | KeyCode::Enter
+            | KeyCode::Esc
+            | KeyCode::Char('q') => {
+                self.stage = GitOpsStage::RebasePickTarget;
+                ScreenAction::Continue
+            }
+            _ => ScreenAction::Continue,
         }
     }
 }
