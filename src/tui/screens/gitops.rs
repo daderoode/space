@@ -359,7 +359,11 @@ impl GitOpsState {
         self.rebase_picker = None;
         self.status = None;
 
-        let detached = crate::core::git::current_branch(&self.repo_path).is_err();
+        // Block when HEAD is not on a branch. `current_branch` reports a
+        // detached HEAD as `Ok("(<sha>)")`, so a plain `.is_err()` would let a
+        // genuinely detached HEAD slip past the pre-flight; `is_on_branch`
+        // gates on the branch ref itself.
+        let detached = !crate::core::git::is_on_branch(&self.repo_path);
         // Untracked files do not block a rebase, so only tracked modifications,
         // staged changes, and conflicts count as "dirty" here (matching what
         // `git rebase` itself refuses).

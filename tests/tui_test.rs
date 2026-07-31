@@ -3604,8 +3604,11 @@ mod gitops_tests {
     #[test]
     fn gitops_menu_r_opens_rebase_preflight_blocked_on_fake_repo() {
         use space::tui::screens::gitops::GitOpsStage;
-        // workspace_with_repos uses a fake /tmp path, so current_branch fails
-        // and the pre-flight blocks with the detached-HEAD reason.
+        // workspace_with_repos uses a fake /tmp path, so Repository::open fails
+        // and is_on_branch returns false: the pre-flight blocks with the
+        // detached-HEAD reason on the unopenable-path case. The genuine
+        // detached-HEAD case (a real repo) is covered by
+        // gitops_rebase_preflight_blocks_genuine_detached_head.
         let ws = common::workspace_with_repos(&["repo-a"]);
         let mut app = test_app(vec![ws], vec![]);
         app.focus = Pane::Right;
@@ -4418,6 +4421,70 @@ mod gitops_tests {
         assert!(
             app.gitop_rx.is_none(),
             "declining the rebase must not start any worker"
+        );
+    }
+
+    #[test]
+    fn gitops_rebase_preflight_blocks_genuine_detached_head() {
+        use space::tui::screens::gitops::GitOpsStage;
+        // A REAL repo detached on disk after setup: start_rebase reads HEAD
+        // live via is_on_branch, so it must block on the genuine detached-HEAD
+        // case. This complements
+        // gitops_menu_r_opens_rebase_preflight_blocked_on_fake_repo, which only
+        // exercises an unopenable /tmp path (is_on_branch returns false because
+        // Repository::open fails), never a real detached HEAD.
+        let (_env, repo_path, mut app) = setup_gitops_log_app("rebase-detached-repo", &[]);
+
+        // Detach HEAD in the real repo before pressing r.
+        let out = std::process::Command::new("git")
+            .args(["checkout", "--detach"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git checkout --detach failed to run");
+        assert!(
+            out.status.success(),
+            "git checkout --detach failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('r')));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::RebasePreflight,
+                "r must enter the rebase pre-flight stage"
+            ),
+            _ => panic!("expected the git ops overlay in the RebasePreflight stage"),
+        }
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Detached HEAD"),
+            "a genuine detached HEAD must show the detached-HEAD blocker, got:\n{}",
+            rendered
+        );
+
+        // A blocked pre-flight must never advance to the target picker.
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::GitOps(st) => {
+                assert_eq!(
+                    st.stage,
+                    GitOpsStage::RebasePreflight,
+                    "Enter on a blocked pre-flight must stay put"
+                );
+                assert_ne!(
+                    st.stage,
+                    GitOpsStage::RebasePickTarget,
+                    "a blocked pre-flight must not reach the target picker"
+                );
+            }
+            _ => panic!("expected the overlay to stay on the blocked pre-flight"),
+        }
+        assert!(
+            app.gitop_rx.is_none(),
+            "a blocked pre-flight must never start a worker"
         );
     }
 }

@@ -1445,3 +1445,33 @@ fn recent_commits_unborn_head_is_empty() {
         "unborn HEAD must yield an empty Vec, not panic"
     );
 }
+
+#[test]
+fn ahead_behind_vs_returns_none_on_detached_head() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    // A second commit gives us a resolvable HEAD to pin ourselves onto.
+    git(&["commit", "--allow-empty", "-m", "m1"]);
+    // Detach HEAD: now we are on no branch, though `main` still resolves.
+    git(&["checkout", "--detach"]);
+
+    assert!(
+        space::core::git::ahead_behind_vs(tmp.path(), "main").is_none(),
+        "detached HEAD must degrade to None even when the target resolves"
+    );
+}

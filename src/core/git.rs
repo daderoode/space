@@ -331,9 +331,28 @@ pub fn ahead_behind(repo_path: &Path) -> Result<(usize, usize)> {
 /// the rebase-confirm summary.
 pub fn ahead_behind_vs(repo_path: &Path, target: &str) -> Option<(usize, usize)> {
     let repo = Repository::open(repo_path).ok()?;
-    let local_oid = repo.head().ok()?.target()?;
+    let head = repo.head().ok()?;
+    // A detached HEAD has a resolvable target OID, so `head.target()` alone does
+    // not filter it out. Gate on `is_branch()` to honor the documented
+    // "None on detached HEAD" contract (the preview degrades instead of
+    // comparing a bare commit against the target).
+    if !head.is_branch() {
+        return None;
+    }
+    let local_oid = head.target()?;
     let target_oid = repo.revparse_single(target).ok()?.id();
     repo.graph_ahead_behind(local_oid, target_oid).ok()
+}
+
+/// Whether `HEAD` currently points at a branch: `true` only when the repo opens
+/// and HEAD resolves to a branch ref. Returns `false` for a detached HEAD, an
+/// unborn branch, or an unopenable path, every state the rebase pre-flight must
+/// block before proceeding. Distinct from `current_branch`, which reports a
+/// detached HEAD as `Ok("(<sha>)")` rather than an error.
+pub fn is_on_branch(repo_path: &Path) -> bool {
+    Repository::open(repo_path)
+        .and_then(|repo| repo.head().map(|head| head.is_branch()))
+        .unwrap_or(false)
 }
 
 /// Returns true iff the current branch has a configured upstream tracking
