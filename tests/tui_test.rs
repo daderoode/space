@@ -4314,6 +4314,86 @@ mod gitops_tests {
     }
 
     #[test]
+    fn gitops_rebase_worker_runs_to_completion_and_auto_closes() {
+        let (_env, _repo, mut app) = setup_gitops_log_app("rebase-done-repo", &[]);
+
+        // Drive to the Running stage exactly like
+        // gitops_rebase_full_flow_y_starts_worker: open git-ops, enter rebase,
+        // clear the clean pre-flight, pick the only branch (main), confirm with y.
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('r')));
+        app.handle_key(key(KeyCode::Enter)); // pre-flight -> picker
+        app.handle_key(key(KeyCode::Enter)); // pick the only branch (main)
+        app.handle_key(key(KeyCode::Char('y'))); // confirm -> Running, spawns worker
+        assert!(
+            app.gitop_rx.is_some(),
+            "confirming the rebase must start the git-ops worker (gitop_rx set)"
+        );
+
+        // Drive the worker to Done by polling each frame in a bounded loop,
+        // mirroring drain_sync. Rebasing main onto main is UpToDate, so the
+        // worker reports Done { success: true } and poll records finished +
+        // close_at (a 3s auto-close timer, which cannot elapse mid-loop).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            app.poll_gitop_result();
+            // Break as soon as Done lands (finished becomes Some). Guard against
+            // the screen no longer being GitOps so the loop can never spin after
+            // an unexpected auto-close.
+            let finished = if let Screen::GitOps(st) = &app.screen {
+                st.finished
+            } else {
+                None
+            };
+            if finished.is_some() || !matches!(app.screen, Screen::GitOps(_)) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "rebase worker did not finish within timeout"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        // The worker finished successfully (an up-to-date rebase counts as
+        // success), and the overlay is still open in the Running stage.
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.finished,
+                Some(true),
+                "the rebase worker must report success (finished = Some(true))"
+            ),
+            _ => panic!("expected the git ops overlay still open after the worker finished"),
+        }
+
+        // The success completion header renders (op label "Rebase" + " complete").
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Rebase complete"),
+            "a successful rebase must render the completion header, got:\n{}",
+            rendered
+        );
+
+        // Exercise the auto-close path without waiting the real ~3s timer: move
+        // close_at into the past, then poll once more.
+        if let Screen::GitOps(ref mut st) = app.screen {
+            st.close_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        } else {
+            panic!("expected the git ops overlay before the auto-close poll");
+        }
+        app.poll_gitop_result();
+
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "the elapsed success timer must auto-close back to the dashboard"
+        );
+        assert!(
+            app.gitop_rx.is_none(),
+            "auto-close must clear the git-ops worker receiver"
+        );
+    }
+
+    #[test]
     fn gitops_rebase_confirm_enter_declines_back_to_picker() {
         use space::tui::screens::gitops::GitOpsStage;
         let (_env, _repo, mut app) = setup_gitops_log_app("rebase-decline-repo", &[]);

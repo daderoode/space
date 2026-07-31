@@ -674,16 +674,38 @@ pub fn rebase_repo(repo_path: &Path, onto: &str) -> RebaseResult {
         }
     };
 
+    // Reject a target that starts with '-': `git rebase -foo` would parse the
+    // target as an option, not a revspec (argument injection). The TUI picker
+    // only yields real branch names, but a plumbing-created ref could begin
+    // with a dash, so guard the boundary rather than trust the caller.
+    if onto.starts_with('-') {
+        return RebaseResult {
+            outcome: RebaseOutcome::Failed,
+            message: format!(
+                "Refusing to rebase onto '{}': a target may not begin with '-'.",
+                onto
+            ),
+        };
+    }
+
     // Best-effort refresh so a rebase onto `origin/<x>` replays onto the latest
     // remote state. A fetch failure (offline / no remote) is non-fatal: the
-    // rebase can still proceed onto a local target.
+    // rebase can still proceed onto a local target. `GIT_TERMINAL_PROMPT=0`
+    // keeps this optional fetch from opening a credential prompt on /dev/tty,
+    // which would hang or scribble over the raw-mode TUI.
     let _ = Command::new("git")
         .args(["fetch", "--quiet", "origin"])
+        .env("GIT_TERMINAL_PROMPT", "0")
         .current_dir(repo_path)
         .output();
 
+    // `LC_ALL=C` pins git's output language so the up-to-date classification
+    // below (`stdout.contains("is up to date")`) is stable: git localizes that
+    // message via gettext, and a non-English LANG would misclassify UpToDate
+    // as Rebased.
     let out = Command::new("git")
         .args(["rebase", onto])
+        .env("LC_ALL", "C")
         .current_dir(repo_path)
         .output();
 
@@ -1737,13 +1759,43 @@ mod tests {
             result.message
         );
         assert!(
-            !result.message.is_empty(),
-            "the failure must surface git's error output"
+            result.message.contains("no-such-branch"),
+            "the failure must surface git's error output naming the bad target, got: {}",
+            result.message
         );
         assert_eq!(
             sha_before,
             get_sha(&local, "main"),
             "a failed rebase must not move the branch"
+        );
+    }
+
+    #[test]
+    fn rebase_repo_rejects_leading_dash_target() {
+        // A target beginning with '-' would be parsed by `git rebase` as an
+        // option, not a revspec (argument injection). rebase_repo must reject
+        // it up front without running git or moving the branch.
+        let (_tmp, local) = origin_and_local();
+        let sha_before = get_sha(&local, "main");
+
+        let result = rebase_repo(&local, "--onto=evil");
+
+        assert!(
+            matches!(result.outcome, RebaseOutcome::Failed),
+            "a leading-dash target must report Failed, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(!result.success(), "a rejected target is not a success");
+        assert!(
+            result.message.contains('-'),
+            "the rejection must name the offending target, got: {}",
+            result.message
+        );
+        assert_eq!(
+            sha_before,
+            get_sha(&local, "main"),
+            "a rejected rebase must not move the branch"
         );
     }
 
@@ -1766,6 +1818,79 @@ mod tests {
             sha_before,
             get_sha(&local, "HEAD"),
             "a detached-HEAD rebase must not move HEAD"
+        );
+    }
+
+    #[test]
+    fn rebase_repo_aborts_conflict_inside_linked_worktree() {
+        let (tmp, local) = origin_and_local();
+
+        // Remote advances main with a conflicting change to base.txt.
+        advance_origin(tmp.path(), |helper| {
+            std::fs::write(helper.join("base.txt"), "helper-version\n").unwrap();
+            git(&["add", "."], helper);
+            git(&["commit", "-m", "helper-edit"], helper);
+        });
+
+        // Create a real linked worktree on a NEW branch `feature` off local's
+        // current HEAD. `local` stays on `main`; git forbids the same branch in
+        // two worktrees, so `feature` must be a distinct branch. The worktree
+        // shares `.git/config` with `local`, so git_setup's identity applies.
+        let wt = tmp.path().join("wt");
+        git(
+            &["worktree", "add", "-b", "feature", wt.to_str().unwrap()],
+            &local,
+        );
+
+        // In the worktree, commit a conflicting change to the same file.
+        std::fs::write(wt.join("base.txt"), "local-version\n").unwrap();
+        git(&["add", "."], &wt);
+        git(&["commit", "-m", "feature-edit"], &wt);
+        let sha_before = get_sha(&wt, "HEAD");
+
+        // rebase_repo fetches origin internally, so rebasing `feature` onto the
+        // conflicting origin/main must conflict and auto-abort. The rebase
+        // state lives in `.git/worktrees/wt/rebase-merge`, so this exercises the
+        // abort-based classification path inside a real linked worktree.
+        let result = rebase_repo(&wt, "origin/main");
+
+        assert!(
+            matches!(result.outcome, RebaseOutcome::Conflicted),
+            "conflicting rebase in a linked worktree must report Conflicted, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(!result.success(), "Conflicted is not a success");
+        // No rebase left in progress IN THE WORKTREE: --abort must now fail.
+        let no_rebase_in_progress = !Cmd::new("git")
+            .args(["rebase", "--abort"])
+            .current_dir(&wt)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(
+            no_rebase_in_progress,
+            "no rebase may be in progress in the worktree after the auto-abort"
+        );
+        let porcelain = Cmd::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&porcelain.stdout).trim().is_empty(),
+            "worktree must be clean after rebase --abort"
+        );
+        let base = std::fs::read_to_string(wt.join("base.txt")).unwrap();
+        assert!(
+            !base.contains("<<<<<<<"),
+            "base.txt must not contain conflict markers after abort"
+        );
+        assert_eq!(
+            sha_before,
+            get_sha(&wt, "HEAD"),
+            "aborted rebase must leave feature at its pre-rebase commit"
         );
     }
 }
