@@ -6263,6 +6263,87 @@ fn create_pick_branch_jk_navigate_while_query_is_empty() {
     }
 }
 
+/// The Add flow's branch picker is the sixth of the six older pickers. Its j/k
+/// guard is currently byte-identical to the Create flow's, but identical-by-
+/// inspection is not a regression net: this pins it independently so the two
+/// cannot silently drift apart.
+fn open_add_pick_branch(env: &TestEnv) -> App {
+    let repo_path = env.create_repo("add-branch-picker-repo");
+    for branch in ["ajk-one", "ajk-two"] {
+        let out = std::process::Command::new("git")
+            .args(["branch", branch])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+    }
+
+    let config = config_from_env(env);
+    let workspaces = vec![Workspace {
+        name: "ws-add-branch".to_string(),
+        path: env.workspaces_dir.join("ws-add-branch"),
+        repos: vec![],
+    }];
+    let mut app = test_app_with_config(config, workspaces, vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('a')));
+    if let Screen::AddRepos(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.stage = space::tui::screens::add::AddStage::PickBranchStrategy;
+        st.recent_branches = vec![];
+        st.branch_strategy_idx = 3; // "Pick a branch..." when there are no recents
+    } else {
+        panic!("expected AddRepos screen");
+    }
+    app.handle_key(key(KeyCode::Enter));
+    match app.screen {
+        Screen::AddRepos(ref st) => assert_eq!(
+            st.stage,
+            space::tui::screens::add::AddStage::PickBranch,
+            "fixture should have reached the add-flow branch picker"
+        ),
+        _ => panic!("expected AddRepos screen"),
+    }
+    app
+}
+
+#[test]
+fn add_pick_branch_jk_type_into_a_non_empty_query() {
+    let env = TestEnv::new();
+    let mut app = open_add_pick_branch(&env);
+
+    app.handle_key(key(KeyCode::Char('a')));
+    app.handle_key(key(KeyCode::Char('j')));
+    app.handle_key(key(KeyCode::Char('k')));
+
+    if let Screen::AddRepos(ref st) = app.screen {
+        let bp = st.branch_picker.as_ref().expect("branch picker present");
+        assert_eq!(
+            bp.input.value(),
+            "ajk",
+            "j/k must reach the branch filter once the query is non-empty"
+        );
+    } else {
+        panic!("expected AddRepos screen");
+    }
+}
+
+#[test]
+fn add_pick_branch_jk_navigate_while_query_is_empty() {
+    let env = TestEnv::new();
+    let mut app = open_add_pick_branch(&env);
+
+    app.handle_key(key(KeyCode::Char('j')));
+
+    if let Screen::AddRepos(ref st) = app.screen {
+        let bp = st.branch_picker.as_ref().expect("branch picker present");
+        assert!(bp.input.value().is_empty());
+        assert_eq!(bp.highlighted, 1, "j navigates while the query is empty");
+    } else {
+        panic!("expected AddRepos screen");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 0.3 — `g` is gated to the workspace pane
 // ---------------------------------------------------------------------------
