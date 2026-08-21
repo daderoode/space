@@ -5889,6 +5889,16 @@ fn jk_repo_paths() -> Vec<PathBuf> {
     ]
 }
 
+/// Same names, but under two distinct parent directories so `Ctrl-S` scope
+/// cycling has more than one scope to move through.
+fn jk_repo_paths_two_scopes() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/tmp/orga/jackal"),
+        PathBuf::from("/tmp/orgb/kernel"),
+        PathBuf::from("/tmp/orgb/mango"),
+    ]
+}
+
 fn open_create_pick_repos(app: &mut App) {
     app.handle_key(key(KeyCode::Char('c')));
     if let Screen::CreateWorkspace(ref mut st) = app.screen {
@@ -5991,6 +6001,68 @@ fn create_pick_repos_tab_still_toggles_with_a_query() {
         );
     } else {
         panic!("expected CreateWorkspace screen");
+    }
+}
+
+/// The j/k guard splits the navigation arms; `Ctrl-S` sits after them in the
+/// same match. Pin that scope-cycling still reaches its arm with a non-empty
+/// query rather than being swallowed as literal input.
+#[test]
+fn create_pick_repos_ctrl_s_still_cycles_scope_with_a_query() {
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+
+    let mut app = test_app(vec![], jk_repo_paths_two_scopes());
+    open_create_pick_repos(&mut app);
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.picker.available_scopes,
+            vec!["orga".to_string(), "orgb".to_string()],
+            "fixture must provide two scopes to cycle through"
+        );
+        assert!(st.picker.scope.is_none(), "scope starts unset");
+    }
+
+    app.handle_key(key(KeyCode::Char('a')));
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.picker.scope,
+            Some("orga".to_string()),
+            "Ctrl-S must still cycle scope while a query is active"
+        );
+        assert_eq!(
+            st.picker.input.value(),
+            "a",
+            "Ctrl-S must not be typed into the query as a literal 's'"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+#[test]
+fn add_pick_repos_ctrl_s_still_cycles_scope_with_a_query() {
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+
+    let ws = common::workspace_with_repos(&["existing"]);
+    let mut app = test_app(vec![ws], jk_repo_paths_two_scopes());
+    app.handle_key(key(KeyCode::Char('a')));
+    assert!(matches!(app.screen, Screen::AddRepos(_)));
+
+    app.handle_key(key(KeyCode::Char('a')));
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+    if let Screen::AddRepos(ref st) = app.screen {
+        assert_eq!(
+            st.picker.scope,
+            Some("orga".to_string()),
+            "Ctrl-S must still cycle scope while a query is active"
+        );
+        assert_eq!(st.picker.input.value(), "a");
+    } else {
+        panic!("expected AddRepos screen");
     }
 }
 
@@ -6208,17 +6280,28 @@ fn g_on_left_pane_opens_the_go_picker() {
     );
 }
 
+/// The pane guard makes the `g` arm fall through. No later arm in the dashboard
+/// match binds lowercase `g` (the nearest is `G`, a distinct char), so it must
+/// reach the wildcard and do nothing at all — not merely "not open the picker".
 #[test]
-fn g_on_right_pane_does_not_open_the_go_picker() {
+fn g_on_right_pane_is_inert() {
     let ws = common::workspace_with_repos(&["repo-a", "repo-b"]);
     let mut app = test_app(vec![ws], vec![]);
     app.focus = Pane::Right;
+    app.cursor_row = 1;
 
     app.handle_key(key(KeyCode::Char('g')));
 
     assert!(
         matches!(app.screen, Screen::Dashboard),
         "g while browsing repo rows must not jump to the workspace picker"
+    );
+    assert!(!app.should_quit, "g must not quit");
+    assert_eq!(app.focus, Pane::Right, "g must not move focus");
+    assert_eq!(app.cursor_row, 1, "g must not move the cursor");
+    assert!(
+        app.expanded_repos.is_empty(),
+        "g must not expand or collapse anything"
     );
 }
 
