@@ -8,13 +8,18 @@ pub struct DeleteState {
 }
 
 impl DeleteState {
+    /// Default-No confirmation, matching `ConfirmPush` and `RebaseConfirm`:
+    /// only an explicit `y`/`Y` deletes. `Enter` declines, so a reflex Enter
+    /// can never destroy a workspace.
     pub fn handle_key(&mut self, key: KeyEvent, _ctx: &ScreenContext) -> ScreenAction {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Enter => ScreenAction::DeleteWorkspace {
+            KeyCode::Char('y') | KeyCode::Char('Y') => ScreenAction::DeleteWorkspace {
                 name: self.workspace_name.clone(),
                 force: true,
             },
-            KeyCode::Char('n') | KeyCode::Esc => ScreenAction::Back,
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Enter | KeyCode::Esc => {
+                ScreenAction::Back
+            }
             _ => ScreenAction::Continue,
         }
     }

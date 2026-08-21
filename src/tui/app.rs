@@ -1371,7 +1371,9 @@ impl App {
                             }
                         }
                     },
-                    (KeyCode::Char('g'), _) => Some(Message::StartGo),
+                    // `g` is documented as a workspace-pane key; ungated it
+                    // would yank the user out of the repo rows they are browsing.
+                    (KeyCode::Char('g'), _) if self.focus == Pane::Left => Some(Message::StartGo),
                     (KeyCode::Char('c'), _) => Some(Message::StartCreate),
                     (KeyCode::Char('a'), _) => Some(Message::StartAdd),
                     (KeyCode::Char('d'), _) => Some(Message::StartDelete),
@@ -1469,7 +1471,11 @@ impl App {
                         }
                     },
                     (KeyCode::Esc, _) => match self.focus {
-                        Pane::Left => Some(Message::Quit),
+                        // The left pane is the top of the navigation tree, so
+                        // "back" has nowhere to go. Quitting on a reflex Esc is
+                        // the surprising part; `q`/`Ctrl-C` remain the documented
+                        // (and only) way out.
+                        Pane::Left => None,
                         Pane::Right => {
                             if self.expanded_repos.is_empty() {
                                 Some(Message::FocusNext)

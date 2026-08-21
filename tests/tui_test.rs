@@ -110,10 +110,13 @@ fn dashboard_q_quits() {
 }
 
 #[test]
-fn dashboard_esc_quits() {
+fn dashboard_esc_on_left_pane_does_not_quit() {
     let mut app = test_app(vec![], vec![]);
     app.handle_key(key(KeyCode::Esc));
-    assert!(app.should_quit);
+    assert!(
+        !app.should_quit,
+        "Esc is 'back', and the left pane is the top of the tree \u{2014} it must not quit"
+    );
 }
 
 #[test]
@@ -709,12 +712,12 @@ fn delete_confirm_keeps_footer_visible_for_long_repo_lists() {
     let rendered = render_text(&app, 70, 10);
 
     assert!(
-        rendered.contains("Enter/y delete"),
+        rendered.contains("y delete"),
         "expected delete actions to remain visible in rendered popup, got:\n{}",
         rendered
     );
     assert!(
-        rendered.contains("Esc/n cancel"),
+        rendered.contains("Esc/n/Enter cancel"),
         "expected cancel action to remain visible in rendered popup, got:\n{}",
         rendered
     );
@@ -741,12 +744,12 @@ fn delete_confirm_wraps_footer_on_narrow_terminals() {
     let rendered = render_text(&app, 24, 10);
 
     assert!(
-        rendered.contains("Enter/y delete"),
+        rendered.contains("y delete"),
         "expected delete action on a wrapped footer line, got:\n{}",
         rendered
     );
     assert!(
-        rendered.contains("Esc/n cancel"),
+        rendered.contains("Esc/n/Enter cancel"),
         "expected cancel action on a wrapped footer line, got:\n{}",
         rendered
     );
@@ -1528,11 +1531,28 @@ fn esc_with_nothing_expanded_refocuses_left_pane() {
 }
 
 #[test]
-fn esc_on_left_pane_quits() {
-    let mut app = test_app(vec![], vec![]);
+fn esc_on_left_pane_is_a_noop() {
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
     assert_eq!(app.focus, Pane::Left);
+
     app.handle_key(key(KeyCode::Esc));
-    assert!(app.should_quit, "Esc on left pane should quit");
+
+    assert!(!app.should_quit, "Esc on the left pane must not quit");
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "Esc on the left pane must leave the app on the dashboard"
+    );
+    assert_eq!(app.focus, Pane::Left, "focus must be unchanged");
+}
+
+#[test]
+fn q_still_quits_after_esc_is_neutered() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Esc));
+    assert!(!app.should_quit);
+    app.handle_key(key(KeyCode::Char('q')));
+    assert!(app.should_quit, "q remains the documented way out");
 }
 
 #[test]
@@ -5847,4 +5867,429 @@ mod sync_report_tests {
             rendered
         );
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Wave 0 — navigation correctness
+//
+// 0.2: the two newest pickers (rebase target, switch-branch) only treat j/k as
+// navigation while the filter query is empty. These tests pin that same rule
+// onto the six older pickers so typing a name containing 'j' or 'k' filters
+// instead of jumping the highlight. Arrows must navigate regardless of query.
+// ---------------------------------------------------------------------------
+
+/// Repo paths whose names contain the navigation letters, so a regression is
+/// visible as a highlight jump rather than a filtered list.
+fn jk_repo_paths() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/tmp/jackal"),
+        PathBuf::from("/tmp/kernel"),
+        PathBuf::from("/tmp/mango"),
+    ]
+}
+
+fn open_create_pick_repos(app: &mut App) {
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.ws_name = tui_input::Input::default().with_value("ws".to_string());
+        st.stage = space::tui::screens::create::CreateStage::PickRepos;
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+#[test]
+fn create_pick_repos_jk_navigate_while_query_is_empty() {
+    let mut app = test_app(vec![], jk_repo_paths());
+    open_create_pick_repos(&mut app);
+
+    app.handle_key(key(KeyCode::Char('j')));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert!(
+            st.picker.input.value().is_empty(),
+            "with an empty query, j is navigation and must not be typed"
+        );
+        assert_eq!(st.picker.highlighted, 1, "j moves the highlight down");
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+#[test]
+fn create_pick_repos_jk_type_into_a_non_empty_query() {
+    let mut app = test_app(vec![], jk_repo_paths());
+    open_create_pick_repos(&mut app);
+
+    // 'a' opens the query; from here j/k are literal characters.
+    app.handle_key(key(KeyCode::Char('a')));
+    app.handle_key(key(KeyCode::Char('j')));
+    app.handle_key(key(KeyCode::Char('k')));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.picker.input.value(),
+            "ajk",
+            "j/k must reach the filter once the query is non-empty"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+#[test]
+fn create_pick_repos_arrows_navigate_even_with_a_query() {
+    let mut app = test_app(vec![], jk_repo_paths());
+    open_create_pick_repos(&mut app);
+
+    // A query that keeps at least two items in the filtered set.
+    app.handle_key(key(KeyCode::Char('a')));
+    let before = match app.screen {
+        Screen::CreateWorkspace(ref st) => {
+            assert!(
+                st.picker.filtered.len() >= 2,
+                "fixture must leave >=2 matches for 'a', got {}",
+                st.picker.filtered.len()
+            );
+            st.picker.highlighted
+        }
+        _ => panic!("expected CreateWorkspace screen"),
+    };
+
+    app.handle_key(key(KeyCode::Down));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.picker.highlighted,
+            before + 1,
+            "arrows always navigate, query or not"
+        );
+        assert_eq!(
+            st.picker.input.value(),
+            "a",
+            "arrows must not edit the query"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+#[test]
+fn create_pick_repos_tab_still_toggles_with_a_query() {
+    let mut app = test_app(vec![], jk_repo_paths());
+    open_create_pick_repos(&mut app);
+
+    app.handle_key(key(KeyCode::Char('a')));
+    app.handle_key(key(KeyCode::Tab));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.picker.toggled.len(),
+            1,
+            "Tab multi-select must be unaffected by the j/k guard"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+#[test]
+fn add_pick_repos_jk_type_into_a_non_empty_query() {
+    let ws = common::workspace_with_repos(&["existing"]);
+    let mut app = test_app(vec![ws], jk_repo_paths());
+
+    app.handle_key(key(KeyCode::Char('a')));
+    assert!(
+        matches!(app.screen, Screen::AddRepos(_)),
+        "expected AddRepos screen"
+    );
+
+    app.handle_key(key(KeyCode::Char('a')));
+    app.handle_key(key(KeyCode::Char('j')));
+    app.handle_key(key(KeyCode::Char('k')));
+
+    if let Screen::AddRepos(ref st) = app.screen {
+        assert_eq!(
+            st.picker.input.value(),
+            "ajk",
+            "j/k must reach the filter once the query is non-empty"
+        );
+    } else {
+        panic!("expected AddRepos screen");
+    }
+}
+
+#[test]
+fn add_pick_repos_jk_navigate_while_query_is_empty() {
+    let ws = common::workspace_with_repos(&["existing"]);
+    let mut app = test_app(vec![ws], jk_repo_paths());
+
+    app.handle_key(key(KeyCode::Char('a')));
+    app.handle_key(key(KeyCode::Char('j')));
+
+    if let Screen::AddRepos(ref st) = app.screen {
+        assert!(st.picker.input.value().is_empty());
+        assert_eq!(st.picker.highlighted, 1, "j moves the highlight down");
+    } else {
+        panic!("expected AddRepos screen");
+    }
+}
+
+#[test]
+fn repo_search_jk_type_into_a_non_empty_query() {
+    let mut app = test_app(vec![], jk_repo_paths());
+    // Focus right so this stays valid once `/` is pane-gated in Wave 1.2.
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Char('/')));
+    assert!(
+        matches!(app.screen, Screen::RepoSearch(_)),
+        "expected RepoSearch screen"
+    );
+
+    app.handle_key(key(KeyCode::Char('a')));
+    app.handle_key(key(KeyCode::Char('j')));
+    app.handle_key(key(KeyCode::Char('k')));
+
+    if let Screen::RepoSearch(ref st) = app.screen {
+        assert_eq!(st.picker.input.value(), "ajk");
+    } else {
+        panic!("expected RepoSearch screen");
+    }
+}
+
+#[test]
+fn repo_search_jk_navigate_while_query_is_empty() {
+    let mut app = test_app(vec![], jk_repo_paths());
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Char('/')));
+    app.handle_key(key(KeyCode::Char('j')));
+
+    if let Screen::RepoSearch(ref st) = app.screen {
+        assert!(st.picker.input.value().is_empty());
+        assert_eq!(st.picker.highlighted, 1);
+    } else {
+        panic!("expected RepoSearch screen");
+    }
+}
+
+fn jk_workspaces() -> Vec<Workspace> {
+    ["jackal", "kernel", "mango"]
+        .iter()
+        .map(|n| Workspace {
+            name: (*n).to_string(),
+            path: PathBuf::from(format!("/tmp/{}", n)),
+            repos: vec![],
+        })
+        .collect()
+}
+
+#[test]
+fn go_picker_jk_type_into_a_non_empty_query() {
+    let mut app = test_app(jk_workspaces(), vec![]);
+    app.handle_key(key(KeyCode::Char('g')));
+    assert!(
+        matches!(app.screen, Screen::GoWorkspace(_)),
+        "expected GoWorkspace screen"
+    );
+
+    app.handle_key(key(KeyCode::Char('a')));
+    app.handle_key(key(KeyCode::Char('j')));
+    app.handle_key(key(KeyCode::Char('k')));
+
+    if let Screen::GoWorkspace(ref st) = app.screen {
+        assert_eq!(st.picker.input.value(), "ajk");
+    } else {
+        panic!("expected GoWorkspace screen");
+    }
+}
+
+#[test]
+fn go_picker_jk_navigate_while_query_is_empty() {
+    let mut app = test_app(jk_workspaces(), vec![]);
+    app.handle_key(key(KeyCode::Char('g')));
+    app.handle_key(key(KeyCode::Char('j')));
+
+    if let Screen::GoWorkspace(ref st) = app.screen {
+        assert!(st.picker.input.value().is_empty());
+        assert_eq!(st.picker.highlighted, 1);
+    } else {
+        panic!("expected GoWorkspace screen");
+    }
+}
+
+/// Drive the create flow as far as the PickBranch fuzzy picker, which is the
+/// sixth older picker and needs a real repo behind it.
+fn open_create_pick_branch(env: &TestEnv) -> App {
+    let repo_path = env.create_repo("branch-picker-repo");
+    for branch in ["ajk-one", "ajk-two"] {
+        let out = std::process::Command::new("git")
+            .args(["branch", branch])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+    }
+
+    let config = config_from_env(env);
+    let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.ws_name = tui_input::Input::default().with_value("ws-branch".to_string());
+        st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
+        st.recent_branches = vec![];
+        st.branch_strategy_idx = 3; // "Pick a branch..." when there are no recents
+    }
+    app.handle_key(key(KeyCode::Enter));
+    match app.screen {
+        Screen::CreateWorkspace(ref st) => assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::PickBranch,
+            "fixture should have reached the branch picker"
+        ),
+        _ => panic!("expected CreateWorkspace screen"),
+    }
+    app
+}
+
+#[test]
+fn create_pick_branch_jk_type_into_a_non_empty_query() {
+    let env = TestEnv::new();
+    let mut app = open_create_pick_branch(&env);
+
+    app.handle_key(key(KeyCode::Char('a')));
+    app.handle_key(key(KeyCode::Char('j')));
+    app.handle_key(key(KeyCode::Char('k')));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        let bp = st.branch_picker.as_ref().expect("branch picker present");
+        assert_eq!(
+            bp.input.value(),
+            "ajk",
+            "j/k must reach the branch filter once the query is non-empty"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+#[test]
+fn create_pick_branch_jk_navigate_while_query_is_empty() {
+    let env = TestEnv::new();
+    let mut app = open_create_pick_branch(&env);
+
+    app.handle_key(key(KeyCode::Char('j')));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        let bp = st.branch_picker.as_ref().expect("branch picker present");
+        assert!(bp.input.value().is_empty());
+        assert_eq!(bp.highlighted, 1, "j navigates while the query is empty");
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 0.3 — `g` is gated to the workspace pane
+// ---------------------------------------------------------------------------
+
+#[test]
+fn g_on_left_pane_opens_the_go_picker() {
+    let mut app = test_app(jk_workspaces(), vec![]);
+    assert_eq!(app.focus, Pane::Left);
+
+    app.handle_key(key(KeyCode::Char('g')));
+
+    assert!(
+        matches!(app.screen, Screen::GoWorkspace(_)),
+        "g keeps its documented workspace-pane meaning"
+    );
+}
+
+#[test]
+fn g_on_right_pane_does_not_open_the_go_picker() {
+    let ws = common::workspace_with_repos(&["repo-a", "repo-b"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+
+    app.handle_key(key(KeyCode::Char('g')));
+
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "g while browsing repo rows must not jump to the workspace picker"
+    );
+}
+
+#[test]
+fn shift_g_on_right_pane_still_opens_git_ops() {
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.cursor_row = 0;
+
+    app.handle_key(shift_key(KeyCode::Char('G')));
+
+    assert!(
+        matches!(app.screen, Screen::GitOps(_)),
+        "G must remain the git-ops menu; the g gate must not disturb it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 0.4 — delete confirm defaults to No
+// ---------------------------------------------------------------------------
+
+#[test]
+fn delete_enter_cancels_instead_of_deleting() {
+    let workspaces = vec![Workspace {
+        name: "keep-me".to_string(),
+        path: PathBuf::from("/tmp/keep-me"),
+        repos: vec![],
+    }];
+    let mut app = test_app(workspaces, vec![]);
+
+    app.handle_key(key(KeyCode::Char('d')));
+    assert!(matches!(app.screen, Screen::ConfirmDelete(_)));
+
+    app.handle_key(key(KeyCode::Enter));
+
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "Enter declines, matching the [y/N] pattern used by push and rebase"
+    );
+    assert_eq!(
+        app.workspaces.len(),
+        1,
+        "nothing may be deleted by a reflex Enter"
+    );
+}
+
+#[test]
+fn delete_uppercase_y_deletes_and_uppercase_n_cancels() {
+    fn keep_me() -> Vec<Workspace> {
+        vec![Workspace {
+            name: "keep-me".to_string(),
+            path: PathBuf::from("/tmp/keep-me"),
+            repos: vec![],
+        }]
+    }
+
+    let mut app = test_app(keep_me(), vec![]);
+
+    app.handle_key(key(KeyCode::Char('d')));
+    app.handle_key(shift_key(KeyCode::Char('N')));
+    assert!(matches!(app.screen, Screen::Dashboard), "N cancels like n");
+    assert_eq!(app.workspaces.len(), 1);
+
+    // Y is accepted as confirmation; the workspace path does not exist on disk,
+    // so the delete fails loudly rather than silently doing nothing.
+    let mut app = test_app(keep_me(), vec![]);
+    app.handle_key(key(KeyCode::Char('d')));
+    app.handle_key(shift_key(KeyCode::Char('Y')));
+    assert!(
+        !matches!(app.screen, Screen::ConfirmDelete(_)),
+        "Y must be treated as confirmation, not swallowed"
+    );
 }

@@ -133,11 +133,22 @@ impl AddState {
                 self.picker.toggle_highlighted();
                 ScreenAction::Continue
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 self.picker.move_up();
                 ScreenAction::Continue
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
+                self.picker.move_down();
+                ScreenAction::Continue
+            }
+            // j/k navigate only while the query is empty; once the user is
+            // typing they are literal characters (a repo named "jackal" must
+            // be reachable). Arrows always navigate.
+            KeyCode::Char('k') if self.picker.input.value().is_empty() => {
+                self.picker.move_up();
+                ScreenAction::Continue
+            }
+            KeyCode::Char('j') if self.picker.input.value().is_empty() => {
                 self.picker.move_down();
                 ScreenAction::Continue
             }
@@ -301,13 +312,38 @@ impl AddState {
                 self.stage = AddStage::PickBranchStrategy;
                 ScreenAction::Continue
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 if let Some(ref mut bp) = self.branch_picker {
                     bp.move_up();
                 }
                 ScreenAction::Continue
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
+                if let Some(ref mut bp) = self.branch_picker {
+                    bp.move_down();
+                }
+                ScreenAction::Continue
+            }
+            // j/k navigate only while the query is empty; once the user is
+            // typing they are literal characters (a branch named "jackal" must
+            // be reachable). Arrows always navigate.
+            KeyCode::Char('k')
+                if self
+                    .branch_picker
+                    .as_ref()
+                    .is_some_and(|bp| bp.input.value().is_empty()) =>
+            {
+                if let Some(ref mut bp) = self.branch_picker {
+                    bp.move_up();
+                }
+                ScreenAction::Continue
+            }
+            KeyCode::Char('j')
+                if self
+                    .branch_picker
+                    .as_ref()
+                    .is_some_and(|bp| bp.input.value().is_empty()) =>
+            {
                 if let Some(ref mut bp) = self.branch_picker {
                     bp.move_down();
                 }

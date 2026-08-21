@@ -17,11 +17,22 @@ impl SearchState {
     pub fn handle_key(&mut self, key: KeyEvent, _ctx: &ScreenContext) -> ScreenAction {
         match key.code {
             KeyCode::Esc => ScreenAction::Back,
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 self.picker.move_up();
                 ScreenAction::Continue
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
+                self.picker.move_down();
+                ScreenAction::Continue
+            }
+            // j/k navigate only while the query is empty; once the user is
+            // typing they are literal characters (a repo named "jackal" must
+            // be reachable). Arrows always navigate.
+            KeyCode::Char('k') if self.picker.input.value().is_empty() => {
+                self.picker.move_up();
+                ScreenAction::Continue
+            }
+            KeyCode::Char('j') if self.picker.input.value().is_empty() => {
                 self.picker.move_down();
                 ScreenAction::Continue
             }

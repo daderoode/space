@@ -174,8 +174,12 @@ Press `Enter` on a file row in the expanded repo list to open a full-screen scro
 | `r` | Rescan the repo list |
 | `/` | Filter spaces (selects in place) |
 | `S` | Open config editor |
-| `q` / `Esc` | Quit |
+| `q` | Quit |
 | `Ctrl-C` | Force quit (works on all screens) |
+
+`Esc` does nothing on this pane. It means "back", and the workspaces pane is the
+top of the navigation tree, so there is nowhere to go back to. Quitting is `q`
+or `Ctrl-C` only.
 
 ### Key Bindings — Repos Pane
 
@@ -275,7 +279,7 @@ Progress log showing each repo with a checkmark or error. If a "branch already c
 
 ## Delete Workspace
 
-Confirmation dialog showing `Delete workspace?`, the workspace name on its own line, and the worktrees that will be removed. Press `Enter` or `y` to delete, `n` or `Esc` to cancel. Long names are truncated with `...`, and long repo lists keep the footer visible by showing `... and N more` when needed. With `space rm --force`, skips the dialog entirely.
+Confirmation dialog showing `Delete workspace?`, the workspace name on its own line, and the worktrees that will be removed. The dialog defaults to No, like the push and rebase confirmations: only `y` or `Y` deletes, while `n`, `N`, `Enter` and `Esc` all cancel. Long names are truncated with `...`, and long repo lists keep the footer visible by showing `... and N more` when needed. With `space rm --force`, skips the dialog entirely.
 
 ---
 
@@ -333,6 +337,11 @@ Powered by **nucleo 0.5** (the engine behind the Helix editor):
 - Character-level match highlighting in the UI
 - Scope filtering by parent directory (`orgname/` prefix or `Ctrl-S` cycling)
 - Multi-select with `Tab` toggle
+
+**Navigating while filtering:** `↑`/`↓` always move the highlight. `j`/`k` move
+it only while the query is empty; once you have typed anything they are literal
+characters, so a repo or branch named `jackal` is reachable. This rule is the
+same in every picker.
 
 Used in: repo picker, workspace picker, branch picker, and repo search.
 
