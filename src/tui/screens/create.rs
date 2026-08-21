@@ -236,7 +236,8 @@ impl CreateState {
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        match crate::tui::app::build_branch_picker(&repo_path, &repo_name) {
+                        match crate::tui::app::build_branch_picker(&repo_path, &repo_name, "Branch")
+                        {
                             Some(picker) => {
                                 self.picked_branch = None;
                                 self.error = None;

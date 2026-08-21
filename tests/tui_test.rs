@@ -3602,7 +3602,13 @@ mod gitops_tests {
     }
 
     #[test]
-    fn gitops_menu_rebase_always_disabled() {
+    fn gitops_menu_r_opens_rebase_preflight_blocked_on_fake_repo() {
+        use space::tui::screens::gitops::GitOpsStage;
+        // workspace_with_repos uses a fake /tmp path, so Repository::open fails
+        // and is_on_branch returns false: the pre-flight blocks with the
+        // detached-HEAD reason on the unopenable-path case. The genuine
+        // detached-HEAD case (a real repo) is covered by
+        // gitops_rebase_preflight_blocks_genuine_detached_head.
         let ws = common::workspace_with_repos(&["repo-a"]);
         let mut app = test_app(vec![ws], vec![]);
         app.focus = Pane::Right;
@@ -3610,16 +3616,42 @@ mod gitops_tests {
 
         app.handle_key(key(KeyCode::Char('r')));
 
-        assert!(
-            matches!(app.screen, Screen::GitOps(_)),
-            "firing rebase should keep the menu open"
-        );
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::RebasePreflight,
+                "r must enter the rebase pre-flight stage"
+            ),
+            _ => panic!("expected the git ops overlay in the RebasePreflight stage"),
+        }
         let rendered = render_text(&app, 80, 24);
         assert!(
-            rendered.contains("Rebase coming soon (item 7)"),
-            "rebase should show the coming-soon hint, got:\n{}",
+            rendered.contains("Detached HEAD"),
+            "a repo without a branch must show the detached-HEAD blocker, got:\n{}",
             rendered
         );
+
+        // Enter must NOT proceed past a blocked pre-flight.
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::RebasePreflight,
+                "Enter on a blocked pre-flight must stay put"
+            ),
+            _ => panic!("expected the overlay to stay on the blocked pre-flight"),
+        }
+
+        // Esc returns to the menu (overlay stays open).
+        app.handle_key(key(KeyCode::Esc));
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Menu,
+                "Esc from the pre-flight must return to the menu"
+            ),
+            _ => panic!("expected the git ops overlay on the Menu stage"),
+        }
     }
 
     #[test]
@@ -3659,25 +3691,27 @@ mod gitops_tests {
         app.focus = Pane::Right;
         app.handle_key(key(KeyCode::Char('G')));
 
-        // Move highlight to rebase (index 5), then Enter fires it. Rebase stays a
-        // permanent placeholder (out of scope for the whole feature), so this
-        // durably verifies Enter dispatches the highlighted item (distinct from a
-        // letter-key press) without depending on push/pull, which now start
-        // real flows.
+        // Move highlight to rebase (index 5), then Enter fires it. Rebase opens
+        // its pre-flight synchronously (no worker), so this durably verifies
+        // Enter dispatches the highlighted item (distinct from a letter-key
+        // press) without depending on push/pull, which start network workers.
+        use space::tui::screens::gitops::GitOpsStage;
         for _ in 0..5 {
             app.handle_key(key(KeyCode::Char('j')));
         }
         app.handle_key(key(KeyCode::Enter));
 
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::RebasePreflight,
+                "Enter on the highlighted rebase item must open its pre-flight"
+            ),
+            _ => panic!("expected the git ops overlay in the RebasePreflight stage"),
+        }
         assert!(
-            matches!(app.screen, Screen::GitOps(_)),
-            "Enter should keep the menu open"
-        );
-        let rendered = render_text(&app, 80, 24);
-        assert!(
-            rendered.contains("Rebase coming soon (item 7)"),
-            "Enter on the highlighted rebase item should fire its placeholder, got:\n{}",
-            rendered
+            app.gitop_rx.is_none(),
+            "firing rebase from the menu must not start a worker"
         );
     }
 
@@ -4133,6 +4167,324 @@ mod gitops_tests {
             rendered.contains("only-extra") || rendered.contains("init"),
             "the log must still show a commit after over-scrolling, got:\n{}",
             rendered
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 7: Safe rebase flow (pre-flight → target picker → confirm → run)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn gitops_rebase_clean_repo_preflight_advances_to_target_picker() {
+        use space::tui::screens::gitops::GitOpsStage;
+        // setup_gitops_log_app with no extra commits = a clean real repo.
+        let (_env, _repo, mut app) = setup_gitops_log_app("rebase-clean-repo", &[]);
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('r')));
+
+        match &app.screen {
+            Screen::GitOps(st) => {
+                assert_eq!(
+                    st.stage,
+                    GitOpsStage::RebasePreflight,
+                    "r must enter the rebase pre-flight stage"
+                );
+                assert!(
+                    st.rebase_block.is_none(),
+                    "a clean repo must not be blocked, got {:?}",
+                    st.rebase_block
+                );
+            }
+            _ => panic!("expected the git ops overlay in the RebasePreflight stage"),
+        }
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Working tree clean"),
+            "a clean pre-flight must say so, got:\n{}",
+            rendered
+        );
+
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::RebasePickTarget,
+                "Enter on a clean pre-flight must open the target picker"
+            ),
+            _ => panic!("expected the git ops overlay in the RebasePickTarget stage"),
+        }
+        // The picker title must state the rebase consequence, not the generic
+        // switch-branch wording.
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Rebase onto"),
+            "the target picker title must say Rebase onto, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn gitops_rebase_dirty_repo_blocks_preflight() {
+        use space::tui::screens::gitops::GitOpsStage;
+        // setup_gitops_staged_app leaves a staged file → the tree is dirty.
+        let (_env, _repo, mut app) = setup_gitops_staged_app("rebase-dirty-repo");
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('r')));
+
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("uncommitted changes"),
+            "a dirty tree must show the uncommitted-changes blocker, got:\n{}",
+            rendered
+        );
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::RebasePreflight,
+                "Enter on a dirty pre-flight must stay put"
+            ),
+            _ => panic!("expected the overlay to stay on the blocked pre-flight"),
+        }
+        assert!(
+            app.gitop_rx.is_none(),
+            "a blocked pre-flight must never start a worker"
+        );
+    }
+
+    #[test]
+    fn gitops_rebase_full_flow_y_starts_worker() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let (_env, _repo, mut app) = setup_gitops_log_app("rebase-flow-repo", &[]);
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('r')));
+        app.handle_key(key(KeyCode::Enter)); // pre-flight -> picker
+        app.handle_key(key(KeyCode::Enter)); // pick the only branch (main)
+
+        match &app.screen {
+            Screen::GitOps(st) => {
+                assert_eq!(
+                    st.stage,
+                    GitOpsStage::RebaseConfirm,
+                    "picking a target must open the confirm stage"
+                );
+                assert_eq!(
+                    st.rebase_onto.as_deref(),
+                    Some("main"),
+                    "the picked target must be stored"
+                );
+            }
+            _ => panic!("expected the git ops overlay in the RebaseConfirm stage"),
+        }
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("[y/N]"),
+            "the confirm stage must show the [y/N] prompt, got:\n{}",
+            rendered
+        );
+        // Substring kept short: the warning line wraps at the dialog's minimum
+        // width, so a longer phrase would span the line break and never match.
+        assert!(
+            rendered.contains("push will be rejected"),
+            "the confirm stage must warn about the post-rebase push rejection, got:\n{}",
+            rendered
+        );
+
+        app.handle_key(key(KeyCode::Char('y')));
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::Running,
+                "confirming with y must start the worker (Running stage)"
+            ),
+            _ => panic!("expected the git ops overlay in the Running stage"),
+        }
+        assert!(
+            app.gitop_rx.is_some(),
+            "confirming the rebase must start the git-ops worker (gitop_rx set)"
+        );
+        // The Running header must use the correct progressive form ("Rebasing",
+        // not "Rebaseing" from naive label + "ing" concatenation).
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Rebasing") && !rendered.contains("Rebaseing"),
+            "the rebase Running header should say Rebasing, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn gitops_rebase_worker_runs_to_completion_and_auto_closes() {
+        let (_env, _repo, mut app) = setup_gitops_log_app("rebase-done-repo", &[]);
+
+        // Drive to the Running stage exactly like
+        // gitops_rebase_full_flow_y_starts_worker: open git-ops, enter rebase,
+        // clear the clean pre-flight, pick the only branch (main), confirm with y.
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('r')));
+        app.handle_key(key(KeyCode::Enter)); // pre-flight -> picker
+        app.handle_key(key(KeyCode::Enter)); // pick the only branch (main)
+        app.handle_key(key(KeyCode::Char('y'))); // confirm -> Running, spawns worker
+        assert!(
+            app.gitop_rx.is_some(),
+            "confirming the rebase must start the git-ops worker (gitop_rx set)"
+        );
+
+        // Drive the worker to Done by polling each frame in a bounded loop,
+        // mirroring drain_sync. Rebasing main onto main is UpToDate, so the
+        // worker reports Done { success: true } and poll records finished +
+        // close_at (a 3s auto-close timer, which cannot elapse mid-loop).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            app.poll_gitop_result();
+            // Break as soon as Done lands (finished becomes Some). Guard against
+            // the screen no longer being GitOps so the loop can never spin after
+            // an unexpected auto-close.
+            let finished = if let Screen::GitOps(st) = &app.screen {
+                st.finished
+            } else {
+                None
+            };
+            if finished.is_some() || !matches!(app.screen, Screen::GitOps(_)) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "rebase worker did not finish within timeout"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        // The worker finished successfully (an up-to-date rebase counts as
+        // success), and the overlay is still open in the Running stage.
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.finished,
+                Some(true),
+                "the rebase worker must report success (finished = Some(true))"
+            ),
+            _ => panic!("expected the git ops overlay still open after the worker finished"),
+        }
+
+        // The success completion header renders (op label "Rebase" + " complete").
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Rebase complete"),
+            "a successful rebase must render the completion header, got:\n{}",
+            rendered
+        );
+
+        // Exercise the auto-close path without waiting the real ~3s timer: move
+        // close_at into the past, then poll once more.
+        if let Screen::GitOps(ref mut st) = app.screen {
+            st.close_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        } else {
+            panic!("expected the git ops overlay before the auto-close poll");
+        }
+        app.poll_gitop_result();
+
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "the elapsed success timer must auto-close back to the dashboard"
+        );
+        assert!(
+            app.gitop_rx.is_none(),
+            "auto-close must clear the git-ops worker receiver"
+        );
+    }
+
+    #[test]
+    fn gitops_rebase_confirm_enter_declines_back_to_picker() {
+        use space::tui::screens::gitops::GitOpsStage;
+        let (_env, _repo, mut app) = setup_gitops_log_app("rebase-decline-repo", &[]);
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('r')));
+        app.handle_key(key(KeyCode::Enter)); // pre-flight -> picker
+        app.handle_key(key(KeyCode::Enter)); // pick main -> confirm
+
+        // The prompt reads [y/N]: Enter is the default No and must never
+        // rewrite history.
+        app.handle_key(key(KeyCode::Enter));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::RebasePickTarget,
+                "Enter must decline (default No) and return to the target picker"
+            ),
+            _ => panic!("expected the git ops overlay back on the target picker"),
+        }
+        assert!(
+            app.gitop_rx.is_none(),
+            "declining the rebase must not start any worker"
+        );
+    }
+
+    #[test]
+    fn gitops_rebase_preflight_blocks_genuine_detached_head() {
+        use space::tui::screens::gitops::GitOpsStage;
+        // A REAL repo detached on disk after setup: start_rebase reads HEAD
+        // live via is_on_branch, so it must block on the genuine detached-HEAD
+        // case. This complements
+        // gitops_menu_r_opens_rebase_preflight_blocked_on_fake_repo, which only
+        // exercises an unopenable /tmp path (is_on_branch returns false because
+        // Repository::open fails), never a real detached HEAD.
+        let (_env, repo_path, mut app) = setup_gitops_log_app("rebase-detached-repo", &[]);
+
+        // Detach HEAD in the real repo before pressing r.
+        let out = std::process::Command::new("git")
+            .args(["checkout", "--detach"])
+            .current_dir(&repo_path)
+            .output()
+            .expect("git checkout --detach failed to run");
+        assert!(
+            out.status.success(),
+            "git checkout --detach failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('r')));
+
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                GitOpsStage::RebasePreflight,
+                "r must enter the rebase pre-flight stage"
+            ),
+            _ => panic!("expected the git ops overlay in the RebasePreflight stage"),
+        }
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Detached HEAD"),
+            "a genuine detached HEAD must show the detached-HEAD blocker, got:\n{}",
+            rendered
+        );
+
+        // A blocked pre-flight must never advance to the target picker.
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::GitOps(st) => {
+                assert_eq!(
+                    st.stage,
+                    GitOpsStage::RebasePreflight,
+                    "Enter on a blocked pre-flight must stay put"
+                );
+                assert_ne!(
+                    st.stage,
+                    GitOpsStage::RebasePickTarget,
+                    "a blocked pre-flight must not reach the target picker"
+                );
+            }
+            _ => panic!("expected the overlay to stay on the blocked pre-flight"),
+        }
+        assert!(
+            app.gitop_rx.is_none(),
+            "a blocked pre-flight must never start a worker"
         );
     }
 }

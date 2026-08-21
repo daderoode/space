@@ -140,6 +140,10 @@ const GIT_OPS: BindingGroup = BindingGroup {
             desc: "Log",
         },
         Binding {
+            key: "r",
+            desc: "Rebase",
+        },
+        Binding {
             key: "\u{2191}\u{2193}/jk",
             desc: "Navigate",
         },

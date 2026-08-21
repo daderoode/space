@@ -22,21 +22,40 @@ pub struct WorktreeParams {
 /// A git operation dispatched to the background git-ops worker.
 /// `Fetch` streams git's progress; `Pull` summarizes the classify/merge result;
 /// `Push { set_upstream }` publishes the current branch (with `-u origin
-/// <branch>` when it has no upstream yet).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// <branch>` when it has no upstream yet); `Rebase { onto }` replays the current
+/// branch onto `onto`, auto-aborting on conflict.
+///
+/// Not `Copy`: `Rebase` carries an owned target, so call sites clone where they
+/// need to keep a copy (see `GitOpsState::start_network_op`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitOp {
     Fetch,
     Pull,
     Push { set_upstream: bool },
+    Rebase { onto: String },
 }
 
 impl GitOp {
-    /// Display label for this op, used e.g. by the Running-stage header.
-    pub fn label(self) -> &'static str {
+    /// Display label for this op, used e.g. by the Running-stage
+    /// completion/failure headers ("Rebase complete").
+    pub fn label(&self) -> &'static str {
         match self {
             GitOp::Fetch => "Fetch",
             GitOp::Pull => "Pull",
             GitOp::Push { .. } => "Push",
+            GitOp::Rebase { .. } => "Rebase",
+        }
+    }
+
+    /// Progressive ("-ing") form for the Running-stage in-progress header.
+    /// A dedicated table rather than `format!("{}ing", label)`: "Rebase" + "ing"
+    /// would render as "Rebaseing".
+    pub fn progressive(&self) -> &'static str {
+        match self {
+            GitOp::Fetch => "Fetching",
+            GitOp::Pull => "Pulling",
+            GitOp::Push { .. } => "Pushing",
+            GitOp::Rebase { .. } => "Rebasing",
         }
     }
 }

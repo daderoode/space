@@ -172,12 +172,17 @@ TUI.
 
 ---
 
-## Tier 3 -- Git Operations
+## Tier 3 -- Git Operations ✓ Complete
 
 Perform routine git operations without leaving the TUI. Each operation is a
 self-contained sub-flow within a git operations overlay.
 
-### 6. Git operations menu
+### 6. Git operations menu ✓
+
+Shipped in v0.12.0 (#23): `G` on a repo opens the per-repo overlay with fetch,
+pull, push, commit, and log. Network ops stream live output on a background
+worker with auto-close on success; commit and log resolve synchronously.
+See `docs/plans/2026-07-16-git-operations-menu-design.md`.
 
 **Problem:** Users must leave `space` to perform routine git operations on
 individual repos within a workspace.
@@ -201,26 +206,14 @@ repos without leaving the TUI.
 
 ---
 
-### 7. Safe rebase flow
+### 7. Safe rebase flow ✓
 
-**Problem:** Rebasing a worktree branch is risky without visibility into the
-current state (dirty files, divergence, conflicts).
-
-**Approach:**
-
-- `r` from the git operations menu triggers a rebase flow.
-- Pre-flight checks: dirty working tree, detached HEAD, fetch latest. Abort
-  with clear message if unsafe.
-- Summary panel shows: current branch, ahead/behind, warnings.
-- Branch picker (reuses existing `build_branch_picker()`) for selecting the
-  rebase target.
-- Confirmation panel, then execute via `git rebase <target>`.
-- On conflict: auto-abort (`git rebase --abort`) and instruct user to rebase
-  manually.
-
-**Files:** `src/core/git.rs`, `src/tui/screens/gitops.rs`
-**Done when:** Users can safely rebase a single repo's branch with pre-flight
-checks and clean abort on conflict.
+`r` in the git operations menu opens a guarded sub-flow: a synchronous
+pre-flight blocks on detached HEAD or a dirty working tree (untracked files
+allowed); a fuzzy branch picker selects the target; a `[y/N]` confirm shows an
+ahead/behind preview before executing. `rebase_repo` fetches best-effort, runs
+`git rebase <target>` on the git-ops worker, and auto-aborts on conflict so the
+branch is always restored. See `docs/plans/2026-07-27-safe-rebase-flow-design.md`.
 
 ---
 

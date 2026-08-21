@@ -321,6 +321,40 @@ pub fn ahead_behind(repo_path: &Path) -> Result<(usize, usize)> {
     Ok((ahead, behind))
 }
 
+/// Return `(ahead, behind)` of the current `HEAD` relative to an arbitrary
+/// `target` revision (e.g. `main`, `origin/main`, a SHA). `ahead` is the number
+/// of commits on `HEAD` not reachable from `target` (these get replayed by a
+/// rebase); `behind` is the number of commits on `target` not on `HEAD`.
+///
+/// Returns `None` on detached HEAD, an unresolvable `target`, or any git error,
+/// so callers can render a preview panel without a target being fatal. Used by
+/// the rebase-confirm summary.
+pub fn ahead_behind_vs(repo_path: &Path, target: &str) -> Option<(usize, usize)> {
+    let repo = Repository::open(repo_path).ok()?;
+    let head = repo.head().ok()?;
+    // A detached HEAD has a resolvable target OID, so `head.target()` alone does
+    // not filter it out. Gate on `is_branch()` to honor the documented
+    // "None on detached HEAD" contract (the preview degrades instead of
+    // comparing a bare commit against the target).
+    if !head.is_branch() {
+        return None;
+    }
+    let local_oid = head.target()?;
+    let target_oid = repo.revparse_single(target).ok()?.id();
+    repo.graph_ahead_behind(local_oid, target_oid).ok()
+}
+
+/// Whether `HEAD` currently points at a branch: `true` only when the repo opens
+/// and HEAD resolves to a branch ref. Returns `false` for a detached HEAD, an
+/// unborn branch, or an unopenable path, every state the rebase pre-flight must
+/// block before proceeding. Distinct from `current_branch`, which reports a
+/// detached HEAD as `Ok("(<sha>)")` rather than an error.
+pub fn is_on_branch(repo_path: &Path) -> bool {
+    Repository::open(repo_path)
+        .and_then(|repo| repo.head().map(|head| head.is_branch()))
+        .unwrap_or(false)
+}
+
 /// Returns true iff the current branch has a configured upstream tracking
 /// branch (`branch.upstream()` resolves). Returns false on detached HEAD, no
 /// upstream, a missing branch, or any error (e.g. the path is not a git repo).

@@ -1540,6 +1540,17 @@ fn run_gitop_worker(
                 success: result.success,
             });
         }
+        // Rebase runs `rebase_repo` (fetch + rebase, auto-abort on conflict),
+        // then reports its summary line(s) plus the success flag.
+        crate::tui::actions::GitOp::Rebase { onto } => {
+            let result = crate::core::workspace::rebase_repo(&repo_path, &onto);
+            for line in result.message.lines() {
+                let _ = tx.send(GitOpProgress::Line(line.to_string()));
+            }
+            let _ = tx.send(GitOpProgress::Done {
+                success: result.success(),
+            });
+        }
     }
 }
 
@@ -1996,9 +2007,13 @@ pub fn run(app: &mut App) -> Result<()> {
 
 /// Build a FuzzyPicker populated with local + remote branches from `repo_path`.
 /// Returns `None` if branch listing fails (not a git repo, etc.).
+/// `label` is the picker-title verb phrase naming what the selection does
+/// (e.g. "Branch" for switch/checkout flows, "Rebase onto" for the rebase
+/// target picker), so the title states the consequence of pressing Enter.
 pub(crate) fn build_branch_picker(
     repo_path: &std::path::Path,
     repo_name: &str,
+    label: &str,
 ) -> Option<crate::tui::widgets::fuzzy_picker::FuzzyPicker> {
     use crate::core::git::list_branches;
     use crate::tui::widgets::fuzzy_picker::{FuzzyPicker, PickerItem};
@@ -2026,7 +2041,7 @@ pub(crate) fn build_branch_picker(
         .collect();
 
     Some(FuzzyPicker::new(
-        format!("Branch  ({})  ENTER=select  ESC=back", repo_name),
+        format!("{}  ({})  ENTER=select  ESC=back", label, repo_name),
         items,
         false,
     ))

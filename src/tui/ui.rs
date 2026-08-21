@@ -1448,14 +1448,20 @@ fn render_gitops_overlay(
         // always sets `running_op`; the fallback is unreachable.
         let op = state
             .running_op
-            .map(crate::tui::actions::GitOp::label)
+            .as_ref()
+            .map(|op| op.label())
             .unwrap_or("Git op");
+        let op_progressive = state
+            .running_op
+            .as_ref()
+            .map(|op| op.progressive())
+            .unwrap_or("Working");
         let header = match state.finished {
             None => {
                 // Animated ellipsis, same cadence as the dashboard spinner.
                 let frames = ["\u{b7}  ", "\u{b7}\u{b7} ", "\u{b7}\u{b7}\u{b7}"];
                 let dots = frames[(spinner_tick as usize / 30) % 3];
-                Span::styled(format!("{}ing {}", op, dots), theme::muted())
+                Span::styled(format!("{} {}", op_progressive, dots), theme::muted())
             }
             Some(true) => Span::styled(format!("\u{2713} {} complete", op), theme::success()),
             Some(false) => Span::styled(
@@ -1530,6 +1536,87 @@ fn render_gitops_overlay(
             ))),
             sections[1],
         );
+        return;
+    }
+
+    // Rebase target picker: reuse the shared fuzzy branch picker (full-screen).
+    if state.stage == crate::tui::screens::gitops::GitOpsStage::RebasePickTarget {
+        if let Some(ref picker) = state.rebase_picker {
+            crate::tui::widgets::fuzzy_picker::render(picker, frame);
+        }
+        return;
+    }
+
+    // Rebase pre-flight: branch state plus either a blocker or a ready prompt.
+    if state.stage == crate::tui::screens::gitops::GitOpsStage::RebasePreflight {
+        let dialog_w = (frame.area().width * 60 / 100).max(48);
+        let dialog_h = 9u16.min(frame.area().height.saturating_sub(2));
+        let title = format!(" Rebase: {} ({}) ", state.repo_name, state.branch);
+        let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
+
+        let lines: Vec<Line> = match &state.rebase_block {
+            Some(reason) => vec![
+                Line::from(Span::styled(reason.clone(), theme::error())),
+                Line::from(""),
+                Line::from(Span::styled("Esc to go back", theme::muted())),
+            ],
+            None => vec![
+                Line::from(Span::styled(
+                    format!("Working tree clean on {}.", state.branch),
+                    theme::text(),
+                )),
+                Line::from(Span::styled(
+                    "Replay this branch's commits on top of another branch.",
+                    theme::muted(),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Enter to choose a target \u{00b7} Esc to cancel",
+                    theme::muted(),
+                )),
+            ],
+        };
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        return;
+    }
+
+    // Rebase confirm: an ahead/behind preview plus the [y/N] prompt.
+    if state.stage == crate::tui::screens::gitops::GitOpsStage::RebaseConfirm {
+        let dialog_w = (frame.area().width * 60 / 100).max(48);
+        // Seven logical lines, but the preview, the abort note, and the push
+        // note each wrap to two rows at the minimum width — reserve room so
+        // [y/N] is never clipped.
+        let dialog_h = 13u16.min(frame.area().height.saturating_sub(2));
+        let title = format!(" Rebase: {} ({}) ", state.repo_name, state.branch);
+        let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
+
+        let onto = state.rebase_onto.as_deref().unwrap_or("?");
+        let preview = match state.rebase_ahead_behind {
+            Some((ahead, behind)) => format!(
+                "{} commit(s) will be replayed. {} is {} commit(s) ahead of your branch.",
+                ahead, onto, behind
+            ),
+            None => "Divergence unknown (could not compare with the target).".to_string(),
+        };
+        let lines = vec![
+            Line::from(Span::styled(
+                format!("Rebase {} onto {}?", state.branch, onto),
+                theme::text(),
+            )),
+            Line::from(Span::styled(preview, theme::muted())),
+            Line::from(""),
+            Line::from(Span::styled(
+                "On conflict the rebase is aborted and your branch restored.",
+                theme::muted(),
+            )),
+            Line::from(Span::styled(
+                "If this branch is already pushed, the next push will be rejected.",
+                theme::muted(),
+            )),
+            Line::from(""),
+            Line::from(Span::styled("Proceed?  [y/N]", theme::text())),
+        ];
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
         return;
     }
 
