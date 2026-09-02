@@ -197,6 +197,10 @@ pub fn view(app: &App, frame: &mut Frame) {
             render_dashboard(app, frame);
             crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
         }
+        Screen::FilterWorkspace(state) => {
+            render_dashboard(app, frame);
+            crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
+        }
         Screen::AddRepos(state) => {
             render_dashboard(app, frame);
             render_add_overlay(state, frame);

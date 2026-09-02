@@ -66,7 +66,7 @@ files with `s`/`space`, or bulk stage/unstage all files in the selected repo wit
 | `a` | Add repos to selected workspace |
 | `d` | Delete selected workspace |
 | `r` | Rescan the repo list |
-| `/` | Search all repos |
+| `/` | Filter spaces (selects in place) |
 | `?` | Open help overlay |
 | `S` | Open config editor |
 | `q` / `Esc` | Quit |
@@ -84,6 +84,7 @@ files with `s`/`space`, or bulk stage/unstage all files in the selected repo wit
 | `S` | Stage all unstaged files in repo |
 | `U` | Unstage all staged files in repo |
 | `b` | Switch branch for selected repo |
+| `/` | Search all repos |
 | `q` | Quit |
 
 **Key bindings, repo picker** (create and add flows):

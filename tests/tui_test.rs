@@ -769,6 +769,8 @@ fn go_esc_returns_to_dashboard() {
 #[test]
 fn search_esc_returns_to_dashboard() {
     let mut app = test_app(vec![], vec![PathBuf::from("/tmp/repos/foo")]);
+    // Repo search is pane-gated to the repos pane (the workspaces pane filters spaces).
+    app.focus = Pane::Right;
 
     app.handle_key(key(KeyCode::Char('/')));
     assert!(matches!(app.screen, Screen::RepoSearch(_)));
@@ -4790,4 +4792,378 @@ mod rescan_tests {
         assert!(rendered.contains("Repo Picker"), "got:\n{}", rendered);
         assert!(rendered.contains("General"), "got:\n{}", rendered);
     }
+}
+
+// ---- 1.2 In-place space filter ----
+
+/// Two bare spaces (no repos) with the first one selected.
+fn two_spaces_app() -> App {
+    let workspaces = vec![
+        Workspace {
+            name: "alpha".to_string(),
+            path: PathBuf::from("/tmp/alpha"),
+            repos: vec![],
+        },
+        Workspace {
+            name: "beta".to_string(),
+            path: PathBuf::from("/tmp/beta"),
+            repos: vec![],
+        },
+    ];
+    test_app(workspaces, vec![])
+}
+
+fn type_str(app: &mut App, s: &str) {
+    for ch in s.chars() {
+        app.handle_key(key(KeyCode::Char(ch)));
+    }
+}
+
+#[test]
+fn filter_slash_on_workspaces_pane_opens_filter() {
+    let mut app = two_spaces_app();
+    assert_eq!(app.focus, Pane::Left);
+
+    app.handle_key(key(KeyCode::Char('/')));
+    assert!(
+        matches!(app.screen, Screen::FilterWorkspace(_)),
+        "/ on the workspaces pane must open the space filter, got {:?}",
+        app.screen
+    );
+}
+
+#[test]
+fn filter_slash_on_repos_pane_opens_repo_search() {
+    let mut app = two_spaces_app();
+    app.focus = Pane::Right;
+
+    app.handle_key(key(KeyCode::Char('/')));
+    assert!(
+        matches!(app.screen, Screen::RepoSearch(_)),
+        "/ on the repos pane must open repo search, got {:?}",
+        app.screen
+    );
+}
+
+#[test]
+fn filter_enter_selects_space_in_place() {
+    let mut app = two_spaces_app();
+    app.expanded_repos.insert(0);
+    app.cursor_row = 3;
+    app.selected_repo = 2;
+    let gen_before = app.ws_generation;
+
+    app.handle_key(key(KeyCode::Char('/')));
+    type_str(&mut app, "bet");
+    app.handle_key(key(KeyCode::Enter));
+
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "Enter must return to the dashboard, got {:?}",
+        app.screen
+    );
+    assert_eq!(app.selected_ws, 1, "the matched space must become selected");
+    assert_eq!(
+        app.focus,
+        Pane::Left,
+        "focus must stay on the workspaces pane"
+    );
+    assert!(!app.should_quit, "the filter must never quit the TUI");
+    assert!(
+        app.space_cd_target.is_none(),
+        "the filter must not set a cd target"
+    );
+    // Repos pane reset, same as the repo-search landing.
+    assert_eq!(app.selected_repo, 0);
+    assert_eq!(app.cursor_row, 0);
+    assert!(app.expanded_repos.is_empty());
+    // Loaded immediately, no debounce.
+    assert_eq!(
+        app.ws_generation,
+        gen_before + 1,
+        "load must fire immediately"
+    );
+    assert!(
+        app.nav_pending.is_none(),
+        "no debounce timer for an explicit jump"
+    );
+    assert!(app.ws_loading, "repos pane must be loading");
+}
+
+#[test]
+fn filter_esc_leaves_selection_untouched() {
+    let mut app = two_spaces_app();
+    app.expanded_repos.insert(0);
+    app.cursor_row = 2;
+    let gen_before = app.ws_generation;
+
+    app.handle_key(key(KeyCode::Char('/')));
+    type_str(&mut app, "bet");
+    app.handle_key(key(KeyCode::Esc));
+
+    assert!(matches!(app.screen, Screen::Dashboard));
+    assert_eq!(app.selected_ws, 0, "Esc must not change the selected space");
+    assert_eq!(app.focus, Pane::Left);
+    assert_eq!(app.cursor_row, 2, "Esc must not reset the repos pane");
+    assert!(app.expanded_repos.contains(&0));
+    assert_eq!(app.ws_generation, gen_before, "Esc must not trigger a load");
+    assert!(!app.ws_loading);
+}
+
+#[test]
+fn filter_refuses_to_open_with_no_spaces() {
+    let mut app = test_app(vec![], vec![]);
+
+    app.handle_key(key(KeyCode::Char('/')));
+
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "an empty space list must not open the filter, got {:?}",
+        app.screen
+    );
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("No spaces yet, press c to create one")
+    );
+}
+
+#[test]
+fn filter_same_space_keeps_expanded_repos_and_cursor() {
+    let mut app = test_app(vec![common::workspace_with_repos(&["a", "b"])], vec![]);
+    app.expanded_repos.insert(1);
+    app.cursor_row = 1;
+    app.selected_repo = 1;
+    let gen_before = app.ws_generation;
+
+    app.handle_key(key(KeyCode::Char('/')));
+    // The only space is highlighted; Enter re-selects it.
+    app.handle_key(key(KeyCode::Enter));
+
+    assert!(matches!(app.screen, Screen::Dashboard));
+    assert_eq!(app.selected_ws, 0);
+    assert_eq!(app.focus, Pane::Left);
+    assert!(
+        app.expanded_repos.contains(&1),
+        "re-selecting the current space must keep expanded repos"
+    );
+    assert_eq!(
+        app.cursor_row, 1,
+        "re-selecting the current space must keep the cursor"
+    );
+    assert_eq!(app.selected_repo, 1);
+    assert_eq!(
+        app.ws_generation, gen_before,
+        "no reload for the same space"
+    );
+    assert!(!app.ws_loading);
+    assert_eq!(
+        app.workspaces[0].repos.len(),
+        2,
+        "the loaded repos must survive (no skeleton reset)"
+    );
+}
+
+#[test]
+fn filter_no_match_keeps_picker_open_and_enter_does_nothing() {
+    let mut app = two_spaces_app();
+
+    app.handle_key(key(KeyCode::Char('/')));
+    type_str(&mut app, "zzz");
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("0/2 matched"),
+        "footer must read 0/N matched, got:\n{}",
+        rendered
+    );
+
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::FilterWorkspace(_)),
+        "Enter with no match must keep the picker open, got {:?}",
+        app.screen
+    );
+    assert_eq!(app.selected_ws, 0);
+    assert!(app.status_message.is_none(), "no error text on no match");
+}
+
+#[test]
+fn filter_j_and_k_edit_the_query() {
+    let mut app = two_spaces_app();
+
+    app.handle_key(key(KeyCode::Char('/')));
+    type_str(&mut app, "jk");
+    match &app.screen {
+        Screen::FilterWorkspace(st) => assert_eq!(st.picker.input.value(), "jk"),
+        other => panic!("expected the space filter, got {:?}", other),
+    }
+}
+
+#[test]
+fn go_j_and_k_edit_the_query() {
+    let mut app = two_spaces_app();
+
+    app.handle_key(key(KeyCode::Char('g')));
+    type_str(&mut app, "jk");
+    match &app.screen {
+        Screen::GoWorkspace(st) => assert_eq!(st.picker.input.value(), "jk"),
+        other => panic!("expected the go picker, got {:?}", other),
+    }
+}
+
+#[test]
+fn filter_and_go_rows_show_repo_count_without_parent() {
+    // Real directories: the count comes from a scan of the space's directory,
+    // since the dashboard only loads repos for the selected space.
+    let env = TestEnv::new();
+    for repo in ["one", "two"] {
+        std::fs::create_dir_all(env.workspaces_dir.join("alpha").join(repo).join(".git")).unwrap();
+    }
+    std::fs::create_dir_all(env.workspaces_dir.join("beta")).unwrap();
+
+    for open_key in ['/', 'g'] {
+        let workspaces = vec![
+            Workspace {
+                name: "alpha".to_string(),
+                path: env.workspaces_dir.join("alpha"),
+                repos: vec![],
+            },
+            Workspace {
+                name: "beta".to_string(),
+                path: env.workspaces_dir.join("beta"),
+                repos: vec![],
+            },
+        ];
+        let mut app = test_app_with_config(config_from_env(&env), workspaces, vec![]);
+        app.handle_key(key(KeyCode::Char(open_key)));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("2 repos"),
+            "{} picker must show the repo count, got:\n{}",
+            open_key,
+            rendered
+        );
+        assert!(
+            rendered.contains("0 repos"),
+            "{} picker must show a zero count, got:\n{}",
+            open_key,
+            rendered
+        );
+        assert!(
+            !rendered.contains("(workspaces)") && !rendered.contains("()"),
+            "{} picker must not draw a parent, got:\n{}",
+            open_key,
+            rendered
+        );
+    }
+}
+
+#[test]
+fn filter_prompt_wording() {
+    let mut app = two_spaces_app();
+    app.handle_key(key(KeyCode::Char('/')));
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("Filter spaces  ENTER=select  ESC=cancel"),
+        "got:\n{}",
+        rendered
+    );
+}
+
+#[test]
+fn filter_arrows_move_the_highlight_and_enter_selects_by_index() {
+    let mut app = two_spaces_app();
+
+    // Empty query: both spaces listed, Down moves the highlight to beta.
+    app.handle_key(key(KeyCode::Char('/')));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Enter));
+    assert!(matches!(app.screen, Screen::Dashboard));
+    assert_eq!(
+        app.selected_ws, 1,
+        "Down then Enter must select the second space"
+    );
+
+    // Up walks back to alpha.
+    app.handle_key(key(KeyCode::Char('/')));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Up));
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        app.selected_ws, 0,
+        "Down, Up then Enter must select the first space"
+    );
+}
+
+#[test]
+fn go_enter_sets_cd_target_and_quits() {
+    let mut app = two_spaces_app();
+
+    app.handle_key(key(KeyCode::Char('g')));
+    type_str(&mut app, "bet");
+    app.handle_key(key(KeyCode::Enter));
+
+    assert_eq!(app.space_cd_target, Some(PathBuf::from("/tmp/beta")));
+    assert!(app.should_quit, "go must quit the TUI");
+    assert_eq!(
+        app.selected_ws, 0,
+        "go must not touch the dashboard selection"
+    );
+}
+
+#[test]
+fn filter_repo_count_is_excluded_from_matching() {
+    let mut app = two_spaces_app();
+
+    app.handle_key(key(KeyCode::Char('/')));
+    type_str(&mut app, "repos");
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("0/2 matched"),
+        "the count label must not match a query, got:\n{}",
+        rendered
+    );
+}
+
+#[test]
+fn filter_rows_use_singular_for_one_repo() {
+    let env = TestEnv::new();
+    std::fs::create_dir_all(env.workspaces_dir.join("solo").join("only").join(".git")).unwrap();
+    let workspaces = vec![Workspace {
+        name: "solo".to_string(),
+        path: env.workspaces_dir.join("solo"),
+        repos: vec![],
+    }];
+    let mut app = test_app_with_config(config_from_env(&env), workspaces, vec![]);
+
+    app.handle_key(key(KeyCode::Char('/')));
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("1 repo") && !rendered.contains("1 repos"),
+        "got:\n{}",
+        rendered
+    );
+}
+
+#[test]
+fn filter_help_registry_and_status_bar_wording() {
+    use space::tui::keybindings::{all_groups, status_bar_bindings};
+
+    let find = |group: &str, key: &str| -> Option<&'static str> {
+        all_groups()
+            .iter()
+            .find(|g| g.name == group)
+            .and_then(|g| g.bindings.iter().find(|b| b.key == key))
+            .map(|b| b.desc)
+    };
+    assert_eq!(find("Workspace Pane", "/"), Some("Filter spaces"));
+    assert_eq!(find("Repo Pane", "/"), Some("Search repos"));
+
+    let bar = |pane: Pane| -> Option<&'static str> {
+        status_bar_bindings(pane)
+            .iter()
+            .find(|b| b.key == "/")
+            .map(|b| b.desc)
+    };
+    assert_eq!(bar(Pane::Left), Some("filter"));
+    assert_eq!(bar(Pane::Right), Some("search"));
 }

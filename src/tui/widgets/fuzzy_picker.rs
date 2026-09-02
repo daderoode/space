@@ -444,7 +444,9 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
 
             let mut line_spans = vec![Span::styled(dot, Style::default().fg(theme::TEAL))];
             line_spans.extend(name_spans);
-            line_spans.push(Span::styled(format!("  ({})", item.parent), theme::muted()));
+            if !item.parent.is_empty() {
+                line_spans.push(Span::styled(format!("  ({})", item.parent), theme::muted()));
+            }
             if let Some(ref branch) = item.branch {
                 line_spans.push(Span::styled(format!("  {}", branch), theme::branch()));
             }
