@@ -367,8 +367,12 @@ pub fn sync_repo_cancellable(
             break;
         }
         let remote_ref = format!("origin/{}", branch);
+        // `LC_ALL=C` pins git's output language so `parse_skip_reason` sees
+        // the English refusal; a localized git would turn every skip into
+        // `Other`.
         let out = Command::new("git")
             .args(["branch", "-f", &branch, &remote_ref])
+            .env("LC_ALL", "C")
             .current_dir(repo_path)
             .stdin(Stdio::null())
             .output();
@@ -397,7 +401,10 @@ pub fn sync_repo_cancellable(
 
 /// Best-effort parse of git's refusal to `branch -f`. Recognises
 /// `fatal: cannot force update the branch '<b>' used by worktree at '<path>'`
-/// (git 2.53.0 wording); anything else is kept verbatim so nothing is swallowed.
+/// (git 2.42 and later) and the `checked out at '<path>'` wording of git 2.38
+/// to 2.41; anything else, including the pre-2.38 `Cannot force update the
+/// current branch.`, is kept verbatim so nothing is swallowed. The caller
+/// runs git with `LC_ALL=C` so the wording is not localized.
 fn parse_skip_reason(stderr: &str) -> SkipReason {
     let line = stderr
         .lines()
@@ -405,33 +412,88 @@ fn parse_skip_reason(stderr: &str) -> SkipReason {
         .find(|l| l.starts_with("fatal:") || l.starts_with("error:"))
         .or_else(|| stderr.lines().map(str::trim).find(|l| !l.is_empty()))
         .unwrap_or("git branch -f failed");
-    if let Some((_, rest)) = line.split_once("used by worktree at '") {
-        if let Some(path) = rest.strip_suffix('\'') {
-            return SkipReason::CheckedOutAt(PathBuf::from(path));
+    for marker in ["used by worktree at '", "checked out at '"] {
+        if let Some((_, rest)) = line.split_once(marker) {
+            if let Some(path) = rest.strip_suffix('\'') {
+                return SkipReason::CheckedOutAt(PathBuf::from(path));
+            }
         }
     }
     SkipReason::Other(line.to_string())
 }
 
-/// Run `git fetch --quiet origin` under the unattended-run policy: the child
-/// gets its own session (so no controlling terminal: prompts for credentials,
-/// passphrases and host keys fail instead of waiting), stdin is null, stdout
-/// and stderr are captured, and `GIT_TERMINAL_PROMPT=0` makes the https
-/// refusal read "terminal prompts disabled". `GIT_SSH_COMMAND` is deliberately
-/// not set so the user's own ssh configuration applies. The session is also the
-/// process group the timeout kills: SIGTERM to the group (git and its ssh or
-/// https helper), a short grace so git can drop its lockfiles, then SIGKILL.
-///
-/// A helper that outlives the kill can keep the stderr pipe open; the reader
-/// thread then lingers until it exits, which is harmless.
+/// Run `git fetch --quiet origin` under the unattended-run policy (see
+/// `run_unattended`). `GIT_TERMINAL_PROMPT=0` makes the https refusal read
+/// "terminal prompts disabled". `GIT_SSH_COMMAND` is deliberately not set so
+/// the user's own ssh configuration applies.
 fn fetch_origin_unattended(repo_path: &Path, timeout: Duration) -> FetchOutcome {
-    use std::os::unix::process::CommandExt;
-
     let mut cmd = Command::new("git");
     cmd.args(["fetch", "--quiet", "origin"])
         .current_dir(repo_path)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0");
+    match run_unattended(cmd, timeout) {
+        Unattended::Exited { status, stderr } => {
+            if status.success() {
+                FetchOutcome::Ok
+            } else {
+                FetchOutcome::Failed {
+                    exit_code: status.code(),
+                    stderr,
+                }
+            }
+        }
+        Unattended::TimedOut { stderr } => FetchOutcome::TimedOut {
+            after: timeout,
+            stderr,
+        },
+        Unattended::SpawnFailed(e) => FetchOutcome::Failed {
+            exit_code: None,
+            stderr: format!("failed to spawn git: {}", e),
+        },
+        Unattended::WaitFailed { stderr } => FetchOutcome::Failed {
+            exit_code: None,
+            stderr: format!("could not wait for git\n{}", stderr),
+        },
+    }
+}
+
+/// How a child run by `run_unattended` ended. `stderr` is what the child
+/// wrote before it ended (or before it was stopped).
+#[derive(Debug)]
+enum Unattended {
+    /// The child exited on its own, within the limit or during the grace
+    /// after SIGTERM; a success status here means the work completed.
+    Exited {
+        status: ExitStatus,
+        stderr: String,
+    },
+    /// The limit passed and the child did not exit cleanly afterwards.
+    TimedOut {
+        stderr: String,
+    },
+    SpawnFailed(std::io::Error),
+    /// `try_wait` failed (the child was reaped elsewhere): the child was no
+    /// longer ours to signal, so its group was not killed.
+    WaitFailed {
+        stderr: String,
+    },
+}
+
+/// Run `cmd` under the unattended-run policy: the child gets its own session
+/// (so no controlling terminal: prompts for credentials, passphrases and host
+/// keys fail instead of waiting), stdin is null, stdout and stderr are
+/// captured. The session is also the process group the timeout stops: SIGTERM
+/// to the group (git and its ssh or https helper), a short grace so git can
+/// drop its lockfiles, then SIGKILL to whatever is left. A child that exits
+/// with success during that grace still counts as `Exited`, so work that
+/// completed at the deadline is not thrown away.
+///
+/// The stderr reader is joined with a bound on every path, so a helper that
+/// keeps the pipe open never stalls the caller.
+fn run_unattended(mut cmd: Command, timeout: Duration) -> Unattended {
+    use std::os::unix::process::CommandExt;
+
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // SAFETY: setsid(2) is async-signal-safe and touches no memory shared with
@@ -447,12 +509,7 @@ fn fetch_origin_unattended(repo_path: &Path, timeout: Duration) -> FetchOutcome 
     }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => {
-            return FetchOutcome::Failed {
-                exit_code: None,
-                stderr: format!("failed to spawn git: {}", e),
-            }
-        }
+        Err(e) => return Unattended::SpawnFailed(e),
     };
     let pgid = child.id() as libc::pid_t;
     let (stderr, stderr_reader) = capture_in_background(child.stderr.take());
@@ -460,30 +517,28 @@ fn fetch_origin_unattended(repo_path: &Path, timeout: Duration) -> FetchOutcome 
 
     match wait_until(&mut child, Instant::now() + timeout) {
         Wait::Exited(status) => {
-            // git has exited, so the pipe normally reaches end-of-file at
-            // once: give the reader a moment to copy git's last write, but
-            // never wait on a helper that outlived git.
+            // The child has exited, so the pipe normally reaches end-of-file
+            // at once: give the reader a moment to copy the last write, but
+            // never wait on a helper that outlived the child.
             join_bounded(&stderr_reader, SYNC_READER_GRACE);
-            let text = snapshot(&stderr);
-            if status.success() {
-                FetchOutcome::Ok
-            } else {
-                FetchOutcome::Failed {
-                    exit_code: status.code(),
-                    stderr: text,
-                }
-            }
-        }
-        Wait::Timeout => {
-            stop_process_group(&mut child, pgid);
-            FetchOutcome::TimedOut {
-                after: timeout,
+            Unattended::Exited {
+                status,
                 stderr: snapshot(&stderr),
             }
         }
-        Wait::Error => FetchOutcome::Failed {
-            exit_code: None,
-            stderr: format!("could not wait for git\n{}", snapshot(&stderr)),
+        Wait::Timeout => {
+            let status = stop_process_group(&mut child, pgid);
+            // Nothing in the group survives the SIGKILL, so the pipe closes
+            // and the reader finishes; the bound is a backstop.
+            join_bounded(&stderr_reader, SYNC_READER_GRACE);
+            let stderr = snapshot(&stderr);
+            match status {
+                Some(status) if status.success() => Unattended::Exited { status, stderr },
+                _ => Unattended::TimedOut { stderr },
+            }
+        }
+        Wait::Error => Unattended::WaitFailed {
+            stderr: snapshot(&stderr),
         },
     }
 }
@@ -552,21 +607,51 @@ fn wait_until(child: &mut Child, deadline: Instant) -> Wait {
     }
 }
 
-/// SIGTERM the child's process group, give it `SYNC_KILL_GRACE` to clean up,
-/// then SIGKILL whatever is left. Always reaps the child.
-fn stop_process_group(child: &mut Child, pgid: libc::pid_t) {
+/// SIGTERM the child's process group, give the leader up to `SYNC_KILL_GRACE`
+/// to exit, then SIGKILL the whole group regardless: a helper in the session
+/// that ignored SIGTERM (askpass, a credential helper) must not outlive git
+/// holding the remote connection and the stderr pipe. The leader is only
+/// reaped after the SIGKILL, so the group id is guaranteed to still be ours
+/// when it is sent. Returns the leader's exit status once reaped, which is
+/// its own status when it exited during the grace.
+fn stop_process_group(child: &mut Child, pgid: libc::pid_t) -> Option<ExitStatus> {
+    let pid = child.id() as libc::pid_t;
     // SAFETY: killpg on the group we created with setsid; the leader is our
     // unreaped child (only `Wait::Timeout` reaches here), so the group id
     // cannot have been recycled.
     unsafe {
         libc::killpg(pgid, libc::SIGTERM);
     }
-    if let Wait::Timeout = wait_until(child, Instant::now() + SYNC_KILL_GRACE) {
-        // SAFETY: as above; the leader is still unreaped.
-        unsafe {
-            libc::killpg(pgid, libc::SIGKILL);
-        }
-        let _ = child.wait();
+    let deadline = Instant::now() + SYNC_KILL_GRACE;
+    while !has_exited_unreaped(pid) && Instant::now() < deadline {
+        std::thread::sleep(SYNC_POLL_INTERVAL);
+    }
+    // SAFETY: as above; the leader is still unreaped (`has_exited_unreaped`
+    // never reaps), so the group id is still ours. ESRCH, when everything
+    // already left, is fine.
+    unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
+    }
+    child.wait().ok()
+}
+
+/// Whether `pid`, an unreaped child of ours, has exited. Uses `waitid` with
+/// `WNOWAIT` so the zombie stays in place for `Child::wait`; `kill(pid, 0)`
+/// would not do, as it succeeds for a zombie too. A failed `waitid` (the
+/// child is not ours to wait for) reports `true` so the caller stops polling.
+fn has_exited_unreaped(pid: libc::pid_t) -> bool {
+    // SAFETY: `siginfo_t` is plain data for which all-zero is a valid value,
+    // and waitid only writes into it. With WNOHANG and no state change the
+    // struct is left with `si_signo == 0`; a reported child sets SIGCHLD.
+    unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        let rc = libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        );
+        rc != 0 || info.si_signo == libc::SIGCHLD
     }
 }
 
@@ -1437,6 +1522,147 @@ mod tests {
         assert_eq!(
             parse_skip_reason(""),
             SkipReason::Other("git branch -f failed".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_skip_reason_recognises_both_worktree_wordings() {
+        // git 2.42 and later.
+        let reason = parse_skip_reason(
+            "fatal: cannot force update the branch 'main' used by worktree at '/w/main'\n",
+        );
+        assert_eq!(reason, SkipReason::CheckedOutAt(PathBuf::from("/w/main")));
+        // git 2.38 to 2.41.
+        let reason = parse_skip_reason(
+            "fatal: cannot force update the branch 'main' checked out at '/w/main'\n",
+        );
+        assert_eq!(reason, SkipReason::CheckedOutAt(PathBuf::from("/w/main")));
+    }
+
+    /// A helper inside git's session that ignores SIGTERM (an askpass or
+    /// credential helper can) must not outlive the timeout: after the grace the
+    /// whole group gets SIGKILL even though git itself left on SIGTERM. The
+    /// upload-pack script backgrounds such a helper and records its pid.
+    #[test]
+    fn sync_repo_timeout_kills_helper_that_ignores_sigterm() {
+        let (tmp, local) = make_behind_repo();
+        let helper_pidfile = tmp.path().join("helper.pid");
+        let script = tmp.path().join("stubborn-upload-pack.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "/bin/sh -c 'trap \"\" TERM; echo $$ > \"{}\"; exec sleep 30' &\nexec sleep 30\n",
+                helper_pidfile.display()
+            ),
+        )
+        .unwrap();
+        let origin_url = format!("file://{}", tmp.path().join("origin.git").display());
+        git(&["remote", "set-url", "origin", &origin_url], &local);
+        git(
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                &format!("/bin/sh {}", script.display()),
+            ],
+            &local,
+        );
+
+        let limit = Duration::from_millis(1000);
+        let started = Instant::now();
+        let result = sync_repo_with_timeout(&local, limit);
+        let elapsed = started.elapsed();
+
+        match &result.fetch {
+            FetchOutcome::TimedOut { after, .. } => assert_eq!(*after, limit),
+            other => panic!("expected FetchOutcome::TimedOut, got {:?}", other),
+        }
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "sync must return shortly after the limit, took {:?}",
+            elapsed
+        );
+
+        let pid: libc::pid_t = std::fs::read_to_string(&helper_pidfile)
+            .expect("the stubborn helper must have started and recorded its pid")
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            // SAFETY: signal 0 only checks for existence; no signal is delivered.
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if !alive {
+                break;
+            }
+            if Instant::now() >= deadline {
+                // SAFETY: our own test helper; stop it so it does not outlive the test.
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+                panic!(
+                    "helper {} that ignored SIGTERM must be gone after the timeout",
+                    pid
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A child that ignores SIGTERM stands in for one that exited just as
+    /// the limit passed: its success status must reach the caller as
+    /// `Exited`, and the grace must end as soon as it exits rather than
+    /// running its full length.
+    #[test]
+    fn run_unattended_reports_success_for_child_exiting_during_kill_grace() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "trap '' TERM; sleep 0.6; echo late >&2; exit 0"]);
+
+        let started = Instant::now();
+        let outcome = run_unattended(cmd, Duration::from_millis(200));
+        let elapsed = started.elapsed();
+
+        match &outcome {
+            Unattended::Exited { status, stderr } => {
+                assert!(
+                    status.success(),
+                    "status must be the child's own: {:?}",
+                    status
+                );
+                assert_eq!(
+                    stderr, "late\n",
+                    "stderr written after SIGTERM must be kept"
+                );
+            }
+            other => panic!("expected Unattended::Exited, got {:?}", other),
+        }
+        assert!(
+            elapsed < SYNC_KILL_GRACE,
+            "the grace must end when the child exits, took {:?}",
+            elapsed
+        );
+    }
+
+    /// The same child that never exits is still a timeout, and the SIGKILL
+    /// after the grace ends it (it ignores SIGTERM, so the grace alone would
+    /// leave it running).
+    #[test]
+    fn run_unattended_times_out_child_that_ignores_sigterm() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "trap '' TERM; sleep 30; exit 0"]);
+
+        let started = Instant::now();
+        let outcome = run_unattended(cmd, Duration::from_millis(200));
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(outcome, Unattended::TimedOut { .. }),
+            "expected Unattended::TimedOut, got {:?}",
+            outcome
+        );
+        assert!(
+            elapsed >= SYNC_KILL_GRACE && elapsed < SYNC_KILL_GRACE + Duration::from_secs(2),
+            "the child gets the full grace and is then killed, took {:?}",
+            elapsed
         );
     }
 
