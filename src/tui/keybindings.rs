@@ -69,7 +69,7 @@ const WORKSPACE_PANE: BindingGroup = BindingGroup {
         },
         Binding {
             key: "/",
-            desc: "Search repos",
+            desc: "Filter spaces",
         },
         Binding {
             key: "S",
@@ -96,6 +96,10 @@ const REPO_PANE: BindingGroup = BindingGroup {
         Binding {
             key: "s/space",
             desc: "Stage / unstage file",
+        },
+        Binding {
+            key: "/",
+            desc: "Search repos",
         },
         Binding {
             key: "S",
@@ -249,7 +253,7 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
         },
         Binding {
             key: "/",
-            desc: "search",
+            desc: "filter",
         },
         Binding {
             key: "S",
@@ -264,7 +268,7 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
             desc: "quit",
         },
     ];
-    static RIGHT: [Binding; 10] = [
+    static RIGHT: [Binding; 11] = [
         Binding {
             key: "enter",
             desc: "expand/diff",
@@ -296,6 +300,10 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
         Binding {
             key: "G",
             desc: "git ops",
+        },
+        Binding {
+            key: "/",
+            desc: "search",
         },
         Binding {
             key: "?",

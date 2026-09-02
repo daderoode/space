@@ -1,44 +1,103 @@
 use crate::tui::actions::{ScreenAction, ScreenContext};
 use crate::tui::widgets::fuzzy_picker::{FuzzyPicker, PickerItem};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use std::path::Path;
+
+/// What Enter does in a space picker. `g` (go) and the space filter share
+/// `GoState` and its key handling; only the confirm action differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmAction {
+    /// Go: cd into the chosen space's directory and quit the TUI.
+    CdAndQuit,
+    /// Space filter: select the chosen space in place and stay in the dashboard.
+    SelectInPlace,
+}
 
 pub struct GoState {
     pub picker: FuzzyPicker,
+    pub confirm: ConfirmAction,
 }
 
 impl GoState {
-    pub fn new(workspaces: &[crate::core::workspace::Workspace]) -> Self {
+    /// The `g` picker: Enter cds into the space and quits.
+    pub fn new(workspaces: &[crate::core::workspace::Workspace], ws_dir: &Path) -> Self {
+        Self::with_confirm(
+            "Go to workspace  ENTER=go  ESC=cancel",
+            workspaces,
+            ws_dir,
+            ConfirmAction::CdAndQuit,
+        )
+    }
+
+    /// The space filter: Enter selects the space in place.
+    pub fn filter(workspaces: &[crate::core::workspace::Workspace], ws_dir: &Path) -> Self {
+        Self::with_confirm(
+            "Filter spaces  ENTER=select  ESC=cancel",
+            workspaces,
+            ws_dir,
+            ConfirmAction::SelectInPlace,
+        )
+    }
+
+    /// Rows are name plus repo count. The count sits in the `branch` slot
+    /// (branch colour, excluded from matching) and `parent` stays empty so a
+    /// literal like "workspaces" never matches a query. Item order equals
+    /// workspace order, so a picker index is a space index. The count comes
+    /// from a directory scan because the dashboard only loads repos for the
+    /// selected space.
+    fn with_confirm(
+        prompt: &str,
+        workspaces: &[crate::core::workspace::Workspace],
+        ws_dir: &Path,
+        confirm: ConfirmAction,
+    ) -> Self {
         let items: Vec<PickerItem> = workspaces
             .iter()
-            .map(|ws| PickerItem {
-                name: ws.name.clone(),
-                parent: "workspaces".to_string(),
-                full_path: ws.path.clone(),
-                branch: None,
-                remote_url: None,
+            .map(|ws| {
+                let count =
+                    crate::core::workspace::workspace_repo_skeletons(ws_dir, &ws.name).len();
+                let label = if count == 1 {
+                    "1 repo".to_string()
+                } else {
+                    format!("{} repos", count)
+                };
+                PickerItem {
+                    name: ws.name.clone(),
+                    parent: String::new(),
+                    full_path: ws.path.clone(),
+                    branch: Some(label),
+                    remote_url: None,
+                }
             })
             .collect();
         GoState {
-            picker: FuzzyPicker::new("Go to workspace  ENTER=go  ESC=cancel", items, false),
+            picker: FuzzyPicker::new(prompt, items, false),
+            confirm,
         }
     }
 
+    /// Arrows move the highlight; every other key edits the query (letters
+    /// are text in a typed picker, so there is no `j`/`k` navigation here).
     pub fn handle_key(&mut self, key: KeyEvent, _ctx: &ScreenContext) -> ScreenAction {
         match key.code {
             KeyCode::Esc => ScreenAction::Back,
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 self.picker.move_up();
                 ScreenAction::Continue
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 self.picker.move_down();
                 ScreenAction::Continue
             }
             KeyCode::Enter => {
-                if let Some(item) = self.picker.confirmed_items().into_iter().next() {
-                    ScreenAction::CdAndQuit(item.full_path.clone())
-                } else {
-                    ScreenAction::Continue
+                let Some(&idx) = self.picker.filtered.get(self.picker.highlighted) else {
+                    return ScreenAction::Continue;
+                };
+                match self.confirm {
+                    ConfirmAction::CdAndQuit => {
+                        ScreenAction::CdAndQuit(self.picker.all_items[idx].full_path.clone())
+                    }
+                    ConfirmAction::SelectInPlace => ScreenAction::SelectWorkspace(idx),
                 }
             }
             _ => {
@@ -54,6 +113,8 @@ impl GoState {
 
 impl std::fmt::Debug for GoState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GoState").finish()
+        f.debug_struct("GoState")
+            .field("confirm", &self.confirm)
+            .finish()
     }
 }

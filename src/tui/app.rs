@@ -102,6 +102,8 @@ pub enum Screen {
     Dashboard,
     CreateWorkspace(crate::tui::screens::create::CreateState),
     GoWorkspace(crate::tui::screens::go::GoState),
+    /// Space filter: the `g` picker with an in-place confirm action.
+    FilterWorkspace(crate::tui::screens::go::GoState),
     AddRepos(crate::tui::screens::add::AddState),
     ConfirmDelete(crate::tui::screens::delete::DeleteState),
     RepoSearch(crate::tui::screens::search::SearchState),
@@ -122,6 +124,7 @@ pub enum Message {
     SelectRepoDown,
     GoToWorkspace,
     StartGo,
+    StartFilter,
     StartCreate,
     StartAdd,
     StartDelete,
@@ -1179,6 +1182,17 @@ impl App {
                     );
                 }
             }
+            ScreenAction::SelectWorkspace(idx) => {
+                self.screen = Screen::Dashboard;
+                // Re-selecting the current space keeps expanded repos and the cursor.
+                if idx == self.selected_ws || idx >= self.workspaces.len() {
+                    return;
+                }
+                self.selected_ws = idx;
+                self.selected_repo = 0;
+                self.reset_repo_pane_state();
+                self.begin_workspace_load_immediate();
+            }
             ScreenAction::StageFile {
                 repo_index,
                 repo_path,
@@ -1247,6 +1261,7 @@ impl App {
             Screen::Help => crate::tui::screens::help::handle_key(key, &ctx),
             Screen::ConfirmDelete(state) => state.handle_key(key, &ctx),
             Screen::GoWorkspace(state) => state.handle_key(key, &ctx),
+            Screen::FilterWorkspace(state) => state.handle_key(key, &ctx),
             Screen::RepoSearch(state) => state.handle_key(key, &ctx),
             Screen::CreateWorkspace(state) => state.handle_key(key, &ctx),
             Screen::AddRepos(state) => state.handle_key(key, &ctx),
@@ -1283,7 +1298,11 @@ impl App {
                     (KeyCode::Char('a'), _) => Some(Message::StartAdd),
                     (KeyCode::Char('d'), _) => Some(Message::StartDelete),
                     (KeyCode::Char('r'), _) => Some(Message::RefreshRepos),
-                    (KeyCode::Char('/'), _) => Some(Message::StartSearch),
+                    // /: pane-gated. Workspaces pane filters spaces, repos pane searches repos.
+                    (KeyCode::Char('/'), _) => match self.focus {
+                        Pane::Left => Some(Message::StartFilter),
+                        Pane::Right => Some(Message::StartSearch),
+                    },
                     (KeyCode::Char('?'), _) => Some(Message::StartHelp),
                     // s/space: stage/unstage single file (Right pane only)
                     (KeyCode::Char('s') | KeyCode::Char(' '), _) if self.focus == Pane::Right => {
@@ -1688,8 +1707,21 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             None
         }
         Message::StartGo => {
-            let state = crate::tui::screens::go::GoState::new(&app.workspaces);
+            let state =
+                crate::tui::screens::go::GoState::new(&app.workspaces, &app.config.workspaces.dir);
             app.screen = Screen::GoWorkspace(state);
+            None
+        }
+        Message::StartFilter => {
+            if app.workspaces.is_empty() {
+                app.set_status("No spaces yet, press c to create one", StatusKind::Info);
+                return None;
+            }
+            let state = crate::tui::screens::go::GoState::filter(
+                &app.workspaces,
+                &app.config.workspaces.dir,
+            );
+            app.screen = Screen::FilterWorkspace(state);
             None
         }
         Message::StartAdd => {

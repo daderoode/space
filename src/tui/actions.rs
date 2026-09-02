@@ -95,6 +95,10 @@ pub enum ScreenAction {
     /// Navigate to the workspace containing a repo with the given name
     /// (repo name from Search, resolved to a workspace in `App::process_action`).
     NavigateToWorkspace(String),
+    /// Select the workspace at this index in place (space filter). Handled
+    /// like the repo-search landing: reset and reload the repos pane, focus
+    /// unchanged. A no-op when the index is already selected.
+    SelectWorkspace(usize),
     /// Stage or unstage a single file from the diff overlay.
     StageFile {
         repo_index: usize,

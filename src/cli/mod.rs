@@ -43,7 +43,7 @@ pub fn dispatch(cmd: Commands) -> Result<()> {
 
         Commands::Go { name: None } => {
             let mut app = App::new()?;
-            let state = screens::go::GoState::new(&app.workspaces);
+            let state = screens::go::GoState::new(&app.workspaces, &app.config.workspaces.dir);
             app.screen = Screen::GoWorkspace(state);
             run_tui_and_emit_cd(&mut app)
         }
