@@ -451,11 +451,14 @@ fn fetch_origin_unattended(repo_path: &Path, timeout: Duration) -> FetchOutcome 
         }
     };
     let pgid = child.id() as libc::pid_t;
-    let stderr = capture_in_background(child.stderr.take());
-    let _stdout = capture_in_background(child.stdout.take());
+    let (stderr, stderr_reader) = capture_in_background(child.stderr.take());
+    let (_stdout, _) = capture_in_background(child.stdout.take());
 
     match wait_until(&mut child, Instant::now() + timeout) {
         Some(status) => {
+            // The group has exited, so the pipe reaches end-of-file: wait for
+            // the reader to copy git's last write before reading the buffer.
+            let _ = stderr_reader.join();
             let text = snapshot(&stderr);
             if status.success() {
                 FetchOutcome::Ok
@@ -478,12 +481,15 @@ fn fetch_origin_unattended(repo_path: &Path, timeout: Duration) -> FetchOutcome 
 
 /// Drain a child pipe on a thread into a shared buffer, so the child never
 /// blocks on a full pipe and a snapshot is available even when the reader has
-/// not reached end-of-file (the timed-out path).
-fn capture_in_background(pipe: Option<impl Read + Send + 'static>) -> Arc<Mutex<Vec<u8>>> {
+/// not reached end-of-file (the timed-out path). Join the handle before
+/// reading the buffer when the pipe is known to be closed.
+fn capture_in_background(
+    pipe: Option<impl Read + Send + 'static>,
+) -> (Arc<Mutex<Vec<u8>>>, std::thread::JoinHandle<()>) {
     let buf = Arc::new(Mutex::new(Vec::new()));
-    if let Some(mut pipe) = pipe {
-        let sink = Arc::clone(&buf);
-        std::thread::spawn(move || {
+    let sink = Arc::clone(&buf);
+    let reader = std::thread::spawn(move || {
+        if let Some(mut pipe) = pipe {
             let mut chunk = [0u8; 4096];
             loop {
                 match pipe.read(&mut chunk) {
@@ -494,9 +500,9 @@ fn capture_in_background(pipe: Option<impl Read + Send + 'static>) -> Arc<Mutex<
                         .extend_from_slice(&chunk[..n]),
                 }
             }
-        });
-    }
-    buf
+        }
+    });
+    (buf, reader)
 }
 
 fn snapshot(buf: &Arc<Mutex<Vec<u8>>>) -> String {
@@ -504,11 +510,14 @@ fn snapshot(buf: &Arc<Mutex<Vec<u8>>>) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// Poll the child until it exits or `deadline` passes.
+/// Poll the child until it exits or `deadline` passes. A wait error (the
+/// child was reaped elsewhere) ends the wait at once rather than spinning.
 fn wait_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
     loop {
-        if let Ok(Some(status)) = child.try_wait() {
-            return Some(status);
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {}
+            Err(_) => return None,
         }
         let now = Instant::now();
         if now >= deadline {
@@ -1482,7 +1491,15 @@ mod tests {
     #[test]
     fn sync_repo_reports_refused_https_prompt_as_fetch_failed() {
         use std::net::{TcpStream, ToSocketAddrs};
-        if std::env::var_os("GIT_ASKPASS").is_some() || std::env::var_os("SSH_ASKPASS").is_some() {
+        let core_askpass = Cmd::new("git")
+            .args(["config", "--get", "core.askPass"])
+            .output()
+            .map(|o| o.status.success() && !o.stdout.is_empty())
+            .unwrap_or(false);
+        if core_askpass
+            || std::env::var_os("GIT_ASKPASS").is_some()
+            || std::env::var_os("SSH_ASKPASS").is_some()
+        {
             eprintln!("skipping: an askpass helper is configured");
             return;
         }

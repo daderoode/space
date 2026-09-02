@@ -790,10 +790,17 @@ fn render_branch_strategy_picker(
 /// and footer) up to 80% of the frame height, never under 10 rows. Below the
 /// cap the dialog is exactly as tall as its content; at the cap it scrolls.
 fn progress_dialog_area(frame_area: Rect, content_rows: usize) -> Rect {
-    let dialog_w = (frame_area.width * 70 / 100).max(60);
+    let dialog_w = progress_dialog_width(frame_area);
     let cap = (usize::from(frame_area.height) * 80 / 100).max(10);
     let height = (content_rows + 3).clamp(10, cap);
     centered_rect_fixed(dialog_w, height as u16, frame_area)
+}
+
+/// 70% of the frame, minimum 60, never wider than the frame. Computed in
+/// `usize` so a very wide frame cannot overflow `u16`.
+fn progress_dialog_width(frame_area: Rect) -> u16 {
+    let w = usize::from(frame_area.width);
+    (w * 70 / 100).max(60).min(w) as u16
 }
 
 /// Pad `text` with spaces to `width` display columns.
@@ -811,12 +818,13 @@ fn pad_to(text: &str, width: usize) -> String {
 fn render_sync_report(frame: &mut Frame, report: &SyncReport) {
     use ratatui::widgets::Clear;
     let frame_area = frame.area();
-    let dialog_w = (frame_area.width * 70 / 100).max(60).min(frame_area.width);
+    let dialog_w = progress_dialog_width(frame_area);
     let inner_w = usize::from(dialog_w.saturating_sub(2));
     let pane = report.pane(inner_w);
     let n = report.rows.len();
-    // Rows, blank separator, rule, pane.
-    let area = progress_dialog_area(frame_area, n + 2 + pane.lines.len());
+    // List (at least its minimum rows), blank separator, rule, pane.
+    let list_need = n.max(sync_report::MIN_LIST_ROWS);
+    let area = progress_dialog_area(frame_area, list_need + 2 + pane.lines.len());
     frame.render_widget(Clear, area);
 
     let block = Block::default()

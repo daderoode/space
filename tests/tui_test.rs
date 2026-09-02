@@ -4998,6 +4998,67 @@ mod sync_report_tests {
     }
 
     #[test]
+    fn small_report_with_long_pane_fits_below_the_cap() {
+        // The spec's longest known case: ssh, five stderr lines, one blank,
+        // 7 pane lines with the header and status line. On a 24-row terminal
+        // a two-repo report is well below the cap, so nothing may be cut.
+        let mut app = test_app(vec![], vec![]);
+        let mut report = SyncReport::new(&[PathBuf::from("/r/ssh"), PathBuf::from("/r/ok")]);
+        report.finished(0, failed_outcome("line1\nline2\n\nline4\nline5\n"));
+        report.finished(1, ok_outcome());
+        report.finish();
+        assert_eq!(report.cursor, 0);
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+
+        let rendered = render_text(&app, 80, 24);
+        for needle in ["line1", "line2", "line4", "line5"] {
+            assert!(
+                rendered.contains(needle),
+                "{} must be visible:\n{}",
+                needle,
+                rendered
+            );
+        }
+        assert!(
+            !rendered.contains("more lines"),
+            "nothing may be cut below the cap:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn running_report_keeps_newest_row_visible() {
+        let mut app = test_app(vec![], vec![]);
+        let repos: Vec<PathBuf> = (0..14)
+            .map(|i| PathBuf::from(format!("/r/repo{:02}", i)))
+            .collect();
+        let mut report = SyncReport::new(&repos);
+        for i in 0..13 {
+            report.started(i);
+            report.finished(i, ok_outcome());
+        }
+        report.started(13);
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("\u{25b6} \u{25cf} repo13") && rendered.contains("syncing\u{2026}"),
+            "the row being synced is on screen:\n{}",
+            rendered
+        );
+        assert!(
+            !rendered.contains("repo00"),
+            "earlier rows scrolled off:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("Sync report \u{b7} 13 of 14"),
+            "title:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
     fn narrow_terminal_keeps_dialog_and_footer_inside_the_frame() {
         let mut app = test_app(vec![], vec![]);
         let mut report = SyncReport::new(&[PathBuf::from("/r/a")]);

@@ -499,10 +499,12 @@ impl SyncReport {
     }
 }
 
-/// Split the dialog's inner height between the list and the pane. The list
-/// gets `MIN_LIST_ROWS` first; the pane takes what its content needs up to
-/// half of the inner height; the list gets the rest, and any rows it cannot
-/// use (fewer repos than rows) go back to the pane. Returns `(list, pane)`.
+/// Split the dialog's inner height between the list and the pane. Below the
+/// dialog's height cap the content fits and each part gets what it needs.
+/// At the cap the list gets `MIN_LIST_ROWS` first; the pane takes what its
+/// content needs up to half of the inner height; the list gets the rest, and
+/// any rows it cannot use (fewer repos than rows) go back to the pane.
+/// Returns `(list, pane)`.
 pub fn report_layout(inner_height: usize, repos: usize, pane_need: usize) -> (usize, usize) {
     // Footer, blank separator and rule.
     let body = inner_height.saturating_sub(3);
@@ -510,6 +512,9 @@ pub fn report_layout(inner_height: usize, repos: usize, pane_need: usize) -> (us
         return (0, 0);
     }
     let list_min = MIN_LIST_ROWS.min(body);
+    if body >= repos.max(list_min) + pane_need {
+        return (body - pane_need, pane_need);
+    }
     let mut pane = pane_need.min(inner_height / 2).min(body - list_min);
     let mut list = body - pane;
     let list_use = repos.max(list_min);
@@ -955,6 +960,9 @@ mod tests {
         assert_eq!(report_layout(8, 4, 2), (3, 2));
         // Content below the cap: exactly what each part needs.
         assert_eq!(report_layout(4 + 3 + 3, 4, 3), (4, 3));
+        // One repo with the spec's 7-line ssh pane on a 24-row terminal:
+        // the list floor plus the pane fit, so the pane is not capped.
+        assert_eq!(report_layout(3 + 7 + 3, 1, 7), (3, 7));
         // At the cap the pane takes up to half the inner height.
         assert_eq!(report_layout(17, 20, 12), (6, 8));
         // Few repos: rows the list cannot use go to the pane.
