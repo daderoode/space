@@ -5870,7 +5870,7 @@ mod sync_report_tests {
 }
 
 // ---------------------------------------------------------------------------
-// Wave 0 — navigation correctness
+// Wave 0: navigation correctness
 //
 // 0.2: no picker with a text input binds j/k any more. In any screen with a
 // text input, letters are text and only arrows move the highlight, whether the
@@ -6553,7 +6553,7 @@ fn switch_branch_pick_branch_jk_type_into_an_empty_query() {
 }
 
 // ---------------------------------------------------------------------------
-// 0.3 — `g` is gated to the workspace pane
+// 0.3: `g` is gated to the workspace pane
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -6571,7 +6571,7 @@ fn g_on_left_pane_opens_the_go_picker() {
 
 /// The pane guard makes the `g` arm fall through. No later arm in the dashboard
 /// match binds lowercase `g` (the nearest is `G`, a distinct char), so it must
-/// reach the wildcard and do nothing at all — not merely "not open the picker".
+/// reach the wildcard and do nothing at all, not merely "not open the picker".
 #[test]
 fn g_on_right_pane_is_inert() {
     let ws = common::workspace_with_repos(&["repo-a", "repo-b"]);
@@ -6610,7 +6610,7 @@ fn shift_g_on_right_pane_still_opens_git_ops() {
 }
 
 // ---------------------------------------------------------------------------
-// 0.4 — delete confirm defaults to No
+// 0.4: delete confirm defaults to No
 // ---------------------------------------------------------------------------
 
 #[test]
