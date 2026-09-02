@@ -1,7 +1,6 @@
 use crate::tui::actions::{ScreenAction, ScreenContext};
 use crate::tui::widgets::fuzzy_picker::{FuzzyPicker, PickerItem};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
-use std::path::Path;
 
 /// What Enter does in a space picker. `g` (go) and the space filter share
 /// `GoState` and its key handling; only the confirm action differs.
@@ -20,21 +19,19 @@ pub struct GoState {
 
 impl GoState {
     /// The `g` picker: Enter cds into the space and quits.
-    pub fn new(workspaces: &[crate::core::workspace::Workspace], ws_dir: &Path) -> Self {
+    pub fn new(workspaces: &[crate::core::workspace::Workspace]) -> Self {
         Self::with_confirm(
             "Go to workspace  ENTER=go  ESC=cancel",
             workspaces,
-            ws_dir,
             ConfirmAction::CdAndQuit,
         )
     }
 
     /// The space filter: Enter selects the space in place.
-    pub fn filter(workspaces: &[crate::core::workspace::Workspace], ws_dir: &Path) -> Self {
+    pub fn filter(workspaces: &[crate::core::workspace::Workspace]) -> Self {
         Self::with_confirm(
             "Filter spaces  ENTER=select  ESC=cancel",
             workspaces,
-            ws_dir,
             ConfirmAction::SelectInPlace,
         )
     }
@@ -43,19 +40,24 @@ impl GoState {
     /// (branch colour, excluded from matching) and `parent` stays empty so a
     /// literal like "workspaces" never matches a query. Item order equals
     /// workspace order, so a picker index is a space index. The count comes
-    /// from a directory scan because the dashboard only loads repos for the
-    /// selected space.
+    /// from a scan of the space's own directory (the same fast scan the repos
+    /// pane uses for skeletons) because the dashboard only loads repos for
+    /// the selected space.
     fn with_confirm(
         prompt: &str,
         workspaces: &[crate::core::workspace::Workspace],
-        ws_dir: &Path,
         confirm: ConfirmAction,
     ) -> Self {
         let items: Vec<PickerItem> = workspaces
             .iter()
             .map(|ws| {
-                let count =
-                    crate::core::workspace::workspace_repo_skeletons(ws_dir, &ws.name).len();
+                let count = ws
+                    .path
+                    .parent()
+                    .map(|dir| {
+                        crate::core::workspace::workspace_repo_skeletons(dir, &ws.name).len()
+                    })
+                    .unwrap_or(0);
                 let label = if count == 1 {
                     "1 repo".to_string()
                 } else {

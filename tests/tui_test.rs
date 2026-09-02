@@ -4755,7 +4755,7 @@ fn filter_and_go_rows_show_repo_count_without_parent() {
 }
 
 #[test]
-fn filter_prompt_and_help_wording() {
+fn filter_prompt_wording() {
     let mut app = two_spaces_app();
     app.handle_key(key(KeyCode::Char('/')));
     let rendered = render_text(&app, 80, 24);
@@ -4764,4 +4764,103 @@ fn filter_prompt_and_help_wording() {
         "got:\n{}",
         rendered
     );
+}
+
+#[test]
+fn filter_arrows_move_the_highlight_and_enter_selects_by_index() {
+    let mut app = two_spaces_app();
+
+    // Empty query: both spaces listed, Down moves the highlight to beta.
+    app.handle_key(key(KeyCode::Char('/')));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Enter));
+    assert!(matches!(app.screen, Screen::Dashboard));
+    assert_eq!(
+        app.selected_ws, 1,
+        "Down then Enter must select the second space"
+    );
+
+    // Up walks back to alpha.
+    app.handle_key(key(KeyCode::Char('/')));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Up));
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        app.selected_ws, 0,
+        "Down, Up then Enter must select the first space"
+    );
+}
+
+#[test]
+fn go_enter_sets_cd_target_and_quits() {
+    let mut app = two_spaces_app();
+
+    app.handle_key(key(KeyCode::Char('g')));
+    type_str(&mut app, "bet");
+    app.handle_key(key(KeyCode::Enter));
+
+    assert_eq!(app.space_cd_target, Some(PathBuf::from("/tmp/beta")));
+    assert!(app.should_quit, "go must quit the TUI");
+    assert_eq!(
+        app.selected_ws, 0,
+        "go must not touch the dashboard selection"
+    );
+}
+
+#[test]
+fn filter_repo_count_is_excluded_from_matching() {
+    let mut app = two_spaces_app();
+
+    app.handle_key(key(KeyCode::Char('/')));
+    type_str(&mut app, "repos");
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("0/2 matched"),
+        "the count label must not match a query, got:\n{}",
+        rendered
+    );
+}
+
+#[test]
+fn filter_rows_use_singular_for_one_repo() {
+    let env = TestEnv::new();
+    std::fs::create_dir_all(env.workspaces_dir.join("solo").join("only").join(".git")).unwrap();
+    let workspaces = vec![Workspace {
+        name: "solo".to_string(),
+        path: env.workspaces_dir.join("solo"),
+        repos: vec![],
+    }];
+    let mut app = test_app_with_config(config_from_env(&env), workspaces, vec![]);
+
+    app.handle_key(key(KeyCode::Char('/')));
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("1 repo") && !rendered.contains("1 repos"),
+        "got:\n{}",
+        rendered
+    );
+}
+
+#[test]
+fn filter_help_registry_and_status_bar_wording() {
+    use space::tui::keybindings::{all_groups, status_bar_bindings};
+
+    let find = |group: &str, key: &str| -> Option<&'static str> {
+        all_groups()
+            .iter()
+            .find(|g| g.name == group)
+            .and_then(|g| g.bindings.iter().find(|b| b.key == key))
+            .map(|b| b.desc)
+    };
+    assert_eq!(find("Workspace Pane", "/"), Some("Filter spaces"));
+    assert_eq!(find("Repo Pane", "/"), Some("Search repos"));
+
+    let bar = |pane: Pane| -> Option<&'static str> {
+        status_bar_bindings(pane)
+            .iter()
+            .find(|b| b.key == "/")
+            .map(|b| b.desc)
+    };
+    assert_eq!(bar(Pane::Left), Some("filter"));
+    assert_eq!(bar(Pane::Right), Some("search"));
 }

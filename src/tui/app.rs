@@ -1707,8 +1707,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             None
         }
         Message::StartGo => {
-            let state =
-                crate::tui::screens::go::GoState::new(&app.workspaces, &app.config.workspaces.dir);
+            let state = crate::tui::screens::go::GoState::new(&app.workspaces);
             app.screen = Screen::GoWorkspace(state);
             None
         }
@@ -1717,10 +1716,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 app.set_status("No spaces yet, press c to create one", StatusKind::Info);
                 return None;
             }
-            let state = crate::tui::screens::go::GoState::filter(
-                &app.workspaces,
-                &app.config.workspaces.dir,
-            );
+            let state = crate::tui::screens::go::GoState::filter(&app.workspaces);
             app.screen = Screen::FilterWorkspace(state);
             None
         }
