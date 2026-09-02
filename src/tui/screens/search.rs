@@ -25,17 +25,6 @@ impl SearchState {
                 self.picker.move_down();
                 ScreenAction::Continue
             }
-            // j/k navigate only while the query is empty; once the user is
-            // typing they are literal characters (a repo named "jackal" must
-            // be reachable). Arrows always navigate.
-            KeyCode::Char('k') if self.picker.input.value().is_empty() => {
-                self.picker.move_up();
-                ScreenAction::Continue
-            }
-            KeyCode::Char('j') if self.picker.input.value().is_empty() => {
-                self.picker.move_down();
-                ScreenAction::Continue
-            }
             KeyCode::Enter => {
                 if let Some(item) = self.picker.confirmed_items().into_iter().next() {
                     ScreenAction::NavigateToWorkspace(item.name.clone())

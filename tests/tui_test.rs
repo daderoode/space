@@ -5869,14 +5869,17 @@ mod sync_report_tests {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Wave 0 — navigation correctness
 //
-// 0.2: the two newest pickers (rebase target, switch-branch) only treat j/k as
-// navigation while the filter query is empty. These tests pin that same rule
-// onto the six older pickers so typing a name containing 'j' or 'k' filters
-// instead of jumping the highlight. Arrows must navigate regardless of query.
+// 0.2: no picker with a text input binds j/k any more. In any screen with a
+// text input, letters are text and only arrows move the highlight, whether the
+// query is empty or not. These tests pin that deletion on all eight typed
+// pickers (create PickRepos and PickBranch, add PickRepos and PickBranch, repo
+// search, go, the rebase target and the switch-branch picker) so a repo or
+// branch whose name contains 'j' or 'k' stays reachable and typing never jumps
+// the list. List-only stages (diff viewer, config editor, git-ops menu and Log,
+// sync report, the branch-strategy stages) keep j/k and are covered elsewhere.
 // ---------------------------------------------------------------------------
 
 /// Repo paths whose names contain the navigation letters, so a regression is
@@ -5886,6 +5889,10 @@ fn jk_repo_paths() -> Vec<PathBuf> {
         PathBuf::from("/tmp/jackal"),
         PathBuf::from("/tmp/kernel"),
         PathBuf::from("/tmp/mango"),
+        // A second name matching both "j" and "jk" (the other three match
+        // neither), so no keystroke narrows the list to one row and clamps the
+        // highlight down off row 1.
+        PathBuf::from("/tmp/jokkmokk"),
     ]
 }
 
@@ -5899,6 +5906,141 @@ fn jk_repo_paths_two_scopes() -> Vec<PathBuf> {
     ]
 }
 
+use space::tui::widgets::fuzzy_picker::FuzzyPicker;
+
+/// The whole of rule 0.2 for one typed picker: `j` then `k` land in the query
+/// and the highlight never moves. Taking the picker by fn pointer keeps every
+/// per-screen test down to its fixture plus one call.
+fn assert_jk_types_into_the_query(app: &mut App, picker_of: fn(&App) -> &FuzzyPicker, what: &str) {
+    // Park the highlight on row 1 before typing. On row 0 "the highlight did
+    // not move" would hold under the old bindings too (j down, k back up); from
+    // row 1 a j that still navigates lands on row 2 and the assertion bites.
+    app.handle_key(key(KeyCode::Down));
+    let before = {
+        let p = picker_of(app);
+        assert!(
+            p.input.value().is_empty(),
+            "{}: the query must still be empty when j is pressed",
+            what
+        );
+        assert!(
+            p.filtered.len() >= 3,
+            "{}: the fixture must give a stray j somewhere to jump to, got {}",
+            what,
+            p.filtered.len()
+        );
+        assert_eq!(
+            p.highlighted, 1,
+            "{}: the arrow must move the highlight off row 0",
+            what
+        );
+        p.highlighted
+    };
+
+    // Every match below must keep at least two rows, or the picker clamps the
+    // highlight for a legitimate reason and the assertion stops meaning
+    // anything: the fixtures carry two "jk" names for exactly this.
+    app.handle_key(key(KeyCode::Char('j')));
+    {
+        let p = picker_of(app);
+        assert!(
+            p.filtered.len() >= 2,
+            "{}: the fixture must keep two rows matching \"j\", got {}",
+            what,
+            p.filtered.len()
+        );
+        assert_eq!(
+            p.highlighted, before,
+            "{}: j must not move the highlight",
+            what
+        );
+        assert_eq!(
+            p.input.value(),
+            "j",
+            "{}: j is a character even on an empty query",
+            what
+        );
+    }
+
+    app.handle_key(key(KeyCode::Char('k')));
+    let p = picker_of(app);
+    assert_eq!(
+        p.input.value(),
+        "jk",
+        "{}: both letters must reach the filter",
+        what
+    );
+    assert!(
+        p.filtered.len() >= 2,
+        "{}: the fixture must keep two rows matching \"jk\", got {}",
+        what,
+        p.filtered.len()
+    );
+    assert_eq!(
+        p.highlighted, before,
+        "{}: typing must not move the highlight",
+        what
+    );
+}
+
+fn create_repos_picker(app: &App) -> &FuzzyPicker {
+    match app.screen {
+        Screen::CreateWorkspace(ref st) => &st.picker,
+        _ => panic!("expected CreateWorkspace screen"),
+    }
+}
+
+fn add_repos_picker(app: &App) -> &FuzzyPicker {
+    match app.screen {
+        Screen::AddRepos(ref st) => &st.picker,
+        _ => panic!("expected AddRepos screen"),
+    }
+}
+
+fn search_picker(app: &App) -> &FuzzyPicker {
+    match app.screen {
+        Screen::RepoSearch(ref st) => &st.picker,
+        _ => panic!("expected RepoSearch screen"),
+    }
+}
+
+fn go_workspace_picker(app: &App) -> &FuzzyPicker {
+    match app.screen {
+        Screen::GoWorkspace(ref st) => &st.picker,
+        _ => panic!("expected GoWorkspace screen"),
+    }
+}
+
+fn create_branch_picker(app: &App) -> &FuzzyPicker {
+    match app.screen {
+        Screen::CreateWorkspace(ref st) => {
+            st.branch_picker.as_ref().expect("branch picker present")
+        }
+        _ => panic!("expected CreateWorkspace screen"),
+    }
+}
+
+fn add_branch_picker(app: &App) -> &FuzzyPicker {
+    match app.screen {
+        Screen::AddRepos(ref st) => st.branch_picker.as_ref().expect("branch picker present"),
+        _ => panic!("expected AddRepos screen"),
+    }
+}
+
+fn rebase_target_picker(app: &App) -> &FuzzyPicker {
+    match app.screen {
+        Screen::GitOps(ref st) => st.rebase_picker.as_ref().expect("rebase picker present"),
+        _ => panic!("expected the git-ops overlay"),
+    }
+}
+
+fn switch_branch_picker(app: &App) -> &FuzzyPicker {
+    match app.screen {
+        Screen::SwitchBranch(ref st) => st.branch_picker.as_ref().expect("branch picker present"),
+        _ => panic!("expected SwitchBranch screen"),
+    }
+}
+
 fn open_create_pick_repos(app: &mut App) {
     app.handle_key(key(KeyCode::Char('c')));
     if let Screen::CreateWorkspace(ref mut st) = app.screen {
@@ -5910,21 +6052,11 @@ fn open_create_pick_repos(app: &mut App) {
 }
 
 #[test]
-fn create_pick_repos_jk_navigate_while_query_is_empty() {
+fn create_pick_repos_jk_type_into_an_empty_query() {
     let mut app = test_app(vec![], jk_repo_paths());
     open_create_pick_repos(&mut app);
 
-    app.handle_key(key(KeyCode::Char('j')));
-
-    if let Screen::CreateWorkspace(ref st) = app.screen {
-        assert!(
-            st.picker.input.value().is_empty(),
-            "with an empty query, j is navigation and must not be typed"
-        );
-        assert_eq!(st.picker.highlighted, 1, "j moves the highlight down");
-    } else {
-        panic!("expected CreateWorkspace screen");
-    }
+    assert_jk_types_into_the_query(&mut app, create_repos_picker, "create PickRepos");
 }
 
 #[test]
@@ -6093,19 +6225,17 @@ fn add_pick_repos_jk_type_into_a_non_empty_query() {
 }
 
 #[test]
-fn add_pick_repos_jk_navigate_while_query_is_empty() {
+fn add_pick_repos_jk_type_into_an_empty_query() {
     let ws = common::workspace_with_repos(&["existing"]);
     let mut app = test_app(vec![ws], jk_repo_paths());
 
     app.handle_key(key(KeyCode::Char('a')));
-    app.handle_key(key(KeyCode::Char('j')));
+    assert!(
+        matches!(app.screen, Screen::AddRepos(_)),
+        "expected AddRepos screen"
+    );
 
-    if let Screen::AddRepos(ref st) = app.screen {
-        assert!(st.picker.input.value().is_empty());
-        assert_eq!(st.picker.highlighted, 1, "j moves the highlight down");
-    } else {
-        panic!("expected AddRepos screen");
-    }
+    assert_jk_types_into_the_query(&mut app, add_repos_picker, "add PickRepos");
 }
 
 #[test]
@@ -6131,22 +6261,20 @@ fn repo_search_jk_type_into_a_non_empty_query() {
 }
 
 #[test]
-fn repo_search_jk_navigate_while_query_is_empty() {
+fn repo_search_jk_type_into_an_empty_query() {
     let mut app = test_app(vec![], jk_repo_paths());
     app.focus = Pane::Right;
     app.handle_key(key(KeyCode::Char('/')));
-    app.handle_key(key(KeyCode::Char('j')));
+    assert!(
+        matches!(app.screen, Screen::RepoSearch(_)),
+        "expected RepoSearch screen"
+    );
 
-    if let Screen::RepoSearch(ref st) = app.screen {
-        assert!(st.picker.input.value().is_empty());
-        assert_eq!(st.picker.highlighted, 1);
-    } else {
-        panic!("expected RepoSearch screen");
-    }
+    assert_jk_types_into_the_query(&mut app, search_picker, "repo search");
 }
 
 fn jk_workspaces() -> Vec<Workspace> {
-    ["jackal", "kernel", "mango"]
+    ["jackal", "kernel", "mango", "jokkmokk"]
         .iter()
         .map(|n| Workspace {
             name: (*n).to_string(),
@@ -6177,17 +6305,15 @@ fn go_picker_jk_type_into_a_non_empty_query() {
 }
 
 #[test]
-fn go_picker_jk_navigate_while_query_is_empty() {
+fn go_picker_jk_type_into_an_empty_query() {
     let mut app = test_app(jk_workspaces(), vec![]);
     app.handle_key(key(KeyCode::Char('g')));
-    app.handle_key(key(KeyCode::Char('j')));
+    assert!(
+        matches!(app.screen, Screen::GoWorkspace(_)),
+        "expected GoWorkspace screen"
+    );
 
-    if let Screen::GoWorkspace(ref st) = app.screen {
-        assert!(st.picker.input.value().is_empty());
-        assert_eq!(st.picker.highlighted, 1);
-    } else {
-        panic!("expected GoWorkspace screen");
-    }
+    assert_jk_types_into_the_query(&mut app, go_workspace_picker, "go picker");
 }
 
 /// Drive the create flow as far as the PickBranch fuzzy picker, which is the
@@ -6248,19 +6374,11 @@ fn create_pick_branch_jk_type_into_a_non_empty_query() {
 }
 
 #[test]
-fn create_pick_branch_jk_navigate_while_query_is_empty() {
+fn create_pick_branch_jk_type_into_an_empty_query() {
     let env = TestEnv::new();
     let mut app = open_create_pick_branch(&env);
 
-    app.handle_key(key(KeyCode::Char('j')));
-
-    if let Screen::CreateWorkspace(ref st) = app.screen {
-        let bp = st.branch_picker.as_ref().expect("branch picker present");
-        assert!(bp.input.value().is_empty());
-        assert_eq!(bp.highlighted, 1, "j navigates while the query is empty");
-    } else {
-        panic!("expected CreateWorkspace screen");
-    }
+    assert_jk_types_into_the_query(&mut app, create_branch_picker, "create PickBranch");
 }
 
 /// The Add flow's branch picker is the sixth of the six older pickers. Its j/k
@@ -6329,19 +6447,109 @@ fn add_pick_branch_jk_type_into_a_non_empty_query() {
 }
 
 #[test]
-fn add_pick_branch_jk_navigate_while_query_is_empty() {
+fn add_pick_branch_jk_type_into_an_empty_query() {
     let env = TestEnv::new();
     let mut app = open_add_pick_branch(&env);
 
-    app.handle_key(key(KeyCode::Char('j')));
+    assert_jk_types_into_the_query(&mut app, add_branch_picker, "add PickBranch");
+}
 
-    if let Screen::AddRepos(ref st) = app.screen {
-        let bp = st.branch_picker.as_ref().expect("branch picker present");
-        assert!(bp.input.value().is_empty());
-        assert_eq!(bp.highlighted, 1, "j navigates while the query is empty");
-    } else {
-        panic!("expected AddRepos screen");
+/// A repo with two extra `j`/`k` branches, in a workspace, focused on its repo
+/// row: the shared fixture for the last two typed pickers, both of which are
+/// reached from a repo row rather than from a create/add flow.
+fn jk_branch_repo_app(env: &TestEnv, name: &str) -> App {
+    let repo_path = env.create_repo(name);
+    for branch in ["ajk-one", "ajk-two"] {
+        let out = std::process::Command::new("git")
+            .args(["branch", branch])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
     }
+
+    let ws = Workspace {
+        name: "jk-branch-ws".to_string(),
+        path: env.workspaces_dir.clone(),
+        repos: vec![WorkspaceRepo {
+            name: name.to_string(),
+            path: repo_path.clone(),
+            branch: "main".to_string(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+    let config = config_from_env(env);
+    let mut app = test_app_with_config(config, vec![ws], vec![repo_path]);
+    app.load_selected_workspace_detail();
+    app.focus = Pane::Right; // cursor_row = 0 is the repo row
+    app
+}
+
+/// The rebase target picker: `G` opens the git-ops menu, `r` the rebase
+/// pre-flight, `Enter` on a clean tree the picker itself.
+fn open_rebase_pick_target(env: &TestEnv) -> App {
+    use space::tui::screens::gitops::GitOpsStage;
+    let mut app = jk_branch_repo_app(env, "rebase-jk-repo");
+
+    app.handle_key(key(KeyCode::Char('G')));
+    app.handle_key(key(KeyCode::Char('r')));
+    app.handle_key(key(KeyCode::Enter));
+
+    match app.screen {
+        Screen::GitOps(ref st) => assert_eq!(
+            st.stage,
+            GitOpsStage::RebasePickTarget,
+            "fixture should have reached the rebase target picker"
+        ),
+        _ => panic!("expected the git-ops overlay"),
+    }
+    app
+}
+
+/// The rebase target picker is one of the two that used to guard j/k on an
+/// empty query. The guard is gone, so it follows the same rule as the rest.
+#[test]
+fn gitops_rebase_target_jk_type_into_an_empty_query() {
+    let env = TestEnv::new();
+    let mut app = open_rebase_pick_target(&env);
+
+    assert_jk_types_into_the_query(&mut app, rebase_target_picker, "rebase target");
+}
+
+/// The switch-branch picker: `b` on a repo row, then the last strategy row
+/// ("Pick a branch...") opens the fuzzy list of every branch.
+fn open_switch_branch_pick_branch(env: &TestEnv) -> App {
+    use space::tui::screens::switch_branch::SwitchBranchStage;
+    let mut app = jk_branch_repo_app(env, "switch-jk-repo");
+
+    app.handle_key(key(KeyCode::Char('b')));
+    if let Screen::SwitchBranch(ref mut st) = app.screen {
+        st.strategy_idx = st.max_idx();
+    } else {
+        panic!("expected SwitchBranch screen");
+    }
+    app.handle_key(key(KeyCode::Enter));
+
+    match app.screen {
+        Screen::SwitchBranch(ref st) => assert_eq!(
+            st.stage,
+            SwitchBranchStage::PickBranch,
+            "fixture should have reached the switch-branch picker"
+        ),
+        _ => panic!("expected SwitchBranch screen"),
+    }
+    app
+}
+
+/// The switch-branch picker is the other formerly guarded one.
+#[test]
+fn switch_branch_pick_branch_jk_type_into_an_empty_query() {
+    let env = TestEnv::new();
+    let mut app = open_switch_branch_pick_branch(&env);
+
+    assert_jk_types_into_the_query(&mut app, switch_branch_picker, "switch branch");
 }
 
 // ---------------------------------------------------------------------------

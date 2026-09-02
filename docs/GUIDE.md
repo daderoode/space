@@ -202,6 +202,7 @@ or `Ctrl-C` only.
 
 | Key | Action |
 |-----|--------|
+| `↑` / `↓` | Move the highlight (every letter types into the filter) |
 | `Tab` | Toggle the highlighted repo |
 | `Ctrl-S` | Cycle the parent-directory scope |
 | `Ctrl-R` | Rescan the repo list without leaving the picker |
@@ -338,10 +339,10 @@ Powered by **nucleo 0.5** (the engine behind the Helix editor):
 - Scope filtering by parent directory (`orgname/` prefix or `Ctrl-S` cycling)
 - Multi-select with `Tab` toggle
 
-**Navigating while filtering:** `↑`/`↓` always move the highlight. `j`/`k` move
-it only while the query is empty; once you have typed anything they are literal
-characters, so a repo or branch named `jackal` is reachable. This rule is the
-same in every picker.
+**Navigating while filtering:** `↑`/`↓` are the only keys that move the
+highlight. Every letter is a literal character, `j` and `k` included, so a repo
+or branch named `jackal` is always reachable. The rule is the same in every
+picker: in a screen with a text input, letters are text and only arrows move.
 
 Used in: repo picker, workspace picker, branch picker, and repo search.
 

@@ -162,29 +162,7 @@ impl SwitchBranchState {
                 }
                 ScreenAction::Continue
             }
-            KeyCode::Char('k')
-                if self
-                    .branch_picker
-                    .as_ref()
-                    .is_some_and(|bp| bp.input.value().is_empty()) =>
-            {
-                if let Some(ref mut bp) = self.branch_picker {
-                    bp.move_up();
-                }
-                ScreenAction::Continue
-            }
             KeyCode::Down => {
-                if let Some(ref mut bp) = self.branch_picker {
-                    bp.move_down();
-                }
-                ScreenAction::Continue
-            }
-            KeyCode::Char('j')
-                if self
-                    .branch_picker
-                    .as_ref()
-                    .is_some_and(|bp| bp.input.value().is_empty()) =>
-            {
                 if let Some(ref mut bp) = self.branch_picker {
                     bp.move_down();
                 }

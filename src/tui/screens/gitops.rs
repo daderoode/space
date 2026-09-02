@@ -422,9 +422,10 @@ impl GitOpsState {
     /// Target-picker stage keys. Follows the switch-branch picker's shape with
     /// one deliberate difference: `q` types into the fuzzy filter (branch names
     /// can contain it) instead of closing. `Esc` steps back to the pre-flight;
-    /// arrows / `j`/`k` (when the filter is empty) move the highlight; `Enter`
-    /// selects the target, computes the ahead/behind preview, and advances to
-    /// the confirm stage; anything else edits the fuzzy filter.
+    /// the arrows move the highlight (letters are text in a typed picker, so
+    /// there is no `j`/`k` navigation here); `Enter` selects the target,
+    /// computes the ahead/behind preview, and advances to the confirm stage;
+    /// anything else edits the fuzzy filter.
     fn handle_rebase_pick_target_key(&mut self, key: KeyEvent) -> ScreenAction {
         match key.code {
             KeyCode::Esc => {
@@ -438,28 +439,6 @@ impl GitOpsState {
                 ScreenAction::Continue
             }
             KeyCode::Down => {
-                if let Some(ref mut bp) = self.rebase_picker {
-                    bp.move_down();
-                }
-                ScreenAction::Continue
-            }
-            KeyCode::Char('k')
-                if self
-                    .rebase_picker
-                    .as_ref()
-                    .is_some_and(|bp| bp.input.value().is_empty()) =>
-            {
-                if let Some(ref mut bp) = self.rebase_picker {
-                    bp.move_up();
-                }
-                ScreenAction::Continue
-            }
-            KeyCode::Char('j')
-                if self
-                    .rebase_picker
-                    .as_ref()
-                    .is_some_and(|bp| bp.input.value().is_empty()) =>
-            {
                 if let Some(ref mut bp) = self.rebase_picker {
                     bp.move_down();
                 }
