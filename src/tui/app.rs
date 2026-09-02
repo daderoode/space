@@ -1012,12 +1012,15 @@ impl App {
                 if st.stage == crate::tui::screens::add::AddStage::Syncing
         );
         if !is_syncing {
-            // Signal cancellation so the worker stops before starting the next repo.
+            // Signal cancellation so the worker stops before its next git call.
             // Dropping the receiver below is a backstop: if the worker is mid-repo when we
             // cancel, its next tx.send() returns Err immediately (a dropped receiver on a
             // sync_channel does not block the sender), so the thread still exits cleanly.
-            // If the user cancels and immediately restarts, two workers can briefly overlap on
-            // the same repos — that is safe because git fetch/branch operations are idempotent.
+            // The cancelled worker finishes its in-flight git call in the background and
+            // starts nothing new. A restart on the same repo while that call is still
+            // running can hit git's own lock error (`cannot lock ref`), which the report
+            // shows as a `fetch failed` row: the accepted residual of design item 1.5
+            // (GitHub issue #24 item 3).
             if let Some(c) = &self.sync_cancel {
                 c.store(true, Ordering::Relaxed);
             }
@@ -1194,8 +1197,10 @@ impl App {
             }
             ScreenAction::ExecuteSyncFlow(repos) => {
                 // Cancel any worker still live from a previous sync before dropping its
-                // handle, so it stops at its next repo boundary rather than running on
-                // untracked.
+                // handle, so it stops before its next git call rather than running on
+                // untracked. Its in-flight call still finishes in the background; if this
+                // worker reaches the same repo first, git's lock error surfaces as a
+                // `fetch failed` row (design item 1.5, GitHub issue #24 item 3).
                 if let Some(old) = &self.sync_cancel {
                     old.store(true, Ordering::Relaxed);
                 }
