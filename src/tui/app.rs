@@ -1019,8 +1019,9 @@ impl App {
             // The cancelled worker finishes its in-flight git call in the background and
             // starts nothing new. A restart on the same repo while that call is still
             // running can hit git's own lock error (`cannot lock ref`), which the report
-            // shows as a `fetch failed` row: the accepted residual of design item 1.5
-            // (GitHub issue #24 item 3).
+            // shows as a `fetch failed` row (or a skipped branch when the colliding call
+            // is a `branch -f`): the accepted residual of design item 1.5 (GitHub issue
+            // #24 item 3).
             if let Some(c) = &self.sync_cancel {
                 c.store(true, Ordering::Relaxed);
             }

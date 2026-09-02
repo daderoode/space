@@ -265,12 +265,20 @@ pub struct SkippedBranch {
     pub reason: SkipReason,
 }
 
+/// Start of the `stderr` of a `FetchOutcome::Failed` whose git never ran.
+/// The sync report matches on this prefix to label the row `git did not
+/// start`, so the wording is part of the contract.
+pub const SPAWN_FAILURE_PREFIX: &str = "failed to spawn git";
+
 /// How the `git fetch` half of a sync ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchOutcome {
     Ok,
-    /// git exited non-zero or could not be started. `exit_code` is `None` when
-    /// git was killed by a signal or never ran; `stderr` is everything it wrote.
+    /// git exited non-zero or the fetch never got a result. `exit_code` is
+    /// `None` when git did not start (`stderr` begins with
+    /// `SPAWN_FAILURE_PREFIX`), when the wait itself failed, when the run was
+    /// cancelled before the fetch, or when git was stopped by a signal;
+    /// otherwise `stderr` is everything git wrote.
     Failed {
         exit_code: Option<i32>,
         stderr: String,
@@ -448,7 +456,7 @@ fn fetch_origin_unattended(repo_path: &Path, timeout: Duration) -> FetchOutcome 
         },
         Unattended::SpawnFailed(e) => FetchOutcome::Failed {
             exit_code: None,
-            stderr: format!("failed to spawn git: {}", e),
+            stderr: format!("{}: {}", SPAWN_FAILURE_PREFIX, e),
         },
         Unattended::WaitFailed { stderr } => FetchOutcome::Failed {
             exit_code: None,
@@ -461,8 +469,9 @@ fn fetch_origin_unattended(repo_path: &Path, timeout: Duration) -> FetchOutcome 
 /// wrote before it ended (or before it was stopped).
 #[derive(Debug)]
 enum Unattended {
-    /// The child exited on its own, within the limit or during the grace
-    /// after SIGTERM; a success status here means the work completed.
+    /// The child exited on its own: within the limit with any status, or
+    /// with a success status during the grace after SIGTERM (a non-success
+    /// exit after the limit is a `TimedOut`).
     Exited {
         status: ExitStatus,
         stderr: String,
@@ -488,8 +497,9 @@ enum Unattended {
 /// with success during that grace still counts as `Exited`, so work that
 /// completed at the deadline is not thrown away.
 ///
-/// The stderr reader is joined with a bound on every path, so a helper that
-/// keeps the pipe open never stalls the caller.
+/// Whenever the child was seen to end, the stderr reader is given a bounded
+/// moment to finish, so a helper that keeps the pipe open never stalls the
+/// caller.
 fn run_unattended(mut cmd: Command, timeout: Duration) -> Unattended {
     use std::os::unix::process::CommandExt;
 
@@ -623,26 +633,41 @@ fn stop_process_group(child: &mut Child, pgid: libc::pid_t) -> Option<ExitStatus
         libc::killpg(pgid, libc::SIGTERM);
     }
     let deadline = Instant::now() + SYNC_KILL_GRACE;
-    while !has_exited_unreaped(pid) && Instant::now() < deadline {
-        std::thread::sleep(SYNC_POLL_INTERVAL);
+    loop {
+        match leader_state(pid) {
+            Leader::Running if Instant::now() < deadline => std::thread::sleep(SYNC_POLL_INTERVAL),
+            Leader::Running | Leader::Exited => break,
+            // Not ours to wait for, so nothing pins the group id: it must
+            // not be signalled. Cannot happen while `wait_until` is the only
+            // other waiter, but the guarantee below depends on it.
+            Leader::NotOurs => return child.wait().ok(),
+        }
     }
-    // SAFETY: as above; the leader is still unreaped (`has_exited_unreaped`
-    // never reaps), so the group id is still ours. ESRCH, when everything
-    // already left, is fine.
+    // SAFETY: as above; the leader is still unreaped (`leader_state` never
+    // reaps), so the group id is still ours. ESRCH, when everything already
+    // left, is fine.
     unsafe {
         libc::killpg(pgid, libc::SIGKILL);
     }
     child.wait().ok()
 }
 
+enum Leader {
+    Running,
+    /// Exited and left as a zombie for `Child::wait`.
+    Exited,
+    /// `waitid` refused the pid (ECHILD: reaped elsewhere, or never ours).
+    NotOurs,
+}
+
 /// Whether `pid`, an unreaped child of ours, has exited. Uses `waitid` with
 /// `WNOWAIT` so the zombie stays in place for `Child::wait`; `kill(pid, 0)`
-/// would not do, as it succeeds for a zombie too. A failed `waitid` (the
-/// child is not ours to wait for) reports `true` so the caller stops polling.
-fn has_exited_unreaped(pid: libc::pid_t) -> bool {
+/// would not do, as it succeeds for a zombie too.
+fn leader_state(pid: libc::pid_t) -> Leader {
     // SAFETY: `siginfo_t` is plain data for which all-zero is a valid value,
-    // and waitid only writes into it. With WNOHANG and no state change the
-    // struct is left with `si_signo == 0`; a reported child sets SIGCHLD.
+    // and waitid only writes into it. A reported child sets `si_signo` to
+    // SIGCHLD; with WNOHANG and no state change Linux writes zeros and XNU
+    // leaves the struct untouched, so starting from zeros covers both.
     unsafe {
         let mut info: libc::siginfo_t = std::mem::zeroed();
         let rc = libc::waitid(
@@ -651,7 +676,13 @@ fn has_exited_unreaped(pid: libc::pid_t) -> bool {
             &mut info,
             libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
         );
-        rc != 0 || info.si_signo == libc::SIGCHLD
+        if rc != 0 {
+            Leader::NotOurs
+        } else if info.si_signo == libc::SIGCHLD {
+            Leader::Exited
+        } else {
+            Leader::Running
+        }
     }
 }
 
@@ -1615,7 +1646,7 @@ mod tests {
     #[test]
     fn run_unattended_reports_success_for_child_exiting_during_kill_grace() {
         let mut cmd = Command::new("/bin/sh");
-        cmd.args(["-c", "trap '' TERM; sleep 0.6; echo late >&2; exit 0"]);
+        cmd.args(["-c", "trap '' TERM; sleep 0.3; echo late >&2; exit 0"]);
 
         let started = Instant::now();
         let outcome = run_unattended(cmd, Duration::from_millis(200));
@@ -1642,9 +1673,10 @@ mod tests {
         );
     }
 
-    /// The same child that never exits is still a timeout, and the SIGKILL
-    /// after the grace ends it (it ignores SIGTERM, so the grace alone would
-    /// leave it running).
+    /// The same child that never exits is still a timeout, ended by the
+    /// SIGKILL after the grace (it ignores SIGTERM). This pins the contract;
+    /// the regression guard for a helper outliving a leader that did exit on
+    /// SIGTERM is `sync_repo_timeout_kills_helper_that_ignores_sigterm`.
     #[test]
     fn run_unattended_times_out_child_that_ignores_sigterm() {
         let mut cmd = Command::new("/bin/sh");
@@ -1660,9 +1692,38 @@ mod tests {
             outcome
         );
         assert!(
-            elapsed >= SYNC_KILL_GRACE && elapsed < SYNC_KILL_GRACE + Duration::from_secs(2),
-            "the child gets the full grace and is then killed, took {:?}",
+            elapsed < SYNC_KILL_GRACE + Duration::from_secs(2),
+            "the child must be killed once the grace ends, took {:?}",
             elapsed
+        );
+    }
+
+    /// A git that cannot be started is a `Failed` with no exit code whose
+    /// stderr carries `SPAWN_FAILURE_PREFIX`, which the report renders as
+    /// `git did not start`. The repo directory does not exist, so spawn fails
+    /// on the working directory before git is ever looked up.
+    #[test]
+    fn sync_repo_reports_unstartable_git_with_spawn_failure_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("no-such-repo");
+
+        let result = sync_repo(&missing);
+
+        match &result.fetch {
+            FetchOutcome::Failed { exit_code, stderr } => {
+                assert_eq!(*exit_code, None, "a git that never ran has no exit code");
+                assert!(
+                    stderr.starts_with(SPAWN_FAILURE_PREFIX),
+                    "stderr must start with {:?}, got: {:?}",
+                    SPAWN_FAILURE_PREFIX,
+                    stderr
+                );
+            }
+            other => panic!("expected FetchOutcome::Failed, got {:?}", other),
+        }
+        assert!(
+            result.forwarded.is_empty() && result.skipped.is_empty(),
+            "no branch work happens when git did not start"
         );
     }
 
