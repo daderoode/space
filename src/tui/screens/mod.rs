@@ -8,3 +8,4 @@ pub mod go;
 pub mod help;
 pub mod search;
 pub mod switch_branch;
+pub mod sync_report;

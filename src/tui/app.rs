@@ -1,7 +1,7 @@
 use crate::core::{
     config::SpaceConfig,
     git::{FileDiff, FileEntry},
-    workspace::{self, Workspace},
+    workspace::{self, SyncOutcome, Workspace},
 };
 use crate::tui::actions::StatusKind;
 use anyhow::Result;
@@ -34,8 +34,11 @@ pub struct LoadResult {
 }
 
 /// Sent from the sync worker thread back to the App during the Syncing stage.
+/// `index` addresses the repo's row in the sync report (selection order); the
+/// UI formats the rows from the structured outcome.
 pub enum SyncProgress {
-    Step(String),
+    Started { index: usize },
+    Finished { index: usize, outcome: SyncOutcome },
     Done,
 }
 
@@ -823,10 +826,12 @@ impl App {
         match &mut self.screen {
             Screen::CreateWorkspace(st) => {
                 st.progress.clear();
+                st.log_view.reset();
                 st.error = None;
             }
             Screen::AddRepos(st) => {
                 st.progress.clear();
+                st.log_view.reset();
                 st.error = None;
             }
             _ => return,
@@ -972,12 +977,30 @@ impl App {
         }
     }
 
+    /// The sync report of the active screen, if it is in the Syncing stage.
+    fn sync_report_mut(&mut self) -> Option<&mut crate::tui::screens::sync_report::SyncReport> {
+        match &mut self.screen {
+            Screen::CreateWorkspace(st)
+                if st.stage == crate::tui::screens::create::CreateStage::Syncing =>
+            {
+                Some(&mut st.report)
+            }
+            Screen::AddRepos(st) if st.stage == crate::tui::screens::add::AddStage::Syncing => {
+                Some(&mut st.report)
+            }
+            _ => None,
+        }
+    }
+
     /// Poll the sync worker channel once per frame. Non-blocking.
     ///
-    /// Drains `Step` messages into the active screen's progress log, and
-    /// calls `advance_to_branch_strategy` on `Done` or channel disconnect.
-    /// Drops `sync_rx` whenever the screen is no longer in the Syncing stage
-    /// (e.g. the user pressed Esc).
+    /// Applies `Started` and `Finished` messages to the active screen's sync
+    /// report. `Done` finishes the report and drops the channel; the screen
+    /// stays on the report until the user presses Enter
+    /// (`ScreenAction::ContinueFromSyncReport`). A disconnect without `Done`
+    /// (the worker panicked or was dropped) is treated as `Done`: unfinished
+    /// rows become `not synced`. Drops `sync_rx` whenever the screen is no
+    /// longer in the Syncing stage (e.g. the user pressed Esc).
     pub fn poll_sync_result(&mut self) {
         let is_syncing = matches!(
             &self.screen,
@@ -1006,19 +1029,21 @@ impl App {
         if let Some(ref r) = rx {
             loop {
                 match r.try_recv() {
-                    Ok(SyncProgress::Step(msg)) => match &mut self.screen {
-                        Screen::CreateWorkspace(st) => st.progress.push(msg),
-                        Screen::AddRepos(st) => st.progress.push(msg),
-                        _ => {}
-                    },
-                    Ok(SyncProgress::Done) => {
-                        self.sync_cancel = None;
-                        self.advance_to_branch_strategy();
-                        return;
+                    Ok(SyncProgress::Started { index }) => {
+                        if let Some(report) = self.sync_report_mut() {
+                            report.started(index);
+                        }
                     }
-                    Err(mpsc::TryRecvError::Disconnected) => {
+                    Ok(SyncProgress::Finished { index, outcome }) => {
+                        if let Some(report) = self.sync_report_mut() {
+                            report.finished(index, outcome);
+                        }
+                    }
+                    Ok(SyncProgress::Done) | Err(mpsc::TryRecvError::Disconnected) => {
+                        if let Some(report) = self.sync_report_mut() {
+                            report.finish();
+                        }
                         self.sync_cancel = None;
-                        self.advance_to_branch_strategy();
                         return;
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -1163,6 +1188,9 @@ impl App {
             }
             ScreenAction::ExecuteWorktreeFlow(params) => {
                 self.execute_worktree_flow(params);
+            }
+            ScreenAction::ContinueFromSyncReport => {
+                self.advance_to_branch_strategy();
             }
             ScreenAction::ExecuteSyncFlow(repos) => {
                 // Cancel any worker still live from a previous sync before dropping its
@@ -1461,45 +1489,34 @@ impl App {
 }
 
 /// Background worker for the Syncing stage: fetch + fast-forward each repo,
-/// reporting progress over `tx`.
+/// sending `Started` and `Finished` per repo over `tx`, then `Done`.
 ///
-/// Cancellation is checked between repos: when `cancel` is set, the worker
-/// returns immediately without sending `Done`. An in-flight git subprocess for
-/// the current repo cannot be interrupted, so cancellation takes effect only at
-/// the next repo boundary.
+/// Cancellation is checked before every git call: when `cancel` is set, the
+/// in-flight git call runs to completion, nothing further is started for that
+/// repo or any later one, and `Done` is never sent. A `send` failing means the
+/// receiver was dropped (the user left the report), so the worker stops there.
 fn run_sync_worker(
     repos: Vec<PathBuf>,
     tx: mpsc::SyncSender<SyncProgress>,
     cancel: Arc<AtomicBool>,
 ) {
-    for repo_path in &repos {
+    for (index, repo_path) in repos.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
-            return; // do NOT send Done — user cancelled
+            return;
         }
-        let repo_name = repo_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "?".to_string());
-        let _ = tx.send(SyncProgress::Step(format!("Syncing {}...", repo_name)));
-        let result = crate::core::workspace::sync_repo(repo_path);
-        if result.fetch_ok {
-            if result.forwarded.is_empty() {
-                let _ = tx.send(SyncProgress::Step(format!(
-                    "  \u{2713} {} up to date",
-                    repo_name
-                )));
-            } else {
-                let _ = tx.send(SyncProgress::Step(format!(
-                    "  \u{2713} {} (fast-forwarded: {})",
-                    repo_name,
-                    result.forwarded.join(", ")
-                )));
-            }
-        } else {
-            let _ = tx.send(SyncProgress::Step(format!(
-                "  ~ {} (fetch failed, using local)",
-                repo_name
-            )));
+        if tx.send(SyncProgress::Started { index }).is_err() {
+            return;
+        }
+        let outcome = crate::core::workspace::sync_repo_cancellable(
+            repo_path,
+            crate::core::workspace::SYNC_FETCH_TIMEOUT,
+            &cancel,
+        );
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        if tx.send(SyncProgress::Finished { index, outcome }).is_err() {
+            return;
         }
     }
     let _ = tx.send(SyncProgress::Done);
@@ -2879,18 +2896,27 @@ mod tests {
         );
     }
 
+    fn ok_outcome() -> SyncOutcome {
+        SyncOutcome {
+            fetch: crate::core::workspace::FetchOutcome::Ok,
+            forwarded: vec![],
+            skipped: vec![],
+        }
+    }
+
     #[test]
-    fn poll_sync_result_appends_step_to_progress() {
+    fn poll_sync_result_started_marks_row_syncing_and_moves_cursor() {
         use crate::tui::screens::create::{CreateStage, CreateState};
+        use crate::tui::screens::sync_report::{RowPhase, SyncReport};
         let mut app = make_app(vec![]);
         let mut state = CreateState::new(vec![], vec![]);
         state.stage = CreateStage::Syncing;
+        state.report = SyncReport::new(&[PathBuf::from("/r/a"), PathBuf::from("/r/b")]);
         app.screen = Screen::CreateWorkspace(state);
 
         let (tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
         app.sync_rx = Some(rx);
-        tx.send(SyncProgress::Step("Syncing my-repo...".to_string()))
-            .unwrap();
+        tx.send(SyncProgress::Started { index: 1 }).unwrap();
 
         app.poll_sync_result();
 
@@ -2901,11 +2927,10 @@ mod tests {
                     CreateStage::Syncing,
                     "stage must remain Syncing while channel is open"
                 );
-                assert_eq!(
-                    st.progress,
-                    vec!["Syncing my-repo..."],
-                    "Step message must be appended to progress"
-                );
+                assert_eq!(st.report.rows[1].phase, RowPhase::Syncing);
+                assert_eq!(st.report.cursor, 1, "cursor follows the syncing row");
+                assert!(!st.report.done);
+                assert_eq!(st.report.title(), "Sync report \u{b7} 0 of 2");
             }
             _ => panic!("expected CreateWorkspace screen"),
         }
@@ -2916,15 +2941,24 @@ mod tests {
     }
 
     #[test]
-    fn poll_sync_result_done_advances_to_pick_branch_strategy() {
+    fn poll_sync_result_done_pauses_on_report_and_enter_advances() {
         use crate::tui::screens::create::{CreateStage, CreateState};
+        use crate::tui::screens::sync_report::SyncReport;
         let mut app = make_app(vec![]);
         let mut state = CreateState::new(vec![], vec![]);
         state.stage = CreateStage::Syncing;
+        state.report = SyncReport::new(&[PathBuf::from("/r/a")]);
         app.screen = Screen::CreateWorkspace(state);
 
         let (tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
         app.sync_rx = Some(rx);
+        app.sync_cancel = Some(Arc::new(AtomicBool::new(false)));
+        tx.send(SyncProgress::Started { index: 0 }).unwrap();
+        tx.send(SyncProgress::Finished {
+            index: 0,
+            outcome: ok_outcome(),
+        })
+        .unwrap();
         tx.send(SyncProgress::Done).unwrap();
 
         app.poll_sync_result();
@@ -2933,27 +2967,94 @@ mod tests {
             Screen::CreateWorkspace(st) => {
                 assert_eq!(
                     st.stage,
-                    CreateStage::PickBranchStrategy,
-                    "Done must advance stage to PickBranchStrategy"
+                    CreateStage::Syncing,
+                    "Done must pause on the report, not advance"
                 );
+                assert!(st.report.done, "the report must be finished");
+                assert_eq!(st.report.title(), "Sync report \u{b7} 1 ok");
             }
             _ => panic!("expected CreateWorkspace screen"),
         }
         assert!(app.sync_rx.is_none(), "sync_rx must be dropped after Done");
+        assert!(
+            app.sync_cancel.is_none(),
+            "cancel handle must be dropped after Done"
+        );
+
+        app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(
+                st.stage,
+                CreateStage::PickBranchStrategy,
+                "Enter on a finished report must advance to PickBranchStrategy"
+            ),
+            _ => panic!("expected CreateWorkspace screen"),
+        }
     }
 
     #[test]
-    fn poll_sync_result_add_repos_appends_step_to_progress() {
+    fn poll_sync_result_disconnect_marks_unfinished_rows_not_synced() {
+        use crate::tui::screens::create::{CreateStage, CreateState};
+        use crate::tui::screens::sync_report::{RowPhase, SyncReport};
+        let mut app = make_app(vec![]);
+        let mut state = CreateState::new(vec![], vec![]);
+        state.stage = CreateStage::Syncing;
+        state.report = SyncReport::new(&[
+            PathBuf::from("/r/a"),
+            PathBuf::from("/r/b"),
+            PathBuf::from("/r/c"),
+        ]);
+        app.screen = Screen::CreateWorkspace(state);
+
+        let (tx, rx) = mpsc::sync_channel::<SyncProgress>(8);
+        app.sync_rx = Some(rx);
+        tx.send(SyncProgress::Started { index: 0 }).unwrap();
+        tx.send(SyncProgress::Finished {
+            index: 0,
+            outcome: ok_outcome(),
+        })
+        .unwrap();
+        tx.send(SyncProgress::Started { index: 1 }).unwrap();
+        drop(tx); // the worker went away without sending Done
+
+        app.poll_sync_result();
+
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(st.stage, CreateStage::Syncing, "must stay on the report");
+                assert!(st.report.done, "disconnect counts as Done");
+                assert_eq!(st.report.rows[1].phase, RowPhase::NotSynced);
+                assert_eq!(st.report.rows[2].phase, RowPhase::NotSynced);
+                assert_eq!(st.report.title(), "Sync report \u{b7} 1 ok, 2 failed");
+                assert_eq!(
+                    st.report.cursor, 1,
+                    "cursor lands on the first not-synced row"
+                );
+            }
+            _ => panic!("expected CreateWorkspace screen"),
+        }
+        assert!(
+            app.sync_rx.is_none(),
+            "sync_rx must be dropped on disconnect"
+        );
+    }
+
+    #[test]
+    fn poll_sync_result_add_repos_started_marks_row_syncing() {
         use crate::tui::screens::add::{AddStage, AddState};
+        use crate::tui::screens::sync_report::{RowPhase, SyncReport};
         let mut app = make_app(vec![]);
         let mut state = AddState::new("my-ws".to_string(), vec![], vec![]);
         state.stage = AddStage::Syncing;
+        state.report = SyncReport::new(&[PathBuf::from("/r/a")]);
         app.screen = Screen::AddRepos(state);
 
         let (tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
         app.sync_rx = Some(rx);
-        tx.send(SyncProgress::Step("Syncing my-repo...".to_string()))
-            .unwrap();
+        tx.send(SyncProgress::Started { index: 0 }).unwrap();
 
         app.poll_sync_result();
 
@@ -2964,11 +3065,7 @@ mod tests {
                     AddStage::Syncing,
                     "stage must remain Syncing while channel is open"
                 );
-                assert_eq!(
-                    st.progress,
-                    vec!["Syncing my-repo..."],
-                    "Step message must be appended to progress"
-                );
+                assert_eq!(st.report.rows[0].phase, RowPhase::Syncing);
             }
             _ => panic!("expected AddRepos screen"),
         }
@@ -2979,11 +3076,13 @@ mod tests {
     }
 
     #[test]
-    fn poll_sync_result_add_repos_done_advances_to_pick_branch_strategy() {
+    fn poll_sync_result_add_repos_done_pauses_on_report_and_enter_advances() {
         use crate::tui::screens::add::{AddStage, AddState};
+        use crate::tui::screens::sync_report::SyncReport;
         let mut app = make_app(vec![]);
         let mut state = AddState::new("my-ws".to_string(), vec![], vec![]);
         state.stage = AddStage::Syncing;
+        state.report = SyncReport::new(&[PathBuf::from("/r/a")]);
         app.screen = Screen::AddRepos(state);
 
         let (tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
@@ -2994,15 +3093,51 @@ mod tests {
 
         match &app.screen {
             Screen::AddRepos(st) => {
+                assert_eq!(st.stage, AddStage::Syncing, "Done must pause on the report");
+                assert!(st.report.done);
                 assert_eq!(
-                    st.stage,
-                    AddStage::PickBranchStrategy,
-                    "Done must advance stage to PickBranchStrategy"
+                    st.report.title(),
+                    "Sync report \u{b7} 0 ok, 1 failed",
+                    "a row the worker never reached is not synced"
                 );
             }
             _ => panic!("expected AddRepos screen"),
         }
         assert!(app.sync_rx.is_none(), "sync_rx must be dropped after Done");
+
+        app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        match &app.screen {
+            Screen::AddRepos(st) => assert_eq!(
+                st.stage,
+                AddStage::PickBranchStrategy,
+                "Enter on a finished report must advance to PickBranchStrategy"
+            ),
+            _ => panic!("expected AddRepos screen"),
+        }
+    }
+
+    #[test]
+    fn run_sync_worker_sends_started_and_finished_per_repo_then_done() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::sync_channel::<SyncProgress>(64);
+        run_sync_worker(vec![PathBuf::from("/nonexistent/repo-a")], tx, cancel);
+
+        assert!(matches!(
+            rx.recv().unwrap(),
+            SyncProgress::Started { index: 0 }
+        ));
+        match rx.recv().unwrap() {
+            SyncProgress::Finished { index, outcome } => {
+                assert_eq!(index, 0);
+                assert!(!outcome.fetch_ok(), "a missing directory cannot be fetched");
+            }
+            _ => panic!("expected Finished after Started"),
+        }
+        assert!(matches!(rx.recv().unwrap(), SyncProgress::Done));
+        assert!(rx.try_recv().is_err(), "nothing follows Done");
     }
 
     #[test]

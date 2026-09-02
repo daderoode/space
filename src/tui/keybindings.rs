@@ -210,6 +210,32 @@ const DIFF_VIEWER: BindingGroup = BindingGroup {
     ],
 };
 
+const SYNC_REPORT: BindingGroup = BindingGroup {
+    name: "Sync Report",
+    bindings: &[
+        Binding {
+            key: "\u{2191}\u{2193}/jk",
+            desc: "Select repo (once done)",
+        },
+        Binding {
+            key: "PgUp/PgDn",
+            desc: "Page by 10 rows",
+        },
+        Binding {
+            key: "Home/End",
+            desc: "First / last repo",
+        },
+        Binding {
+            key: "Enter",
+            desc: "Continue to branch picker (once done)",
+        },
+        Binding {
+            key: "Esc",
+            desc: "Cancel / back to repo picker",
+        },
+    ],
+};
+
 const GENERAL: BindingGroup = BindingGroup {
     name: "General",
     bindings: &[
@@ -230,13 +256,14 @@ const GENERAL: BindingGroup = BindingGroup {
 
 /// All binding groups — consumed by the help overlay.
 pub fn all_groups() -> &'static [BindingGroup] {
-    static GROUPS: [BindingGroup; 7] = [
+    static GROUPS: [BindingGroup; 8] = [
         NAVIGATION,
         WORKSPACE_PANE,
         REPO_PANE,
         REPO_PICKER,
         GIT_OPS,
         DIFF_VIEWER,
+        SYNC_REPORT,
         GENERAL,
     ];
     &GROUPS

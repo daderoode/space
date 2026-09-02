@@ -1,7 +1,11 @@
 use crate::core::git::{self, RepoStatus};
 use anyhow::{Context, Result};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, serde::Serialize)]
 pub struct Workspace {
@@ -245,54 +249,298 @@ pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) ->
     run_git_in(wt_path, &["switch", "--", local_name])
 }
 
-/// Result from syncing a single repo with its remote.
-pub struct SyncRepoResult {
-    pub fetch_ok: bool,
-    pub forwarded: Vec<String>, // names of branches that were fast-forwarded
+/// Why a branch that was strictly behind `origin/<name>` was not fast-forwarded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    /// git refused because the branch is checked out in the worktree at this path.
+    CheckedOutAt(PathBuf),
+    /// Any refusal the parser does not recognise; carries git's stderr line verbatim.
+    Other(String),
 }
+
+/// A branch the sync tried to fast-forward and git refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedBranch {
+    pub name: String,
+    pub reason: SkipReason,
+}
+
+/// How the `git fetch` half of a sync ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchOutcome {
+    Ok,
+    /// git exited non-zero or could not be started. `exit_code` is `None` when
+    /// git was killed by a signal or never ran; `stderr` is everything it wrote.
+    Failed {
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+    /// The wall-clock limit expired and git's whole process group was stopped.
+    /// `stderr` is whatever arrived before the kill, usually nothing.
+    TimedOut {
+        after: Duration,
+        stderr: String,
+    },
+}
+
+/// The per-repo result inside a sync report (glossary: sync outcome).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncOutcome {
+    pub fetch: FetchOutcome,
+    /// Branches fast-forwarded, in the order they were tried.
+    pub forwarded: Vec<String>,
+    /// Branches that were behind but git refused to move, with the reason.
+    pub skipped: Vec<SkippedBranch>,
+}
+
+impl SyncOutcome {
+    pub fn fetch_ok(&self) -> bool {
+        matches!(self.fetch, FetchOutcome::Ok)
+    }
+
+    fn without_branch_work(fetch: FetchOutcome) -> Self {
+        Self {
+            fetch,
+            forwarded: vec![],
+            skipped: vec![],
+        }
+    }
+}
+
+/// Wall-clock limit on the fetch of a sync. Fixed in Wave 1; the fast-forward
+/// calls are local and run without a limit.
+pub const SYNC_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a timed-out fetch gets to clean up after SIGTERM before SIGKILL.
+const SYNC_KILL_GRACE: Duration = Duration::from_secs(2);
+const SYNC_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Fetch from `origin` and fast-forward all local branches that are strictly
 /// behind their `origin/<branch>` ref (0 ahead, N behind); this assumes a single
 /// remote named `origin` rather than each branch's configured upstream. Branches
 /// with local commits ahead, diverged, or currently checked out are left
-/// untouched.
-/// If the fetch fails (offline / no remote), returns `fetch_ok: false` and an
-/// empty `forwarded` list — the caller should warn and continue.
-pub fn sync_repo(repo_path: &Path) -> SyncRepoResult {
-    let fetch_ok = Command::new("git")
-        .args(["fetch", "--quiet", "origin"])
-        .current_dir(repo_path)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+/// untouched and the refusals are reported as skips.
+///
+/// The fetch runs under the unattended-run policy (see `fetch_origin_unattended`)
+/// with the fixed `SYNC_FETCH_TIMEOUT`. When it does not succeed the outcome
+/// carries the failure and no branch work is attempted; the caller continues
+/// with local refs.
+#[allow(dead_code)] // public API; the TUI worker calls sync_repo_cancellable
+pub fn sync_repo(repo_path: &Path) -> SyncOutcome {
+    sync_repo_with_timeout(repo_path, SYNC_FETCH_TIMEOUT)
+}
 
-    if !fetch_ok {
-        return SyncRepoResult {
-            fetch_ok: false,
-            forwarded: vec![],
-        };
+/// `sync_repo` with an explicit fetch limit. The limit is a parameter so tests
+/// can use a short one; the user-facing value is `SYNC_FETCH_TIMEOUT`.
+#[allow(dead_code)] // public API; the TUI worker calls sync_repo_cancellable
+pub fn sync_repo_with_timeout(repo_path: &Path, timeout: Duration) -> SyncOutcome {
+    sync_repo_cancellable(repo_path, timeout, &AtomicBool::new(false))
+}
+
+/// `sync_repo_with_timeout` that stops before every git call once `cancel` is
+/// set: the in-flight call runs to completion, nothing further is started.
+/// The outcome returned after a cancellation is partial and callers that
+/// cancelled should discard it.
+pub fn sync_repo_cancellable(
+    repo_path: &Path,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> SyncOutcome {
+    if cancel.load(Ordering::Relaxed) {
+        return SyncOutcome::without_branch_work(FetchOutcome::Failed {
+            exit_code: None,
+            stderr: "sync cancelled".to_string(),
+        });
+    }
+    let fetch = fetch_origin_unattended(repo_path, timeout);
+    if fetch != FetchOutcome::Ok {
+        return SyncOutcome::without_branch_work(fetch);
     }
 
-    let behind = git::branches_behind_upstream(repo_path);
     let mut forwarded = vec![];
-
-    for branch in behind {
+    let mut skipped = vec![];
+    for branch in git::branches_behind_upstream(repo_path) {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         let remote_ref = format!("origin/{}", branch);
-        let success = Command::new("git")
+        let out = Command::new("git")
             .args(["branch", "-f", &branch, &remote_ref])
             .current_dir(repo_path)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if success {
-            forwarded.push(branch);
+            .stdin(Stdio::null())
+            .output();
+        match out {
+            Ok(o) if o.status.success() => forwarded.push(branch),
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                skipped.push(SkippedBranch {
+                    name: branch,
+                    reason: parse_skip_reason(&stderr),
+                });
+            }
+            Err(e) => skipped.push(SkippedBranch {
+                name: branch,
+                reason: SkipReason::Other(format!("failed to run git: {}", e)),
+            }),
         }
-        // Silently ignore failures (e.g. branch is currently checked out)
     }
 
-    SyncRepoResult {
-        fetch_ok: true,
+    SyncOutcome {
+        fetch: FetchOutcome::Ok,
         forwarded,
+        skipped,
+    }
+}
+
+/// Best-effort parse of git's refusal to `branch -f`. Recognises
+/// `fatal: cannot force update the branch '<b>' used by worktree at '<path>'`
+/// (git 2.53.0 wording); anything else is kept verbatim so nothing is swallowed.
+fn parse_skip_reason(stderr: &str) -> SkipReason {
+    let line = stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("fatal:") || l.starts_with("error:"))
+        .or_else(|| stderr.lines().map(str::trim).find(|l| !l.is_empty()))
+        .unwrap_or("git branch -f failed");
+    if let Some((_, rest)) = line.split_once("used by worktree at '") {
+        if let Some(path) = rest.strip_suffix('\'') {
+            return SkipReason::CheckedOutAt(PathBuf::from(path));
+        }
+    }
+    SkipReason::Other(line.to_string())
+}
+
+/// Run `git fetch --quiet origin` under the unattended-run policy: the child
+/// gets its own session (so no controlling terminal: prompts for credentials,
+/// passphrases and host keys fail instead of waiting), stdin is null, stdout
+/// and stderr are captured, and `GIT_TERMINAL_PROMPT=0` makes the https
+/// refusal read "terminal prompts disabled". `GIT_SSH_COMMAND` is deliberately
+/// not set so the user's own ssh configuration applies. The session is also the
+/// process group the timeout kills: SIGTERM to the group (git and its ssh or
+/// https helper), a short grace so git can drop its lockfiles, then SIGKILL.
+///
+/// A helper that outlives the kill can keep the stderr pipe open; the reader
+/// thread then lingers until it exits, which is harmless.
+fn fetch_origin_unattended(repo_path: &Path, timeout: Duration) -> FetchOutcome {
+    use std::os::unix::process::CommandExt;
+
+    let mut cmd = Command::new("git");
+    cmd.args(["fetch", "--quiet", "origin"])
+        .current_dir(repo_path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // SAFETY: setsid(2) is async-signal-safe and touches no memory shared with
+    // the parent, which is all `pre_exec` requires of the closure.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return FetchOutcome::Failed {
+                exit_code: None,
+                stderr: format!("failed to spawn git: {}", e),
+            }
+        }
+    };
+    let pgid = child.id() as libc::pid_t;
+    let (stderr, stderr_reader) = capture_in_background(child.stderr.take());
+    let (_stdout, _) = capture_in_background(child.stdout.take());
+
+    match wait_until(&mut child, Instant::now() + timeout) {
+        Some(status) => {
+            // The group has exited, so the pipe reaches end-of-file: wait for
+            // the reader to copy git's last write before reading the buffer.
+            let _ = stderr_reader.join();
+            let text = snapshot(&stderr);
+            if status.success() {
+                FetchOutcome::Ok
+            } else {
+                FetchOutcome::Failed {
+                    exit_code: status.code(),
+                    stderr: text,
+                }
+            }
+        }
+        None => {
+            stop_process_group(&mut child, pgid);
+            FetchOutcome::TimedOut {
+                after: timeout,
+                stderr: snapshot(&stderr),
+            }
+        }
+    }
+}
+
+/// Drain a child pipe on a thread into a shared buffer, so the child never
+/// blocks on a full pipe and a snapshot is available even when the reader has
+/// not reached end-of-file (the timed-out path). Join the handle before
+/// reading the buffer when the pipe is known to be closed.
+fn capture_in_background(
+    pipe: Option<impl Read + Send + 'static>,
+) -> (Arc<Mutex<Vec<u8>>>, std::thread::JoinHandle<()>) {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&buf);
+    let reader = std::thread::spawn(move || {
+        if let Some(mut pipe) = pipe {
+            let mut chunk = [0u8; 4096];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => sink
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .extend_from_slice(&chunk[..n]),
+                }
+            }
+        }
+    });
+    (buf, reader)
+}
+
+fn snapshot(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+    let bytes = buf.lock().unwrap_or_else(|e| e.into_inner());
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Poll the child until it exits or `deadline` passes. A wait error (the
+/// child was reaped elsewhere) ends the wait at once rather than spinning.
+fn wait_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {}
+            Err(_) => return None,
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        std::thread::sleep(SYNC_POLL_INTERVAL.min(deadline - now));
+    }
+}
+
+/// SIGTERM the child's process group, give it `SYNC_KILL_GRACE` to clean up,
+/// then SIGKILL whatever is left. Always reaps the child.
+fn stop_process_group(child: &mut Child, pgid: libc::pid_t) {
+    // SAFETY: killpg on the group we created with setsid; the leader is our
+    // unreaped child, so the group id cannot have been recycled.
+    unsafe {
+        libc::killpg(pgid, libc::SIGTERM);
+    }
+    if wait_until(child, Instant::now() + SYNC_KILL_GRACE).is_none() {
+        // SAFETY: as above; the leader is still unreaped.
+        unsafe {
+            libc::killpg(pgid, libc::SIGKILL);
+        }
+        let _ = child.wait();
     }
 }
 
@@ -1080,10 +1328,21 @@ mod tests {
         git(&["commit", "--allow-empty", "-m", "init"], tmp.path());
 
         let result = sync_repo(tmp.path());
-        assert!(!result.fetch_ok, "fetch_ok must be false when no remote");
+        assert!(!result.fetch_ok(), "fetch must fail when no remote");
+        match &result.fetch {
+            FetchOutcome::Failed { exit_code, stderr } => {
+                assert_eq!(*exit_code, Some(128), "git reports a missing remote as 128");
+                assert!(
+                    stderr.contains("'origin' does not appear to be a git repository"),
+                    "stderr must be captured in full, got: {:?}",
+                    stderr
+                );
+            }
+            other => panic!("expected FetchOutcome::Failed, got {:?}", other),
+        }
         assert!(
-            result.forwarded.is_empty(),
-            "forwarded must be empty when fetch fails"
+            result.forwarded.is_empty() && result.skipped.is_empty(),
+            "no branch work happens when the fetch fails"
         );
     }
 
@@ -1094,10 +1353,11 @@ mod tests {
         let sha_before = get_sha(&local, "dev");
         let result = sync_repo(&local);
 
-        assert!(result.fetch_ok, "fetch must succeed");
-        assert!(
-            result.forwarded.contains(&"dev".to_string()),
-            "dev must be fast-forwarded: {:?}",
+        assert!(result.fetch_ok(), "fetch must succeed");
+        assert_eq!(
+            result.forwarded,
+            vec!["dev".to_string()],
+            "dev must be the only fast-forwarded branch: {:?}",
             result.forwarded
         );
 
@@ -1111,17 +1371,182 @@ mod tests {
     }
 
     #[test]
-    fn sync_repo_does_not_fast_forward_checked_out_branch() {
+    fn sync_repo_reports_checked_out_branch_as_skipped_with_worktree_path() {
         let (_tmp, local) = make_behind_repo();
 
         let result = sync_repo(&local);
 
-        assert!(result.fetch_ok, "fetch must succeed");
+        assert!(result.fetch_ok(), "fetch must succeed");
         assert!(
             !result.forwarded.contains(&"main".to_string()),
             "main must not be fast-forwarded when checked out: {:?}",
             result.forwarded
         );
+        let skip = result
+            .skipped
+            .iter()
+            .find(|s| s.name == "main")
+            .unwrap_or_else(|| panic!("main must be reported as skipped: {:?}", result.skipped));
+        match &skip.reason {
+            SkipReason::CheckedOutAt(path) => assert_eq!(
+                path.canonicalize().unwrap(),
+                local.canonicalize().unwrap(),
+                "the skip must carry the worktree path git named"
+            ),
+            other => panic!("expected CheckedOutAt, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_skip_reason_keeps_unrecognised_refusals_verbatim() {
+        let reason = parse_skip_reason("fatal: Cannot force update the current branch.\n");
+        assert_eq!(
+            reason,
+            SkipReason::Other("fatal: Cannot force update the current branch.".to_string())
+        );
+        let reason = parse_skip_reason(
+            "fatal: cannot force update the branch 'x' used by worktree at '/w/x'\n",
+        );
+        assert_eq!(reason, SkipReason::CheckedOutAt(PathBuf::from("/w/x")));
+        assert_eq!(
+            parse_skip_reason(""),
+            SkipReason::Other("git branch -f failed".to_string())
+        );
+    }
+
+    /// The fetch must give up after the limit and leave no child behind. The
+    /// remote is a `file://` origin whose upload-pack is a script that records
+    /// its pid and sleeps, so nothing touches the network. The script runs as
+    /// `/bin/sh <script>` rather than as an executable: macOS assesses a
+    /// freshly written executable on its first exec, which can take longer
+    /// than the limit.
+    #[test]
+    fn sync_repo_times_out_when_remote_never_answers_and_child_is_gone() {
+        let (tmp, local) = make_behind_repo();
+        let pidfile = tmp.path().join("upload-pack.pid");
+        let script = tmp.path().join("slow-upload-pack.sh");
+        std::fs::write(
+            &script,
+            format!("echo $$ > '{}'\nexec sleep 30\n", pidfile.display()),
+        )
+        .unwrap();
+        let origin_url = format!("file://{}", tmp.path().join("origin.git").display());
+        git(&["remote", "set-url", "origin", &origin_url], &local);
+        git(
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                &format!("/bin/sh {}", script.display()),
+            ],
+            &local,
+        );
+
+        let limit = Duration::from_millis(1000);
+        let started = Instant::now();
+        let result = sync_repo_with_timeout(&local, limit);
+        let elapsed = started.elapsed();
+
+        match &result.fetch {
+            FetchOutcome::TimedOut { after, .. } => assert_eq!(*after, limit),
+            other => panic!("expected FetchOutcome::TimedOut, got {:?}", other),
+        }
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "sync must return shortly after the limit, took {:?}",
+            elapsed
+        );
+        assert!(
+            result.forwarded.is_empty() && result.skipped.is_empty(),
+            "a timed-out repo never has fast-forwards or skips"
+        );
+
+        // The upload-pack helper ran inside git's session; the group kill must
+        // have taken it with git. Poll: the kernel reaps the orphan a moment
+        // after SIGTERM lands.
+        let pid: libc::pid_t = std::fs::read_to_string(&pidfile)
+            .expect("the slow upload-pack must have started and recorded its pid")
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            // SAFETY: signal 0 only checks for existence; no signal is delivered.
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if !alive {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "upload-pack child {} must be gone after the timeout",
+                pid
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A remote that would prompt for credentials fails at once with git's
+    /// own "terminal prompts disabled" text instead of hanging. Needs the
+    /// network: skipped when github.com is unreachable or an askpass helper
+    /// is configured (it would answer the prompt instead).
+    #[test]
+    fn sync_repo_reports_refused_https_prompt_as_fetch_failed() {
+        use std::net::{TcpStream, ToSocketAddrs};
+        let core_askpass = Cmd::new("git")
+            .args(["config", "--get", "core.askPass"])
+            .output()
+            .map(|o| o.status.success() && !o.stdout.is_empty())
+            .unwrap_or(false);
+        if core_askpass
+            || std::env::var_os("GIT_ASKPASS").is_some()
+            || std::env::var_os("SSH_ASKPASS").is_some()
+        {
+            eprintln!("skipping: an askpass helper is configured");
+            return;
+        }
+        let reachable = "github.com:443"
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut addrs| addrs.next())
+            .map(|addr| TcpStream::connect_timeout(&addr, Duration::from_secs(3)).is_ok())
+            .unwrap_or(false);
+        if !reachable {
+            eprintln!("skipping: github.com is unreachable");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        Cmd::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        git_setup(tmp.path());
+        git(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/space-wayfinder-probe-nonexistent/repo.git",
+            ],
+            tmp.path(),
+        );
+        // An empty value resets the helper list, so a stored credential on the
+        // machine cannot answer the 401 before the prompt logic runs.
+        git(&["config", "credential.helper", ""], tmp.path());
+
+        let result = sync_repo_with_timeout(tmp.path(), Duration::from_secs(20));
+
+        match &result.fetch {
+            FetchOutcome::Failed { exit_code, stderr } => {
+                assert_eq!(*exit_code, Some(128));
+                assert!(
+                    stderr.contains("terminal prompts disabled"),
+                    "expected git's refused-prompt text, got: {:?}",
+                    stderr
+                );
+            }
+            other => panic!("expected FetchOutcome::Failed, got {:?}", other),
+        }
     }
 
     #[test]
