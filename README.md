@@ -69,7 +69,7 @@ files with `s`/`space`, or bulk stage/unstage all files in the selected repo wit
 | `/` | Filter spaces (selects in place) |
 | `?` | Open help overlay |
 | `S` | Open config editor |
-| `q` / `Esc` | Quit |
+| `q` | Quit |
 
 **Key bindings — Repos pane:**
 

@@ -115,7 +115,7 @@ fn dashboard_esc_on_left_pane_does_not_quit() {
     app.handle_key(key(KeyCode::Esc));
     assert!(
         !app.should_quit,
-        "Esc is 'back', and the left pane is the top of the tree \u{2014} it must not quit"
+        "Esc is 'back', and the left pane is the top of the tree, so it must not quit"
     );
 }
 
@@ -6316,18 +6316,24 @@ fn go_picker_jk_type_into_an_empty_query() {
     assert_jk_types_into_the_query(&mut app, go_workspace_picker, "go picker");
 }
 
-/// Drive the create flow as far as the PickBranch fuzzy picker, which is the
-/// sixth older picker and needs a real repo behind it.
-fn open_create_pick_branch(env: &TestEnv) -> App {
-    let repo_path = env.create_repo("branch-picker-repo");
+/// Create the two `ajk-*` branches every typed branch picker fixture needs,
+/// so pressing `j`/`k` after `a` has rows to filter against.
+fn create_jk_branches(repo_path: &std::path::Path) {
     for branch in ["ajk-one", "ajk-two"] {
         let out = std::process::Command::new("git")
             .args(["branch", branch])
-            .current_dir(&repo_path)
+            .current_dir(repo_path)
             .output()
             .unwrap();
         assert!(out.status.success());
     }
+}
+
+/// Drive the create flow as far as the PickBranch fuzzy picker, which is the
+/// sixth older picker and needs a real repo behind it.
+fn open_create_pick_branch(env: &TestEnv) -> App {
+    let repo_path = env.create_repo("branch-picker-repo");
+    create_jk_branches(&repo_path);
 
     let config = config_from_env(env);
     let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
@@ -6387,14 +6393,7 @@ fn create_pick_branch_jk_type_into_an_empty_query() {
 /// cannot silently drift apart.
 fn open_add_pick_branch(env: &TestEnv) -> App {
     let repo_path = env.create_repo("add-branch-picker-repo");
-    for branch in ["ajk-one", "ajk-two"] {
-        let out = std::process::Command::new("git")
-            .args(["branch", branch])
-            .current_dir(&repo_path)
-            .output()
-            .unwrap();
-        assert!(out.status.success());
-    }
+    create_jk_branches(&repo_path);
 
     let config = config_from_env(env);
     let workspaces = vec![Workspace {
@@ -6459,14 +6458,7 @@ fn add_pick_branch_jk_type_into_an_empty_query() {
 /// reached from a repo row rather than from a create/add flow.
 fn jk_branch_repo_app(env: &TestEnv, name: &str) -> App {
     let repo_path = env.create_repo(name);
-    for branch in ["ajk-one", "ajk-two"] {
-        let out = std::process::Command::new("git")
-            .args(["branch", branch])
-            .current_dir(&repo_path)
-            .output()
-            .unwrap();
-        assert!(out.status.success());
-    }
+    create_jk_branches(&repo_path);
 
     let ws = Workspace {
         name: "jk-branch-ws".to_string(),
