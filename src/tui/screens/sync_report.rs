@@ -190,7 +190,7 @@ impl SyncRow {
 
 /// Marker the worker puts at the start of `stderr` when `git` could not be
 /// started at all (repo directory gone, git not on `PATH`).
-const SPAWN_FAILURE_PREFIX: &str = "failed to spawn git";
+use crate::core::workspace::SPAWN_FAILURE_PREFIX;
 
 /// How the fetch ended, for the status line. A missing exit code is not
 /// evidence of a signal: the worker also reports `None` when git could not
