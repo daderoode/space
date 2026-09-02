@@ -82,8 +82,15 @@ pub enum ScreenAction {
     CdAndQuit(PathBuf),
     /// Execute worktree creation/addition.
     ExecuteWorktreeFlow(WorktreeParams),
-    /// Fetch + fast-forward the given repos, then transition to branch picker.
+    /// Fetch + fast-forward the given repos, reporting into the sync report.
     ExecuteSyncFlow(Vec<std::path::PathBuf>),
+    /// Rescan the repo list and rebuild the open repo picker from it
+    /// (Ctrl-R in the PickRepos stage of the create and add flows).
+    RescanRepoList,
+
+    /// Enter on a finished sync report: load recent branches and move to the
+    /// branch picker.
+    ContinueFromSyncReport,
     /// Run a git operation on a single repo via the background git-ops worker.
     ExecuteGitOp { repo_path: PathBuf, op: GitOp },
     /// Commit the staged changes of a single repo (synchronous local op).
@@ -95,6 +102,10 @@ pub enum ScreenAction {
     /// Navigate to the workspace containing a repo with the given name
     /// (repo name from Search, resolved to a workspace in `App::process_action`).
     NavigateToWorkspace(String),
+    /// Select the workspace at this index in place (space filter). Handled
+    /// like the repo-search landing: reset and reload the repos pane, focus
+    /// unchanged. A no-op when the index is already selected.
+    SelectWorkspace(usize),
     /// Stage or unstage a single file from the diff overlay.
     StageFile {
         repo_index: usize,

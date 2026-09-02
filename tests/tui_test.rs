@@ -58,21 +58,24 @@ fn max_rendered_width(rendered: &str) -> usize {
 }
 
 /// Drive the background sync worker (Syncing stage) to completion by polling
-/// `poll_sync_result`, mirroring what the real run loop does each frame.
+/// `poll_sync_result`, mirroring what the real run loop does each frame, then
+/// continue past the finished sync report with Enter.
 fn drain_sync(app: &mut App) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         app.poll_sync_result();
-        let syncing = matches!(
-            app.screen,
-            Screen::CreateWorkspace(ref st)
-                if st.stage == space::tui::screens::create::CreateStage::Syncing
-        ) || matches!(
-            app.screen,
-            Screen::AddRepos(ref st)
-                if st.stage == space::tui::screens::add::AddStage::Syncing
-        );
-        if !syncing {
+        let done = match &app.screen {
+            Screen::CreateWorkspace(st)
+                if st.stage == space::tui::screens::create::CreateStage::Syncing =>
+            {
+                st.report.done
+            }
+            Screen::AddRepos(st) if st.stage == space::tui::screens::add::AddStage::Syncing => {
+                st.report.done
+            }
+            _ => true,
+        };
+        if done {
             break;
         }
         assert!(
@@ -80,6 +83,18 @@ fn drain_sync(app: &mut App) {
             "sync worker did not complete within timeout"
         );
         std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let on_report = matches!(
+        app.screen,
+        Screen::CreateWorkspace(ref st)
+            if st.stage == space::tui::screens::create::CreateStage::Syncing
+    ) || matches!(
+        app.screen,
+        Screen::AddRepos(ref st)
+            if st.stage == space::tui::screens::add::AddStage::Syncing
+    );
+    if on_report {
+        app.handle_key(key(KeyCode::Enter));
     }
 }
 
@@ -769,6 +784,8 @@ fn go_esc_returns_to_dashboard() {
 #[test]
 fn search_esc_returns_to_dashboard() {
     let mut app = test_app(vec![], vec![PathBuf::from("/tmp/repos/foo")]);
+    // Repo search is pane-gated to the repos pane (the workspaces pane filters spaces).
+    app.focus = Pane::Right;
 
     app.handle_key(key(KeyCode::Char('/')));
     assert!(matches!(app.screen, Screen::RepoSearch(_)));
@@ -4485,6 +4502,1349 @@ mod gitops_tests {
         assert!(
             app.gitop_rx.is_none(),
             "a blocked pre-flight must never start a worker"
+        );
+    }
+}
+
+// ---- 1.1 Rescan the repo list inside the picker ----
+
+mod rescan_tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+    use space::tui::actions::StatusKind;
+    use std::collections::BTreeSet;
+    use std::sync::{LazyLock, Mutex};
+
+    /// The rescan saves the repo cache to `SpaceConfig::cache_path()`, which
+    /// reads SPACE_CONFIG_DIR. Point it at the TestEnv so the tests never touch
+    /// the real user cache, and serialise them because the env var is
+    /// process-global (same pattern as mcp_test.rs).
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct EnvGuard;
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("SPACE_CONFIG_DIR") };
+        }
+    }
+
+    fn with_config_dir<F: FnOnce(&TestEnv)>(f: F) {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = TestEnv::new();
+        unsafe { std::env::set_var("SPACE_CONFIG_DIR", &env.config_dir) };
+        let _guard = EnvGuard;
+        f(&env);
+    }
+
+    fn ctrl_r() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)
+    }
+
+    fn item_paths(picker: &space::tui::widgets::fuzzy_picker::FuzzyPicker) -> BTreeSet<PathBuf> {
+        picker
+            .all_items
+            .iter()
+            .map(|i| i.full_path.clone())
+            .collect()
+    }
+
+    fn toggled_paths(picker: &space::tui::widgets::fuzzy_picker::FuzzyPicker) -> BTreeSet<PathBuf> {
+        picker
+            .toggled
+            .iter()
+            .map(|&i| picker.all_items[i].full_path.clone())
+            .collect()
+    }
+
+    /// Open the create flow and land in PickRepos with the given space name.
+    fn open_create_picker(app: &mut App, name: &str) {
+        app.handle_key(key(KeyCode::Char('c')));
+        for ch in name.chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(
+                st.stage,
+                space::tui::screens::create::CreateStage::PickRepos
+            ),
+            _ => panic!("expected CreateWorkspace screen"),
+        }
+    }
+
+    #[test]
+    fn ctrl_r_in_create_picker_shows_new_repo_and_keeps_toggle_and_query() {
+        with_config_dir(|env| {
+            let alpha = env.create_repo("alpha");
+            let beta = env.create_repo("beta");
+            let config = config_from_env(env);
+            let mut app = test_app_with_config(config, vec![], vec![alpha.clone(), beta.clone()]);
+            app.cursor_row = 3;
+
+            open_create_picker(&mut app, "ws");
+            // Toggle the top row (alpha, cache order), then type a query that
+            // still matches every repo in this test.
+            app.handle_key(key(KeyCode::Tab));
+            app.handle_key(key(KeyCode::Char('a')));
+
+            let gamma = env.create_repo("gamma");
+            app.handle_key(ctrl_r());
+
+            let Screen::CreateWorkspace(st) = &app.screen else {
+                panic!("Ctrl-R must keep the create flow open");
+            };
+            assert_eq!(
+                st.stage,
+                space::tui::screens::create::CreateStage::PickRepos
+            );
+            assert_eq!(
+                item_paths(&st.picker),
+                BTreeSet::from([alpha.clone(), beta.clone(), gamma.clone()]),
+                "the new repo must appear after the rescan"
+            );
+            assert_eq!(st.picker.query(), "a", "the query must be intact");
+            assert_eq!(
+                toggled_paths(&st.picker),
+                BTreeSet::from([alpha.clone()]),
+                "the toggle must survive the rescan"
+            );
+            assert!(
+                st.picker
+                    .filtered
+                    .iter()
+                    .any(|&i| st.picker.all_items[i].full_path == gamma),
+                "the new repo must be visible under the kept query"
+            );
+            assert_eq!(
+                app.status_message.as_deref(),
+                Some("Rescanned: 3 repos, 1 new")
+            );
+            assert_eq!(app.status_kind, StatusKind::Success);
+            assert_eq!(
+                app.repos_cache.iter().cloned().collect::<BTreeSet<_>>(),
+                BTreeSet::from([alpha, beta, gamma]),
+                "the app repo list must be replaced by the rescan"
+            );
+            assert_eq!(
+                app.cursor_row, 3,
+                "a picker rescan must not touch the dashboard cursor"
+            );
+            assert!(
+                env.config_dir.join("repos.cache").exists(),
+                "the rescan must save the cache"
+            );
+        });
+    }
+
+    #[test]
+    fn ctrl_r_drops_toggle_for_removed_repo_with_warning() {
+        with_config_dir(|env| {
+            let alpha = env.create_repo("alpha");
+            let beta = env.create_repo("beta");
+            let config = config_from_env(env);
+            let mut app = test_app_with_config(config, vec![], vec![alpha.clone(), beta.clone()]);
+
+            open_create_picker(&mut app, "ws");
+            app.handle_key(key(KeyCode::Tab)); // toggles alpha
+
+            std::fs::remove_dir_all(&alpha).unwrap();
+            app.handle_key(ctrl_r());
+
+            let Screen::CreateWorkspace(st) = &app.screen else {
+                panic!("Ctrl-R must keep the create flow open");
+            };
+            assert_eq!(item_paths(&st.picker), BTreeSet::from([beta]));
+            assert!(
+                st.picker.toggled.is_empty(),
+                "a toggled repo that is gone must be dropped"
+            );
+            assert_eq!(
+                app.status_message.as_deref(),
+                Some("Rescanned: 1 repo, 0 new, 1 selected repo no longer found")
+            );
+            assert_eq!(app.status_kind, StatusKind::Warning);
+        });
+    }
+
+    #[test]
+    fn ctrl_r_in_add_picker_keeps_space_repos_excluded() {
+        with_config_dir(|env| {
+            let alpha = env.create_repo("alpha");
+            let beta = env.create_repo("beta");
+            let config = config_from_env(env);
+            let workspaces = vec![Workspace {
+                name: "ws".to_string(),
+                path: env.workspaces_dir.join("ws"),
+                repos: vec![WorkspaceRepo {
+                    name: "alpha".to_string(),
+                    path: env.workspaces_dir.join("ws").join("alpha"),
+                    branch: "main".to_string(),
+                    status: Default::default(),
+                    ahead: 0,
+                    behind: 0,
+                }],
+            }];
+            let mut app =
+                test_app_with_config(config, workspaces, vec![alpha.clone(), beta.clone()]);
+
+            app.handle_key(key(KeyCode::Char('a')));
+            match &app.screen {
+                Screen::AddRepos(st) => {
+                    assert_eq!(item_paths(&st.picker), BTreeSet::from([beta.clone()]))
+                }
+                _ => panic!("expected AddRepos screen"),
+            }
+
+            let gamma = env.create_repo("gamma");
+            app.handle_key(ctrl_r());
+
+            let Screen::AddRepos(st) = &app.screen else {
+                panic!("Ctrl-R must keep the add flow open");
+            };
+            assert_eq!(st.stage, space::tui::screens::add::AddStage::PickRepos);
+            assert_eq!(
+                item_paths(&st.picker),
+                BTreeSet::from([beta, gamma]),
+                "repos already in the space must stay excluded; the new repo must appear"
+            );
+            // alpha is still in the repo list; only the picker hides it.
+            assert_eq!(
+                app.status_message.as_deref(),
+                Some("Rescanned: 3 repos, 1 new")
+            );
+            assert_eq!(app.status_kind, StatusKind::Success);
+        });
+    }
+
+    #[test]
+    fn ctrl_r_in_add_picker_leaves_flow_when_space_is_gone() {
+        with_config_dir(|env| {
+            let alpha = env.create_repo("alpha");
+            let config = config_from_env(env);
+            let workspaces = vec![Workspace {
+                name: "ws".to_string(),
+                path: env.workspaces_dir.join("ws"),
+                repos: vec![],
+            }];
+            let mut app = test_app_with_config(config, workspaces, vec![alpha]);
+
+            app.handle_key(key(KeyCode::Char('a')));
+            assert!(matches!(app.screen, Screen::AddRepos(_)));
+
+            // The space disappears while the picker is open.
+            app.workspaces.clear();
+            app.handle_key(ctrl_r());
+
+            assert!(
+                matches!(app.screen, Screen::Dashboard),
+                "a vanished space must leave the add flow"
+            );
+            assert_eq!(
+                app.status_message.as_deref(),
+                Some("Space 'ws' no longer exists")
+            );
+            assert_eq!(app.status_kind, StatusKind::Error);
+        });
+    }
+
+    #[test]
+    fn dashboard_r_reports_rescanned_with_new_count() {
+        with_config_dir(|env| {
+            let alpha = env.create_repo("alpha");
+            let beta = env.create_repo("beta");
+            let config = config_from_env(env);
+            let mut app = test_app_with_config(config, vec![], vec![alpha.clone()]);
+
+            app.handle_key(key(KeyCode::Char('r')));
+
+            assert_eq!(
+                app.repos_cache.iter().cloned().collect::<BTreeSet<_>>(),
+                BTreeSet::from([alpha, beta])
+            );
+            assert_eq!(
+                app.status_message.as_deref(),
+                Some("Rescanned: 2 repos, 1 new")
+            );
+            assert_eq!(app.status_kind, StatusKind::Success);
+        });
+    }
+
+    #[test]
+    fn help_and_status_bar_use_rescan_wording() {
+        let groups = space::tui::keybindings::all_groups();
+        let picker = groups
+            .iter()
+            .find(|g| g.name == "Repo Picker")
+            .expect("help registry must have a Repo Picker group");
+        let rows: Vec<(&str, &str)> = picker.bindings.iter().map(|b| (b.key, b.desc)).collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("Tab", "Toggle repo"),
+                ("Ctrl-S", "Cycle scope"),
+                ("Ctrl-R", "Rescan repo list"),
+            ]
+        );
+        let ws_pane = groups.iter().find(|g| g.name == "Workspace Pane").unwrap();
+        assert!(
+            ws_pane
+                .bindings
+                .iter()
+                .any(|b| b.key == "r" && b.desc == "Rescan repo list"),
+            "dashboard r must read 'Rescan repo list' in the help registry"
+        );
+        let left = space::tui::keybindings::status_bar_bindings(Pane::Left);
+        assert!(
+            left.iter().any(|b| b.key == "r" && b.desc == "rescan"),
+            "status bar must read 'r rescan'"
+        );
+
+        // The help overlay must still render every group with the extra group.
+        // Tall enough for the whole registry: the 24-row clip is item 1.4's.
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        let rendered = render_text(&app, 100, 70);
+        assert!(rendered.contains("Repo Picker"), "got:\n{}", rendered);
+        assert!(rendered.contains("General"), "got:\n{}", rendered);
+    }
+}
+
+// ---- 1.2 In-place space filter ----
+
+/// Two bare spaces (no repos) with the first one selected.
+fn two_spaces_app() -> App {
+    let workspaces = vec![
+        Workspace {
+            name: "alpha".to_string(),
+            path: PathBuf::from("/tmp/alpha"),
+            repos: vec![],
+        },
+        Workspace {
+            name: "beta".to_string(),
+            path: PathBuf::from("/tmp/beta"),
+            repos: vec![],
+        },
+    ];
+    test_app(workspaces, vec![])
+}
+
+fn type_str(app: &mut App, s: &str) {
+    for ch in s.chars() {
+        app.handle_key(key(KeyCode::Char(ch)));
+    }
+}
+
+#[test]
+fn filter_slash_on_workspaces_pane_opens_filter() {
+    let mut app = two_spaces_app();
+    assert_eq!(app.focus, Pane::Left);
+
+    app.handle_key(key(KeyCode::Char('/')));
+    assert!(
+        matches!(app.screen, Screen::FilterWorkspace(_)),
+        "/ on the workspaces pane must open the space filter, got {:?}",
+        app.screen
+    );
+}
+
+#[test]
+fn filter_slash_on_repos_pane_opens_repo_search() {
+    let mut app = two_spaces_app();
+    app.focus = Pane::Right;
+
+    app.handle_key(key(KeyCode::Char('/')));
+    assert!(
+        matches!(app.screen, Screen::RepoSearch(_)),
+        "/ on the repos pane must open repo search, got {:?}",
+        app.screen
+    );
+}
+
+#[test]
+fn filter_enter_selects_space_in_place() {
+    let mut app = two_spaces_app();
+    app.expanded_repos.insert(0);
+    app.cursor_row = 3;
+    app.selected_repo = 2;
+    let gen_before = app.ws_generation;
+
+    app.handle_key(key(KeyCode::Char('/')));
+    type_str(&mut app, "bet");
+    app.handle_key(key(KeyCode::Enter));
+
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "Enter must return to the dashboard, got {:?}",
+        app.screen
+    );
+    assert_eq!(app.selected_ws, 1, "the matched space must become selected");
+    assert_eq!(
+        app.focus,
+        Pane::Left,
+        "focus must stay on the workspaces pane"
+    );
+    assert!(!app.should_quit, "the filter must never quit the TUI");
+    assert!(
+        app.space_cd_target.is_none(),
+        "the filter must not set a cd target"
+    );
+    // Repos pane reset, same as the repo-search landing.
+    assert_eq!(app.selected_repo, 0);
+    assert_eq!(app.cursor_row, 0);
+    assert!(app.expanded_repos.is_empty());
+    // Loaded immediately, no debounce.
+    assert_eq!(
+        app.ws_generation,
+        gen_before + 1,
+        "load must fire immediately"
+    );
+    assert!(
+        app.nav_pending.is_none(),
+        "no debounce timer for an explicit jump"
+    );
+    assert!(app.ws_loading, "repos pane must be loading");
+}
+
+#[test]
+fn filter_esc_leaves_selection_untouched() {
+    let mut app = two_spaces_app();
+    app.expanded_repos.insert(0);
+    app.cursor_row = 2;
+    let gen_before = app.ws_generation;
+
+    app.handle_key(key(KeyCode::Char('/')));
+    type_str(&mut app, "bet");
+    app.handle_key(key(KeyCode::Esc));
+
+    assert!(matches!(app.screen, Screen::Dashboard));
+    assert_eq!(app.selected_ws, 0, "Esc must not change the selected space");
+    assert_eq!(app.focus, Pane::Left);
+    assert_eq!(app.cursor_row, 2, "Esc must not reset the repos pane");
+    assert!(app.expanded_repos.contains(&0));
+    assert_eq!(app.ws_generation, gen_before, "Esc must not trigger a load");
+    assert!(!app.ws_loading);
+}
+
+#[test]
+fn filter_refuses_to_open_with_no_spaces() {
+    let mut app = test_app(vec![], vec![]);
+
+    app.handle_key(key(KeyCode::Char('/')));
+
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "an empty space list must not open the filter, got {:?}",
+        app.screen
+    );
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("No spaces yet, press c to create one")
+    );
+}
+
+#[test]
+fn filter_same_space_keeps_expanded_repos_and_cursor() {
+    let mut app = test_app(vec![common::workspace_with_repos(&["a", "b"])], vec![]);
+    app.expanded_repos.insert(1);
+    app.cursor_row = 1;
+    app.selected_repo = 1;
+    let gen_before = app.ws_generation;
+
+    app.handle_key(key(KeyCode::Char('/')));
+    // The only space is highlighted; Enter re-selects it.
+    app.handle_key(key(KeyCode::Enter));
+
+    assert!(matches!(app.screen, Screen::Dashboard));
+    assert_eq!(app.selected_ws, 0);
+    assert_eq!(app.focus, Pane::Left);
+    assert!(
+        app.expanded_repos.contains(&1),
+        "re-selecting the current space must keep expanded repos"
+    );
+    assert_eq!(
+        app.cursor_row, 1,
+        "re-selecting the current space must keep the cursor"
+    );
+    assert_eq!(app.selected_repo, 1);
+    assert_eq!(
+        app.ws_generation, gen_before,
+        "no reload for the same space"
+    );
+    assert!(!app.ws_loading);
+    assert_eq!(
+        app.workspaces[0].repos.len(),
+        2,
+        "the loaded repos must survive (no skeleton reset)"
+    );
+}
+
+#[test]
+fn filter_no_match_keeps_picker_open_and_enter_does_nothing() {
+    let mut app = two_spaces_app();
+
+    app.handle_key(key(KeyCode::Char('/')));
+    type_str(&mut app, "zzz");
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("0/2 matched"),
+        "footer must read 0/N matched, got:\n{}",
+        rendered
+    );
+
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(app.screen, Screen::FilterWorkspace(_)),
+        "Enter with no match must keep the picker open, got {:?}",
+        app.screen
+    );
+    assert_eq!(app.selected_ws, 0);
+    assert!(app.status_message.is_none(), "no error text on no match");
+}
+
+#[test]
+fn filter_j_and_k_edit_the_query() {
+    let mut app = two_spaces_app();
+
+    app.handle_key(key(KeyCode::Char('/')));
+    type_str(&mut app, "jk");
+    match &app.screen {
+        Screen::FilterWorkspace(st) => assert_eq!(st.picker.input.value(), "jk"),
+        other => panic!("expected the space filter, got {:?}", other),
+    }
+}
+
+#[test]
+fn go_j_and_k_edit_the_query() {
+    let mut app = two_spaces_app();
+
+    app.handle_key(key(KeyCode::Char('g')));
+    type_str(&mut app, "jk");
+    match &app.screen {
+        Screen::GoWorkspace(st) => assert_eq!(st.picker.input.value(), "jk"),
+        other => panic!("expected the go picker, got {:?}", other),
+    }
+}
+
+#[test]
+fn filter_and_go_rows_show_repo_count_without_parent() {
+    // Real directories: the count comes from a scan of the space's directory,
+    // since the dashboard only loads repos for the selected space.
+    let env = TestEnv::new();
+    for repo in ["one", "two"] {
+        std::fs::create_dir_all(env.workspaces_dir.join("alpha").join(repo).join(".git")).unwrap();
+    }
+    std::fs::create_dir_all(env.workspaces_dir.join("beta")).unwrap();
+
+    for open_key in ['/', 'g'] {
+        let workspaces = vec![
+            Workspace {
+                name: "alpha".to_string(),
+                path: env.workspaces_dir.join("alpha"),
+                repos: vec![],
+            },
+            Workspace {
+                name: "beta".to_string(),
+                path: env.workspaces_dir.join("beta"),
+                repos: vec![],
+            },
+        ];
+        let mut app = test_app_with_config(config_from_env(&env), workspaces, vec![]);
+        app.handle_key(key(KeyCode::Char(open_key)));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("2 repos"),
+            "{} picker must show the repo count, got:\n{}",
+            open_key,
+            rendered
+        );
+        assert!(
+            rendered.contains("0 repos"),
+            "{} picker must show a zero count, got:\n{}",
+            open_key,
+            rendered
+        );
+        assert!(
+            !rendered.contains("(workspaces)") && !rendered.contains("()"),
+            "{} picker must not draw a parent, got:\n{}",
+            open_key,
+            rendered
+        );
+    }
+}
+
+#[test]
+fn filter_prompt_wording() {
+    let mut app = two_spaces_app();
+    app.handle_key(key(KeyCode::Char('/')));
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("Filter spaces  ENTER=select  ESC=cancel"),
+        "got:\n{}",
+        rendered
+    );
+}
+
+#[test]
+fn filter_arrows_move_the_highlight_and_enter_selects_by_index() {
+    let mut app = two_spaces_app();
+
+    // Empty query: both spaces listed, Down moves the highlight to beta.
+    app.handle_key(key(KeyCode::Char('/')));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Enter));
+    assert!(matches!(app.screen, Screen::Dashboard));
+    assert_eq!(
+        app.selected_ws, 1,
+        "Down then Enter must select the second space"
+    );
+
+    // Up walks back to alpha.
+    app.handle_key(key(KeyCode::Char('/')));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Up));
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        app.selected_ws, 0,
+        "Down, Up then Enter must select the first space"
+    );
+}
+
+#[test]
+fn go_enter_sets_cd_target_and_quits() {
+    let mut app = two_spaces_app();
+
+    app.handle_key(key(KeyCode::Char('g')));
+    type_str(&mut app, "bet");
+    app.handle_key(key(KeyCode::Enter));
+
+    assert_eq!(app.space_cd_target, Some(PathBuf::from("/tmp/beta")));
+    assert!(app.should_quit, "go must quit the TUI");
+    assert_eq!(
+        app.selected_ws, 0,
+        "go must not touch the dashboard selection"
+    );
+}
+
+#[test]
+fn filter_repo_count_is_excluded_from_matching() {
+    let mut app = two_spaces_app();
+
+    app.handle_key(key(KeyCode::Char('/')));
+    type_str(&mut app, "repos");
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("0/2 matched"),
+        "the count label must not match a query, got:\n{}",
+        rendered
+    );
+}
+
+#[test]
+fn filter_rows_use_singular_for_one_repo() {
+    let env = TestEnv::new();
+    std::fs::create_dir_all(env.workspaces_dir.join("solo").join("only").join(".git")).unwrap();
+    let workspaces = vec![Workspace {
+        name: "solo".to_string(),
+        path: env.workspaces_dir.join("solo"),
+        repos: vec![],
+    }];
+    let mut app = test_app_with_config(config_from_env(&env), workspaces, vec![]);
+
+    app.handle_key(key(KeyCode::Char('/')));
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("1 repo") && !rendered.contains("1 repos"),
+        "got:\n{}",
+        rendered
+    );
+}
+
+#[test]
+fn filter_help_registry_and_status_bar_wording() {
+    use space::tui::keybindings::{all_groups, status_bar_bindings};
+
+    let find = |group: &str, key: &str| -> Option<&'static str> {
+        all_groups()
+            .iter()
+            .find(|g| g.name == group)
+            .and_then(|g| g.bindings.iter().find(|b| b.key == key))
+            .map(|b| b.desc)
+    };
+    assert_eq!(find("Workspace Pane", "/"), Some("Filter spaces"));
+    assert_eq!(find("Repo Pane", "/"), Some("Search repos"));
+
+    let bar = |pane: Pane| -> Option<&'static str> {
+        status_bar_bindings(pane)
+            .iter()
+            .find(|b| b.key == "/")
+            .map(|b| b.desc)
+    };
+    assert_eq!(bar(Pane::Left), Some("filter"));
+    assert_eq!(bar(Pane::Right), Some("search"));
+}
+
+// ---- 1.5 Sync report ----
+
+mod sync_report_tests {
+    use super::*;
+    use space::core::workspace::{FetchOutcome, SyncOutcome};
+    use space::tui::screens::add::{AddStage, AddState};
+    use space::tui::screens::create::{CreateStage, CreateState};
+    use space::tui::screens::sync_report::SyncReport;
+    use std::path::Path;
+
+    fn sr_git(args: &[&str], dir: &Path) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed:\n{}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn sr_git_setup(dir: &Path) {
+        sr_git(&["config", "user.email", "t@local"], dir);
+        sr_git(&["config", "user.name", "T"], dir);
+        sr_git(&["config", "commit.gpgsign", "false"], dir);
+    }
+
+    /// A repo under `repos_dir/<name>` cloned from a bare origin, with `main`
+    /// checked out and a `dev` branch that is one commit behind `origin/dev`,
+    /// so a sync fast-forwards `dev`.
+    fn behind_repo(env: &TestEnv, name: &str) -> PathBuf {
+        let fixtures = env.dir.path().join("fixtures").join(name);
+        std::fs::create_dir_all(&fixtures).unwrap();
+        let bare = fixtures.join("origin.git");
+        sr_git(
+            &["init", "--bare", "-b", "main", &bare.to_string_lossy()],
+            &fixtures,
+        );
+        let local = env.repos_dir.join(name);
+        sr_git(
+            &[
+                "clone",
+                "-q",
+                &bare.to_string_lossy(),
+                &local.to_string_lossy(),
+            ],
+            &fixtures,
+        );
+        sr_git_setup(&local);
+        sr_git(&["commit", "--allow-empty", "-m", "init"], &local);
+        sr_git(&["push", "-q", "-u", "origin", "main"], &local);
+        sr_git(&["checkout", "-q", "-b", "dev"], &local);
+        sr_git(&["commit", "--allow-empty", "-m", "dev-init"], &local);
+        sr_git(&["push", "-q", "-u", "origin", "dev"], &local);
+        sr_git(&["checkout", "-q", "main"], &local);
+
+        let helper = fixtures.join("helper");
+        sr_git(
+            &[
+                "clone",
+                "-q",
+                &bare.to_string_lossy(),
+                &helper.to_string_lossy(),
+            ],
+            &fixtures,
+        );
+        sr_git_setup(&helper);
+        sr_git(&["checkout", "-q", "-b", "dev", "origin/dev"], &helper);
+        sr_git(&["commit", "--allow-empty", "-m", "dev-remote"], &helper);
+        sr_git(&["push", "-q", "origin", "dev"], &helper);
+        local
+    }
+
+    /// Poll until the active screen's sync report is done, without pressing Enter.
+    fn wait_for_report(app: &mut App) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            app.poll_sync_result();
+            let done = match &app.screen {
+                Screen::CreateWorkspace(st) => st.report.done,
+                Screen::AddRepos(st) => st.report.done,
+                _ => panic!("expected the create or add screen"),
+            };
+            if done {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "sync worker did not complete within timeout"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn ok_outcome() -> SyncOutcome {
+        SyncOutcome {
+            fetch: FetchOutcome::Ok,
+            forwarded: vec![],
+            skipped: vec![],
+        }
+    }
+
+    fn failed_outcome(stderr: &str) -> SyncOutcome {
+        SyncOutcome {
+            fetch: FetchOutcome::Failed {
+                exit_code: Some(128),
+                stderr: stderr.to_string(),
+            },
+            forwarded: vec![],
+            skipped: vec![],
+        }
+    }
+
+    fn create_state_on_report(report: SyncReport) -> CreateState {
+        let mut st = CreateState::new(vec![], vec![]);
+        st.ws_name = tui_input::Input::default().with_value("ws".to_string());
+        st.stage = CreateStage::Syncing;
+        st.report = report;
+        st
+    }
+
+    #[test]
+    fn mixed_run_shows_rows_title_cursor_on_failure_and_enter_continues() {
+        let env = TestEnv::new();
+        let good = behind_repo(&env, "payments-api");
+        let bad = env.create_repo("web-console"); // no remote: the fetch fails
+        let config = config_from_env(&env);
+        let mut app = test_app_with_config(config, vec![], vec![good.clone(), bad.clone()]);
+
+        app.handle_key(key(KeyCode::Char('c')));
+        if let Screen::CreateWorkspace(ref mut st) = app.screen {
+            st.ws_name = tui_input::Input::default().with_value("ws".to_string());
+            st.stage = CreateStage::PickRepos;
+            st.picker.toggle_highlighted();
+            st.picker.move_down();
+            st.picker.toggle_highlighted();
+        }
+        app.handle_key(key(KeyCode::Enter));
+        wait_for_report(&mut app);
+
+        let Screen::CreateWorkspace(st) = &app.screen else {
+            panic!("expected CreateWorkspace screen");
+        };
+        assert_eq!(st.stage, CreateStage::Syncing, "Done pauses on the report");
+        assert_eq!(st.report.rows.len(), 2);
+        let good_idx = st
+            .report
+            .rows
+            .iter()
+            .position(|r| r.name == "payments-api")
+            .unwrap();
+        let bad_idx = 1 - good_idx;
+        assert_eq!(st.report.rows[good_idx].outcome_label(), "fast-forwarded");
+        assert_eq!(st.report.rows[good_idx].detail().0, "dev");
+        assert_eq!(st.report.rows[bad_idx].outcome_label(), "fetch failed");
+        assert_eq!(st.report.title(), "Sync report \u{b7} 1 ok, 1 failed");
+        assert_eq!(
+            st.report.cursor, bad_idx,
+            "cursor lands on the first failed row"
+        );
+
+        let rendered = render_text(&app, 100, 30);
+        for needle in [
+            "Sync report \u{b7} 1 ok, 1 failed",
+            "\u{25b6} \u{2717} web-console",
+            "fast-forwarded  dev",
+            "fetch failed (git exit 128) \u{b7} branch picker will use local refs",
+            "fatal: 'origin' does not appear to be a git repository",
+            "ENTER continue \u{b7} ESC back",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "report must show {:?}, got:\n{}",
+                needle,
+                rendered
+            );
+        }
+
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(
+                st.stage,
+                CreateStage::PickBranchStrategy,
+                "Enter continues to the branch picker"
+            ),
+            _ => panic!("expected CreateWorkspace screen"),
+        }
+    }
+
+    #[test]
+    fn add_flow_esc_returns_to_pick_repos_with_selection_and_query_intact() {
+        let env = TestEnv::new();
+        let repo = env.create_repo("alpha");
+        let config = config_from_env(&env);
+        let mut app = test_app_with_config(config, vec![], vec![repo.clone()]);
+        app.screen = Screen::AddRepos(AddState::new("ws".to_string(), vec![repo], vec![]));
+
+        app.handle_key(key(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::AddRepos(st) => assert_eq!(st.stage, AddStage::Syncing),
+            _ => panic!("expected AddRepos screen"),
+        }
+        wait_for_report(&mut app);
+
+        app.handle_key(key(KeyCode::Esc));
+        let Screen::AddRepos(st) = &app.screen else {
+            panic!("expected AddRepos screen");
+        };
+        assert_eq!(
+            st.stage,
+            AddStage::PickRepos,
+            "Esc returns to the repo picker"
+        );
+        assert_eq!(st.picker.input.value(), "a", "the query survives");
+        assert_eq!(
+            st.picker.confirmed_items().len(),
+            1,
+            "the selection survives"
+        );
+
+        // Re-confirming re-syncs the same selection into a fresh report.
+        app.handle_key(key(KeyCode::Enter));
+        wait_for_report(&mut app);
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::AddRepos(st) => assert_eq!(
+                st.stage,
+                AddStage::PickBranchStrategy,
+                "Enter on the finished report continues"
+            ),
+            _ => panic!("expected AddRepos screen"),
+        }
+    }
+
+    #[test]
+    fn enter_is_ignored_and_esc_cancels_while_running() {
+        let mut app = test_app(vec![], vec![]);
+        let mut report = SyncReport::new(&[PathBuf::from("/r/a"), PathBuf::from("/r/b")]);
+        report.started(0);
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+
+        let rendered = render_text(&app, 80, 24);
+        for needle in [
+            "Sync report \u{b7} 0 of 2",
+            "\u{25cf} a",
+            "syncing\u{2026}",
+            "fetching origin\u{2026}",
+            "ESC cancel",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "running report must show {:?}, got:\n{}",
+                needle,
+                rendered
+            );
+        }
+
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Down));
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(
+                    st.stage,
+                    CreateStage::Syncing,
+                    "Enter is ignored until Done"
+                );
+                assert_eq!(st.report.cursor, 0, "cursor keys are ignored until Done");
+            }
+            _ => panic!("expected CreateWorkspace screen"),
+        }
+
+        app.handle_key(key(KeyCode::Esc));
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(
+                st.stage,
+                CreateStage::PickRepos,
+                "Esc while running cancels back to the repo picker"
+            ),
+            _ => panic!("expected CreateWorkspace screen"),
+        }
+    }
+
+    #[test]
+    fn all_failed_shows_notice_and_continue_anyway() {
+        let mut app = test_app(vec![], vec![]);
+        let mut report = SyncReport::new(&[PathBuf::from("/r/a"), PathBuf::from("/r/b")]);
+        report.finished(0, failed_outcome("fatal: no way"));
+        report.finished(1, failed_outcome("fatal: nor this"));
+        report.finish();
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+
+        let rendered = render_text(&app, 100, 30);
+        for needle in [
+            "Sync report \u{b7} 0 ok, 2 failed",
+            "Nothing was fetched. You can still continue;",
+            "ENTER continue anyway",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "all-failed report must show {:?}, got:\n{}",
+                needle,
+                rendered
+            );
+        }
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(
+                st.stage,
+                CreateStage::PickBranchStrategy,
+                "continuing after an all-failed run is allowed"
+            ),
+            _ => panic!("expected CreateWorkspace screen"),
+        }
+    }
+
+    #[test]
+    fn many_repos_scroll_to_keep_cursor_visible() {
+        let mut app = test_app(vec![], vec![]);
+        let repos: Vec<PathBuf> = (0..14)
+            .map(|i| PathBuf::from(format!("/r/repo{:02}", i)))
+            .collect();
+        let mut report = SyncReport::new(&repos);
+        for i in 0..14 {
+            report.finished(i, ok_outcome());
+        }
+        report.finish();
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+
+        // 80x24: the dialog caps at 19 rows, 12 list rows fit.
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("repo00"),
+            "top of the list:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("repo11"),
+            "12th row visible:\n{}",
+            rendered
+        );
+        assert!(
+            !rendered.contains("repo13"),
+            "the last row is reachable only by scrolling:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains(
+                "\u{2191}\u{2193} select \u{b7} PgUp/PgDn page \u{b7} ENTER continue \u{b7} ESC back"
+            ),
+            "the rows prefix drops on a 60-column dialog:\n{}",
+            rendered
+        );
+        let wide = render_text(&app, 120, 24);
+        assert!(
+            wide.contains("rows 1\u{2013}12 of 14 \u{b7}"),
+            "a wide dialog shows the rows prefix:\n{}",
+            wide
+        );
+
+        app.handle_key(key(KeyCode::End));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("\u{25b6} \u{2713} repo13"),
+            "End reaches the last row:\n{}",
+            rendered
+        );
+        assert!(
+            !rendered.contains("repo00"),
+            "the list scrolled:\n{}",
+            rendered
+        );
+        assert!(
+            !rendered.contains("repo01"),
+            "the list scrolled:\n{}",
+            rendered
+        );
+
+        app.handle_key(key(KeyCode::PageUp));
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(st.report.cursor, 3),
+            _ => panic!("expected CreateWorkspace screen"),
+        }
+        app.handle_key(key(KeyCode::Home));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("\u{25b6} \u{2713} repo00"),
+            "Home:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn creating_log_tail_follows_and_end_resumes() {
+        let mut app = test_app(vec![], vec![]);
+        let mut st = CreateState::new(vec![], vec![]);
+        st.stage = CreateStage::Creating;
+        st.progress = (1..=30).map(|i| format!("step {:02}", i)).collect();
+        st.error = Some("boom".to_string());
+        app.screen = Screen::CreateWorkspace(st);
+
+        // 80x24: the dialog caps at 19 rows, 16 log lines fit.
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("step 30"),
+            "tail-follow shows the newest line:\n{}",
+            rendered
+        );
+        assert!(rendered.contains("step 15"), "16 lines fit:\n{}", rendered);
+        assert!(
+            !rendered.contains("step 14"),
+            "earlier lines are scrolled off:\n{}",
+            rendered
+        );
+        assert!(rendered.contains("Error: boom"), "footer:\n{}", rendered);
+
+        app.handle_key(key(KeyCode::Up));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("step 14"),
+            "Up scrolls back one line:\n{}",
+            rendered
+        );
+        assert!(
+            !rendered.contains("step 30"),
+            "Up detaches from the tail:\n{}",
+            rendered
+        );
+
+        // New lines arriving while detached leave the view where it is.
+        if let Screen::CreateWorkspace(ref mut st) = app.screen {
+            st.progress.push("step 31".to_string());
+        }
+        let rendered = render_text(&app, 80, 24);
+        assert!(rendered.contains("step 14") && !rendered.contains("step 31"));
+
+        app.handle_key(key(KeyCode::End));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("step 31"),
+            "End resumes following:\n{}",
+            rendered
+        );
+        if let Screen::CreateWorkspace(ref mut st) = app.screen {
+            st.progress.push("step 32".to_string());
+        }
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("step 32"),
+            "following tracks new lines:\n{}",
+            rendered
+        );
+
+        app.handle_key(key(KeyCode::Home));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("step 01"),
+            "Home shows the first line:\n{}",
+            rendered
+        );
+
+        // Esc still leaves the stage with the error status.
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(app.screen, Screen::Dashboard));
+    }
+
+    #[test]
+    fn add_flow_creating_log_scrolls_too() {
+        let mut app = test_app(vec![], vec![]);
+        let mut st = AddState::new("ws".to_string(), vec![], vec![]);
+        st.stage = AddStage::Creating;
+        st.progress = (1..=30).map(|i| format!("step {:02}", i)).collect();
+        st.error = Some("boom".to_string());
+        app.screen = Screen::AddRepos(st);
+
+        let rendered = render_text(&app, 80, 24);
+        assert!(rendered.contains("step 30") && !rendered.contains("step 14"));
+        app.handle_key(key(KeyCode::PageUp));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("step 05") && !rendered.contains("step 30"),
+            "PgUp:\n{}",
+            rendered
+        );
+        app.handle_key(key(KeyCode::End));
+        let rendered = render_text(&app, 80, 24);
+        assert!(rendered.contains("step 30"), "End resumes:\n{}", rendered);
+    }
+
+    #[test]
+    fn small_report_with_long_pane_fits_below_the_cap() {
+        // The spec's longest known case: ssh, five stderr lines, one blank,
+        // 7 pane lines with the header and status line. On a 24-row terminal
+        // a two-repo report is well below the cap, so nothing may be cut.
+        let mut app = test_app(vec![], vec![]);
+        let mut report = SyncReport::new(&[PathBuf::from("/r/ssh"), PathBuf::from("/r/ok")]);
+        report.finished(0, failed_outcome("line1\nline2\n\nline4\nline5\n"));
+        report.finished(1, ok_outcome());
+        report.finish();
+        assert_eq!(report.cursor, 0);
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+
+        let rendered = render_text(&app, 80, 24);
+        for needle in ["line1", "line2", "line4", "line5"] {
+            assert!(
+                rendered.contains(needle),
+                "{} must be visible:\n{}",
+                needle,
+                rendered
+            );
+        }
+        assert!(
+            !rendered.contains("more lines"),
+            "nothing may be cut below the cap:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn running_report_keeps_newest_row_visible() {
+        let mut app = test_app(vec![], vec![]);
+        let repos: Vec<PathBuf> = (0..14)
+            .map(|i| PathBuf::from(format!("/r/repo{:02}", i)))
+            .collect();
+        let mut report = SyncReport::new(&repos);
+        for i in 0..13 {
+            report.started(i);
+            report.finished(i, ok_outcome());
+        }
+        report.started(13);
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("\u{25b6} \u{25cf} repo13") && rendered.contains("syncing\u{2026}"),
+            "the row being synced is on screen:\n{}",
+            rendered
+        );
+        assert!(
+            !rendered.contains("repo00"),
+            "earlier rows scrolled off:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("Sync report \u{b7} 13 of 14"),
+            "title:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn narrow_terminal_keeps_dialog_and_footer_inside_the_frame() {
+        let mut app = test_app(vec![], vec![]);
+        let mut report = SyncReport::new(&[PathBuf::from("/r/a")]);
+        report.finished(0, failed_outcome("fatal: x"));
+        report.finish();
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+        let rendered = render_text(&app, 50, 12);
+        assert!(
+            rendered.contains("ENTER continue anyway \u{b7} ESC back"),
+            "ENTER and ESC never drop:\n{}",
+            rendered
+        );
+        assert!(max_rendered_width(&rendered) <= 50);
+    }
+
+    #[test]
+    fn terminal_shorter_than_the_dialog_minimum_has_no_row_range_in_the_footer() {
+        // A 5-row terminal cannot hold the dialog's 10-row minimum: the list
+        // gets zero rows and the visible window is empty. The footer must
+        // not claim `rows 1–0 of 2`. The frame is wide enough (inner 82)
+        // that the prefix would fit if it were emitted.
+        let mut app = test_app(vec![], vec![]);
+        let mut report = SyncReport::new(&[PathBuf::from("/r/a"), PathBuf::from("/r/b")]);
+        report.finished(0, ok_outcome());
+        report.finished(1, ok_outcome());
+        report.finish();
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+
+        let rendered = render_text(&app, 120, 5);
+        assert!(
+            !rendered.contains("rows 1\u{2013}0"),
+            "an empty list must not report a row range:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("ENTER continue"),
+            "the footer still renders:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn minimum_height_dialog_marks_cut_pane_lines_for_one_repo() {
+        // A 12-row terminal clamps the dialog to its 10-row minimum: inner 8,
+        // body 5. One failing repo needs one list row, so the two rows the
+        // list cannot use go to the pane, which shows the all-failed notice,
+        // the header, and the marker for everything it had to cut (the
+        // status line and the five stderr lines).
+        let mut app = test_app(vec![], vec![]);
+        let mut report = SyncReport::new(&[PathBuf::from("/r/a")]);
+        report.finished(0, failed_outcome("err-1\nerr-2\nerr-3\nerr-4\nerr-5\n"));
+        report.finish();
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+
+        let rendered = render_text(&app, 100, 12);
+        for needle in [
+            "Nothing was fetched. You can still continue;",
+            "a  /r/a",
+            "\u{2026} 6 more lines",
+            "ENTER continue anyway",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "a pane with cut lines must show {:?}, got:\n{}",
+                needle,
+                rendered
+            );
+        }
+        // The list row's DETAIL column shows the first stderr line; the
+        // second appears only in the pane.
+        assert!(
+            !rendered.contains("err-2"),
+            "the stderr lines were cut from the pane:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn minimum_height_dialog_keeps_status_line_for_two_repos() {
+        // Two repos leave one spare list row for the pane: the header, the
+        // status line, then the marker for the five stderr lines.
+        let mut app = test_app(vec![], vec![]);
+        let mut report = SyncReport::new(&[PathBuf::from("/r/a"), PathBuf::from("/r/b")]);
+        report.finished(0, failed_outcome("err-1\nerr-2\nerr-3\nerr-4\nerr-5\n"));
+        report.finished(1, ok_outcome());
+        report.finish();
+        assert_eq!(report.cursor, 0);
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+
+        let rendered = render_text(&app, 100, 12);
+        for needle in [
+            "a  /r/a",
+            "fetch failed (git exit 128) \u{b7} branch picker will use local refs",
+            "\u{2026} 5 more lines",
+            "ENTER continue \u{b7} ESC back",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "a pane with cut lines must show {:?}, got:\n{}",
+                needle,
+                rendered
+            );
+        }
+        assert!(
+            !rendered.contains("err-2"),
+            "the stderr lines were cut from the pane:\n{}",
+            rendered
         );
     }
 }

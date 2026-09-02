@@ -202,6 +202,75 @@ impl FuzzyPicker {
         }
     }
 
+    /// Swap in a fresh item list (a rescan of the repo list) while keeping the
+    /// user's place in the picker. The query is left untouched; toggles are
+    /// re-resolved by `full_path` (missing ones are dropped and counted in the
+    /// return value); the Ctrl-S scope is kept when its parent-directory name is
+    /// still among the recomputed scopes, else it resets to all; the highlighted
+    /// row is kept by path when it is still in the filtered list, else it goes
+    /// back to the top.
+    pub fn replace_items(&mut self, items: Vec<PickerItem>) -> usize {
+        let toggled_paths: Vec<PathBuf> = self
+            .toggled
+            .iter()
+            .map(|&i| self.all_items[i].full_path.clone())
+            .collect();
+        let highlighted_path: Option<PathBuf> = self
+            .filtered
+            .get(self.highlighted)
+            .map(|&i| self.all_items[i].full_path.clone());
+
+        let mut scopes: Vec<String> = items
+            .iter()
+            .map(|i| i.parent.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        scopes.sort();
+
+        self.all_items = items;
+        self.available_scopes = scopes;
+
+        // Scope: keep by name if still present, otherwise back to all.
+        let kept_scope = self
+            .scope
+            .as_ref()
+            .and_then(|s| self.available_scopes.iter().position(|a| a == s));
+        match kept_scope {
+            Some(pos) => self.scope_idx = pos + 1,
+            None => {
+                self.scope = None;
+                self.scope_idx = 0;
+            }
+        }
+
+        // Toggles: keep by path, count the ones that no longer exist.
+        let mut missing = 0;
+        self.toggled = toggled_paths
+            .iter()
+            .filter_map(|path| {
+                let idx = self.all_items.iter().position(|i| &i.full_path == path);
+                if idx.is_none() {
+                    missing += 1;
+                }
+                idx
+            })
+            .collect();
+
+        self.refilter();
+
+        // Highlight: keep by path if still in the filtered list, else the top.
+        self.highlighted = highlighted_path
+            .and_then(|path| {
+                self.filtered
+                    .iter()
+                    .position(|&i| self.all_items[i].full_path == path)
+            })
+            .unwrap_or(0);
+
+        missing
+    }
+
     pub fn cycle_scope(&mut self) {
         if self.available_scopes.is_empty() {
             return;
@@ -375,7 +444,9 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
 
             let mut line_spans = vec![Span::styled(dot, Style::default().fg(theme::TEAL))];
             line_spans.extend(name_spans);
-            line_spans.push(Span::styled(format!("  ({})", item.parent), theme::muted()));
+            if !item.parent.is_empty() {
+                line_spans.push(Span::styled(format!("  ({})", item.parent), theme::muted()));
+            }
             if let Some(ref branch) = item.branch {
                 line_spans.push(Span::styled(format!("  {}", branch), theme::branch()));
             }
@@ -577,5 +648,184 @@ mod tests {
         assert_eq!(picker.toggled.len(), 1);
         picker.toggle_highlighted();
         assert_eq!(picker.toggled.len(), 0);
+    }
+
+    // ---- replace_items survival rules ----
+
+    fn toggled_paths(picker: &FuzzyPicker) -> Vec<String> {
+        let mut paths: Vec<String> = picker
+            .toggled
+            .iter()
+            .map(|&i| picker.all_items[i].full_path.to_string_lossy().into_owned())
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    fn highlighted_path(picker: &FuzzyPicker) -> Option<String> {
+        picker
+            .filtered
+            .get(picker.highlighted)
+            .map(|&i| picker.all_items[i].full_path.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn replace_items_keeps_query_and_refilters_new_items() {
+        let items = make_items(&["/work/acme/acme-api", "/work/widgets/widget-ui"]);
+        let mut picker = FuzzyPicker::new("test", items, true);
+        picker.input = picker.input.with_value("acme".into());
+        picker.refilter();
+        assert_eq!(picker.filtered.len(), 1);
+
+        let dropped = picker.replace_items(make_items(&[
+            "/work/acme/acme-api",
+            "/work/widgets/widget-ui",
+            "/work/acme/acme-payments",
+        ]));
+
+        assert_eq!(dropped, 0);
+        assert_eq!(picker.query(), "acme", "query must survive the rebuild");
+        assert_eq!(picker.all_items.len(), 3);
+        assert_eq!(
+            picker.filtered.len(),
+            2,
+            "the kept query must be applied to the new items"
+        );
+    }
+
+    #[test]
+    fn replace_items_keeps_toggles_by_path_even_when_indices_shift() {
+        let items = make_items(&["/work/acme/a", "/work/acme/b", "/work/acme/c"]);
+        let mut picker = FuzzyPicker::new("test", items, true);
+        picker.move_down();
+        picker.toggle_highlighted(); // b (index 1)
+        picker.move_down();
+        picker.toggle_highlighted(); // c (index 2)
+        assert_eq!(toggled_paths(&picker), vec!["/work/acme/b", "/work/acme/c"]);
+
+        // A new repo sorted before the toggled ones shifts every index by one.
+        let dropped = picker.replace_items(make_items(&[
+            "/work/acme/0-new",
+            "/work/acme/a",
+            "/work/acme/b",
+            "/work/acme/c",
+        ]));
+
+        assert_eq!(dropped, 0);
+        assert_eq!(
+            toggled_paths(&picker),
+            vec!["/work/acme/b", "/work/acme/c"],
+            "toggles must follow the repo path, not the old index"
+        );
+    }
+
+    #[test]
+    fn replace_items_drops_and_counts_missing_toggles() {
+        let items = make_items(&["/work/acme/a", "/work/acme/b", "/work/acme/c"]);
+        let mut picker = FuzzyPicker::new("test", items, true);
+        picker.toggle_highlighted(); // a
+        picker.move_down();
+        picker.toggle_highlighted(); // b
+        picker.move_down();
+        picker.toggle_highlighted(); // c
+
+        let dropped = picker.replace_items(make_items(&["/work/acme/b"]));
+
+        assert_eq!(dropped, 2, "a and c are gone and must be counted");
+        assert_eq!(toggled_paths(&picker), vec!["/work/acme/b"]);
+    }
+
+    #[test]
+    fn replace_items_keeps_scope_when_parent_still_exists() {
+        let items = make_items(&["/work/acme/a", "/work/widgets/w"]);
+        let mut picker = FuzzyPicker::new("test", items, true);
+        // available_scopes is sorted: ["acme", "widgets"]; cycle twice to reach "widgets".
+        picker.cycle_scope();
+        picker.cycle_scope();
+        assert_eq!(picker.scope.as_deref(), Some("widgets"));
+
+        // A new parent sorted before "widgets" changes its index.
+        picker.replace_items(make_items(&[
+            "/work/acme/a",
+            "/work/tools/t",
+            "/work/widgets/w",
+        ]));
+
+        assert_eq!(picker.scope.as_deref(), Some("widgets"));
+        assert_eq!(picker.available_scopes, vec!["acme", "tools", "widgets"]);
+        assert_eq!(picker.scope_idx, 3, "scope index must be re-derived");
+        assert_eq!(picker.filtered.len(), 1, "scope must still filter the list");
+        // Cycling from a re-derived index wraps back to "all".
+        picker.cycle_scope();
+        assert!(picker.scope.is_none());
+    }
+
+    #[test]
+    fn replace_items_resets_scope_when_parent_is_gone() {
+        let items = make_items(&["/work/acme/a", "/work/widgets/w"]);
+        let mut picker = FuzzyPicker::new("test", items, true);
+        picker.cycle_scope();
+        picker.cycle_scope();
+        assert_eq!(picker.scope.as_deref(), Some("widgets"));
+
+        picker.replace_items(make_items(&["/work/acme/a", "/work/acme/b"]));
+
+        assert!(picker.scope.is_none(), "a vanished scope resets to all");
+        assert_eq!(picker.scope_idx, 0);
+        assert_eq!(picker.filtered.len(), 2);
+    }
+
+    #[test]
+    fn replace_items_keeps_highlight_by_path() {
+        let items = make_items(&["/work/acme/a", "/work/acme/b", "/work/acme/c"]);
+        let mut picker = FuzzyPicker::new("test", items, true);
+        picker.move_down();
+        picker.move_down();
+        assert_eq!(highlighted_path(&picker).as_deref(), Some("/work/acme/c"));
+
+        picker.replace_items(make_items(&[
+            "/work/acme/0-new",
+            "/work/acme/a",
+            "/work/acme/b",
+            "/work/acme/c",
+        ]));
+
+        assert_eq!(
+            highlighted_path(&picker).as_deref(),
+            Some("/work/acme/c"),
+            "highlight must follow the repo path"
+        );
+        assert_eq!(picker.highlighted, 3);
+    }
+
+    #[test]
+    fn replace_items_resets_highlight_to_top_when_row_is_gone() {
+        let items = make_items(&["/work/acme/a", "/work/acme/b", "/work/acme/c"]);
+        let mut picker = FuzzyPicker::new("test", items, true);
+        picker.move_down();
+        picker.move_down();
+        assert_eq!(highlighted_path(&picker).as_deref(), Some("/work/acme/c"));
+
+        picker.replace_items(make_items(&["/work/acme/a", "/work/acme/b"]));
+
+        assert_eq!(picker.highlighted, 0);
+        assert_eq!(highlighted_path(&picker).as_deref(), Some("/work/acme/a"));
+    }
+
+    #[test]
+    fn replace_items_with_empty_list_clears_everything_safely() {
+        let items = make_items(&["/work/acme/a"]);
+        let mut picker = FuzzyPicker::new("test", items, true);
+        picker.toggle_highlighted();
+        picker.cycle_scope();
+
+        let dropped = picker.replace_items(vec![]);
+
+        assert_eq!(dropped, 1);
+        assert!(picker.toggled.is_empty());
+        assert!(picker.filtered.is_empty());
+        assert_eq!(picker.highlighted, 0);
+        assert!(picker.scope.is_none());
+        assert!(picker.available_scopes.is_empty());
     }
 }

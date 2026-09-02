@@ -1,7 +1,7 @@
 use crate::core::{
     config::SpaceConfig,
     git::{FileDiff, FileEntry},
-    workspace::{self, Workspace},
+    workspace::{self, SyncOutcome, Workspace},
 };
 use crate::tui::actions::StatusKind;
 use anyhow::Result;
@@ -34,8 +34,11 @@ pub struct LoadResult {
 }
 
 /// Sent from the sync worker thread back to the App during the Syncing stage.
+/// `index` addresses the repo's row in the sync report (selection order); the
+/// UI formats the rows from the structured outcome.
 pub enum SyncProgress {
-    Step(String),
+    Started { index: usize },
+    Finished { index: usize, outcome: SyncOutcome },
     Done,
 }
 
@@ -102,6 +105,8 @@ pub enum Screen {
     Dashboard,
     CreateWorkspace(crate::tui::screens::create::CreateState),
     GoWorkspace(crate::tui::screens::go::GoState),
+    /// Space filter: the `g` picker with an in-place confirm action.
+    FilterWorkspace(crate::tui::screens::go::GoState),
     AddRepos(crate::tui::screens::add::AddState),
     ConfirmDelete(crate::tui::screens::delete::DeleteState),
     RepoSearch(crate::tui::screens::search::SearchState),
@@ -122,6 +127,7 @@ pub enum Message {
     SelectRepoDown,
     GoToWorkspace,
     StartGo,
+    StartFilter,
     StartCreate,
     StartAdd,
     StartDelete,
@@ -621,6 +627,47 @@ impl App {
         }
     }
 
+    /// Rescan the configured roots, save the cache and replace `repos_cache`.
+    /// Shared by the dashboard `r` and the picker's Ctrl-R; it does nothing
+    /// else, so callers own any cursor or diff-cache resets of their own.
+    pub fn rescan_repo_list(&mut self) -> RescanSummary {
+        let roots = self.config.repos.roots.clone();
+        let depth = self.config.repos.max_depth;
+        let repos = crate::core::repo::find_repos_in(&roots, depth);
+        let _ = crate::core::repo::save_cache(&SpaceConfig::cache_path(), &repos);
+        let previous: std::collections::HashSet<&PathBuf> = self.repos_cache.iter().collect();
+        let new_count = repos.iter().filter(|p| !previous.contains(p)).count();
+        let total = repos.len();
+        self.repos_cache = repos;
+        RescanSummary { total, new_count }
+    }
+
+    /// Ctrl-R inside a repo picker: rescan the repo list and rebuild the open
+    /// picker from it, keeping the user's place. The add flow reapplies its
+    /// exclusion of repos already in the space; if that space is gone the flow
+    /// leaves with an error notice. The dashboard cursor is never touched.
+    fn rescan_open_picker(&mut self) {
+        let summary = self.rescan_repo_list();
+        let missing = match &mut self.screen {
+            Screen::CreateWorkspace(st) => st.replace_repo_list(self.repos_cache.clone()),
+            Screen::AddRepos(st) => {
+                let ws = self.workspaces.iter().find(|w| w.name == st.workspace_name);
+                match ws {
+                    Some(ws) => st.replace_repo_list(addable_repos(&self.repos_cache, ws)),
+                    None => {
+                        let msg = format!("Space '{}' no longer exists", st.workspace_name);
+                        self.screen = Screen::Dashboard;
+                        self.set_status(msg, StatusKind::Error);
+                        return;
+                    }
+                }
+            }
+            _ => return,
+        };
+        let (msg, kind) = rescan_notice(&summary, missing);
+        self.set_status(msg, kind);
+    }
+
     /// Fetch file diffs for all repos in the selected workspace and populate
     /// `repo_file_cache`. Called on explicit refresh (`RefreshRepos`) and when
     /// a repo is expanded (`ToggleRepoExpand`). Not called on workspace navigation
@@ -779,10 +826,12 @@ impl App {
         match &mut self.screen {
             Screen::CreateWorkspace(st) => {
                 st.progress.clear();
+                st.log_view.reset();
                 st.error = None;
             }
             Screen::AddRepos(st) => {
                 st.progress.clear();
+                st.log_view.reset();
                 st.error = None;
             }
             _ => return,
@@ -928,12 +977,30 @@ impl App {
         }
     }
 
+    /// The sync report of the active screen, if it is in the Syncing stage.
+    fn sync_report_mut(&mut self) -> Option<&mut crate::tui::screens::sync_report::SyncReport> {
+        match &mut self.screen {
+            Screen::CreateWorkspace(st)
+                if st.stage == crate::tui::screens::create::CreateStage::Syncing =>
+            {
+                Some(&mut st.report)
+            }
+            Screen::AddRepos(st) if st.stage == crate::tui::screens::add::AddStage::Syncing => {
+                Some(&mut st.report)
+            }
+            _ => None,
+        }
+    }
+
     /// Poll the sync worker channel once per frame. Non-blocking.
     ///
-    /// Drains `Step` messages into the active screen's progress log, and
-    /// calls `advance_to_branch_strategy` on `Done` or channel disconnect.
-    /// Drops `sync_rx` whenever the screen is no longer in the Syncing stage
-    /// (e.g. the user pressed Esc).
+    /// Applies `Started` and `Finished` messages to the active screen's sync
+    /// report. `Done` finishes the report and drops the channel; the screen
+    /// stays on the report until the user presses Enter
+    /// (`ScreenAction::ContinueFromSyncReport`). A disconnect without `Done`
+    /// (the worker panicked or was dropped) is treated as `Done`: unfinished
+    /// rows become `not synced`. Drops `sync_rx` whenever the screen is no
+    /// longer in the Syncing stage (e.g. the user pressed Esc).
     pub fn poll_sync_result(&mut self) {
         let is_syncing = matches!(
             &self.screen,
@@ -945,12 +1012,16 @@ impl App {
                 if st.stage == crate::tui::screens::add::AddStage::Syncing
         );
         if !is_syncing {
-            // Signal cancellation so the worker stops before starting the next repo.
+            // Signal cancellation so the worker stops before its next git call.
             // Dropping the receiver below is a backstop: if the worker is mid-repo when we
             // cancel, its next tx.send() returns Err immediately (a dropped receiver on a
             // sync_channel does not block the sender), so the thread still exits cleanly.
-            // If the user cancels and immediately restarts, two workers can briefly overlap on
-            // the same repos — that is safe because git fetch/branch operations are idempotent.
+            // The cancelled worker finishes its in-flight git call in the background and
+            // starts nothing new. A restart on the same repo while that call is still
+            // running can hit git's own lock error (`cannot lock ref`), which the report
+            // shows as a `fetch failed` row (or a skipped branch when the colliding call
+            // is a `branch -f`): the accepted residual of design item 1.5 (GitHub issue
+            // #24 item 3).
             if let Some(c) = &self.sync_cancel {
                 c.store(true, Ordering::Relaxed);
             }
@@ -962,19 +1033,21 @@ impl App {
         if let Some(ref r) = rx {
             loop {
                 match r.try_recv() {
-                    Ok(SyncProgress::Step(msg)) => match &mut self.screen {
-                        Screen::CreateWorkspace(st) => st.progress.push(msg),
-                        Screen::AddRepos(st) => st.progress.push(msg),
-                        _ => {}
-                    },
-                    Ok(SyncProgress::Done) => {
-                        self.sync_cancel = None;
-                        self.advance_to_branch_strategy();
-                        return;
+                    Ok(SyncProgress::Started { index }) => {
+                        if let Some(report) = self.sync_report_mut() {
+                            report.started(index);
+                        }
                     }
-                    Err(mpsc::TryRecvError::Disconnected) => {
+                    Ok(SyncProgress::Finished { index, outcome }) => {
+                        if let Some(report) = self.sync_report_mut() {
+                            report.finished(index, outcome);
+                        }
+                    }
+                    Ok(SyncProgress::Done) | Err(mpsc::TryRecvError::Disconnected) => {
+                        if let Some(report) = self.sync_report_mut() {
+                            report.finish();
+                        }
                         self.sync_cancel = None;
-                        self.advance_to_branch_strategy();
                         return;
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -1086,6 +1159,9 @@ impl App {
                 self.screen = Screen::Dashboard;
                 self.set_status(msg, kind);
             }
+            ScreenAction::RescanRepoList => {
+                self.rescan_open_picker();
+            }
             ScreenAction::CdAndQuit(path) => {
                 self.space_cd_target = Some(path);
                 self.should_quit = true;
@@ -1117,10 +1193,15 @@ impl App {
             ScreenAction::ExecuteWorktreeFlow(params) => {
                 self.execute_worktree_flow(params);
             }
+            ScreenAction::ContinueFromSyncReport => {
+                self.advance_to_branch_strategy();
+            }
             ScreenAction::ExecuteSyncFlow(repos) => {
                 // Cancel any worker still live from a previous sync before dropping its
-                // handle, so it stops at its next repo boundary rather than running on
-                // untracked.
+                // handle, so it stops before its next git call rather than running on
+                // untracked. Its in-flight call still finishes in the background; if this
+                // worker reaches the same repo first, git's lock error surfaces as a
+                // `fetch failed` row (design item 1.5, GitHub issue #24 item 3).
                 if let Some(old) = &self.sync_cancel {
                     old.store(true, Ordering::Relaxed);
                 }
@@ -1178,6 +1259,17 @@ impl App {
                         StatusKind::Info,
                     );
                 }
+            }
+            ScreenAction::SelectWorkspace(idx) => {
+                self.screen = Screen::Dashboard;
+                // Re-selecting the current space keeps expanded repos and the cursor.
+                if idx == self.selected_ws || idx >= self.workspaces.len() {
+                    return;
+                }
+                self.selected_ws = idx;
+                self.selected_repo = 0;
+                self.reset_repo_pane_state();
+                self.begin_workspace_load_immediate();
             }
             ScreenAction::StageFile {
                 repo_index,
@@ -1247,6 +1339,7 @@ impl App {
             Screen::Help => crate::tui::screens::help::handle_key(key, &ctx),
             Screen::ConfirmDelete(state) => state.handle_key(key, &ctx),
             Screen::GoWorkspace(state) => state.handle_key(key, &ctx),
+            Screen::FilterWorkspace(state) => state.handle_key(key, &ctx),
             Screen::RepoSearch(state) => state.handle_key(key, &ctx),
             Screen::CreateWorkspace(state) => state.handle_key(key, &ctx),
             Screen::AddRepos(state) => state.handle_key(key, &ctx),
@@ -1283,7 +1376,11 @@ impl App {
                     (KeyCode::Char('a'), _) => Some(Message::StartAdd),
                     (KeyCode::Char('d'), _) => Some(Message::StartDelete),
                     (KeyCode::Char('r'), _) => Some(Message::RefreshRepos),
-                    (KeyCode::Char('/'), _) => Some(Message::StartSearch),
+                    // /: pane-gated. Workspaces pane filters spaces, repos pane searches repos.
+                    (KeyCode::Char('/'), _) => match self.focus {
+                        Pane::Left => Some(Message::StartFilter),
+                        Pane::Right => Some(Message::StartSearch),
+                    },
                     (KeyCode::Char('?'), _) => Some(Message::StartHelp),
                     // s/space: stage/unstage single file (Right pane only)
                     (KeyCode::Char('s') | KeyCode::Char(' '), _) if self.focus == Pane::Right => {
@@ -1398,45 +1495,34 @@ impl App {
 }
 
 /// Background worker for the Syncing stage: fetch + fast-forward each repo,
-/// reporting progress over `tx`.
+/// sending `Started` and `Finished` per repo over `tx`, then `Done`.
 ///
-/// Cancellation is checked between repos: when `cancel` is set, the worker
-/// returns immediately without sending `Done`. An in-flight git subprocess for
-/// the current repo cannot be interrupted, so cancellation takes effect only at
-/// the next repo boundary.
+/// Cancellation is checked before every git call: when `cancel` is set, the
+/// in-flight git call runs to completion, nothing further is started for that
+/// repo or any later one, and `Done` is never sent. A `send` failing means the
+/// receiver was dropped (the user left the report), so the worker stops there.
 fn run_sync_worker(
     repos: Vec<PathBuf>,
     tx: mpsc::SyncSender<SyncProgress>,
     cancel: Arc<AtomicBool>,
 ) {
-    for repo_path in &repos {
+    for (index, repo_path) in repos.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
-            return; // do NOT send Done — user cancelled
+            return;
         }
-        let repo_name = repo_path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "?".to_string());
-        let _ = tx.send(SyncProgress::Step(format!("Syncing {}...", repo_name)));
-        let result = crate::core::workspace::sync_repo(repo_path);
-        if result.fetch_ok {
-            if result.forwarded.is_empty() {
-                let _ = tx.send(SyncProgress::Step(format!(
-                    "  \u{2713} {} up to date",
-                    repo_name
-                )));
-            } else {
-                let _ = tx.send(SyncProgress::Step(format!(
-                    "  \u{2713} {} (fast-forwarded: {})",
-                    repo_name,
-                    result.forwarded.join(", ")
-                )));
-            }
-        } else {
-            let _ = tx.send(SyncProgress::Step(format!(
-                "  ~ {} (fetch failed, using local)",
-                repo_name
-            )));
+        if tx.send(SyncProgress::Started { index }).is_err() {
+            return;
+        }
+        let outcome = crate::core::workspace::sync_repo_cancellable(
+            repo_path,
+            crate::core::workspace::SYNC_FETCH_TIMEOUT,
+            &cancel,
+        );
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        if tx.send(SyncProgress::Finished { index, outcome }).is_err() {
+            return;
         }
     }
     let _ = tx.send(SyncProgress::Done);
@@ -1659,18 +1745,12 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             None
         }
         Message::RefreshRepos => {
-            let roots = app.config.repos.roots.clone();
-            let depth = app.config.repos.max_depth;
-            let repos = crate::core::repo::find_repos_in(&roots, depth);
-            let _ = crate::core::repo::save_cache(&SpaceConfig::cache_path(), &repos);
-            app.repos_cache = repos;
+            let summary = app.rescan_repo_list();
             app.cursor_row = 0;
             app.expanded_repos.clear();
             app.refresh_file_diff_cache();
-            app.set_status(
-                format!("Refreshed: {} repos found", app.repos_cache.len()),
-                StatusKind::Success,
-            );
+            let (msg, kind) = rescan_notice(&summary, 0);
+            app.set_status(msg, kind);
             None
         }
         Message::GoToWorkspace => {
@@ -1692,22 +1772,18 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             app.screen = Screen::GoWorkspace(state);
             None
         }
+        Message::StartFilter => {
+            if app.workspaces.is_empty() {
+                app.set_status("No spaces yet, press c to create one", StatusKind::Info);
+                return None;
+            }
+            let state = crate::tui::screens::go::GoState::filter(&app.workspaces);
+            app.screen = Screen::FilterWorkspace(state);
+            None
+        }
         Message::StartAdd => {
             if let Some(ws) = app.selected_workspace() {
-                let existing: std::collections::HashSet<_> =
-                    ws.repos.iter().map(|r| r.name.clone()).collect();
-                let available: Vec<_> = app
-                    .repos_cache
-                    .iter()
-                    .filter(|p| {
-                        let name = p
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        !existing.contains(&name)
-                    })
-                    .cloned()
-                    .collect();
+                let available = addable_repos(&app.repos_cache, ws);
                 let state =
                     crate::tui::screens::add::AddState::new(ws.name.clone(), available, vec![]);
                 app.screen = Screen::AddRepos(state);
@@ -2003,6 +2079,56 @@ pub fn run(app: &mut App) -> Result<()> {
     let result = run_loop(&mut terminal, app);
     ratatui::restore();
     result
+}
+
+/// What a rescan of the repo list found, for the status notice.
+pub struct RescanSummary {
+    /// Repos in the rebuilt repo list.
+    pub total: usize,
+    /// Repos present now that were absent from the previous repo list.
+    pub new_count: usize,
+}
+
+/// Notice for a rescan: `Rescanned: 42 repos, 2 new`, with a trailing
+/// `, 1 selected repo no longer found` (kind Warning) when a picker had toggled
+/// repos that the rescan no longer finds.
+fn rescan_notice(summary: &RescanSummary, missing_toggles: usize) -> (String, StatusKind) {
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let mut msg = format!(
+        "Rescanned: {} repo{}, {} new",
+        summary.total,
+        plural(summary.total),
+        summary.new_count
+    );
+    if missing_toggles == 0 {
+        (msg, StatusKind::Success)
+    } else {
+        msg.push_str(&format!(
+            ", {} selected repo{} no longer found",
+            missing_toggles,
+            plural(missing_toggles)
+        ));
+        (msg, StatusKind::Warning)
+    }
+}
+
+/// The repos a space can still add: the repo list minus the repos already in
+/// the space, matched by repo name (so a repo elsewhere that shares a name with
+/// one in the space is hidden too; pre-existing behaviour).
+fn addable_repos(repos: &[PathBuf], ws: &Workspace) -> Vec<PathBuf> {
+    let existing: std::collections::HashSet<&str> =
+        ws.repos.iter().map(|r| r.name.as_str()).collect();
+    repos
+        .iter()
+        .filter(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            !existing.contains(name.as_str())
+        })
+        .cloned()
+        .collect()
 }
 
 /// Build a FuzzyPicker populated with local + remote branches from `repo_path`.
@@ -2776,18 +2902,27 @@ mod tests {
         );
     }
 
+    fn ok_outcome() -> SyncOutcome {
+        SyncOutcome {
+            fetch: crate::core::workspace::FetchOutcome::Ok,
+            forwarded: vec![],
+            skipped: vec![],
+        }
+    }
+
     #[test]
-    fn poll_sync_result_appends_step_to_progress() {
+    fn poll_sync_result_started_marks_row_syncing_and_moves_cursor() {
         use crate::tui::screens::create::{CreateStage, CreateState};
+        use crate::tui::screens::sync_report::{RowPhase, SyncReport};
         let mut app = make_app(vec![]);
         let mut state = CreateState::new(vec![], vec![]);
         state.stage = CreateStage::Syncing;
+        state.report = SyncReport::new(&[PathBuf::from("/r/a"), PathBuf::from("/r/b")]);
         app.screen = Screen::CreateWorkspace(state);
 
         let (tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
         app.sync_rx = Some(rx);
-        tx.send(SyncProgress::Step("Syncing my-repo...".to_string()))
-            .unwrap();
+        tx.send(SyncProgress::Started { index: 1 }).unwrap();
 
         app.poll_sync_result();
 
@@ -2798,11 +2933,10 @@ mod tests {
                     CreateStage::Syncing,
                     "stage must remain Syncing while channel is open"
                 );
-                assert_eq!(
-                    st.progress,
-                    vec!["Syncing my-repo..."],
-                    "Step message must be appended to progress"
-                );
+                assert_eq!(st.report.rows[1].phase, RowPhase::Syncing);
+                assert_eq!(st.report.cursor, 1, "cursor follows the syncing row");
+                assert!(!st.report.done);
+                assert_eq!(st.report.title(), "Sync report \u{b7} 0 of 2");
             }
             _ => panic!("expected CreateWorkspace screen"),
         }
@@ -2813,15 +2947,24 @@ mod tests {
     }
 
     #[test]
-    fn poll_sync_result_done_advances_to_pick_branch_strategy() {
+    fn poll_sync_result_done_pauses_on_report_and_enter_advances() {
         use crate::tui::screens::create::{CreateStage, CreateState};
+        use crate::tui::screens::sync_report::SyncReport;
         let mut app = make_app(vec![]);
         let mut state = CreateState::new(vec![], vec![]);
         state.stage = CreateStage::Syncing;
+        state.report = SyncReport::new(&[PathBuf::from("/r/a")]);
         app.screen = Screen::CreateWorkspace(state);
 
         let (tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
         app.sync_rx = Some(rx);
+        app.sync_cancel = Some(Arc::new(AtomicBool::new(false)));
+        tx.send(SyncProgress::Started { index: 0 }).unwrap();
+        tx.send(SyncProgress::Finished {
+            index: 0,
+            outcome: ok_outcome(),
+        })
+        .unwrap();
         tx.send(SyncProgress::Done).unwrap();
 
         app.poll_sync_result();
@@ -2830,27 +2973,94 @@ mod tests {
             Screen::CreateWorkspace(st) => {
                 assert_eq!(
                     st.stage,
-                    CreateStage::PickBranchStrategy,
-                    "Done must advance stage to PickBranchStrategy"
+                    CreateStage::Syncing,
+                    "Done must pause on the report, not advance"
                 );
+                assert!(st.report.done, "the report must be finished");
+                assert_eq!(st.report.title(), "Sync report \u{b7} 1 ok");
             }
             _ => panic!("expected CreateWorkspace screen"),
         }
         assert!(app.sync_rx.is_none(), "sync_rx must be dropped after Done");
+        assert!(
+            app.sync_cancel.is_none(),
+            "cancel handle must be dropped after Done"
+        );
+
+        app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(
+                st.stage,
+                CreateStage::PickBranchStrategy,
+                "Enter on a finished report must advance to PickBranchStrategy"
+            ),
+            _ => panic!("expected CreateWorkspace screen"),
+        }
     }
 
     #[test]
-    fn poll_sync_result_add_repos_appends_step_to_progress() {
+    fn poll_sync_result_disconnect_marks_unfinished_rows_not_synced() {
+        use crate::tui::screens::create::{CreateStage, CreateState};
+        use crate::tui::screens::sync_report::{RowPhase, SyncReport};
+        let mut app = make_app(vec![]);
+        let mut state = CreateState::new(vec![], vec![]);
+        state.stage = CreateStage::Syncing;
+        state.report = SyncReport::new(&[
+            PathBuf::from("/r/a"),
+            PathBuf::from("/r/b"),
+            PathBuf::from("/r/c"),
+        ]);
+        app.screen = Screen::CreateWorkspace(state);
+
+        let (tx, rx) = mpsc::sync_channel::<SyncProgress>(8);
+        app.sync_rx = Some(rx);
+        tx.send(SyncProgress::Started { index: 0 }).unwrap();
+        tx.send(SyncProgress::Finished {
+            index: 0,
+            outcome: ok_outcome(),
+        })
+        .unwrap();
+        tx.send(SyncProgress::Started { index: 1 }).unwrap();
+        drop(tx); // the worker went away without sending Done
+
+        app.poll_sync_result();
+
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(st.stage, CreateStage::Syncing, "must stay on the report");
+                assert!(st.report.done, "disconnect counts as Done");
+                assert_eq!(st.report.rows[1].phase, RowPhase::NotSynced);
+                assert_eq!(st.report.rows[2].phase, RowPhase::NotSynced);
+                assert_eq!(st.report.title(), "Sync report \u{b7} 1 ok, 2 failed");
+                assert_eq!(
+                    st.report.cursor, 1,
+                    "cursor lands on the first not-synced row"
+                );
+            }
+            _ => panic!("expected CreateWorkspace screen"),
+        }
+        assert!(
+            app.sync_rx.is_none(),
+            "sync_rx must be dropped on disconnect"
+        );
+    }
+
+    #[test]
+    fn poll_sync_result_add_repos_started_marks_row_syncing() {
         use crate::tui::screens::add::{AddStage, AddState};
+        use crate::tui::screens::sync_report::{RowPhase, SyncReport};
         let mut app = make_app(vec![]);
         let mut state = AddState::new("my-ws".to_string(), vec![], vec![]);
         state.stage = AddStage::Syncing;
+        state.report = SyncReport::new(&[PathBuf::from("/r/a")]);
         app.screen = Screen::AddRepos(state);
 
         let (tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
         app.sync_rx = Some(rx);
-        tx.send(SyncProgress::Step("Syncing my-repo...".to_string()))
-            .unwrap();
+        tx.send(SyncProgress::Started { index: 0 }).unwrap();
 
         app.poll_sync_result();
 
@@ -2861,11 +3071,7 @@ mod tests {
                     AddStage::Syncing,
                     "stage must remain Syncing while channel is open"
                 );
-                assert_eq!(
-                    st.progress,
-                    vec!["Syncing my-repo..."],
-                    "Step message must be appended to progress"
-                );
+                assert_eq!(st.report.rows[0].phase, RowPhase::Syncing);
             }
             _ => panic!("expected AddRepos screen"),
         }
@@ -2876,11 +3082,13 @@ mod tests {
     }
 
     #[test]
-    fn poll_sync_result_add_repos_done_advances_to_pick_branch_strategy() {
+    fn poll_sync_result_add_repos_done_pauses_on_report_and_enter_advances() {
         use crate::tui::screens::add::{AddStage, AddState};
+        use crate::tui::screens::sync_report::SyncReport;
         let mut app = make_app(vec![]);
         let mut state = AddState::new("my-ws".to_string(), vec![], vec![]);
         state.stage = AddStage::Syncing;
+        state.report = SyncReport::new(&[PathBuf::from("/r/a")]);
         app.screen = Screen::AddRepos(state);
 
         let (tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
@@ -2891,15 +3099,51 @@ mod tests {
 
         match &app.screen {
             Screen::AddRepos(st) => {
+                assert_eq!(st.stage, AddStage::Syncing, "Done must pause on the report");
+                assert!(st.report.done);
                 assert_eq!(
-                    st.stage,
-                    AddStage::PickBranchStrategy,
-                    "Done must advance stage to PickBranchStrategy"
+                    st.report.title(),
+                    "Sync report \u{b7} 0 ok, 1 failed",
+                    "a row the worker never reached is not synced"
                 );
             }
             _ => panic!("expected AddRepos screen"),
         }
         assert!(app.sync_rx.is_none(), "sync_rx must be dropped after Done");
+
+        app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        match &app.screen {
+            Screen::AddRepos(st) => assert_eq!(
+                st.stage,
+                AddStage::PickBranchStrategy,
+                "Enter on a finished report must advance to PickBranchStrategy"
+            ),
+            _ => panic!("expected AddRepos screen"),
+        }
+    }
+
+    #[test]
+    fn run_sync_worker_sends_started_and_finished_per_repo_then_done() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::sync_channel::<SyncProgress>(64);
+        run_sync_worker(vec![PathBuf::from("/nonexistent/repo-a")], tx, cancel);
+
+        assert!(matches!(
+            rx.recv().unwrap(),
+            SyncProgress::Started { index: 0 }
+        ));
+        match rx.recv().unwrap() {
+            SyncProgress::Finished { index, outcome } => {
+                assert_eq!(index, 0);
+                assert!(!outcome.fetch_ok(), "a missing directory cannot be fetched");
+            }
+            _ => panic!("expected Finished after Started"),
+        }
+        assert!(matches!(rx.recv().unwrap(), SyncProgress::Done));
+        assert!(rx.try_recv().is_err(), "nothing follows Done");
     }
 
     #[test]

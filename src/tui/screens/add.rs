@@ -1,6 +1,7 @@
 use crate::core::workspace::BranchStrategy;
 use crate::tui::actions::{ScreenAction, ScreenContext, WorktreeParams};
-use crate::tui::widgets::fuzzy_picker::{FuzzyPicker, PickerItem};
+use crate::tui::screens::sync_report::{LogView, SyncReport};
+use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 use tui_input::Input;
@@ -26,6 +27,8 @@ pub struct AddState {
     pub picked_branch: Option<String>,
     pub recent_branches: Vec<crate::core::git::BranchInfo>,
     pub progress: Vec<String>,
+    pub report: SyncReport, // per-repo sync outcomes shown during Syncing stage
+    pub log_view: LogView,  // scroll state of the Creating log
     pub error: Option<String>,
 }
 
@@ -35,17 +38,7 @@ impl AddState {
         available_repos: Vec<PathBuf>,
         initial_queries: Vec<String>,
     ) -> Self {
-        let items: Vec<PickerItem> = available_repos
-            .into_iter()
-            .map(|path| {
-                let (branch, remote_url) = crate::core::git::repo_display_info(&path);
-                PickerItem {
-                    branch,
-                    remote_url,
-                    ..PickerItem::from_path(path)
-                }
-            })
-            .collect();
+        let items = super::repo_items(available_repos);
         let mut picker = FuzzyPicker::new(
             "Add repos  TAB=toggle  ENTER=confirm  ESC=cancel",
             items,
@@ -67,6 +60,8 @@ impl AddState {
             picked_branch: None,
             recent_branches: vec![],
             progress: vec![],
+            report: SyncReport::empty(),
+            log_view: LogView::new(),
             error: None,
         }
     }
@@ -92,6 +87,14 @@ impl AddState {
                 })
             }
         }
+    }
+
+    /// Rebuild the repo picker from a rescanned repo list (already minus the
+    /// repos in the space), keeping the user's place (see
+    /// `FuzzyPicker::replace_items`). Returns how many toggled repos are no
+    /// longer in the list.
+    pub fn replace_repo_list(&mut self, repos: Vec<PathBuf>) -> usize {
+        self.picker.replace_items(super::repo_items(repos))
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
@@ -122,6 +125,7 @@ impl AddState {
                 self.selected_repos = confirmed;
                 self.error = None;
                 self.progress.clear();
+                self.report = SyncReport::new(&self.selected_repos);
                 self.stage = AddStage::Syncing;
                 ScreenAction::ExecuteSyncFlow(self.selected_repos.clone())
             }
@@ -141,6 +145,9 @@ impl AddState {
                 self.picker.cycle_scope();
                 ScreenAction::Continue
             }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                ScreenAction::RescanRepoList
+            }
             _ => {
                 if let Some(req) = crate::tui::app::key_to_input_request(&key) {
                     self.picker.input.handle(req);
@@ -151,12 +158,20 @@ impl AddState {
         }
     }
 
+    /// The sync report; mirrors `CreateState::handle_syncing`.
     fn handle_syncing(&mut self, key: KeyEvent) -> ScreenAction {
-        if key.code == KeyCode::Esc {
-            self.progress.clear();
-            self.stage = AddStage::PickRepos;
+        match key.code {
+            KeyCode::Esc => {
+                self.progress.clear();
+                self.stage = AddStage::PickRepos;
+                ScreenAction::Continue
+            }
+            KeyCode::Enter if self.report.done => ScreenAction::ContinueFromSyncReport,
+            _ => {
+                self.report.handle_key(key);
+                ScreenAction::Continue
+            }
         }
-        ScreenAction::Continue
     }
 
     fn handle_branch_strategy(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
@@ -344,7 +359,10 @@ impl AddState {
                     ScreenAction::Back
                 }
             }
-            _ => ScreenAction::Continue,
+            _ => {
+                self.log_view.handle_key(key, self.progress.len());
+                ScreenAction::Continue
+            }
         }
     }
 }

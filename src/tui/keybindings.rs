@@ -65,11 +65,11 @@ const WORKSPACE_PANE: BindingGroup = BindingGroup {
         },
         Binding {
             key: "r",
-            desc: "Refresh repos",
+            desc: "Rescan repo list",
         },
         Binding {
             key: "/",
-            desc: "Search repos",
+            desc: "Filter spaces",
         },
         Binding {
             key: "S",
@@ -98,6 +98,10 @@ const REPO_PANE: BindingGroup = BindingGroup {
             desc: "Stage / unstage file",
         },
         Binding {
+            key: "/",
+            desc: "Search repos",
+        },
+        Binding {
             key: "S",
             desc: "Stage all unstaged",
         },
@@ -112,6 +116,24 @@ const REPO_PANE: BindingGroup = BindingGroup {
         Binding {
             key: "G",
             desc: "Git operations",
+        },
+    ],
+};
+
+const REPO_PICKER: BindingGroup = BindingGroup {
+    name: "Repo Picker",
+    bindings: &[
+        Binding {
+            key: "Tab",
+            desc: "Toggle repo",
+        },
+        Binding {
+            key: "Ctrl-S",
+            desc: "Cycle scope",
+        },
+        Binding {
+            key: "Ctrl-R",
+            desc: "Rescan repo list",
         },
     ],
 };
@@ -188,6 +210,32 @@ const DIFF_VIEWER: BindingGroup = BindingGroup {
     ],
 };
 
+const SYNC_REPORT: BindingGroup = BindingGroup {
+    name: "Sync Report",
+    bindings: &[
+        Binding {
+            key: "\u{2191}\u{2193}/jk",
+            desc: "Select repo (once done)",
+        },
+        Binding {
+            key: "PgUp/PgDn",
+            desc: "Page by 10 rows",
+        },
+        Binding {
+            key: "Home/End",
+            desc: "First / last repo",
+        },
+        Binding {
+            key: "Enter",
+            desc: "Continue to branch picker (once done)",
+        },
+        Binding {
+            key: "Esc",
+            desc: "Cancel / back to repo picker",
+        },
+    ],
+};
+
 const GENERAL: BindingGroup = BindingGroup {
     name: "General",
     bindings: &[
@@ -208,12 +256,14 @@ const GENERAL: BindingGroup = BindingGroup {
 
 /// All binding groups — consumed by the help overlay.
 pub fn all_groups() -> &'static [BindingGroup] {
-    static GROUPS: [BindingGroup; 6] = [
+    static GROUPS: [BindingGroup; 8] = [
         NAVIGATION,
         WORKSPACE_PANE,
         REPO_PANE,
+        REPO_PICKER,
         GIT_OPS,
         DIFF_VIEWER,
+        SYNC_REPORT,
         GENERAL,
     ];
     &GROUPS
@@ -245,11 +295,11 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
         },
         Binding {
             key: "r",
-            desc: "refresh",
+            desc: "rescan",
         },
         Binding {
             key: "/",
-            desc: "search",
+            desc: "filter",
         },
         Binding {
             key: "S",
@@ -264,7 +314,7 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
             desc: "quit",
         },
     ];
-    static RIGHT: [Binding; 10] = [
+    static RIGHT: [Binding; 11] = [
         Binding {
             key: "enter",
             desc: "expand/diff",
@@ -296,6 +346,10 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
         Binding {
             key: "G",
             desc: "git ops",
+        },
+        Binding {
+            key: "/",
+            desc: "search",
         },
         Binding {
             key: "?",
