@@ -5752,4 +5752,73 @@ mod sync_report_tests {
         );
         assert!(max_rendered_width(&rendered) <= 50);
     }
+
+    #[test]
+    fn minimum_height_dialog_marks_cut_pane_lines_for_one_repo() {
+        // A 12-row terminal clamps the dialog to its 10-row minimum: inner 8,
+        // body 5. One failing repo needs one list row, so the two rows the
+        // list cannot use go to the pane, which shows the all-failed notice,
+        // the header, and the marker for everything it had to cut (the
+        // status line and the five stderr lines).
+        let mut app = test_app(vec![], vec![]);
+        let mut report = SyncReport::new(&[PathBuf::from("/r/a")]);
+        report.finished(0, failed_outcome("err-1\nerr-2\nerr-3\nerr-4\nerr-5\n"));
+        report.finish();
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+
+        let rendered = render_text(&app, 100, 12);
+        for needle in [
+            "Nothing was fetched. You can still continue;",
+            "a  /r/a",
+            "\u{2026} 6 more lines",
+            "ENTER continue anyway",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "a pane with cut lines must show {:?}, got:\n{}",
+                needle,
+                rendered
+            );
+        }
+        // The list row's DETAIL column shows the first stderr line; the
+        // second appears only in the pane.
+        assert!(
+            !rendered.contains("err-2"),
+            "the stderr lines were cut from the pane:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn minimum_height_dialog_keeps_status_line_for_two_repos() {
+        // Two repos leave one spare list row for the pane: the header, the
+        // status line, then the marker for the five stderr lines.
+        let mut app = test_app(vec![], vec![]);
+        let mut report = SyncReport::new(&[PathBuf::from("/r/a"), PathBuf::from("/r/b")]);
+        report.finished(0, failed_outcome("err-1\nerr-2\nerr-3\nerr-4\nerr-5\n"));
+        report.finished(1, ok_outcome());
+        report.finish();
+        assert_eq!(report.cursor, 0);
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+
+        let rendered = render_text(&app, 100, 12);
+        for needle in [
+            "a  /r/a",
+            "fetch failed (git exit 128) \u{b7} branch picker will use local refs",
+            "\u{2026} 5 more lines",
+            "ENTER continue \u{b7} ESC back",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "a pane with cut lines must show {:?}, got:\n{}",
+                needle,
+                rendered
+            );
+        }
+        assert!(
+            !rendered.contains("err-2"),
+            "the stderr lines were cut from the pane:\n{}",
+            rendered
+        );
+    }
 }

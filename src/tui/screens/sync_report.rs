@@ -58,12 +58,12 @@ impl PaneLine {
     }
 }
 
-/// The detail pane's lines plus how many leading lines survive truncation:
-/// the all-failed notice, the `<name>  <path>` header and the status line.
+/// The detail pane's lines, wrapped, in priority order: the all-failed
+/// notice when present, the `<name>  <path>` header, the status line, then
+/// the skips or git's stderr. `fit_pane` cuts from the end.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneContent {
     pub lines: Vec<PaneLine>,
-    pub mandatory: usize,
 }
 
 impl SyncRow {
@@ -122,7 +122,7 @@ impl SyncRow {
                     (plain, dim)
                 }
                 FetchOutcome::Failed { exit_code, stderr } => (
-                    first_stderr_line(stderr).unwrap_or_else(|| exit_label(*exit_code)),
+                    first_stderr_line(stderr).unwrap_or_else(|| exit_label(*exit_code, stderr)),
                     String::new(),
                 ),
                 FetchOutcome::TimedOut { after, .. } => (
@@ -171,7 +171,7 @@ impl SyncRow {
                 FetchOutcome::Failed { exit_code, stderr } => {
                     lines.push(PaneLine::plain(format!(
                         "fetch failed ({}) \u{b7} branch picker will use local refs",
-                        exit_label(*exit_code)
+                        exit_label(*exit_code, stderr)
                     )));
                     lines.extend(stderr.lines().map(PaneLine::plain));
                 }
@@ -188,10 +188,20 @@ impl SyncRow {
     }
 }
 
-fn exit_label(exit_code: Option<i32>) -> String {
+/// Marker the worker puts at the start of `stderr` when `git` could not be
+/// started at all (repo directory gone, git not on `PATH`).
+const SPAWN_FAILURE_PREFIX: &str = "failed to spawn git";
+
+/// How the fetch ended, for the status line. A missing exit code is not
+/// evidence of a signal: the worker also reports `None` when git could not
+/// be started, when waiting for it failed, and for a cancelled sync. Only the
+/// spawn failure is recognisable from `stderr`; every other `None` is
+/// reported as what it is, an exit code the worker does not have.
+fn exit_label(exit_code: Option<i32>, stderr: &str) -> String {
     match exit_code {
         Some(code) => format!("git exit {}", code),
-        None => "git stopped by a signal".to_string(),
+        None if stderr.starts_with(SPAWN_FAILURE_PREFIX) => "git did not start".to_string(),
+        None => "no exit code".to_string(),
     }
 }
 
@@ -393,28 +403,24 @@ impl SyncReport {
     /// The detail pane for the highlighted row, wrapped to `width` columns.
     pub fn pane(&self, width: usize) -> PaneContent {
         let mut raw: Vec<PaneLine> = vec![];
-        let mut mandatory_raw = 0;
         if self.all_failed() {
             raw.extend(Self::notice_lines().iter().map(|l| PaneLine::plain(*l)));
-            mandatory_raw += 2;
         }
         if let Some(row) = self.rows.get(self.cursor) {
             raw.extend(row.pane_lines());
-            mandatory_raw += 2; // header and status line
         }
-        let mut lines = vec![];
-        let mut mandatory = 0;
-        for (i, line) in raw.into_iter().enumerate() {
-            let wrapped = wrap_line(&line.text, width);
-            if i < mandatory_raw {
-                mandatory += wrapped.len();
-            }
-            lines.extend(wrapped.into_iter().map(|text| PaneLine {
-                text,
-                dim: line.dim,
-            }));
-        }
-        PaneContent { lines, mandatory }
+        let lines = raw
+            .into_iter()
+            .flat_map(|line| {
+                wrap_line(&line.text, width)
+                    .into_iter()
+                    .map(move |text| PaneLine {
+                        text,
+                        dim: line.dim,
+                    })
+            })
+            .collect();
+        PaneContent { lines }
     }
 
     /// The footer for `width` columns. Running: `ESC cancel`. Done: the key
@@ -503,7 +509,11 @@ impl SyncReport {
 /// dialog's height cap the content fits and each part gets what it needs.
 /// At the cap the list gets `MIN_LIST_ROWS` first; the pane takes what its
 /// content needs up to half of the inner height; the list gets the rest, and
-/// any rows it cannot use (fewer repos than rows) go back to the pane.
+/// any rows it cannot use (fewer repos than rows, the floor included) go
+/// back to the pane. At the 10-row minimum dialog (inner 8) that gives a
+/// one-repo report a 4-row pane and a two-repo report a 3-row pane: room for
+/// the header, the status line and the `… N more lines` marker, or, when
+/// every fetch failed, for the two-line notice, the header and the marker.
 /// Returns `(list, pane)`.
 pub fn report_layout(inner_height: usize, repos: usize, pane_need: usize) -> (usize, usize) {
     // Footer, blank separator and rule.
@@ -517,34 +527,36 @@ pub fn report_layout(inner_height: usize, repos: usize, pane_need: usize) -> (us
     }
     let mut pane = pane_need.min(inner_height / 2).min(body - list_min);
     let mut list = body - pane;
-    let list_use = repos.max(list_min);
-    if list > list_use {
-        let give = (list - list_use).min(pane_need - pane);
+    if list > repos {
+        let give = (list - repos).min(pane_need - pane);
         pane += give;
         list -= give;
     }
     (list, pane)
 }
 
-/// Fit the pane into `rows`: keep the mandatory lines, then as many following
-/// lines as fit, ending with a dimmed `… N more lines`.
+/// Fit the pane into `rows`. When everything fits the lines are returned as
+/// they are. Otherwise the last row is always a dimmed `… N more lines`, with
+/// `N` the number of lines not on screen, and the rows above it are the
+/// leading lines in order: the all-failed notice, the header, the status
+/// line, then as many following lines as fit. The marker is never dropped
+/// to make room for a line, so a pane shorter than its notice, header and
+/// status line loses those from the bottom up: with exactly the header and
+/// status rows the marker takes the status row, and a single row shows only
+/// the marker.
 pub fn fit_pane(content: &PaneContent, rows: usize) -> Vec<PaneLine> {
     let total = content.lines.len();
     if total <= rows {
         return content.lines.clone();
     }
-    let mandatory = content.mandatory.min(rows);
-    let mut out: Vec<PaneLine> = content.lines[..mandatory].to_vec();
-    let room = rows - mandatory;
-    if room == 0 {
-        return out;
+    if rows == 0 {
+        return vec![];
     }
-    let following = &content.lines[mandatory..];
-    let shown = room - 1;
-    out.extend(following[..shown].iter().cloned());
+    let shown = rows - 1;
+    let mut out: Vec<PaneLine> = content.lines[..shown].to_vec();
     out.push(PaneLine::dim(format!(
         "\u{2026} {} more lines",
-        following.len() - shown
+        total - shown
     )));
     out
 }
@@ -781,7 +793,6 @@ mod tests {
             pane.lines[2],
             PaneLine::dim("skipped main: checked out in a worktree at /w/x")
         );
-        assert_eq!(pane.mandatory, 2);
 
         r.cursor = 1;
         let pane = r.pane(200);
@@ -811,11 +822,10 @@ mod tests {
         assert_eq!(pane.lines[0].text, SyncReport::notice_lines()[0]);
         assert_eq!(pane.lines[1].text, SyncReport::notice_lines()[1]);
         assert_eq!(pane.lines[2].text, "repo0  /r/repo0");
-        assert_eq!(pane.mandatory, 4);
     }
 
     #[test]
-    fn pane_wraps_long_lines_and_counts_wrapped_mandatory_lines() {
+    fn pane_wraps_long_lines() {
         let mut r = report(2);
         r.finished(
             0,
@@ -837,24 +847,27 @@ mod tests {
             "fatal: could not read Username for 'https://github.com': terminal"
         );
         assert_eq!(pane.lines[3].text, "prompts disabled");
-        assert_eq!(
-            pane.mandatory, 2,
-            "header and status line fit unwrapped at 66"
-        );
         let narrow = r.pane(20);
         assert!(
-            narrow.mandatory > 2,
-            "a wrapped status line keeps all its parts"
+            narrow.lines.len() > pane.lines.len(),
+            "a narrower pane wraps into more lines"
+        );
+        assert!(
+            narrow
+                .lines
+                .iter()
+                .all(|l| UnicodeWidthStr::width(l.text.as_str()) <= 20),
+            "every pane line must fit the width: {:?}",
+            narrow.lines
         );
     }
 
     #[test]
-    fn fit_pane_keeps_mandatory_lines_and_reports_hidden_count() {
+    fn fit_pane_keeps_leading_lines_and_reports_hidden_count() {
         let content = PaneContent {
             lines: (0..7)
                 .map(|i| PaneLine::plain(format!("line {}", i)))
                 .collect(),
-            mandatory: 2,
         };
         let fitted = fit_pane(&content, 4);
         assert_eq!(fitted.len(), 4);
@@ -863,14 +876,92 @@ mod tests {
         assert_eq!(fitted[2].text, "line 2");
         assert_eq!(fitted[3], PaneLine::dim("\u{2026} 4 more lines"));
         assert_eq!(fit_pane(&content, 7).len(), 7, "everything fits untouched");
-        let tight = fit_pane(&content, 2);
-        assert_eq!(
-            tight.len(),
-            2,
-            "no room for the marker: only mandatory lines"
-        );
         let one_spare = fit_pane(&content, 3);
         assert_eq!(one_spare[2], PaneLine::dim("\u{2026} 5 more lines"));
+    }
+
+    #[test]
+    fn fit_pane_always_ends_with_the_marker_when_lines_are_cut() {
+        let content = PaneContent {
+            lines: (0..7)
+                .map(|i| PaneLine::plain(format!("line {}", i)))
+                .collect(),
+        };
+        // Exactly the header and status rows: the marker takes the status row.
+        let tight = fit_pane(&content, 2);
+        assert_eq!(tight.len(), 2);
+        assert_eq!(tight[0].text, "line 0", "the header is kept");
+        assert_eq!(tight[1], PaneLine::dim("\u{2026} 6 more lines"));
+        // A single row shows only the marker.
+        assert_eq!(
+            fit_pane(&content, 1),
+            vec![PaneLine::dim("\u{2026} 7 more lines")]
+        );
+        assert!(fit_pane(&content, 0).is_empty());
+        // The count always equals the lines not on screen.
+        for rows in 1..7 {
+            let fitted = fit_pane(&content, rows);
+            assert_eq!(fitted.len(), rows);
+            assert_eq!(
+                fitted[rows - 1],
+                PaneLine::dim(format!("\u{2026} {} more lines", 7 - (rows - 1))),
+                "rows {}",
+                rows
+            );
+        }
+    }
+
+    #[test]
+    fn exit_label_only_claims_what_the_outcome_proves() {
+        fn status_line(exit_code: Option<i32>, stderr: &str) -> String {
+            let mut r = report(1);
+            r.finished(
+                0,
+                SyncOutcome {
+                    fetch: FetchOutcome::Failed {
+                        exit_code,
+                        stderr: stderr.to_string(),
+                    },
+                    forwarded: vec![],
+                    skipped: vec![],
+                },
+            );
+            r.rows[0].pane_lines()[1].text.clone()
+        }
+        let suffix = " \u{b7} branch picker will use local refs";
+        assert_eq!(
+            status_line(Some(128), "fatal: x"),
+            format!("fetch failed (git exit 128){}", suffix)
+        );
+        assert_eq!(
+            status_line(
+                None,
+                "failed to spawn git: No such file or directory (os error 2)"
+            ),
+            format!("fetch failed (git did not start){}", suffix)
+        );
+        for stderr in ["", "sync cancelled", "could not wait for git\n", "fatal: x"] {
+            assert_eq!(
+                status_line(None, stderr),
+                format!("fetch failed (no exit code){}", suffix),
+                "stderr {:?}",
+                stderr
+            );
+        }
+        // The DETAIL column falls back to the same label when git wrote nothing.
+        let mut r = report(1);
+        r.finished(
+            0,
+            SyncOutcome {
+                fetch: FetchOutcome::Failed {
+                    exit_code: None,
+                    stderr: String::new(),
+                },
+                forwarded: vec![],
+                skipped: vec![],
+            },
+        );
+        assert_eq!(r.rows[0].detail().0, "no exit code");
     }
 
     #[test]
@@ -966,8 +1057,34 @@ mod tests {
         // At the cap the pane takes up to half the inner height.
         assert_eq!(report_layout(17, 20, 12), (6, 8));
         // Few repos: rows the list cannot use go to the pane.
-        assert_eq!(report_layout(17, 2, 12), (3, 11));
+        assert_eq!(report_layout(17, 2, 12), (2, 12));
         assert_eq!(report_layout(2, 5, 5), (0, 0));
+    }
+
+    #[test]
+    fn report_layout_gives_unused_list_rows_to_the_pane_at_the_minimum_height() {
+        // A 12-row terminal clamps the dialog to 10 rows: inner 8, body 5.
+        // The pane needs 9 lines (notice, header, status, five stderr lines).
+        assert_eq!(
+            report_layout(8, 1, 9),
+            (1, 4),
+            "one repo: two spare list rows"
+        );
+        assert_eq!(
+            report_layout(8, 2, 9),
+            (2, 3),
+            "two repos: one spare list row"
+        );
+        assert_eq!(
+            report_layout(8, 3, 9),
+            (3, 2),
+            "a full list keeps its floor"
+        );
+        assert_eq!(
+            report_layout(8, 5, 9),
+            (3, 2),
+            "a longer list scrolls instead"
+        );
     }
 
     #[test]
