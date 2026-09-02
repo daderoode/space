@@ -82,8 +82,11 @@ pub enum ScreenAction {
     CdAndQuit(PathBuf),
     /// Execute worktree creation/addition.
     ExecuteWorktreeFlow(WorktreeParams),
-    /// Fetch + fast-forward the given repos, then transition to branch picker.
+    /// Fetch + fast-forward the given repos, reporting into the sync report.
     ExecuteSyncFlow(Vec<std::path::PathBuf>),
+    /// Enter on a finished sync report: load recent branches and move to the
+    /// branch picker.
+    ContinueFromSyncReport,
     /// Run a git operation on a single repo via the background git-ops worker.
     ExecuteGitOp { repo_path: PathBuf, op: GitOp },
     /// Commit the staged changes of a single repo (synchronous local op).

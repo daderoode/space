@@ -1,4 +1,5 @@
 use crate::core::workspace::BranchStrategy;
+use crate::tui::screens::sync_report::{LogView, SyncReport};
 use crate::tui::widgets::fuzzy_picker::{FuzzyPicker, PickerItem};
 use std::path::PathBuf;
 use tui_input::Input;
@@ -25,6 +26,8 @@ pub struct CreateState {
     pub picked_branch: Option<String>, // branch name chosen via branch_picker
     pub recent_branches: Vec<crate::core::git::BranchInfo>,
     pub progress: Vec<String>, // log lines shown during Creating stage
+    pub report: SyncReport,    // per-repo sync outcomes shown during Syncing stage
+    pub log_view: LogView,     // scroll state of the Creating log
     pub error: Option<String>,
 }
 
@@ -76,6 +79,8 @@ impl CreateState {
             picked_branch: None,
             recent_branches: vec![],
             progress: vec![],
+            report: SyncReport::empty(),
+            log_view: LogView::new(),
             error: None,
         }
     }
@@ -122,6 +127,7 @@ impl CreateState {
                 self.selected_repos = confirmed;
                 self.error = None;
                 self.progress.clear();
+                self.report = SyncReport::new(&self.selected_repos);
                 self.stage = CreateStage::Syncing;
                 ScreenAction::ExecuteSyncFlow(self.selected_repos.clone())
             }
@@ -151,17 +157,28 @@ impl CreateState {
         }
     }
 
+    /// The sync report. Esc always returns to PickRepos with the picker's
+    /// selection and query intact (running: cancels the worker at its next
+    /// boundary). Enter continues only once the run is done; the cursor keys
+    /// are handled by the report, which ignores them until then.
     fn handle_syncing(
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
     ) -> crate::tui::actions::ScreenAction {
         use crate::tui::actions::ScreenAction;
         use ratatui::crossterm::event::KeyCode;
-        if key.code == KeyCode::Esc {
-            self.progress.clear();
-            self.stage = CreateStage::PickRepos;
+        match key.code {
+            KeyCode::Esc => {
+                self.progress.clear();
+                self.stage = CreateStage::PickRepos;
+                ScreenAction::Continue
+            }
+            KeyCode::Enter if self.report.done => ScreenAction::ContinueFromSyncReport,
+            _ => {
+                self.report.handle_key(key);
+                ScreenAction::Continue
+            }
         }
-        ScreenAction::Continue
     }
 
     fn handle_enter_name(
@@ -408,7 +425,10 @@ impl CreateState {
                     ScreenAction::Back
                 }
             }
-            _ => ScreenAction::Continue,
+            _ => {
+                self.log_view.handle_key(key, self.progress.len());
+                ScreenAction::Continue
+            }
         }
     }
 

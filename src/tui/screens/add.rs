@@ -1,5 +1,6 @@
 use crate::core::workspace::BranchStrategy;
 use crate::tui::actions::{ScreenAction, ScreenContext, WorktreeParams};
+use crate::tui::screens::sync_report::{LogView, SyncReport};
 use crate::tui::widgets::fuzzy_picker::{FuzzyPicker, PickerItem};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
@@ -26,6 +27,8 @@ pub struct AddState {
     pub picked_branch: Option<String>,
     pub recent_branches: Vec<crate::core::git::BranchInfo>,
     pub progress: Vec<String>,
+    pub report: SyncReport, // per-repo sync outcomes shown during Syncing stage
+    pub log_view: LogView,  // scroll state of the Creating log
     pub error: Option<String>,
 }
 
@@ -67,6 +70,8 @@ impl AddState {
             picked_branch: None,
             recent_branches: vec![],
             progress: vec![],
+            report: SyncReport::empty(),
+            log_view: LogView::new(),
             error: None,
         }
     }
@@ -122,6 +127,7 @@ impl AddState {
                 self.selected_repos = confirmed;
                 self.error = None;
                 self.progress.clear();
+                self.report = SyncReport::new(&self.selected_repos);
                 self.stage = AddStage::Syncing;
                 ScreenAction::ExecuteSyncFlow(self.selected_repos.clone())
             }
@@ -151,12 +157,20 @@ impl AddState {
         }
     }
 
+    /// The sync report; mirrors `CreateState::handle_syncing`.
     fn handle_syncing(&mut self, key: KeyEvent) -> ScreenAction {
-        if key.code == KeyCode::Esc {
-            self.progress.clear();
-            self.stage = AddStage::PickRepos;
+        match key.code {
+            KeyCode::Esc => {
+                self.progress.clear();
+                self.stage = AddStage::PickRepos;
+                ScreenAction::Continue
+            }
+            KeyCode::Enter if self.report.done => ScreenAction::ContinueFromSyncReport,
+            _ => {
+                self.report.handle_key(key);
+                ScreenAction::Continue
+            }
         }
-        ScreenAction::Continue
     }
 
     fn handle_branch_strategy(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
@@ -344,7 +358,10 @@ impl AddState {
                     ScreenAction::Back
                 }
             }
-            _ => ScreenAction::Continue,
+            _ => {
+                self.log_view.handle_key(key, self.progress.len());
+                ScreenAction::Continue
+            }
         }
     }
 }
