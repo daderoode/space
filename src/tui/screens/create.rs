@@ -42,19 +42,24 @@ impl std::fmt::Debug for CreateState {
     }
 }
 
+/// Picker rows for repo paths, each with its branch and remote read live.
+fn repo_items(repos: Vec<PathBuf>) -> Vec<PickerItem> {
+    repos
+        .into_iter()
+        .map(|path| {
+            let (branch, remote_url) = crate::core::git::repo_display_info(&path);
+            PickerItem {
+                branch,
+                remote_url,
+                ..PickerItem::from_path(path)
+            }
+        })
+        .collect()
+}
+
 impl CreateState {
     pub fn new(all_repos: Vec<PathBuf>, initial_queries: Vec<String>) -> Self {
-        let items: Vec<PickerItem> = all_repos
-            .into_iter()
-            .map(|path| {
-                let (branch, remote_url) = crate::core::git::repo_display_info(&path);
-                PickerItem {
-                    branch,
-                    remote_url,
-                    ..PickerItem::from_path(path)
-                }
-            })
-            .collect();
+        let items = repo_items(all_repos);
         let mut picker = FuzzyPicker::new(
             "Select repos  TAB=toggle  ENTER=confirm  ESC=cancel",
             items,
@@ -78,6 +83,13 @@ impl CreateState {
             progress: vec![],
             error: None,
         }
+    }
+
+    /// Rebuild the repo picker from a rescanned repo list, keeping the user's
+    /// place (see `FuzzyPicker::replace_items`). Returns how many toggled repos
+    /// are no longer in the list.
+    pub fn replace_repo_list(&mut self, repos: Vec<PathBuf>) -> usize {
+        self.picker.replace_items(repo_items(repos))
     }
 
     pub fn handle_key(
@@ -140,6 +152,9 @@ impl CreateState {
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.picker.cycle_scope();
                 ScreenAction::Continue
+            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                ScreenAction::RescanRepoList
             }
             _ => {
                 if let Some(req) = crate::tui::app::key_to_input_request(&key) {

@@ -4488,3 +4488,306 @@ mod gitops_tests {
         );
     }
 }
+
+// ---- 1.1 Rescan the repo list inside the picker ----
+
+mod rescan_tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+    use space::tui::actions::StatusKind;
+    use std::collections::BTreeSet;
+    use std::sync::{LazyLock, Mutex};
+
+    /// The rescan saves the repo cache to `SpaceConfig::cache_path()`, which
+    /// reads SPACE_CONFIG_DIR. Point it at the TestEnv so the tests never touch
+    /// the real user cache, and serialise them because the env var is
+    /// process-global (same pattern as mcp_test.rs).
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct EnvGuard;
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::remove_var("SPACE_CONFIG_DIR") };
+        }
+    }
+
+    fn with_config_dir<F: FnOnce(&TestEnv)>(f: F) {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let env = TestEnv::new();
+        unsafe { std::env::set_var("SPACE_CONFIG_DIR", &env.config_dir) };
+        let _guard = EnvGuard;
+        f(&env);
+    }
+
+    fn ctrl_r() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)
+    }
+
+    fn item_paths(picker: &space::tui::widgets::fuzzy_picker::FuzzyPicker) -> BTreeSet<PathBuf> {
+        picker
+            .all_items
+            .iter()
+            .map(|i| i.full_path.clone())
+            .collect()
+    }
+
+    fn toggled_paths(picker: &space::tui::widgets::fuzzy_picker::FuzzyPicker) -> BTreeSet<PathBuf> {
+        picker
+            .toggled
+            .iter()
+            .map(|&i| picker.all_items[i].full_path.clone())
+            .collect()
+    }
+
+    /// Open the create flow and land in PickRepos with the given space name.
+    fn open_create_picker(app: &mut App, name: &str) {
+        app.handle_key(key(KeyCode::Char('c')));
+        for ch in name.chars() {
+            app.handle_key(key(KeyCode::Char(ch)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(
+                st.stage,
+                space::tui::screens::create::CreateStage::PickRepos
+            ),
+            _ => panic!("expected CreateWorkspace screen"),
+        }
+    }
+
+    #[test]
+    fn ctrl_r_in_create_picker_shows_new_repo_and_keeps_toggle_and_query() {
+        with_config_dir(|env| {
+            let alpha = env.create_repo("alpha");
+            let beta = env.create_repo("beta");
+            let config = config_from_env(env);
+            let mut app = test_app_with_config(config, vec![], vec![alpha.clone(), beta.clone()]);
+            app.cursor_row = 3;
+
+            open_create_picker(&mut app, "ws");
+            // Toggle the top row (alpha, cache order), then type a query that
+            // still matches every repo in this test.
+            app.handle_key(key(KeyCode::Tab));
+            app.handle_key(key(KeyCode::Char('a')));
+
+            let gamma = env.create_repo("gamma");
+            app.handle_key(ctrl_r());
+
+            let Screen::CreateWorkspace(st) = &app.screen else {
+                panic!("Ctrl-R must keep the create flow open");
+            };
+            assert_eq!(
+                st.stage,
+                space::tui::screens::create::CreateStage::PickRepos
+            );
+            assert_eq!(
+                item_paths(&st.picker),
+                BTreeSet::from([alpha.clone(), beta.clone(), gamma.clone()]),
+                "the new repo must appear after the rescan"
+            );
+            assert_eq!(st.picker.query(), "a", "the query must be intact");
+            assert_eq!(
+                toggled_paths(&st.picker),
+                BTreeSet::from([alpha.clone()]),
+                "the toggle must survive the rescan"
+            );
+            assert!(
+                st.picker
+                    .filtered
+                    .iter()
+                    .any(|&i| st.picker.all_items[i].full_path == gamma),
+                "the new repo must be visible under the kept query"
+            );
+            assert_eq!(
+                app.status_message.as_deref(),
+                Some("Rescanned: 3 repos, 1 new")
+            );
+            assert_eq!(app.status_kind, StatusKind::Success);
+            assert_eq!(
+                app.repos_cache.iter().cloned().collect::<BTreeSet<_>>(),
+                BTreeSet::from([alpha, beta, gamma]),
+                "the app repo list must be replaced by the rescan"
+            );
+            assert_eq!(
+                app.cursor_row, 3,
+                "a picker rescan must not touch the dashboard cursor"
+            );
+            assert!(
+                env.config_dir.join("repos.cache").exists(),
+                "the rescan must save the cache"
+            );
+        });
+    }
+
+    #[test]
+    fn ctrl_r_drops_toggle_for_removed_repo_with_warning() {
+        with_config_dir(|env| {
+            let alpha = env.create_repo("alpha");
+            let beta = env.create_repo("beta");
+            let config = config_from_env(env);
+            let mut app = test_app_with_config(config, vec![], vec![alpha.clone(), beta.clone()]);
+
+            open_create_picker(&mut app, "ws");
+            app.handle_key(key(KeyCode::Tab)); // toggles alpha
+
+            std::fs::remove_dir_all(&alpha).unwrap();
+            app.handle_key(ctrl_r());
+
+            let Screen::CreateWorkspace(st) = &app.screen else {
+                panic!("Ctrl-R must keep the create flow open");
+            };
+            assert_eq!(item_paths(&st.picker), BTreeSet::from([beta]));
+            assert!(
+                st.picker.toggled.is_empty(),
+                "a toggled repo that is gone must be dropped"
+            );
+            assert_eq!(
+                app.status_message.as_deref(),
+                Some("Rescanned: 1 repo, 0 new, 1 selected repo no longer found")
+            );
+            assert_eq!(app.status_kind, StatusKind::Warning);
+        });
+    }
+
+    #[test]
+    fn ctrl_r_in_add_picker_keeps_space_repos_excluded() {
+        with_config_dir(|env| {
+            let alpha = env.create_repo("alpha");
+            let beta = env.create_repo("beta");
+            let config = config_from_env(env);
+            let workspaces = vec![Workspace {
+                name: "ws".to_string(),
+                path: env.workspaces_dir.join("ws"),
+                repos: vec![WorkspaceRepo {
+                    name: "alpha".to_string(),
+                    path: env.workspaces_dir.join("ws").join("alpha"),
+                    branch: "main".to_string(),
+                    status: Default::default(),
+                    ahead: 0,
+                    behind: 0,
+                }],
+            }];
+            let mut app =
+                test_app_with_config(config, workspaces, vec![alpha.clone(), beta.clone()]);
+
+            app.handle_key(key(KeyCode::Char('a')));
+            match &app.screen {
+                Screen::AddRepos(st) => {
+                    assert_eq!(item_paths(&st.picker), BTreeSet::from([beta.clone()]))
+                }
+                _ => panic!("expected AddRepos screen"),
+            }
+
+            let gamma = env.create_repo("gamma");
+            app.handle_key(ctrl_r());
+
+            let Screen::AddRepos(st) = &app.screen else {
+                panic!("Ctrl-R must keep the add flow open");
+            };
+            assert_eq!(st.stage, space::tui::screens::add::AddStage::PickRepos);
+            assert_eq!(
+                item_paths(&st.picker),
+                BTreeSet::from([beta, gamma]),
+                "repos already in the space must stay excluded; the new repo must appear"
+            );
+            // alpha is still in the repo list; only the picker hides it.
+            assert_eq!(
+                app.status_message.as_deref(),
+                Some("Rescanned: 3 repos, 1 new")
+            );
+            assert_eq!(app.status_kind, StatusKind::Success);
+        });
+    }
+
+    #[test]
+    fn ctrl_r_in_add_picker_leaves_flow_when_space_is_gone() {
+        with_config_dir(|env| {
+            let alpha = env.create_repo("alpha");
+            let config = config_from_env(env);
+            let workspaces = vec![Workspace {
+                name: "ws".to_string(),
+                path: env.workspaces_dir.join("ws"),
+                repos: vec![],
+            }];
+            let mut app = test_app_with_config(config, workspaces, vec![alpha]);
+
+            app.handle_key(key(KeyCode::Char('a')));
+            assert!(matches!(app.screen, Screen::AddRepos(_)));
+
+            // The space disappears while the picker is open.
+            app.workspaces.clear();
+            app.handle_key(ctrl_r());
+
+            assert!(
+                matches!(app.screen, Screen::Dashboard),
+                "a vanished space must leave the add flow"
+            );
+            assert_eq!(
+                app.status_message.as_deref(),
+                Some("Space 'ws' no longer exists")
+            );
+            assert_eq!(app.status_kind, StatusKind::Error);
+        });
+    }
+
+    #[test]
+    fn dashboard_r_reports_rescanned_with_new_count() {
+        with_config_dir(|env| {
+            let alpha = env.create_repo("alpha");
+            let beta = env.create_repo("beta");
+            let config = config_from_env(env);
+            let mut app = test_app_with_config(config, vec![], vec![alpha.clone()]);
+
+            app.handle_key(key(KeyCode::Char('r')));
+
+            assert_eq!(
+                app.repos_cache.iter().cloned().collect::<BTreeSet<_>>(),
+                BTreeSet::from([alpha, beta])
+            );
+            assert_eq!(
+                app.status_message.as_deref(),
+                Some("Rescanned: 2 repos, 1 new")
+            );
+            assert_eq!(app.status_kind, StatusKind::Success);
+        });
+    }
+
+    #[test]
+    fn help_and_status_bar_use_rescan_wording() {
+        let groups = space::tui::keybindings::all_groups();
+        let picker = groups
+            .iter()
+            .find(|g| g.name == "Repo Picker")
+            .expect("help registry must have a Repo Picker group");
+        let rows: Vec<(&str, &str)> = picker.bindings.iter().map(|b| (b.key, b.desc)).collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("Tab", "Toggle repo"),
+                ("Ctrl-S", "Cycle scope"),
+                ("Ctrl-R", "Rescan repo list"),
+            ]
+        );
+        let ws_pane = groups.iter().find(|g| g.name == "Workspace Pane").unwrap();
+        assert!(
+            ws_pane
+                .bindings
+                .iter()
+                .any(|b| b.key == "r" && b.desc == "Rescan repo list"),
+            "dashboard r must read 'Rescan repo list' in the help registry"
+        );
+        let left = space::tui::keybindings::status_bar_bindings(Pane::Left);
+        assert!(
+            left.iter().any(|b| b.key == "r" && b.desc == "rescan"),
+            "status bar must read 'r rescan'"
+        );
+
+        // The help overlay must still render every group with the extra group.
+        // Tall enough for the whole registry: the 24-row clip is item 1.4's.
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        let rendered = render_text(&app, 100, 70);
+        assert!(rendered.contains("Repo Picker"), "got:\n{}", rendered);
+        assert!(rendered.contains("General"), "got:\n{}", rendered);
+    }
+}

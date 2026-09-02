@@ -84,6 +84,9 @@ pub enum ScreenAction {
     ExecuteWorktreeFlow(WorktreeParams),
     /// Fetch + fast-forward the given repos, then transition to branch picker.
     ExecuteSyncFlow(Vec<std::path::PathBuf>),
+    /// Rescan the repo list and rebuild the open repo picker from it
+    /// (Ctrl-R in the PickRepos stage of the create and add flows).
+    RescanRepoList,
     /// Run a git operation on a single repo via the background git-ops worker.
     ExecuteGitOp { repo_path: PathBuf, op: GitOp },
     /// Commit the staged changes of a single repo (synchronous local op).

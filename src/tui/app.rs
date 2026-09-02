@@ -621,6 +621,47 @@ impl App {
         }
     }
 
+    /// Rescan the configured roots, save the cache and replace `repos_cache`.
+    /// Shared by the dashboard `r` and the picker's Ctrl-R; it does nothing
+    /// else, so callers own any cursor or diff-cache resets of their own.
+    pub fn rescan_repo_list(&mut self) -> RescanSummary {
+        let roots = self.config.repos.roots.clone();
+        let depth = self.config.repos.max_depth;
+        let repos = crate::core::repo::find_repos_in(&roots, depth);
+        let _ = crate::core::repo::save_cache(&SpaceConfig::cache_path(), &repos);
+        let previous: std::collections::HashSet<&PathBuf> = self.repos_cache.iter().collect();
+        let new_count = repos.iter().filter(|p| !previous.contains(p)).count();
+        let total = repos.len();
+        self.repos_cache = repos;
+        RescanSummary { total, new_count }
+    }
+
+    /// Ctrl-R inside a repo picker: rescan the repo list and rebuild the open
+    /// picker from it, keeping the user's place. The add flow reapplies its
+    /// exclusion of repos already in the space; if that space is gone the flow
+    /// leaves with an error notice. The dashboard cursor is never touched.
+    fn rescan_open_picker(&mut self) {
+        let summary = self.rescan_repo_list();
+        let missing = match &mut self.screen {
+            Screen::CreateWorkspace(st) => st.replace_repo_list(self.repos_cache.clone()),
+            Screen::AddRepos(st) => {
+                let ws = self.workspaces.iter().find(|w| w.name == st.workspace_name);
+                match ws {
+                    Some(ws) => st.replace_repo_list(addable_repos(&self.repos_cache, ws)),
+                    None => {
+                        let msg = format!("Space '{}' no longer exists", st.workspace_name);
+                        self.screen = Screen::Dashboard;
+                        self.set_status(msg, StatusKind::Error);
+                        return;
+                    }
+                }
+            }
+            _ => return,
+        };
+        let (msg, kind) = rescan_notice(&summary, missing);
+        self.set_status(msg, kind);
+    }
+
     /// Fetch file diffs for all repos in the selected workspace and populate
     /// `repo_file_cache`. Called on explicit refresh (`RefreshRepos`) and when
     /// a repo is expanded (`ToggleRepoExpand`). Not called on workspace navigation
@@ -1085,6 +1126,9 @@ impl App {
                 self.refresh_if_leaving_creating_stage();
                 self.screen = Screen::Dashboard;
                 self.set_status(msg, kind);
+            }
+            ScreenAction::RescanRepoList => {
+                self.rescan_open_picker();
             }
             ScreenAction::CdAndQuit(path) => {
                 self.space_cd_target = Some(path);
@@ -1659,18 +1703,12 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             None
         }
         Message::RefreshRepos => {
-            let roots = app.config.repos.roots.clone();
-            let depth = app.config.repos.max_depth;
-            let repos = crate::core::repo::find_repos_in(&roots, depth);
-            let _ = crate::core::repo::save_cache(&SpaceConfig::cache_path(), &repos);
-            app.repos_cache = repos;
+            let summary = app.rescan_repo_list();
             app.cursor_row = 0;
             app.expanded_repos.clear();
             app.refresh_file_diff_cache();
-            app.set_status(
-                format!("Refreshed: {} repos found", app.repos_cache.len()),
-                StatusKind::Success,
-            );
+            let (msg, kind) = rescan_notice(&summary, 0);
+            app.set_status(msg, kind);
             None
         }
         Message::GoToWorkspace => {
@@ -1694,20 +1732,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
         }
         Message::StartAdd => {
             if let Some(ws) = app.selected_workspace() {
-                let existing: std::collections::HashSet<_> =
-                    ws.repos.iter().map(|r| r.name.clone()).collect();
-                let available: Vec<_> = app
-                    .repos_cache
-                    .iter()
-                    .filter(|p| {
-                        let name = p
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        !existing.contains(&name)
-                    })
-                    .cloned()
-                    .collect();
+                let available = addable_repos(&app.repos_cache, ws);
                 let state =
                     crate::tui::screens::add::AddState::new(ws.name.clone(), available, vec![]);
                 app.screen = Screen::AddRepos(state);
@@ -2003,6 +2028,56 @@ pub fn run(app: &mut App) -> Result<()> {
     let result = run_loop(&mut terminal, app);
     ratatui::restore();
     result
+}
+
+/// What a rescan of the repo list found, for the status notice.
+pub struct RescanSummary {
+    /// Repos in the rebuilt repo list.
+    pub total: usize,
+    /// Repos present now that were absent from the previous repo list.
+    pub new_count: usize,
+}
+
+/// Notice for a rescan: `Rescanned: 42 repos, 2 new`, with a trailing
+/// `, 1 selected repo no longer found` (kind Warning) when a picker had toggled
+/// repos that the rescan no longer finds.
+fn rescan_notice(summary: &RescanSummary, missing_toggles: usize) -> (String, StatusKind) {
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let mut msg = format!(
+        "Rescanned: {} repo{}, {} new",
+        summary.total,
+        plural(summary.total),
+        summary.new_count
+    );
+    if missing_toggles == 0 {
+        (msg, StatusKind::Success)
+    } else {
+        msg.push_str(&format!(
+            ", {} selected repo{} no longer found",
+            missing_toggles,
+            plural(missing_toggles)
+        ));
+        (msg, StatusKind::Warning)
+    }
+}
+
+/// The repos a space can still add: the repo list minus the repos already in
+/// the space, matched by repo name (so a repo elsewhere that shares a name with
+/// one in the space is hidden too; pre-existing behaviour).
+fn addable_repos(repos: &[PathBuf], ws: &Workspace) -> Vec<PathBuf> {
+    let existing: std::collections::HashSet<&str> =
+        ws.repos.iter().map(|r| r.name.as_str()).collect();
+    repos
+        .iter()
+        .filter(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            !existing.contains(name.as_str())
+        })
+        .cloned()
+        .collect()
 }
 
 /// Build a FuzzyPicker populated with local + remote branches from `repo_path`.

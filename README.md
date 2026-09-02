@@ -65,7 +65,7 @@ files with `s`/`space`, or bulk stage/unstage all files in the selected repo wit
 | `c` | Create a new workspace |
 | `a` | Add repos to selected workspace |
 | `d` | Delete selected workspace |
-| `r` | Refresh repo cache |
+| `r` | Rescan the repo list |
 | `/` | Search all repos |
 | `?` | Open help overlay |
 | `S` | Open config editor |
@@ -85,6 +85,14 @@ files with `s`/`space`, or bulk stage/unstage all files in the selected repo wit
 | `U` | Unstage all staged files in repo |
 | `b` | Switch branch for selected repo |
 | `q` | Quit |
+
+**Key bindings, repo picker** (create and add flows):
+
+| Key | Action |
+|-----|--------|
+| `Tab` | Toggle the highlighted repo |
+| `Ctrl-S` | Cycle the parent-directory scope |
+| `Ctrl-R` | Rescan the repo list without leaving the picker |
 
 Interactive commands (`go`, `create`, `add`, `config`, `rm` without `--force`)
 also launch TUI flows when invoked from the command line.

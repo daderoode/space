@@ -29,23 +29,28 @@ pub struct AddState {
     pub error: Option<String>,
 }
 
+/// Picker rows for repo paths, each with its branch and remote read live.
+fn repo_items(repos: Vec<PathBuf>) -> Vec<PickerItem> {
+    repos
+        .into_iter()
+        .map(|path| {
+            let (branch, remote_url) = crate::core::git::repo_display_info(&path);
+            PickerItem {
+                branch,
+                remote_url,
+                ..PickerItem::from_path(path)
+            }
+        })
+        .collect()
+}
+
 impl AddState {
     pub fn new(
         ws_name: String,
         available_repos: Vec<PathBuf>,
         initial_queries: Vec<String>,
     ) -> Self {
-        let items: Vec<PickerItem> = available_repos
-            .into_iter()
-            .map(|path| {
-                let (branch, remote_url) = crate::core::git::repo_display_info(&path);
-                PickerItem {
-                    branch,
-                    remote_url,
-                    ..PickerItem::from_path(path)
-                }
-            })
-            .collect();
+        let items = repo_items(available_repos);
         let mut picker = FuzzyPicker::new(
             "Add repos  TAB=toggle  ENTER=confirm  ESC=cancel",
             items,
@@ -94,6 +99,14 @@ impl AddState {
         }
     }
 
+    /// Rebuild the repo picker from a rescanned repo list (already minus the
+    /// repos in the space), keeping the user's place (see
+    /// `FuzzyPicker::replace_items`). Returns how many toggled repos are no
+    /// longer in the list.
+    pub fn replace_repo_list(&mut self, repos: Vec<PathBuf>) -> usize {
+        self.picker.replace_items(repo_items(repos))
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
         match self.stage {
             AddStage::PickRepos => self.handle_pick_repos(key),
@@ -140,6 +153,9 @@ impl AddState {
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.picker.cycle_scope();
                 ScreenAction::Continue
+            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                ScreenAction::RescanRepoList
             }
             _ => {
                 if let Some(req) = crate::tui::app::key_to_input_request(&key) {
