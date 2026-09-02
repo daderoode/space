@@ -2319,6 +2319,7 @@ dependencies = [
  "filetime",
  "git2",
  "indicatif",
+ "libc",
  "nucleo",
  "predicates",
  "ratatui 0.30.0",

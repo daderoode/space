@@ -1419,7 +1419,7 @@ fn run_sync_worker(
             .unwrap_or_else(|| "?".to_string());
         let _ = tx.send(SyncProgress::Step(format!("Syncing {}...", repo_name)));
         let result = crate::core::workspace::sync_repo(repo_path);
-        if result.fetch_ok {
+        if result.fetch_ok() {
             if result.forwarded.is_empty() {
                 let _ = tx.send(SyncProgress::Step(format!(
                     "  \u{2713} {} up to date",
