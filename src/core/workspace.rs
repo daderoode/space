@@ -324,12 +324,14 @@ const SYNC_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// with the fixed `SYNC_FETCH_TIMEOUT`. When it does not succeed the outcome
 /// carries the failure and no branch work is attempted; the caller continues
 /// with local refs.
+#[allow(dead_code)] // public API; the TUI worker calls sync_repo_cancellable
 pub fn sync_repo(repo_path: &Path) -> SyncOutcome {
     sync_repo_with_timeout(repo_path, SYNC_FETCH_TIMEOUT)
 }
 
 /// `sync_repo` with an explicit fetch limit. The limit is a parameter so tests
 /// can use a short one; the user-facing value is `SYNC_FETCH_TIMEOUT`.
+#[allow(dead_code)] // public API; the TUI worker calls sync_repo_cancellable
 pub fn sync_repo_with_timeout(repo_path: &Path, timeout: Duration) -> SyncOutcome {
     sync_repo_cancellable(repo_path, timeout, &AtomicBool::new(false))
 }
@@ -1405,7 +1407,10 @@ mod tests {
 
     /// The fetch must give up after the limit and leave no child behind. The
     /// remote is a `file://` origin whose upload-pack is a script that records
-    /// its pid and sleeps, so nothing touches the network.
+    /// its pid and sleeps, so nothing touches the network. The script runs as
+    /// `/bin/sh <script>` rather than as an executable: macOS assesses a
+    /// freshly written executable on its first exec, which can take longer
+    /// than the limit.
     #[test]
     fn sync_repo_times_out_when_remote_never_answers_and_child_is_gone() {
         let (tmp, local) = make_behind_repo();
@@ -1413,28 +1418,21 @@ mod tests {
         let script = tmp.path().join("slow-upload-pack.sh");
         std::fs::write(
             &script,
-            format!(
-                "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
-                pidfile.display()
-            ),
+            format!("echo $$ > '{}'\nexec sleep 30\n", pidfile.display()),
         )
         .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
         let origin_url = format!("file://{}", tmp.path().join("origin.git").display());
         git(&["remote", "set-url", "origin", &origin_url], &local);
         git(
             &[
                 "config",
                 "remote.origin.uploadpack",
-                &script.to_string_lossy(),
+                &format!("/bin/sh {}", script.display()),
             ],
             &local,
         );
 
-        let limit = Duration::from_millis(500);
+        let limit = Duration::from_millis(1000);
         let started = Instant::now();
         let result = sync_repo_with_timeout(&local, limit);
         let elapsed = started.elapsed();

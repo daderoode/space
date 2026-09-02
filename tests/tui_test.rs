@@ -58,21 +58,24 @@ fn max_rendered_width(rendered: &str) -> usize {
 }
 
 /// Drive the background sync worker (Syncing stage) to completion by polling
-/// `poll_sync_result`, mirroring what the real run loop does each frame.
+/// `poll_sync_result`, mirroring what the real run loop does each frame, then
+/// continue past the finished sync report with Enter.
 fn drain_sync(app: &mut App) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         app.poll_sync_result();
-        let syncing = matches!(
-            app.screen,
-            Screen::CreateWorkspace(ref st)
-                if st.stage == space::tui::screens::create::CreateStage::Syncing
-        ) || matches!(
-            app.screen,
-            Screen::AddRepos(ref st)
-                if st.stage == space::tui::screens::add::AddStage::Syncing
-        );
-        if !syncing {
+        let done = match &app.screen {
+            Screen::CreateWorkspace(st)
+                if st.stage == space::tui::screens::create::CreateStage::Syncing =>
+            {
+                st.report.done
+            }
+            Screen::AddRepos(st) if st.stage == space::tui::screens::add::AddStage::Syncing => {
+                st.report.done
+            }
+            _ => true,
+        };
+        if done {
             break;
         }
         assert!(
@@ -80,6 +83,18 @@ fn drain_sync(app: &mut App) {
             "sync worker did not complete within timeout"
         );
         std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let on_report = matches!(
+        app.screen,
+        Screen::CreateWorkspace(ref st)
+            if st.stage == space::tui::screens::create::CreateStage::Syncing
+    ) || matches!(
+        app.screen,
+        Screen::AddRepos(ref st)
+            if st.stage == space::tui::screens::add::AddStage::Syncing
+    );
+    if on_report {
+        app.handle_key(key(KeyCode::Enter));
     }
 }
 
@@ -4486,5 +4501,515 @@ mod gitops_tests {
             app.gitop_rx.is_none(),
             "a blocked pre-flight must never start a worker"
         );
+    }
+}
+
+// ---- 1.5 Sync report ----
+
+mod sync_report_tests {
+    use super::*;
+    use space::core::workspace::{FetchOutcome, SyncOutcome};
+    use space::tui::screens::add::{AddStage, AddState};
+    use space::tui::screens::create::{CreateStage, CreateState};
+    use space::tui::screens::sync_report::SyncReport;
+    use std::path::Path;
+
+    fn sr_git(args: &[&str], dir: &Path) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed:\n{}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn sr_git_setup(dir: &Path) {
+        sr_git(&["config", "user.email", "t@local"], dir);
+        sr_git(&["config", "user.name", "T"], dir);
+        sr_git(&["config", "commit.gpgsign", "false"], dir);
+    }
+
+    /// A repo under `repos_dir/<name>` cloned from a bare origin, with `main`
+    /// checked out and a `dev` branch that is one commit behind `origin/dev`,
+    /// so a sync fast-forwards `dev`.
+    fn behind_repo(env: &TestEnv, name: &str) -> PathBuf {
+        let fixtures = env.dir.path().join("fixtures").join(name);
+        std::fs::create_dir_all(&fixtures).unwrap();
+        let bare = fixtures.join("origin.git");
+        sr_git(
+            &["init", "--bare", "-b", "main", &bare.to_string_lossy()],
+            &fixtures,
+        );
+        let local = env.repos_dir.join(name);
+        sr_git(
+            &[
+                "clone",
+                "-q",
+                &bare.to_string_lossy(),
+                &local.to_string_lossy(),
+            ],
+            &fixtures,
+        );
+        sr_git_setup(&local);
+        sr_git(&["commit", "--allow-empty", "-m", "init"], &local);
+        sr_git(&["push", "-q", "-u", "origin", "main"], &local);
+        sr_git(&["checkout", "-q", "-b", "dev"], &local);
+        sr_git(&["commit", "--allow-empty", "-m", "dev-init"], &local);
+        sr_git(&["push", "-q", "-u", "origin", "dev"], &local);
+        sr_git(&["checkout", "-q", "main"], &local);
+
+        let helper = fixtures.join("helper");
+        sr_git(
+            &[
+                "clone",
+                "-q",
+                &bare.to_string_lossy(),
+                &helper.to_string_lossy(),
+            ],
+            &fixtures,
+        );
+        sr_git_setup(&helper);
+        sr_git(&["checkout", "-q", "-b", "dev", "origin/dev"], &helper);
+        sr_git(&["commit", "--allow-empty", "-m", "dev-remote"], &helper);
+        sr_git(&["push", "-q", "origin", "dev"], &helper);
+        local
+    }
+
+    /// Poll until the active screen's sync report is done, without pressing Enter.
+    fn wait_for_report(app: &mut App) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            app.poll_sync_result();
+            let done = match &app.screen {
+                Screen::CreateWorkspace(st) => st.report.done,
+                Screen::AddRepos(st) => st.report.done,
+                _ => panic!("expected the create or add screen"),
+            };
+            if done {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "sync worker did not complete within timeout"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn ok_outcome() -> SyncOutcome {
+        SyncOutcome {
+            fetch: FetchOutcome::Ok,
+            forwarded: vec![],
+            skipped: vec![],
+        }
+    }
+
+    fn failed_outcome(stderr: &str) -> SyncOutcome {
+        SyncOutcome {
+            fetch: FetchOutcome::Failed {
+                exit_code: Some(128),
+                stderr: stderr.to_string(),
+            },
+            forwarded: vec![],
+            skipped: vec![],
+        }
+    }
+
+    fn create_state_on_report(report: SyncReport) -> CreateState {
+        let mut st = CreateState::new(vec![], vec![]);
+        st.ws_name = tui_input::Input::default().with_value("ws".to_string());
+        st.stage = CreateStage::Syncing;
+        st.report = report;
+        st
+    }
+
+    #[test]
+    fn mixed_run_shows_rows_title_cursor_on_failure_and_enter_continues() {
+        let env = TestEnv::new();
+        let good = behind_repo(&env, "payments-api");
+        let bad = env.create_repo("web-console"); // no remote: the fetch fails
+        let config = config_from_env(&env);
+        let mut app = test_app_with_config(config, vec![], vec![good.clone(), bad.clone()]);
+
+        app.handle_key(key(KeyCode::Char('c')));
+        if let Screen::CreateWorkspace(ref mut st) = app.screen {
+            st.ws_name = tui_input::Input::default().with_value("ws".to_string());
+            st.stage = CreateStage::PickRepos;
+            st.picker.toggle_highlighted();
+            st.picker.move_down();
+            st.picker.toggle_highlighted();
+        }
+        app.handle_key(key(KeyCode::Enter));
+        wait_for_report(&mut app);
+
+        let Screen::CreateWorkspace(st) = &app.screen else {
+            panic!("expected CreateWorkspace screen");
+        };
+        assert_eq!(st.stage, CreateStage::Syncing, "Done pauses on the report");
+        assert_eq!(st.report.rows.len(), 2);
+        let good_idx = st
+            .report
+            .rows
+            .iter()
+            .position(|r| r.name == "payments-api")
+            .unwrap();
+        let bad_idx = 1 - good_idx;
+        assert_eq!(st.report.rows[good_idx].outcome_label(), "fast-forwarded");
+        assert_eq!(st.report.rows[good_idx].detail().0, "dev");
+        assert_eq!(st.report.rows[bad_idx].outcome_label(), "fetch failed");
+        assert_eq!(st.report.title(), "Sync report \u{b7} 1 ok, 1 failed");
+        assert_eq!(
+            st.report.cursor, bad_idx,
+            "cursor lands on the first failed row"
+        );
+
+        let rendered = render_text(&app, 100, 30);
+        for needle in [
+            "Sync report \u{b7} 1 ok, 1 failed",
+            "\u{25b6} \u{2717} web-console",
+            "fast-forwarded  dev",
+            "fetch failed (git exit 128) \u{b7} branch picker will use local refs",
+            "fatal: 'origin' does not appear to be a git repository",
+            "ENTER continue \u{b7} ESC back",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "report must show {:?}, got:\n{}",
+                needle,
+                rendered
+            );
+        }
+
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(
+                st.stage,
+                CreateStage::PickBranchStrategy,
+                "Enter continues to the branch picker"
+            ),
+            _ => panic!("expected CreateWorkspace screen"),
+        }
+    }
+
+    #[test]
+    fn add_flow_esc_returns_to_pick_repos_with_selection_and_query_intact() {
+        let env = TestEnv::new();
+        let repo = env.create_repo("alpha");
+        let config = config_from_env(&env);
+        let mut app = test_app_with_config(config, vec![], vec![repo.clone()]);
+        app.screen = Screen::AddRepos(AddState::new("ws".to_string(), vec![repo], vec![]));
+
+        app.handle_key(key(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::AddRepos(st) => assert_eq!(st.stage, AddStage::Syncing),
+            _ => panic!("expected AddRepos screen"),
+        }
+        wait_for_report(&mut app);
+
+        app.handle_key(key(KeyCode::Esc));
+        let Screen::AddRepos(st) = &app.screen else {
+            panic!("expected AddRepos screen");
+        };
+        assert_eq!(
+            st.stage,
+            AddStage::PickRepos,
+            "Esc returns to the repo picker"
+        );
+        assert_eq!(st.picker.input.value(), "a", "the query survives");
+        assert_eq!(
+            st.picker.confirmed_items().len(),
+            1,
+            "the selection survives"
+        );
+
+        // Re-confirming re-syncs the same selection into a fresh report.
+        app.handle_key(key(KeyCode::Enter));
+        wait_for_report(&mut app);
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::AddRepos(st) => assert_eq!(
+                st.stage,
+                AddStage::PickBranchStrategy,
+                "Enter on the finished report continues"
+            ),
+            _ => panic!("expected AddRepos screen"),
+        }
+    }
+
+    #[test]
+    fn enter_is_ignored_and_esc_cancels_while_running() {
+        let mut app = test_app(vec![], vec![]);
+        let mut report = SyncReport::new(&[PathBuf::from("/r/a"), PathBuf::from("/r/b")]);
+        report.started(0);
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+
+        let rendered = render_text(&app, 80, 24);
+        for needle in [
+            "Sync report \u{b7} 0 of 2",
+            "\u{25cf} a",
+            "syncing\u{2026}",
+            "fetching origin\u{2026}",
+            "ESC cancel",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "running report must show {:?}, got:\n{}",
+                needle,
+                rendered
+            );
+        }
+
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Down));
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(
+                    st.stage,
+                    CreateStage::Syncing,
+                    "Enter is ignored until Done"
+                );
+                assert_eq!(st.report.cursor, 0, "cursor keys are ignored until Done");
+            }
+            _ => panic!("expected CreateWorkspace screen"),
+        }
+
+        app.handle_key(key(KeyCode::Esc));
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(
+                st.stage,
+                CreateStage::PickRepos,
+                "Esc while running cancels back to the repo picker"
+            ),
+            _ => panic!("expected CreateWorkspace screen"),
+        }
+    }
+
+    #[test]
+    fn all_failed_shows_notice_and_continue_anyway() {
+        let mut app = test_app(vec![], vec![]);
+        let mut report = SyncReport::new(&[PathBuf::from("/r/a"), PathBuf::from("/r/b")]);
+        report.finished(0, failed_outcome("fatal: no way"));
+        report.finished(1, failed_outcome("fatal: nor this"));
+        report.finish();
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+
+        let rendered = render_text(&app, 100, 30);
+        for needle in [
+            "Sync report \u{b7} 0 ok, 2 failed",
+            "Nothing was fetched. You can still continue;",
+            "ENTER continue anyway",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "all-failed report must show {:?}, got:\n{}",
+                needle,
+                rendered
+            );
+        }
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(
+                st.stage,
+                CreateStage::PickBranchStrategy,
+                "continuing after an all-failed run is allowed"
+            ),
+            _ => panic!("expected CreateWorkspace screen"),
+        }
+    }
+
+    #[test]
+    fn many_repos_scroll_to_keep_cursor_visible() {
+        let mut app = test_app(vec![], vec![]);
+        let repos: Vec<PathBuf> = (0..14)
+            .map(|i| PathBuf::from(format!("/r/repo{:02}", i)))
+            .collect();
+        let mut report = SyncReport::new(&repos);
+        for i in 0..14 {
+            report.finished(i, ok_outcome());
+        }
+        report.finish();
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+
+        // 80x24: the dialog caps at 19 rows, 12 list rows fit.
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("repo00"),
+            "top of the list:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("repo11"),
+            "12th row visible:\n{}",
+            rendered
+        );
+        assert!(
+            !rendered.contains("repo13"),
+            "the last row is reachable only by scrolling:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains(
+                "\u{2191}\u{2193} select \u{b7} PgUp/PgDn page \u{b7} ENTER continue \u{b7} ESC back"
+            ),
+            "the rows prefix drops on a 60-column dialog:\n{}",
+            rendered
+        );
+        let wide = render_text(&app, 120, 24);
+        assert!(
+            wide.contains("rows 1\u{2013}12 of 14 \u{b7}"),
+            "a wide dialog shows the rows prefix:\n{}",
+            wide
+        );
+
+        app.handle_key(key(KeyCode::End));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("\u{25b6} \u{2713} repo13"),
+            "End reaches the last row:\n{}",
+            rendered
+        );
+        assert!(
+            !rendered.contains("repo00"),
+            "the list scrolled:\n{}",
+            rendered
+        );
+        assert!(
+            !rendered.contains("repo01"),
+            "the list scrolled:\n{}",
+            rendered
+        );
+
+        app.handle_key(key(KeyCode::PageUp));
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(st.report.cursor, 3),
+            _ => panic!("expected CreateWorkspace screen"),
+        }
+        app.handle_key(key(KeyCode::Home));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("\u{25b6} \u{2713} repo00"),
+            "Home:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn creating_log_tail_follows_and_end_resumes() {
+        let mut app = test_app(vec![], vec![]);
+        let mut st = CreateState::new(vec![], vec![]);
+        st.stage = CreateStage::Creating;
+        st.progress = (1..=30).map(|i| format!("step {:02}", i)).collect();
+        st.error = Some("boom".to_string());
+        app.screen = Screen::CreateWorkspace(st);
+
+        // 80x24: the dialog caps at 19 rows, 16 log lines fit.
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("step 30"),
+            "tail-follow shows the newest line:\n{}",
+            rendered
+        );
+        assert!(rendered.contains("step 15"), "16 lines fit:\n{}", rendered);
+        assert!(
+            !rendered.contains("step 14"),
+            "earlier lines are scrolled off:\n{}",
+            rendered
+        );
+        assert!(rendered.contains("Error: boom"), "footer:\n{}", rendered);
+
+        app.handle_key(key(KeyCode::Up));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("step 14"),
+            "Up scrolls back one line:\n{}",
+            rendered
+        );
+        assert!(
+            !rendered.contains("step 30"),
+            "Up detaches from the tail:\n{}",
+            rendered
+        );
+
+        // New lines arriving while detached leave the view where it is.
+        if let Screen::CreateWorkspace(ref mut st) = app.screen {
+            st.progress.push("step 31".to_string());
+        }
+        let rendered = render_text(&app, 80, 24);
+        assert!(rendered.contains("step 14") && !rendered.contains("step 31"));
+
+        app.handle_key(key(KeyCode::End));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("step 31"),
+            "End resumes following:\n{}",
+            rendered
+        );
+        if let Screen::CreateWorkspace(ref mut st) = app.screen {
+            st.progress.push("step 32".to_string());
+        }
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("step 32"),
+            "following tracks new lines:\n{}",
+            rendered
+        );
+
+        app.handle_key(key(KeyCode::Home));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("step 01"),
+            "Home shows the first line:\n{}",
+            rendered
+        );
+
+        // Esc still leaves the stage with the error status.
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(app.screen, Screen::Dashboard));
+    }
+
+    #[test]
+    fn add_flow_creating_log_scrolls_too() {
+        let mut app = test_app(vec![], vec![]);
+        let mut st = AddState::new("ws".to_string(), vec![], vec![]);
+        st.stage = AddStage::Creating;
+        st.progress = (1..=30).map(|i| format!("step {:02}", i)).collect();
+        st.error = Some("boom".to_string());
+        app.screen = Screen::AddRepos(st);
+
+        let rendered = render_text(&app, 80, 24);
+        assert!(rendered.contains("step 30") && !rendered.contains("step 14"));
+        app.handle_key(key(KeyCode::PageUp));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("step 05") && !rendered.contains("step 30"),
+            "PgUp:\n{}",
+            rendered
+        );
+        app.handle_key(key(KeyCode::End));
+        let rendered = render_text(&app, 80, 24);
+        assert!(rendered.contains("step 30"), "End resumes:\n{}", rendered);
+    }
+
+    #[test]
+    fn narrow_terminal_keeps_dialog_and_footer_inside_the_frame() {
+        let mut app = test_app(vec![], vec![]);
+        let mut report = SyncReport::new(&[PathBuf::from("/r/a")]);
+        report.finished(0, failed_outcome("fatal: x"));
+        report.finish();
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+        let rendered = render_text(&app, 50, 12);
+        assert!(
+            rendered.contains("ENTER continue anyway \u{b7} ESC back"),
+            "ENTER and ESC never drop:\n{}",
+            rendered
+        );
+        assert!(max_rendered_width(&rendered) <= 50);
     }
 }
