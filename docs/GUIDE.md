@@ -96,7 +96,7 @@ For each repo worktree in the workspace:
 
 space scans configured root directories (default `~/projects`) using `walkdir` up to a configurable depth (default 3). It finds directories containing `.git`, filters out nested repos (submodules), and caches the results to `~/.config/space/repos.cache`.
 
-The cache is a simple newline-delimited file of absolute paths. Refresh manually with `space repos --refresh` or the `r` key in the TUI.
+The cache is a simple newline-delimited file of absolute paths. Rescan manually with `space repos --refresh` or the `r` key in the TUI.
 
 ## Architecture
 
@@ -171,8 +171,8 @@ Press `Enter` on a file row in the expanded repo list to open a full-screen scro
 | `a` | Add repos to selected workspace |
 | `d` | Delete selected workspace |
 | `g` | Go to workspace (fuzzy picker) |
-| `r` | Refresh repo cache |
-| `/` | Search all repos |
+| `r` | Rescan the repo list |
+| `/` | Filter spaces (selects in place) |
 | `S` | Open config editor |
 | `q` / `Esc` | Quit |
 | `Ctrl-C` | Force quit (works on all screens) |
@@ -191,7 +191,16 @@ Press `Enter` on a file row in the expanded repo list to open a full-screen scro
 | `S` | Stage all unstaged files in repo |
 | `U` | Unstage all staged files in repo |
 | `b` | Switch branch for selected repo |
+| `/` | Search all repos |
 | `q` | Quit |
+
+### Repo Picker Key Bindings (create and add flows)
+
+| Key | Action |
+|-----|--------|
+| `Tab` | Toggle the highlighted repo |
+| `Ctrl-S` | Cycle the parent-directory scope |
+| `Ctrl-R` | Rescan the repo list without leaving the picker |
 
 ### Key Bindings — Diff Viewer
 
@@ -336,9 +345,9 @@ Used in: repo picker, workspace picker, branch picker, and repo search.
 - Filters out nested repos (submodule pattern: `.git` inside another `.git` tree)
 - Does not descend into `.git` directories
 - Cache stored at `~/.config/space/repos.cache` (newline-delimited paths)
-- Refresh with `space repos --refresh`, the `r` key in the TUI, or `list_repos(refresh: true)` via MCP
+- Rescan with `space repos --refresh`, the `r` key in the TUI, or `list_repos(refresh: true)` via MCP
 
-> **Note:** The cache is automatically invalidated when older than `cache_age_secs` (default: 1 hour). A stale cache triggers a rescan on next use. You can also force a refresh with `space repos --refresh`, the `r` key in the TUI, or `list_repos(refresh: true)` via MCP.
+> **Note:** The cache is automatically invalidated when older than `cache_age_secs` (default: 1 hour). A stale cache triggers a rescan on next use. You can also force a rescan with `space repos --refresh`, the `r` key in the TUI, or `list_repos(refresh: true)` via MCP.
 
 ---
 

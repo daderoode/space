@@ -1,7 +1,7 @@
 use crate::core::workspace::BranchStrategy;
 use crate::tui::actions::{ScreenAction, ScreenContext, WorktreeParams};
 use crate::tui::screens::sync_report::{LogView, SyncReport};
-use crate::tui::widgets::fuzzy_picker::{FuzzyPicker, PickerItem};
+use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::PathBuf;
 use tui_input::Input;
@@ -32,28 +32,13 @@ pub struct AddState {
     pub error: Option<String>,
 }
 
-/// Picker rows for repo paths, each with its branch and remote read live.
-fn repo_items(repos: Vec<PathBuf>) -> Vec<PickerItem> {
-    repos
-        .into_iter()
-        .map(|path| {
-            let (branch, remote_url) = crate::core::git::repo_display_info(&path);
-            PickerItem {
-                branch,
-                remote_url,
-                ..PickerItem::from_path(path)
-            }
-        })
-        .collect()
-}
-
 impl AddState {
     pub fn new(
         ws_name: String,
         available_repos: Vec<PathBuf>,
         initial_queries: Vec<String>,
     ) -> Self {
-        let items = repo_items(available_repos);
+        let items = super::repo_items(available_repos);
         let mut picker = FuzzyPicker::new(
             "Add repos  TAB=toggle  ENTER=confirm  ESC=cancel",
             items,
@@ -109,7 +94,7 @@ impl AddState {
     /// `FuzzyPicker::replace_items`). Returns how many toggled repos are no
     /// longer in the list.
     pub fn replace_repo_list(&mut self, repos: Vec<PathBuf>) -> usize {
-        self.picker.replace_items(repo_items(repos))
+        self.picker.replace_items(super::repo_items(repos))
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
