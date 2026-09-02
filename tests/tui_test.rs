@@ -5754,6 +5754,32 @@ mod sync_report_tests {
     }
 
     #[test]
+    fn terminal_shorter_than_the_dialog_minimum_has_no_row_range_in_the_footer() {
+        // A 5-row terminal cannot hold the dialog's 10-row minimum: the list
+        // gets zero rows and the visible window is empty. The footer must
+        // not claim `rows 1–0 of 2`. The frame is wide enough (inner 82)
+        // that the prefix would fit if it were emitted.
+        let mut app = test_app(vec![], vec![]);
+        let mut report = SyncReport::new(&[PathBuf::from("/r/a"), PathBuf::from("/r/b")]);
+        report.finished(0, ok_outcome());
+        report.finished(1, ok_outcome());
+        report.finish();
+        app.screen = Screen::CreateWorkspace(create_state_on_report(report));
+
+        let rendered = render_text(&app, 120, 5);
+        assert!(
+            !rendered.contains("rows 1\u{2013}0"),
+            "an empty list must not report a row range:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("ENTER continue"),
+            "the footer still renders:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
     fn minimum_height_dialog_marks_cut_pane_lines_for_one_repo() {
         // A 12-row terminal clamps the dialog to its 10-row minimum: inner 8,
         // body 5. One failing repo needs one list row, so the two rows the

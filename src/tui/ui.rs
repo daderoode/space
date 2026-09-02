@@ -880,7 +880,9 @@ fn render_sync_report(frame: &mut Frame, report: &SyncReport) {
         .collect();
     frame.render_widget(Paragraph::new(pane_lines), sections[3]);
 
-    let scrolled = (n > list_rows).then_some((start + 1, end));
+    // A frame too short for the dialog leaves the list with zero rows and an
+    // empty window; that is not a scrolled list, so no `rows a–b of n`.
+    let scrolled = (list_rows > 0 && n > list_rows).then_some((start + 1, end));
     frame.render_widget(
         Paragraph::new(report.footer(scrolled, inner_w)).style(theme::muted()),
         sections[4],

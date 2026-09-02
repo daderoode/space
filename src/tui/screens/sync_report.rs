@@ -205,13 +205,19 @@ fn exit_label(exit_code: Option<i32>, stderr: &str) -> String {
     }
 }
 
-/// git's first non-empty stderr line with only the `fatal: ` prefix stripped.
+/// The stderr line for the DETAIL column: git's first `fatal: ` or `error: `
+/// line with that prefix stripped, so a remote that prints a redirect or
+/// other notice first still shows the reason. Falls back to the first
+/// non-empty line when there is no such line (ssh's own messages, for one).
 fn first_stderr_line(stderr: &str) -> Option<String> {
-    stderr
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map(|l| l.strip_prefix("fatal: ").unwrap_or(l).to_string())
+    let lines = || stderr.lines().map(str::trim).filter(|l| !l.is_empty());
+    lines()
+        .find_map(|l| {
+            l.strip_prefix("fatal: ")
+                .or_else(|| l.strip_prefix("error: "))
+        })
+        .or_else(|| lines().next())
+        .map(str::to_string)
 }
 
 /// A path for display, with the home directory shortened to `~`.
@@ -766,6 +772,48 @@ mod tests {
         let waiting = report(1);
         assert_eq!(waiting.rows[0].glyph(), "\u{b7}");
         assert_eq!(waiting.rows[0].outcome_label(), "waiting");
+    }
+
+    #[test]
+    fn detail_prefers_git_fatal_or_error_line_over_earlier_noise() {
+        // A redirecting remote prints its notice before the real reason;
+        // the column must show the reason.
+        let mut r = report(3);
+        r.finished(
+            0,
+            failed(
+                "warning: redirecting to https://github.com/acme/web-console/\n\
+                 fatal: could not read Username for 'https://github.com': terminal prompts disabled\n",
+            ),
+        );
+        r.finished(
+            1,
+            failed("error: cannot lock ref 'refs/remotes/origin/main'\n"),
+        );
+        r.finished(
+            2,
+            failed(
+                "Load key \"/k\": invalid format\ngit@github.com: Permission denied (publickey).\n",
+            ),
+        );
+        assert_eq!(
+            r.rows[0].detail().0,
+            "could not read Username for 'https://github.com': terminal prompts disabled"
+        );
+        assert_eq!(
+            r.rows[1].detail().0,
+            "cannot lock ref 'refs/remotes/origin/main'"
+        );
+        assert_eq!(
+            r.rows[2].detail().0,
+            "Load key \"/k\": invalid format",
+            "with no fatal or error line the first non-empty line is used"
+        );
+        assert_eq!(
+            first_stderr_line("\n  \n  fatal: bare\n"),
+            Some("bare".to_string())
+        );
+        assert_eq!(first_stderr_line("\n \n"), None);
     }
 
     #[test]

@@ -490,12 +490,15 @@ enum Unattended {
 
 /// Run `cmd` under the unattended-run policy: the child gets its own session
 /// (so no controlling terminal: prompts for credentials, passphrases and host
-/// keys fail instead of waiting), stdin is null, stdout and stderr are
-/// captured. The session is also the process group the timeout stops: SIGTERM
-/// to the group (git and its ssh or https helper), a short grace so git can
-/// drop its lockfiles, then SIGKILL to whatever is left. A child that exits
-/// with success during that grace still counts as `Exited`, so work that
-/// completed at the deadline is not thrown away.
+/// keys fail instead of waiting), stdin is null, stdout is discarded and
+/// stderr is captured. Only stderr is kept because `git fetch --quiet` writes
+/// its summary there and every outcome reports stderr alone; draining stdout
+/// would cost a reader thread per run for text nobody reads. The session is
+/// also the process group the timeout stops: SIGTERM to the group (git and
+/// its ssh or https helper), a short grace so git can drop its lockfiles,
+/// then SIGKILL to whatever is left. A child that exits with success during
+/// that grace still counts as `Exited`, so work that completed at the
+/// deadline is not thrown away.
 ///
 /// Whenever the child was seen to end, the stderr reader is given a bounded
 /// moment to finish, so a helper that keeps the pipe open never stalls the
@@ -504,7 +507,7 @@ fn run_unattended(mut cmd: Command, timeout: Duration) -> Unattended {
     use std::os::unix::process::CommandExt;
 
     cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped());
     // SAFETY: setsid(2) is async-signal-safe and touches no memory shared with
     // the parent, which is all `pre_exec` requires of the closure.
@@ -523,7 +526,6 @@ fn run_unattended(mut cmd: Command, timeout: Duration) -> Unattended {
     };
     let pgid = child.id() as libc::pid_t;
     let (stderr, stderr_reader) = capture_in_background(child.stderr.take());
-    let (_stdout, _) = capture_in_background(child.stdout.take());
 
     match wait_until(&mut child, Instant::now() + timeout) {
         Wait::Exited(status) => {
