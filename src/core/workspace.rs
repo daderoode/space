@@ -313,6 +313,10 @@ pub const SYNC_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a timed-out fetch gets to clean up after SIGTERM before SIGKILL.
 const SYNC_KILL_GRACE: Duration = Duration::from_secs(2);
 const SYNC_POLL_INTERVAL: Duration = Duration::from_millis(20);
+/// How long to wait for git's stderr pipe to close after git itself exited.
+/// A helper that outlived git and still holds the pipe must not stall the
+/// sync: after this the captured text is used as is.
+const SYNC_READER_GRACE: Duration = Duration::from_secs(1);
 
 /// Fetch from `origin` and fast-forward all local branches that are strictly
 /// behind their `origin/<branch>` ref (0 ahead, N behind); this assumes a single
@@ -455,10 +459,11 @@ fn fetch_origin_unattended(repo_path: &Path, timeout: Duration) -> FetchOutcome 
     let (_stdout, _) = capture_in_background(child.stdout.take());
 
     match wait_until(&mut child, Instant::now() + timeout) {
-        Some(status) => {
-            // The group has exited, so the pipe reaches end-of-file: wait for
-            // the reader to copy git's last write before reading the buffer.
-            let _ = stderr_reader.join();
+        Wait::Exited(status) => {
+            // git has exited, so the pipe normally reaches end-of-file at
+            // once: give the reader a moment to copy git's last write, but
+            // never wait on a helper that outlived git.
+            join_bounded(&stderr_reader, SYNC_READER_GRACE);
             let text = snapshot(&stderr);
             if status.success() {
                 FetchOutcome::Ok
@@ -469,13 +474,25 @@ fn fetch_origin_unattended(repo_path: &Path, timeout: Duration) -> FetchOutcome 
                 }
             }
         }
-        None => {
+        Wait::Timeout => {
             stop_process_group(&mut child, pgid);
             FetchOutcome::TimedOut {
                 after: timeout,
                 stderr: snapshot(&stderr),
             }
         }
+        Wait::Error => FetchOutcome::Failed {
+            exit_code: None,
+            stderr: format!("could not wait for git\n{}", snapshot(&stderr)),
+        },
+    }
+}
+
+/// Wait up to `limit` for a reader thread to reach end-of-file.
+fn join_bounded(reader: &std::thread::JoinHandle<()>, limit: Duration) {
+    let deadline = Instant::now() + limit;
+    while !reader.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(SYNC_POLL_INTERVAL);
     }
 }
 
@@ -510,18 +527,26 @@ fn snapshot(buf: &Arc<Mutex<Vec<u8>>>) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// Poll the child until it exits or `deadline` passes. A wait error (the
-/// child was reaped elsewhere) ends the wait at once rather than spinning.
-fn wait_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
+/// How a bounded wait for the child ended.
+enum Wait {
+    Exited(ExitStatus),
+    Timeout,
+    /// `try_wait` failed (the child was reaped elsewhere): the child is no
+    /// longer ours to signal, so callers must not kill its group.
+    Error,
+}
+
+/// Poll the child until it exits, `deadline` passes, or waiting fails.
+fn wait_until(child: &mut Child, deadline: Instant) -> Wait {
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
+            Ok(Some(status)) => return Wait::Exited(status),
             Ok(None) => {}
-            Err(_) => return None,
+            Err(_) => return Wait::Error,
         }
         let now = Instant::now();
         if now >= deadline {
-            return None;
+            return Wait::Timeout;
         }
         std::thread::sleep(SYNC_POLL_INTERVAL.min(deadline - now));
     }
@@ -531,11 +556,12 @@ fn wait_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
 /// then SIGKILL whatever is left. Always reaps the child.
 fn stop_process_group(child: &mut Child, pgid: libc::pid_t) {
     // SAFETY: killpg on the group we created with setsid; the leader is our
-    // unreaped child, so the group id cannot have been recycled.
+    // unreaped child (only `Wait::Timeout` reaches here), so the group id
+    // cannot have been recycled.
     unsafe {
         libc::killpg(pgid, libc::SIGTERM);
     }
-    if wait_until(child, Instant::now() + SYNC_KILL_GRACE).is_none() {
+    if let Wait::Timeout = wait_until(child, Instant::now() + SYNC_KILL_GRACE) {
         // SAFETY: as above; the leader is still unreaped.
         unsafe {
             libc::killpg(pgid, libc::SIGKILL);
