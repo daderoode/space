@@ -17,11 +17,11 @@ impl SearchState {
     pub fn handle_key(&mut self, key: KeyEvent, _ctx: &ScreenContext) -> ScreenAction {
         match key.code {
             KeyCode::Esc => ScreenAction::Back,
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 self.picker.move_up();
                 ScreenAction::Continue
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 self.picker.move_down();
                 ScreenAction::Continue
             }

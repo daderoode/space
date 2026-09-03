@@ -119,7 +119,8 @@ impl SwitchBranchState {
 
     fn handle_enter_branch_name(&mut self, key: KeyEvent, _ctx: &ScreenContext) -> ScreenAction {
         match key.code {
-            KeyCode::Char('q') => ScreenAction::Back,
+            // No `q` arm: this is a text input, so every letter is typed and
+            // Esc alone goes back.
             KeyCode::Esc => {
                 self.error = None;
                 self.stage = SwitchBranchStage::PickStrategy;
@@ -150,7 +151,8 @@ impl SwitchBranchState {
 
     fn handle_pick_branch(&mut self, key: KeyEvent, _ctx: &ScreenContext) -> ScreenAction {
         match key.code {
-            KeyCode::Char('q') => ScreenAction::Back,
+            // No `q` arm: the fuzzy filter owns every letter, so a branch whose
+            // name contains a `q` stays reachable. Esc alone goes back.
             KeyCode::Esc => {
                 self.error = None;
                 self.stage = SwitchBranchStage::PickStrategy;
@@ -162,29 +164,7 @@ impl SwitchBranchState {
                 }
                 ScreenAction::Continue
             }
-            KeyCode::Char('k')
-                if self
-                    .branch_picker
-                    .as_ref()
-                    .is_some_and(|bp| bp.input.value().is_empty()) =>
-            {
-                if let Some(ref mut bp) = self.branch_picker {
-                    bp.move_up();
-                }
-                ScreenAction::Continue
-            }
             KeyCode::Down => {
-                if let Some(ref mut bp) = self.branch_picker {
-                    bp.move_down();
-                }
-                ScreenAction::Continue
-            }
-            KeyCode::Char('j')
-                if self
-                    .branch_picker
-                    .as_ref()
-                    .is_some_and(|bp| bp.input.value().is_empty()) =>
-            {
                 if let Some(ref mut bp) = self.branch_picker {
                     bp.move_down();
                 }

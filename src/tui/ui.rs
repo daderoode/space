@@ -1024,8 +1024,8 @@ fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame
     let title = " Delete Workspace ";
     let heading = "Delete workspace?";
     let repo_heading = "This removes these worktrees:";
-    let footer_delete = "Enter/y delete";
-    let footer_cancel = "Esc/n cancel";
+    let footer_delete = "y delete";
+    let footer_cancel = "Esc/n/Enter cancel";
     let footer_spacing = "   ";
     let footer_text = format!("{}{}{}", footer_delete, footer_spacing, footer_cancel);
 
@@ -1143,11 +1143,11 @@ mod tests {
 
     #[test]
     fn delete_footer_wraps_when_it_cannot_fit_on_one_line() {
-        let lines = render_delete_footer(18, "Enter/y delete", "   ", "Esc/n cancel");
+        let lines = render_delete_footer(18, "y delete", "   ", "Esc/n/Enter cancel");
 
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].width(), 14);
-        assert_eq!(lines[1].width(), 12);
+        assert_eq!(lines[0].width(), 8);
+        assert_eq!(lines[1].width(), 18);
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use super::default_no_confirm;
 use crate::core::git::CommitInfo;
 use crate::tui::actions::{GitOp, ScreenAction, ScreenContext};
 use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
@@ -238,25 +239,20 @@ impl GitOpsState {
     }
 
     /// Handle keys in the ConfirmPush stage (branch has no upstream).
-    /// `y`/Enter confirms and pushes with `-u origin <branch>`.
+    /// Only `y`/`Y` confirms, pushing with `-u origin <branch>`; Enter
+    /// declines, because the prompt is `[y/N]` (default No).
     fn handle_confirm_push_key(&mut self, key: KeyEvent) -> ScreenAction {
-        match key.code {
-            // Only an explicit `y` confirms publishing the branch; Enter
-            // declines, matching the [y/N] prompt (default No) so the remote
-            // is never mutated by a reflexive keypress.
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                self.start_network_op(GitOp::Push { set_upstream: true })
-            }
+        // Only an explicit `y` confirms publishing the branch; Enter
+        // declines, matching the [y/N] prompt (default No) so the remote
+        // is never mutated by a reflexive keypress.
+        match default_no_confirm(key.code) {
+            Some(true) => self.start_network_op(GitOp::Push { set_upstream: true }),
             // Decline: back to the menu without touching the remote.
-            KeyCode::Char('n')
-            | KeyCode::Char('N')
-            | KeyCode::Enter
-            | KeyCode::Esc
-            | KeyCode::Char('q') => {
+            Some(false) => {
                 self.stage = GitOpsStage::Menu;
                 ScreenAction::Continue
             }
-            _ => ScreenAction::Continue,
+            None => ScreenAction::Continue,
         }
     }
 
@@ -422,9 +418,10 @@ impl GitOpsState {
     /// Target-picker stage keys. Follows the switch-branch picker's shape with
     /// one deliberate difference: `q` types into the fuzzy filter (branch names
     /// can contain it) instead of closing. `Esc` steps back to the pre-flight;
-    /// arrows / `j`/`k` (when the filter is empty) move the highlight; `Enter`
-    /// selects the target, computes the ahead/behind preview, and advances to
-    /// the confirm stage; anything else edits the fuzzy filter.
+    /// the arrows move the highlight (letters are text in a typed picker, so
+    /// there is no `j`/`k` navigation here); `Enter` selects the target,
+    /// computes the ahead/behind preview, and advances to the confirm stage;
+    /// anything else edits the fuzzy filter.
     fn handle_rebase_pick_target_key(&mut self, key: KeyEvent) -> ScreenAction {
         match key.code {
             KeyCode::Esc => {
@@ -438,28 +435,6 @@ impl GitOpsState {
                 ScreenAction::Continue
             }
             KeyCode::Down => {
-                if let Some(ref mut bp) = self.rebase_picker {
-                    bp.move_down();
-                }
-                ScreenAction::Continue
-            }
-            KeyCode::Char('k')
-                if self
-                    .rebase_picker
-                    .as_ref()
-                    .is_some_and(|bp| bp.input.value().is_empty()) =>
-            {
-                if let Some(ref mut bp) = self.rebase_picker {
-                    bp.move_up();
-                }
-                ScreenAction::Continue
-            }
-            KeyCode::Char('j')
-                if self
-                    .rebase_picker
-                    .as_ref()
-                    .is_some_and(|bp| bp.input.value().is_empty()) =>
-            {
                 if let Some(ref mut bp) = self.rebase_picker {
                     bp.move_down();
                 }
@@ -498,23 +473,19 @@ impl GitOpsState {
     /// `n`/`Enter`/`Esc`/`q` decline back to the target picker. Enter declines
     /// (default No) so a reflexive keypress never rewrites history.
     fn handle_rebase_confirm_key(&mut self, key: KeyEvent) -> ScreenAction {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => match self.rebase_onto.clone() {
+        match default_no_confirm(key.code) {
+            Some(true) => match self.rebase_onto.clone() {
                 Some(onto) => self.start_network_op(GitOp::Rebase { onto }),
                 None => {
                     self.stage = GitOpsStage::RebasePickTarget;
                     ScreenAction::Continue
                 }
             },
-            KeyCode::Char('n')
-            | KeyCode::Char('N')
-            | KeyCode::Enter
-            | KeyCode::Esc
-            | KeyCode::Char('q') => {
+            Some(false) => {
                 self.stage = GitOpsStage::RebasePickTarget;
                 ScreenAction::Continue
             }
-            _ => ScreenAction::Continue,
+            None => ScreenAction::Continue,
         }
     }
 }

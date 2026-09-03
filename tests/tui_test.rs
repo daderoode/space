@@ -110,13 +110,6 @@ fn dashboard_q_quits() {
 }
 
 #[test]
-fn dashboard_esc_quits() {
-    let mut app = test_app(vec![], vec![]);
-    app.handle_key(key(KeyCode::Esc));
-    assert!(app.should_quit);
-}
-
-#[test]
 fn dashboard_tab_toggles_focus() {
     let mut app = test_app(vec![], vec![]);
     assert_eq!(app.focus, Pane::Left);
@@ -709,12 +702,12 @@ fn delete_confirm_keeps_footer_visible_for_long_repo_lists() {
     let rendered = render_text(&app, 70, 10);
 
     assert!(
-        rendered.contains("Enter/y delete"),
+        rendered.contains("y delete"),
         "expected delete actions to remain visible in rendered popup, got:\n{}",
         rendered
     );
     assert!(
-        rendered.contains("Esc/n cancel"),
+        rendered.contains("Esc/n/Enter cancel"),
         "expected cancel action to remain visible in rendered popup, got:\n{}",
         rendered
     );
@@ -741,12 +734,12 @@ fn delete_confirm_wraps_footer_on_narrow_terminals() {
     let rendered = render_text(&app, 24, 10);
 
     assert!(
-        rendered.contains("Enter/y delete"),
+        rendered.contains("y delete"),
         "expected delete action on a wrapped footer line, got:\n{}",
         rendered
     );
     assert!(
-        rendered.contains("Esc/n cancel"),
+        rendered.contains("Esc/n/Enter cancel"),
         "expected cancel action on a wrapped footer line, got:\n{}",
         rendered
     );
@@ -1528,11 +1521,28 @@ fn esc_with_nothing_expanded_refocuses_left_pane() {
 }
 
 #[test]
-fn esc_on_left_pane_quits() {
-    let mut app = test_app(vec![], vec![]);
+fn esc_on_left_pane_is_a_noop() {
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
     assert_eq!(app.focus, Pane::Left);
+
     app.handle_key(key(KeyCode::Esc));
-    assert!(app.should_quit, "Esc on left pane should quit");
+
+    assert!(!app.should_quit, "Esc on the left pane must not quit");
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "Esc on the left pane must leave the app on the dashboard"
+    );
+    assert_eq!(app.focus, Pane::Left, "focus must be unchanged");
+}
+
+#[test]
+fn q_still_quits_after_esc_is_neutered() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Esc));
+    assert!(!app.should_quit);
+    app.handle_key(key(KeyCode::Char('q')));
+    assert!(app.should_quit, "q remains the documented way out");
 }
 
 #[test]
@@ -4556,22 +4566,6 @@ mod rescan_tests {
             .collect()
     }
 
-    /// Open the create flow and land in PickRepos with the given space name.
-    fn open_create_picker(app: &mut App, name: &str) {
-        app.handle_key(key(KeyCode::Char('c')));
-        for ch in name.chars() {
-            app.handle_key(key(KeyCode::Char(ch)));
-        }
-        app.handle_key(key(KeyCode::Enter));
-        match &app.screen {
-            Screen::CreateWorkspace(st) => assert_eq!(
-                st.stage,
-                space::tui::screens::create::CreateStage::PickRepos
-            ),
-            _ => panic!("expected CreateWorkspace screen"),
-        }
-    }
-
     #[test]
     fn ctrl_r_in_create_picker_shows_new_repo_and_keeps_toggle_and_query() {
         with_config_dir(|env| {
@@ -5847,4 +5841,872 @@ mod sync_report_tests {
             rendered
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Wave 0: navigation correctness
+//
+// 0.2: no picker with a text input binds j/k any more. In any screen with a
+// text input, letters are text and only arrows move the highlight, whether the
+// query is empty or not. These tests pin that deletion on all eight typed
+// pickers (create PickRepos and PickBranch, add PickRepos and PickBranch, repo
+// search, go, the rebase target and the switch-branch picker) so a repo or
+// branch whose name contains 'j' or 'k' stays reachable and typing never jumps
+// the list. List-only stages (diff viewer, config editor, git-ops menu and Log,
+// sync report, the branch-strategy stages) keep j/k and are covered elsewhere.
+// ---------------------------------------------------------------------------
+
+/// Repo paths whose names contain the navigation letters, so a regression is
+/// visible as a highlight jump rather than a filtered list.
+fn jk_repo_paths() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/tmp/jackal"),
+        PathBuf::from("/tmp/kernel"),
+        PathBuf::from("/tmp/mango"),
+        // A second name matching both "j" and "jk" (the other three match
+        // neither), so no keystroke narrows the list to one row and clamps the
+        // highlight down off row 1.
+        PathBuf::from("/tmp/jokkmokk"),
+    ]
+}
+
+/// Same names, but under two distinct parent directories so `Ctrl-S` scope
+/// cycling has more than one scope to move through.
+fn jk_repo_paths_two_scopes() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/tmp/orga/jackal"),
+        PathBuf::from("/tmp/orgb/kernel"),
+        PathBuf::from("/tmp/orgb/mango"),
+    ]
+}
+
+use space::tui::widgets::fuzzy_picker::FuzzyPicker;
+
+/// The whole of rule 0.2 for one typed picker: `j` then `k` land in the query
+/// and the highlight never moves. Taking the picker by fn pointer keeps every
+/// per-screen test down to its fixture plus one call.
+fn assert_jk_types_into_the_query(app: &mut App, picker_of: fn(&App) -> &FuzzyPicker, what: &str) {
+    // Park the highlight on row 1 before typing. On row 0 "the highlight did
+    // not move" would hold under the old bindings too (j down, k back up); from
+    // row 1 a j that still navigates lands on row 2 and the assertion bites.
+    app.handle_key(key(KeyCode::Down));
+    let before = {
+        let p = picker_of(app);
+        assert!(
+            p.input.value().is_empty(),
+            "{}: the query must still be empty when j is pressed",
+            what
+        );
+        assert!(
+            p.filtered.len() >= 3,
+            "{}: the fixture must give a stray j somewhere to jump to, got {}",
+            what,
+            p.filtered.len()
+        );
+        assert_eq!(
+            p.highlighted, 1,
+            "{}: the arrow must move the highlight off row 0",
+            what
+        );
+        p.highlighted
+    };
+
+    // Every match below must keep at least two rows, or the picker clamps the
+    // highlight for a legitimate reason and the assertion stops meaning
+    // anything: the fixtures carry two "jk" names for exactly this.
+    app.handle_key(key(KeyCode::Char('j')));
+    {
+        let p = picker_of(app);
+        assert!(
+            p.filtered.len() >= 2,
+            "{}: the fixture must keep two rows matching \"j\", got {}",
+            what,
+            p.filtered.len()
+        );
+        assert_eq!(
+            p.highlighted, before,
+            "{}: j must not move the highlight",
+            what
+        );
+        assert_eq!(
+            p.input.value(),
+            "j",
+            "{}: j is a character even on an empty query",
+            what
+        );
+    }
+
+    app.handle_key(key(KeyCode::Char('k')));
+    let p = picker_of(app);
+    assert_eq!(
+        p.input.value(),
+        "jk",
+        "{}: both letters must reach the filter",
+        what
+    );
+    assert!(
+        p.filtered.len() >= 2,
+        "{}: the fixture must keep two rows matching \"jk\", got {}",
+        what,
+        p.filtered.len()
+    );
+    assert_eq!(
+        p.highlighted, before,
+        "{}: typing must not move the highlight",
+        what
+    );
+}
+
+/// The same rule once a query is already open: `a` first, then `j` and `k` are
+/// plain characters that extend it. Each intermediate value is asserted so a
+/// failure names the keystroke that went missing.
+fn assert_jk_types_into_a_non_empty_query(
+    app: &mut App,
+    picker_of: fn(&App) -> &FuzzyPicker,
+    what: &str,
+) {
+    // 'a' opens the query; from here j/k must be literal characters.
+    app.handle_key(key(KeyCode::Char('a')));
+    assert_eq!(
+        picker_of(app).input.value(),
+        "a",
+        "{}: the query must be non-empty before j is pressed",
+        what
+    );
+
+    app.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(
+        picker_of(app).input.value(),
+        "aj",
+        "{}: j must reach the filter once the query is non-empty",
+        what
+    );
+
+    app.handle_key(key(KeyCode::Char('k')));
+    assert_eq!(
+        picker_of(app).input.value(),
+        "ajk",
+        "{}: k must reach the filter once the query is non-empty",
+        what
+    );
+}
+
+fn create_repos_picker(app: &App) -> &FuzzyPicker {
+    match app.screen {
+        Screen::CreateWorkspace(ref st) => &st.picker,
+        _ => panic!("expected CreateWorkspace screen"),
+    }
+}
+
+fn add_repos_picker(app: &App) -> &FuzzyPicker {
+    match app.screen {
+        Screen::AddRepos(ref st) => &st.picker,
+        _ => panic!("expected AddRepos screen"),
+    }
+}
+
+fn search_picker(app: &App) -> &FuzzyPicker {
+    match app.screen {
+        Screen::RepoSearch(ref st) => &st.picker,
+        _ => panic!("expected RepoSearch screen"),
+    }
+}
+
+fn go_workspace_picker(app: &App) -> &FuzzyPicker {
+    match app.screen {
+        Screen::GoWorkspace(ref st) => &st.picker,
+        _ => panic!("expected GoWorkspace screen"),
+    }
+}
+
+fn create_branch_picker(app: &App) -> &FuzzyPicker {
+    match app.screen {
+        Screen::CreateWorkspace(ref st) => {
+            st.branch_picker.as_ref().expect("branch picker present")
+        }
+        _ => panic!("expected CreateWorkspace screen"),
+    }
+}
+
+fn add_branch_picker(app: &App) -> &FuzzyPicker {
+    match app.screen {
+        Screen::AddRepos(ref st) => st.branch_picker.as_ref().expect("branch picker present"),
+        _ => panic!("expected AddRepos screen"),
+    }
+}
+
+fn rebase_target_picker(app: &App) -> &FuzzyPicker {
+    match app.screen {
+        Screen::GitOps(ref st) => st.rebase_picker.as_ref().expect("rebase picker present"),
+        _ => panic!("expected the git-ops overlay"),
+    }
+}
+
+fn switch_branch_picker(app: &App) -> &FuzzyPicker {
+    match app.screen {
+        Screen::SwitchBranch(ref st) => st.branch_picker.as_ref().expect("branch picker present"),
+        _ => panic!("expected SwitchBranch screen"),
+    }
+}
+
+/// Open the create flow and land in PickRepos with the given space name.
+fn open_create_picker(app: &mut App, name: &str) {
+    app.handle_key(key(KeyCode::Char('c')));
+    for ch in name.chars() {
+        app.handle_key(key(KeyCode::Char(ch)));
+    }
+    app.handle_key(key(KeyCode::Enter));
+    match &app.screen {
+        Screen::CreateWorkspace(st) => assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::PickRepos
+        ),
+        _ => panic!("expected CreateWorkspace screen"),
+    }
+}
+
+#[test]
+fn create_pick_repos_jk_type_into_an_empty_query() {
+    let mut app = test_app(vec![], jk_repo_paths());
+    open_create_picker(&mut app, "ws");
+
+    assert_jk_types_into_the_query(&mut app, create_repos_picker, "create PickRepos");
+}
+
+#[test]
+fn create_pick_repos_jk_type_into_a_non_empty_query() {
+    let mut app = test_app(vec![], jk_repo_paths());
+    open_create_picker(&mut app, "ws");
+
+    assert_jk_types_into_a_non_empty_query(&mut app, create_repos_picker, "create PickRepos");
+}
+
+#[test]
+fn create_pick_repos_arrows_navigate_even_with_a_query() {
+    let mut app = test_app(vec![], jk_repo_paths());
+    open_create_picker(&mut app, "ws");
+
+    // A query that keeps at least two items in the filtered set.
+    app.handle_key(key(KeyCode::Char('a')));
+    let before = match app.screen {
+        Screen::CreateWorkspace(ref st) => {
+            assert!(
+                st.picker.filtered.len() >= 2,
+                "fixture must leave >=2 matches for 'a', got {}",
+                st.picker.filtered.len()
+            );
+            st.picker.highlighted
+        }
+        _ => panic!("expected CreateWorkspace screen"),
+    };
+
+    app.handle_key(key(KeyCode::Down));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.picker.highlighted,
+            before + 1,
+            "arrows always navigate, query or not"
+        );
+        assert_eq!(
+            st.picker.input.value(),
+            "a",
+            "arrows must not edit the query"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+#[test]
+fn create_pick_repos_tab_still_toggles_with_a_query() {
+    let mut app = test_app(vec![], jk_repo_paths());
+    open_create_picker(&mut app, "ws");
+
+    app.handle_key(key(KeyCode::Char('a')));
+    app.handle_key(key(KeyCode::Tab));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.picker.toggled.len(),
+            1,
+            "Tab multi-select must be unaffected by the j/k guard"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+/// The j/k guard splits the navigation arms; `Ctrl-S` sits after them in the
+/// same match. Pin that scope-cycling still reaches its arm with a non-empty
+/// query rather than being swallowed as literal input.
+#[test]
+fn create_pick_repos_ctrl_s_still_cycles_scope_with_a_query() {
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+
+    let mut app = test_app(vec![], jk_repo_paths_two_scopes());
+    open_create_picker(&mut app, "ws");
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.picker.available_scopes,
+            vec!["orga".to_string(), "orgb".to_string()],
+            "fixture must provide two scopes to cycle through"
+        );
+        assert!(st.picker.scope.is_none(), "scope starts unset");
+    }
+
+    app.handle_key(key(KeyCode::Char('a')));
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.picker.scope,
+            Some("orga".to_string()),
+            "Ctrl-S must still cycle scope while a query is active"
+        );
+        assert_eq!(
+            st.picker.input.value(),
+            "a",
+            "Ctrl-S must not be typed into the query as a literal 's'"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+#[test]
+fn add_pick_repos_ctrl_s_still_cycles_scope_with_a_query() {
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+
+    let ws = common::workspace_with_repos(&["existing"]);
+    let mut app = test_app(vec![ws], jk_repo_paths_two_scopes());
+    app.handle_key(key(KeyCode::Char('a')));
+    assert!(matches!(app.screen, Screen::AddRepos(_)));
+
+    app.handle_key(key(KeyCode::Char('a')));
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+    if let Screen::AddRepos(ref st) = app.screen {
+        assert_eq!(
+            st.picker.scope,
+            Some("orga".to_string()),
+            "Ctrl-S must still cycle scope while a query is active"
+        );
+        assert_eq!(st.picker.input.value(), "a");
+    } else {
+        panic!("expected AddRepos screen");
+    }
+}
+
+#[test]
+fn add_pick_repos_jk_type_into_a_non_empty_query() {
+    let ws = common::workspace_with_repos(&["existing"]);
+    let mut app = test_app(vec![ws], jk_repo_paths());
+
+    app.handle_key(key(KeyCode::Char('a')));
+    assert!(
+        matches!(app.screen, Screen::AddRepos(_)),
+        "expected AddRepos screen"
+    );
+
+    assert_jk_types_into_a_non_empty_query(&mut app, add_repos_picker, "add PickRepos");
+}
+
+#[test]
+fn add_pick_repos_jk_type_into_an_empty_query() {
+    let ws = common::workspace_with_repos(&["existing"]);
+    let mut app = test_app(vec![ws], jk_repo_paths());
+
+    app.handle_key(key(KeyCode::Char('a')));
+    assert!(
+        matches!(app.screen, Screen::AddRepos(_)),
+        "expected AddRepos screen"
+    );
+
+    assert_jk_types_into_the_query(&mut app, add_repos_picker, "add PickRepos");
+}
+
+#[test]
+fn repo_search_jk_type_into_a_non_empty_query() {
+    let mut app = test_app(vec![], jk_repo_paths());
+    // Focus right so this stays valid once `/` is pane-gated in Wave 1.2.
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Char('/')));
+    assert!(
+        matches!(app.screen, Screen::RepoSearch(_)),
+        "expected RepoSearch screen"
+    );
+
+    assert_jk_types_into_a_non_empty_query(&mut app, search_picker, "repo search");
+}
+
+#[test]
+fn repo_search_jk_type_into_an_empty_query() {
+    let mut app = test_app(vec![], jk_repo_paths());
+    app.focus = Pane::Right;
+    app.handle_key(key(KeyCode::Char('/')));
+    assert!(
+        matches!(app.screen, Screen::RepoSearch(_)),
+        "expected RepoSearch screen"
+    );
+
+    assert_jk_types_into_the_query(&mut app, search_picker, "repo search");
+}
+
+fn jk_workspaces() -> Vec<Workspace> {
+    ["jackal", "kernel", "mango", "jokkmokk"]
+        .iter()
+        .map(|n| Workspace {
+            name: (*n).to_string(),
+            path: PathBuf::from(format!("/tmp/{}", n)),
+            repos: vec![],
+        })
+        .collect()
+}
+
+#[test]
+fn go_picker_jk_type_into_a_non_empty_query() {
+    let mut app = test_app(jk_workspaces(), vec![]);
+    app.handle_key(key(KeyCode::Char('g')));
+    assert!(
+        matches!(app.screen, Screen::GoWorkspace(_)),
+        "expected GoWorkspace screen"
+    );
+
+    assert_jk_types_into_a_non_empty_query(&mut app, go_workspace_picker, "go picker");
+}
+
+#[test]
+fn go_picker_jk_type_into_an_empty_query() {
+    let mut app = test_app(jk_workspaces(), vec![]);
+    app.handle_key(key(KeyCode::Char('g')));
+    assert!(
+        matches!(app.screen, Screen::GoWorkspace(_)),
+        "expected GoWorkspace screen"
+    );
+
+    assert_jk_types_into_the_query(&mut app, go_workspace_picker, "go picker");
+}
+
+/// Create the two `ajk-*` branches every typed branch picker fixture needs,
+/// so pressing `j`/`k` after `a` has rows to filter against.
+fn create_jk_branches(repo_path: &std::path::Path) {
+    for branch in ["ajk-one", "ajk-two"] {
+        let out = std::process::Command::new("git")
+            .args(["branch", branch])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+    }
+}
+
+/// Drive the create flow as far as the PickBranch fuzzy picker, which is the
+/// sixth older picker and needs a real repo behind it.
+fn open_create_pick_branch(env: &TestEnv) -> App {
+    let repo_path = env.create_repo("branch-picker-repo");
+    create_jk_branches(&repo_path);
+
+    let config = config_from_env(env);
+    let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.ws_name = tui_input::Input::default().with_value("ws-branch".to_string());
+        st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
+        st.recent_branches = vec![];
+        st.branch_strategy_idx = 3; // "Pick a branch..." when there are no recents
+    }
+    app.handle_key(key(KeyCode::Enter));
+    match app.screen {
+        Screen::CreateWorkspace(ref st) => assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::PickBranch,
+            "fixture should have reached the branch picker"
+        ),
+        _ => panic!("expected CreateWorkspace screen"),
+    }
+    app
+}
+
+#[test]
+fn create_pick_branch_jk_type_into_a_non_empty_query() {
+    let env = TestEnv::new();
+    let mut app = open_create_pick_branch(&env);
+
+    assert_jk_types_into_a_non_empty_query(&mut app, create_branch_picker, "create PickBranch");
+}
+
+#[test]
+fn create_pick_branch_jk_type_into_an_empty_query() {
+    let env = TestEnv::new();
+    let mut app = open_create_pick_branch(&env);
+
+    assert_jk_types_into_the_query(&mut app, create_branch_picker, "create PickBranch");
+}
+
+/// The Add flow's branch picker is the sixth of the six older pickers. Its j/k
+/// guard is currently byte-identical to the Create flow's, but identical-by-
+/// inspection is not a regression net: this pins it independently so the two
+/// cannot silently drift apart.
+fn open_add_pick_branch(env: &TestEnv) -> App {
+    let repo_path = env.create_repo("add-branch-picker-repo");
+    create_jk_branches(&repo_path);
+
+    let config = config_from_env(env);
+    let workspaces = vec![Workspace {
+        name: "ws-add-branch".to_string(),
+        path: env.workspaces_dir.join("ws-add-branch"),
+        repos: vec![],
+    }];
+    let mut app = test_app_with_config(config, workspaces, vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('a')));
+    if let Screen::AddRepos(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.stage = space::tui::screens::add::AddStage::PickBranchStrategy;
+        st.recent_branches = vec![];
+        st.branch_strategy_idx = 3; // "Pick a branch..." when there are no recents
+    } else {
+        panic!("expected AddRepos screen");
+    }
+    app.handle_key(key(KeyCode::Enter));
+    match app.screen {
+        Screen::AddRepos(ref st) => assert_eq!(
+            st.stage,
+            space::tui::screens::add::AddStage::PickBranch,
+            "fixture should have reached the add-flow branch picker"
+        ),
+        _ => panic!("expected AddRepos screen"),
+    }
+    app
+}
+
+#[test]
+fn add_pick_branch_jk_type_into_a_non_empty_query() {
+    let env = TestEnv::new();
+    let mut app = open_add_pick_branch(&env);
+
+    assert_jk_types_into_a_non_empty_query(&mut app, add_branch_picker, "add PickBranch");
+}
+
+#[test]
+fn add_pick_branch_jk_type_into_an_empty_query() {
+    let env = TestEnv::new();
+    let mut app = open_add_pick_branch(&env);
+
+    assert_jk_types_into_the_query(&mut app, add_branch_picker, "add PickBranch");
+}
+
+/// A repo with two extra `j`/`k` branches, in a workspace, focused on its repo
+/// row: the shared fixture for the last two typed pickers, both of which are
+/// reached from a repo row rather than from a create/add flow.
+fn jk_branch_repo_app(env: &TestEnv, name: &str) -> App {
+    let repo_path = env.create_repo(name);
+    create_jk_branches(&repo_path);
+
+    let ws = Workspace {
+        name: "jk-branch-ws".to_string(),
+        path: env.workspaces_dir.clone(),
+        repos: vec![WorkspaceRepo {
+            name: name.to_string(),
+            path: repo_path.clone(),
+            branch: "main".to_string(),
+            status: RepoStatus::default(),
+            ahead: 0,
+            behind: 0,
+        }],
+    };
+    let config = config_from_env(env);
+    let mut app = test_app_with_config(config, vec![ws], vec![repo_path]);
+    app.load_selected_workspace_detail();
+    app.focus = Pane::Right; // cursor_row = 0 is the repo row
+    app
+}
+
+/// The rebase target picker: `G` opens the git-ops menu, `r` the rebase
+/// pre-flight, `Enter` on a clean tree the picker itself.
+fn open_rebase_pick_target(env: &TestEnv) -> App {
+    use space::tui::screens::gitops::GitOpsStage;
+    let mut app = jk_branch_repo_app(env, "rebase-jk-repo");
+
+    app.handle_key(key(KeyCode::Char('G')));
+    app.handle_key(key(KeyCode::Char('r')));
+    app.handle_key(key(KeyCode::Enter));
+
+    match app.screen {
+        Screen::GitOps(ref st) => assert_eq!(
+            st.stage,
+            GitOpsStage::RebasePickTarget,
+            "fixture should have reached the rebase target picker"
+        ),
+        _ => panic!("expected the git-ops overlay"),
+    }
+    app
+}
+
+/// The rebase target picker is one of the two that used to guard j/k on an
+/// empty query. The guard is gone, so it follows the same rule as the rest.
+#[test]
+fn gitops_rebase_target_jk_type_into_an_empty_query() {
+    let env = TestEnv::new();
+    let mut app = open_rebase_pick_target(&env);
+
+    assert_jk_types_into_the_query(&mut app, rebase_target_picker, "rebase target");
+}
+
+/// The switch-branch picker: `b` on a repo row, then the last strategy row
+/// ("Pick a branch...") opens the fuzzy list of every branch.
+fn open_switch_branch_pick_branch(env: &TestEnv) -> App {
+    use space::tui::screens::switch_branch::SwitchBranchStage;
+    let mut app = jk_branch_repo_app(env, "switch-jk-repo");
+
+    app.handle_key(key(KeyCode::Char('b')));
+    if let Screen::SwitchBranch(ref mut st) = app.screen {
+        st.strategy_idx = st.max_idx();
+    } else {
+        panic!("expected SwitchBranch screen");
+    }
+    app.handle_key(key(KeyCode::Enter));
+
+    match app.screen {
+        Screen::SwitchBranch(ref st) => assert_eq!(
+            st.stage,
+            SwitchBranchStage::PickBranch,
+            "fixture should have reached the switch-branch picker"
+        ),
+        _ => panic!("expected SwitchBranch screen"),
+    }
+    app
+}
+
+/// The switch-branch picker is the other formerly guarded one.
+#[test]
+fn switch_branch_pick_branch_jk_type_into_an_empty_query() {
+    let env = TestEnv::new();
+    let mut app = open_switch_branch_pick_branch(&env);
+
+    assert_jk_types_into_the_query(&mut app, switch_branch_picker, "switch branch");
+}
+
+/// `q` is a character in a typed picker, not an exit. The create, add and
+/// rebase-target pickers already treat it that way; this pins the same rule on
+/// the switch-branch picker so a branch named `queue` stays reachable. Esc
+/// keeps its meaning as the way out.
+#[test]
+fn switch_branch_pick_branch_q_types_into_the_query() {
+    use space::tui::screens::switch_branch::SwitchBranchStage;
+    let env = TestEnv::new();
+    let mut app = open_switch_branch_pick_branch(&env);
+
+    app.handle_key(key(KeyCode::Char('q')));
+
+    match app.screen {
+        Screen::SwitchBranch(ref st) => {
+            assert_eq!(
+                st.stage,
+                SwitchBranchStage::PickBranch,
+                "q must not leave the branch picker"
+            );
+            let bp = st.branch_picker.as_ref().expect("branch picker present");
+            assert_eq!(
+                bp.input.value(),
+                "q",
+                "q must reach the filter like every other letter"
+            );
+        }
+        _ => panic!("expected SwitchBranch screen; q must not exit the flow"),
+    }
+}
+
+/// The new-branch name field is a text input, so `q` is typed there too: a
+/// branch called `quick` must be nameable.
+#[test]
+fn switch_branch_enter_branch_name_types_q() {
+    use space::tui::screens::switch_branch::SwitchBranchStage;
+    let env = TestEnv::new();
+    let mut app = jk_branch_repo_app(&env, "switch-name-repo");
+
+    app.handle_key(key(KeyCode::Char('b')));
+    match app.screen {
+        // Row 0 of the strategy list is "New branch", so Enter opens the name field.
+        Screen::SwitchBranch(ref st) => assert_eq!(st.strategy_idx, 0),
+        _ => panic!("expected SwitchBranch screen"),
+    }
+    app.handle_key(key(KeyCode::Enter));
+
+    for ch in "quick".chars() {
+        app.handle_key(key(KeyCode::Char(ch)));
+    }
+
+    match app.screen {
+        Screen::SwitchBranch(ref st) => {
+            assert_eq!(
+                st.stage,
+                SwitchBranchStage::EnterBranchName,
+                "q must not leave the branch-name field"
+            );
+            assert_eq!(
+                st.branch_name_input.value(),
+                "quick",
+                "every letter, q included, belongs to the branch name"
+            );
+        }
+        _ => panic!("expected SwitchBranch screen; q must not exit the flow"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 0.3: `g` is gated to the workspace pane
+// ---------------------------------------------------------------------------
+
+#[test]
+fn g_on_left_pane_opens_the_go_picker() {
+    let mut app = test_app(jk_workspaces(), vec![]);
+    assert_eq!(app.focus, Pane::Left);
+
+    app.handle_key(key(KeyCode::Char('g')));
+
+    assert!(
+        matches!(app.screen, Screen::GoWorkspace(_)),
+        "g keeps its documented workspace-pane meaning"
+    );
+}
+
+/// The pane guard makes the `g` arm fall through. No later arm in the dashboard
+/// match binds lowercase `g` (the nearest is `G`, a distinct char), so it must
+/// reach the wildcard and do nothing at all, not merely "not open the picker".
+#[test]
+fn g_on_right_pane_is_inert() {
+    let ws = common::workspace_with_repos(&["repo-a", "repo-b"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.cursor_row = 1;
+
+    app.handle_key(key(KeyCode::Char('g')));
+
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "g while browsing repo rows must not jump to the workspace picker"
+    );
+    assert!(!app.should_quit, "g must not quit");
+    assert_eq!(app.focus, Pane::Right, "g must not move focus");
+    assert_eq!(app.cursor_row, 1, "g must not move the cursor");
+    assert!(
+        app.expanded_repos.is_empty(),
+        "g must not expand or collapse anything"
+    );
+}
+
+#[test]
+fn shift_g_on_right_pane_still_opens_git_ops() {
+    let ws = common::workspace_with_repos(&["repo-a"]);
+    let mut app = test_app(vec![ws], vec![]);
+    app.focus = Pane::Right;
+    app.cursor_row = 0;
+
+    app.handle_key(shift_key(KeyCode::Char('G')));
+
+    assert!(
+        matches!(app.screen, Screen::GitOps(_)),
+        "G must remain the git-ops menu; the g gate must not disturb it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 0.4: delete confirm defaults to No
+// ---------------------------------------------------------------------------
+
+/// A workspace the app lists but whose directory does not exist under the
+/// (temporary) workspaces dir. Confirming therefore fails loudly instead of
+/// deleting anything, which is exactly what lets the confirm case below prove
+/// that a delete was attempted at all.
+fn delete_confirm_app(env: &TestEnv) -> App {
+    let workspaces = vec![Workspace {
+        name: "keep-me".to_string(),
+        path: env.workspaces_dir.join("keep-me"),
+        repos: vec![],
+    }];
+    test_app_with_config(config_from_env(env), workspaces, vec![])
+}
+
+/// `ScreenAction::Back` sets no status message, so an empty status line is the
+/// evidence that the decline key never reached `remove_workspace`. Screen and
+/// workspace-count assertions alone cannot tell the two apart: the fixture
+/// workspace is not on disk, so a delete that *did* run would also land back on
+/// the dashboard with the list untouched.
+fn assert_delete_was_declined(app: &App, key_name: &str) {
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "{} must return to the dashboard",
+        key_name
+    );
+    assert_eq!(
+        app.workspaces.len(),
+        1,
+        "{}: nothing may be deleted",
+        key_name
+    );
+    assert_eq!(
+        app.workspaces[0].name, "keep-me",
+        "{}: the workspace must survive intact",
+        key_name
+    );
+    assert_eq!(
+        app.status_message, None,
+        "{}: declining must not attempt a delete, and any attempt sets a status message",
+        key_name
+    );
+}
+
+#[test]
+fn delete_enter_cancels_instead_of_deleting() {
+    let env = TestEnv::new();
+    let mut app = delete_confirm_app(&env);
+
+    app.handle_key(key(KeyCode::Char('d')));
+    assert!(matches!(app.screen, Screen::ConfirmDelete(_)));
+
+    app.handle_key(key(KeyCode::Enter));
+
+    // Enter declines, matching the [y/N] pattern used by push and rebase.
+    assert_delete_was_declined(&app, "Enter");
+}
+
+#[test]
+fn delete_uppercase_y_deletes_and_uppercase_n_cancels() {
+    use space::tui::actions::StatusKind;
+
+    let env = TestEnv::new();
+
+    let mut app = delete_confirm_app(&env);
+    app.handle_key(key(KeyCode::Char('d')));
+    app.handle_key(shift_key(KeyCode::Char('N')));
+    assert_delete_was_declined(&app, "N");
+
+    // q cancels too, the same set of decline keys as the push and rebase
+    // confirmations (they share one default-No helper).
+    let mut app = delete_confirm_app(&env);
+    app.handle_key(key(KeyCode::Char('d')));
+    app.handle_key(key(KeyCode::Char('q')));
+    assert_delete_was_declined(&app, "q");
+
+    // Y is accepted as confirmation; the workspace path does not exist on disk,
+    // so the delete fails loudly rather than silently doing nothing. That error
+    // status is the proof the keypress reached `remove_workspace`.
+    let mut app = delete_confirm_app(&env);
+    app.handle_key(key(KeyCode::Char('d')));
+    app.handle_key(shift_key(KeyCode::Char('Y')));
+    assert!(
+        !matches!(app.screen, Screen::ConfirmDelete(_)),
+        "Y must be treated as confirmation, not swallowed"
+    );
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Delete failed: workspace 'keep-me' not found"),
+        "Y must reach the delete, which reports the missing directory"
+    );
+    assert_eq!(app.status_kind, StatusKind::Error);
 }

@@ -167,7 +167,7 @@ const GIT_OPS: BindingGroup = BindingGroup {
         },
         Binding {
             key: "\u{2191}\u{2193}/jk",
-            desc: "Navigate",
+            desc: "Navigate (menu and log only)",
         },
         Binding {
             key: "enter",
@@ -363,5 +363,31 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
     match pane {
         crate::tui::app::Pane::Left => &LEFT,
         crate::tui::app::Pane::Right => &RIGHT,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::all_groups;
+
+    /// The help overlay never wraps: each row is two spaces, the key padded
+    /// to 12 columns and the description. On the 80-column default terminal
+    /// the dialog is 56 wide, 54 inside the border, so every registered
+    /// binding must fit 54 columns or its description is clipped there.
+    #[test]
+    fn every_binding_fits_the_default_terminal_help_dialog() {
+        for group in all_groups() {
+            for binding in group.bindings {
+                let key_cols = binding.key.chars().count().max(12);
+                let row = 2 + key_cols + binding.desc.chars().count();
+                assert!(
+                    row <= 54,
+                    "{} / {:?} is {} columns wide, over the 54-column help dialog at 80 columns",
+                    group.name,
+                    binding.desc,
+                    row
+                );
+            }
+        }
     }
 }

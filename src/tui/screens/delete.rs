@@ -1,5 +1,6 @@
+use super::default_no_confirm;
 use crate::tui::actions::{ScreenAction, ScreenContext};
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::KeyEvent;
 
 #[derive(Debug)]
 pub struct DeleteState {
@@ -8,14 +9,17 @@ pub struct DeleteState {
 }
 
 impl DeleteState {
+    /// Default-No confirmation shared with `ConfirmPush` and `RebaseConfirm`:
+    /// only an explicit `y`/`Y` deletes, so a reflex Enter can never destroy
+    /// a workspace.
     pub fn handle_key(&mut self, key: KeyEvent, _ctx: &ScreenContext) -> ScreenAction {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Enter => ScreenAction::DeleteWorkspace {
+        match default_no_confirm(key.code) {
+            Some(true) => ScreenAction::DeleteWorkspace {
                 name: self.workspace_name.clone(),
                 force: true,
             },
-            KeyCode::Char('n') | KeyCode::Esc => ScreenAction::Back,
-            _ => ScreenAction::Continue,
+            Some(false) => ScreenAction::Back,
+            None => ScreenAction::Continue,
         }
     }
 }

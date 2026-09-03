@@ -39,12 +39,19 @@ stay aligned.
 
 ---
 
-## Tier 1.6 -- Create-flow polish
+## Tier 1.6 -- Create-flow polish ✓ Complete
 
 UX improvements from user feedback. Small, self-contained changes to the
 workspace-creation flow. Can be picked off independently.
 
-### 3a. Reorder workspace-creation steps (#7)
+All three shipped ahead of being ticked off here; reconciled 2026-08-21 against
+the code. The only piece not built is the optional tree-grouping stretch in 3c,
+which was a bonus rather than an acceptance criterion.
+
+### 3a. Reorder workspace-creation steps (#7) ✓
+
+`EnterName` is the first `CreateStage` (`src/tui/screens/create.rs`), so the
+flow is name-first as specified.
 
 **Problem:** The current creation order is: select repos, enter workspace name,
 pick branch strategy. Users expect to name the workspace first, then select
@@ -63,7 +70,10 @@ repos — the name provides context for the subsequent choices.
 
 ---
 
-### 3b. Custom new-branch name (#6)
+### 3b. Custom new-branch name (#6) ✓
+
+`branch_name_input` and the `EnterBranchName` stage exist in both the create and
+add flows, pre-filled with the workspace name and editable before creation.
 
 **Problem:** "New branch" always uses the workspace name as the branch name.
 Users want to specify a different branch name (e.g. `feature/DEV-1234`).
@@ -82,7 +92,12 @@ Users want to specify a different branch name (e.g. `feature/DEV-1234`).
 
 ---
 
-### 3c. Repo metadata and tree view in picker (#5)
+### 3c. Repo metadata and tree view in picker (#5) ✓
+
+`repo_display_info` populates `PickerItem.branch` / `.remote_url` when either
+picker is built (`create.rs:50`, `add.rs:41`), and both render as dimmed
+suffixes (`fuzzy_picker.rs:379-383`) with credentials stripped from the URL.
+Tree grouping was the explicit stretch goal and remains unbuilt.
 
 **Problem:** The repo picker shows repos as `<dir-name> (<parent-dir-name>)`.
 No branch, URL, or hierarchical grouping. Hard to distinguish repos with

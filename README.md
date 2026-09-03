@@ -69,7 +69,7 @@ files with `s`/`space`, or bulk stage/unstage all files in the selected repo wit
 | `/` | Filter spaces (selects in place) |
 | `?` | Open help overlay |
 | `S` | Open config editor |
-| `q` / `Esc` | Quit |
+| `q` | Quit |
 
 **Key bindings — Repos pane:**
 
@@ -91,6 +91,7 @@ files with `s`/`space`, or bulk stage/unstage all files in the selected repo wit
 
 | Key | Action |
 |-----|--------|
+| `↑` / `↓` | Move the highlight (every letter types into the filter) |
 | `Tab` | Toggle the highlighted repo |
 | `Ctrl-S` | Cycle the parent-directory scope |
 | `Ctrl-R` | Rescan the repo list without leaving the picker |

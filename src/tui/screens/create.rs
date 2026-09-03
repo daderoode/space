@@ -132,11 +132,11 @@ impl CreateState {
                 self.picker.toggle_highlighted();
                 ScreenAction::Continue
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 self.picker.move_up();
                 ScreenAction::Continue
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 self.picker.move_down();
                 ScreenAction::Continue
             }
@@ -361,13 +361,13 @@ impl CreateState {
                 self.stage = CreateStage::PickBranchStrategy;
                 ScreenAction::Continue
             }
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 if let Some(ref mut bp) = self.branch_picker {
                     bp.move_up();
                 }
                 ScreenAction::Continue
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 if let Some(ref mut bp) = self.branch_picker {
                     bp.move_down();
                 }
