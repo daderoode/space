@@ -4799,7 +4799,10 @@ mod rescan_tests {
             general
                 .bindings
                 .iter()
-                .any(|b| b.key == "r" && b.desc == "Rescan repo list"),
+                // The qualifier matters: git-ops binds `r` to Rebase, and the
+                // overlay shows every group at once. What this test is about is
+                // the glossary word, so it pins the prefix.
+                .any(|b| b.key == "r" && b.desc.starts_with("Rescan repo list")),
             "dashboard r must read 'Rescan repo list' in the help registry"
         );
         let ws_pane = groups
@@ -7935,6 +7938,11 @@ mod help_overlay_tests {
                 "q",
                 "Close, when not editing",
             ),
+            (
+                keybindings::GENERAL_NAME,
+                "q",
+                "Quit (dashboard, not while typing)",
+            ),
         ];
         for (group_name, wanted_key, wanted_desc) in expected {
             let group = keybindings::all_groups()
@@ -7979,7 +7987,15 @@ mod help_overlay_tests {
                 continue;
             }
             for b in group.bindings {
-                if b.key.contains('/') && b.key.split('/').any(|k| k.eq_ignore_ascii_case("q")) {
+                // Tokenised on any separator, not just `/`: keying a row
+                // "q or Esc" must not slip past a check coupled to one
+                // formatting convention.
+                let tokens: Vec<&str> = b
+                    .key
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if tokens.len() > 1 && tokens.iter().any(|k| k.eq_ignore_ascii_case("q")) {
                     panic!(
                         "{:?} folds q into {:?} ({:?}); q's meaning varies by \
                          stage, so it needs its own row",
@@ -7987,6 +8003,154 @@ mod help_overlay_tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Every row of the registry, pinned.
+    ///
+    /// Six reviews of this branch found roughly ten rows that documented keys
+    /// the code does not bind, or omitted stages where a key means something
+    /// else. Four consecutive attempts to fix that by hand each introduced a
+    /// fresh instance. Spot checks keep failing because they test the row that
+    /// was just edited rather than the property "this row is true".
+    ///
+    /// So the whole table is pinned here. This test is not evidence that the
+    /// rows are correct; it makes changing one a deliberate act. When it fails,
+    /// re-read the handler for that key, in the stage the group covers, and
+    /// only then update the expectation.
+    #[test]
+    fn the_whole_registry_is_pinned() {
+        let expected: &[(&str, &str, &str)] = &[
+            ("Navigation", "Tab", "Switch pane"),
+            ("Navigation", "↑/k", "Up"),
+            ("Navigation", "↓/j", "Down"),
+            ("Navigation", "PgUp/PgDn", "Page up/down"),
+            ("Navigation", "Home/End", "First / last row"),
+            ("Navigation", "h/l", "Scroll table left/right (repo pane)"),
+            ("Navigation", "→", "Expand / focus repos"),
+            (
+                "Navigation",
+                "←/Esc",
+                "Right pane: collapse / focus workspaces",
+            ),
+            ("Workspace Pane", "Enter", "Go to workspace (cd)"),
+            ("Workspace Pane", "c", "Create workspace"),
+            ("Workspace Pane", "a", "Add repos"),
+            ("Workspace Pane", "d", "Delete workspace"),
+            ("Workspace Pane", "g", "Go (fuzzy picker)"),
+            ("Workspace Pane", "/", "Filter spaces"),
+            ("Workspace Pane", "S", "Config"),
+            ("Repo Pane", "Enter (repo)", "Expand / collapse repo"),
+            ("Repo Pane", "Enter (file)", "View file diff"),
+            ("Repo Pane", "←/Esc", "Collapse all / back"),
+            ("Repo Pane", "s/space", "Stage / unstage file"),
+            ("Repo Pane", "/", "Search repos"),
+            ("Repo Pane", "S", "Stage all unstaged"),
+            ("Repo Pane", "U", "Unstage all staged"),
+            ("Repo Pane", "b", "Switch branch"),
+            ("Repo Pane", "G", "Git operations"),
+            ("Repo Picker", "Tab", "Toggle repo"),
+            ("Repo Picker", "Ctrl-S", "Cycle scope"),
+            ("Repo Picker", "Ctrl-R", "Rescan repo list"),
+            ("Create / Add Flow", "Tab", "Toggle repo in picker"),
+            ("Create / Add Flow", "Enter", "Confirm and continue"),
+            ("Create / Add Flow", "↑↓/jk", "Choose branch strategy"),
+            (
+                "Create / Add Flow",
+                "letters",
+                "Type a name, or filter the picker",
+            ),
+            ("Create / Add Flow", "Esc", "Back one stage"),
+            ("Creating Log", "↑↓/jk", "Scroll the log"),
+            ("Creating Log", "PgUp/PgDn", "Page the log"),
+            (
+                "Creating Log",
+                "Home/End",
+                "Top / bottom (End resumes follow)",
+            ),
+            ("Creating Log", "Enter/Esc/q", "Back to the dashboard"),
+            ("Delete Confirm", "y", "Delete the space"),
+            ("Delete Confirm", "n/Esc/Enter", "Cancel (the default)"),
+            ("Delete Confirm", "q", "Cancel"),
+            ("Switch Branch", "↑↓/jk", "Choose strategy"),
+            ("Switch Branch", "Enter", "Confirm"),
+            (
+                "Switch Branch",
+                "letters",
+                "Type a new branch name / filter",
+            ),
+            ("Switch Branch", "↑↓", "Move the branch highlight"),
+            ("Switch Branch", "Esc", "Back one stage"),
+            ("Switch Branch", "q", "Back, on the strategy stage only"),
+            ("Config Editor", "↑↓/jk", "Move between fields"),
+            ("Config Editor", "Enter", "Edit field / commit edit"),
+            ("Config Editor", "Ctrl-S", "Save and exit"),
+            ("Config Editor", "Esc", "Cancel edit, or close"),
+            ("Config Editor", "q", "Close, when not editing"),
+            ("Space & Repo Pickers", "↑↓", "Move the highlight"),
+            ("Space & Repo Pickers", "Enter", "Select"),
+            ("Space & Repo Pickers", "Esc", "Cancel"),
+            ("Space & Repo Pickers", "letters", "Type into the filter"),
+            ("Git Operations", "f", "Fetch"),
+            ("Git Operations", "p", "Pull"),
+            ("Git Operations", "P", "Push"),
+            ("Git Operations", "c", "Commit"),
+            ("Git Operations", "l", "Log"),
+            ("Git Operations", "r", "Rebase"),
+            ("Git Operations", "↑↓/jk", "Navigate (menu and log only)"),
+            ("Git Operations", "↑↓", "Move the rebase-target highlight"),
+            ("Git Operations", "PgUp/PgDn", "Page the log"),
+            ("Git Operations", "Home/End", "Log top / bottom"),
+            ("Git Operations", "enter", "Select"),
+            ("Git Operations", "y", "Confirm a push or rebase"),
+            ("Git Operations", "n/Enter/Esc", "Decline (the default)"),
+            (
+                "Git Operations",
+                "esc",
+                "Back a stage (closes from menu/running)",
+            ),
+            ("Git Operations", "q", "Same as Esc, except while typing"),
+            ("Diff Viewer", "up/k", "Scroll up"),
+            ("Diff Viewer", "dn/j", "Scroll down"),
+            ("Diff Viewer", "PgUp/PgDn", "Page scroll"),
+            ("Diff Viewer", "Home/End", "Jump to start/end"),
+            ("Diff Viewer", "s/space", "Stage / unstage"),
+            ("Diff Viewer", "Esc/q", "Close"),
+            ("Sync Report", "↑↓/jk", "Select repo (once done)"),
+            ("Sync Report", "PgUp/PgDn", "Page by 10 rows"),
+            ("Sync Report", "Home/End", "First / last repo"),
+            (
+                "Sync Report",
+                "Enter",
+                "Continue to branch picker (once done)",
+            ),
+            ("Sync Report", "Esc", "Cancel / back to repo picker"),
+            ("Help Overlay", "↑↓/jk", "Scroll"),
+            ("Help Overlay", "PgUp/PgDn", "Page"),
+            ("Help Overlay", "Home/End", "Top / bottom"),
+            ("Help Overlay", "Esc/q/?/F1", "Close"),
+            ("General", "r", "Rescan repo list (dashboard)"),
+            ("General", "?", "Help (not while typing)"),
+            ("General", "F1", "Help (works while typing)"),
+            ("General", "q", "Quit (dashboard, not while typing)"),
+            ("General", "Ctrl-C", "Force quit"),
+        ];
+        let actual: Vec<(&str, &str, &str)> = keybindings::all_groups()
+            .iter()
+            .flat_map(|g| g.bindings.iter().map(move |b| (g.name, b.key, b.desc)))
+            .collect();
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "the registry gained or lost rows; see this test's doc comment"
+        );
+        for (i, (got, want)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                got, want,
+                "registry row {} changed; re-read the handler before updating this \
+                 expectation",
+                i
+            );
         }
     }
 

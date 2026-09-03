@@ -219,7 +219,7 @@ const GIT_OPS: BindingGroup = BindingGroup {
         },
         Binding {
             key: "esc",
-            desc: "Back a stage, or close from the menu",
+            desc: "Back a stage (closes from menu/running)",
         },
         Binding {
             key: "q",
@@ -289,7 +289,7 @@ const GENERAL: BindingGroup = BindingGroup {
     bindings: &[
         Binding {
             key: "r",
-            desc: "Rescan repo list",
+            desc: "Rescan repo list (dashboard)",
         },
         Binding {
             key: "?",
@@ -301,7 +301,7 @@ const GENERAL: BindingGroup = BindingGroup {
         },
         Binding {
             key: "q",
-            desc: "Quit",
+            desc: "Quit (dashboard, not while typing)",
         },
         Binding {
             key: "Ctrl-C",
