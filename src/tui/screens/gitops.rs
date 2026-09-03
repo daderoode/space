@@ -1,6 +1,7 @@
 use super::default_no_confirm;
 use crate::core::git::CommitInfo;
 use crate::tui::actions::{GitOp, ScreenAction, ScreenContext};
+use crate::tui::screens::sync_report::PAGE_ROWS;
 use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::path::PathBuf;
@@ -150,11 +151,9 @@ impl GitOpsState {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, _ctx: &ScreenContext) -> ScreenAction {
-        // `?` opens help from the stages that are not typing. In the typed
-        // stages it is a legitimate character and falls through to the text
-        // input; `F1` covers those, and is handled app-wide.
-        if key.code == KeyCode::Char('?')
-            && matches!(
+        if super::opens_help(
+            key.code,
+            matches!(
                 self.stage,
                 GitOpsStage::Menu
                     | GitOpsStage::Log
@@ -162,8 +161,8 @@ impl GitOpsState {
                     | GitOpsStage::ConfirmPush
                     | GitOpsStage::RebasePreflight
                     | GitOpsStage::RebaseConfirm
-            )
-        {
+            ),
+        ) {
             return ScreenAction::OpenHelp;
         }
         match self.stage {
@@ -203,11 +202,11 @@ impl GitOpsState {
                 ScreenAction::Continue
             }
             KeyCode::PageUp => {
-                self.log_scroll = self.log_scroll.saturating_sub(10);
+                self.log_scroll = self.log_scroll.saturating_sub(PAGE_ROWS as u16);
                 ScreenAction::Continue
             }
             KeyCode::PageDown => {
-                self.log_scroll = self.log_scroll.saturating_add(10).min(max);
+                self.log_scroll = self.log_scroll.saturating_add(PAGE_ROWS as u16).min(max);
                 ScreenAction::Continue
             }
             KeyCode::Home => {

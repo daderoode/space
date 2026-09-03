@@ -264,7 +264,7 @@ fn render_dashboard(app: &App, frame: &mut Frame) {
         Constraint::Length(1),             // title
         Constraint::Min(0),                // main
         Constraint::Length(status_height), // status message (collapses when idle)
-        Constraint::Length(1),             // keybindings (always visible)
+        Constraint::Length(1),             // key bar (always visible)
     ])
     .split(area);
 
@@ -273,7 +273,7 @@ fn render_dashboard(app: &App, frame: &mut Frame) {
     if app.status_message.is_some() {
         render_status_message(app, frame, outer[2]);
     }
-    render_keybindings_bar(app, frame, outer[3]);
+    render_key_bar(app, frame, outer[3]);
 }
 
 fn render_title(frame: &mut Frame, area: Rect) {
@@ -520,8 +520,8 @@ fn render_status_message(app: &App, frame: &mut Frame, area: Rect) {
     }
 }
 
-/// Render the always-visible keybindings hint bar at the bottom.
-fn render_keybindings_bar(app: &App, frame: &mut Frame, area: Rect) {
+/// Render the always-visible key bar at the bottom.
+fn render_key_bar(app: &App, frame: &mut Frame, area: Rect) {
     let bindings = crate::tui::keybindings::key_bar_bindings(app.focus);
     const SEP: &str = "  ·  ";
     let width = usize::from(area.width);

@@ -6886,15 +6886,14 @@ mod paging_tests {
 
     /// A page must never leave the cursor on a section header, in either
     /// direction: those rows are not selectable by `j`/`k` either.
-    #[test]
-    fn repo_paging_never_rests_on_a_section_header() {
+    /// One repo expanded over 9 unstaged then 9 staged files, so the "Staged"
+    /// header sits at row 11 and a page from row 1 lands exactly on it.
+    fn header_heavy_app() -> App {
         use space::core::git::{FileEntry, FileStatus};
         let ws = common::workspace_with_repos(&["repo-a"]);
         let mut app = test_app(vec![ws], vec![]);
         app.focus = Pane::Right;
         app.expanded_repos.insert(0);
-        // 9 unstaged then 9 staged files, so the "Staged" header sits at row 11
-        // and a PgDn from row 1 would land exactly on it.
         let mut entries: Vec<FileEntry> = (0..9)
             .map(|i| FileEntry {
                 path: format!("u-{}.rs", i),
@@ -6912,6 +6911,12 @@ mod paging_tests {
             deletions: 0,
         }));
         app.repo_file_cache.insert(0, entries);
+        app
+    }
+
+    #[test]
+    fn repo_paging_never_rests_on_a_section_header() {
+        let mut app = header_heavy_app();
 
         // Walk every landing spot a page can reach from every start.
         let total = app.flattened_rows().len();
@@ -6931,6 +6936,52 @@ mod paging_tests {
                     app.cursor_row
                 );
             }
+        }
+    }
+
+    /// Stronger than "never rests on a header": a page that lands on a header
+    /// must step out the way it was travelling, so the landing row is on the
+    /// far side of the target. Hardcoding the skip direction to `down` leaves
+    /// the header assertion passing but moves a PgUp *towards* the cursor,
+    /// which this catches.
+    #[test]
+    fn a_page_resolves_a_header_in_its_own_direction_of_travel() {
+        use space::tui::app::RepoRow;
+        let mut app = header_heavy_app();
+        let total = app.flattened_rows().len();
+        const PAGE: usize = 10;
+
+        for start in 0..total {
+            // PgUp: the target is `start - PAGE`; resolving a header there must
+            // move further up, never back down towards `start`.
+            app.cursor_row = start;
+            let target = start.saturating_sub(PAGE);
+            app.handle_key(key(KeyCode::PageUp));
+            assert!(
+                app.cursor_row <= target,
+                "PgUp from {} targeted {} but resolved down to {}",
+                start,
+                target,
+                app.cursor_row
+            );
+
+            // PgDn: the target is `start + PAGE` clamped; resolving a header
+            // there must move further down.
+            app.cursor_row = start;
+            let target = (start + PAGE).min(total - 1);
+            app.handle_key(key(KeyCode::PageDown));
+            assert!(
+                app.cursor_row >= target,
+                "PgDn from {} targeted {} but resolved up to {}",
+                start,
+                target,
+                app.cursor_row
+            );
+            let rows = app.flattened_rows();
+            assert!(!matches!(
+                rows[app.cursor_row],
+                RepoRow::SectionHeader { .. }
+            ));
         }
     }
 

@@ -87,15 +87,13 @@ impl CreateState {
         key: ratatui::crossterm::event::KeyEvent,
         ctx: &crate::tui::actions::ScreenContext,
     ) -> crate::tui::actions::ScreenAction {
-        // `?` opens help from the stages that are not typing. In the typed
-        // stages it is a legitimate character and falls through to the text
-        // input; `F1` covers those, and is handled app-wide.
-        if key.code == ratatui::crossterm::event::KeyCode::Char('?')
-            && matches!(
+        if super::opens_help(
+            key.code,
+            matches!(
                 self.stage,
                 CreateStage::Syncing | CreateStage::PickBranchStrategy | CreateStage::Creating
-            )
-        {
+            ),
+        ) {
             return crate::tui::actions::ScreenAction::OpenHelp;
         }
         match self.stage {

@@ -13,8 +13,8 @@ impl DeleteState {
     /// only an explicit `y`/`Y` deletes, so a reflex Enter can never destroy
     /// a workspace.
     pub fn handle_key(&mut self, key: KeyEvent, _ctx: &ScreenContext) -> ScreenAction {
-        // Nothing is typed here, so `?` opens help rather than being ignored.
-        if key.code == ratatui::crossterm::event::KeyCode::Char('?') {
+        // Nothing is typed here, so `?` always opens help.
+        if super::opens_help(key.code, true) {
             return ScreenAction::OpenHelp;
         }
         match default_no_confirm(key.code) {
