@@ -57,6 +57,12 @@ impl SwitchBranchState {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
+        // `?` opens help from the stages that are not typing. In the typed
+        // stages it is a legitimate character and falls through to the text
+        // input; `F1` covers those, and is handled app-wide.
+        if key.code == KeyCode::Char('?') && self.stage == SwitchBranchStage::PickStrategy {
+            return ScreenAction::OpenHelp;
+        }
         match self.stage {
             SwitchBranchStage::PickStrategy => self.handle_pick_strategy(key, ctx),
             SwitchBranchStage::EnterBranchName => self.handle_enter_branch_name(key, ctx),

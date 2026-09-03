@@ -83,6 +83,7 @@ files with `s`/`space`, or bulk stage/unstage all files in the selected repo wit
 | `S` | Stage all unstaged files in repo |
 | `U` | Unstage all staged files in repo |
 | `b` | Switch branch for selected repo |
+| `G` | Git operations for selected repo (fetch, pull, push, commit, log, rebase) |
 | `PgUp` / `PgDn` | Page up / down |
 | `Home` / `End` | First / last row |
 | `/` | Search all repos |

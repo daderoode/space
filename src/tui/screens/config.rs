@@ -121,6 +121,9 @@ impl ConfigState {
             }
         } else {
             match key.code {
+                // Not editing, so nothing is typed and `?` opens help. While
+                // editing it falls through to the input; `F1` covers that.
+                KeyCode::Char('?') => return ScreenAction::OpenHelp,
                 KeyCode::Esc | KeyCode::Char('q') => return ScreenAction::Back,
                 KeyCode::Enter => self.start_editing(),
                 KeyCode::Up | KeyCode::Char('k') if self.focused > 0 => {

@@ -219,10 +219,6 @@ pub fn view(app: &App, frame: &mut Frame) {
             render_dashboard(app, frame);
             render_diff_overlay(state, frame);
         }
-        Screen::Help => {
-            render_dashboard(app, frame);
-            render_help_overlay(frame);
-        }
         Screen::SwitchBranch(state) => {
             render_dashboard(app, frame);
             render_switch_branch_overlay(state, frame);
@@ -231,6 +227,12 @@ pub fn view(app: &App, frame: &mut Frame) {
             render_dashboard(app, frame);
             render_gitops_overlay(state, app.spinner_tick, frame);
         }
+    }
+
+    // Help is a layer over whatever screen is showing, so it is drawn last and
+    // the screen beneath it is drawn normally.
+    if let Some(help) = &app.help {
+        render_help_overlay(help, frame);
     }
 }
 
@@ -520,16 +522,45 @@ fn render_status_message(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Render the always-visible keybindings hint bar at the bottom.
 fn render_keybindings_bar(app: &App, frame: &mut Frame, area: Rect) {
-    let bindings = crate::tui::keybindings::status_bar_bindings(app.focus);
-    let sep = Span::styled("  ·  ", theme::muted());
-    let mut spans: Vec<Span> = Vec::new();
+    let bindings = crate::tui::keybindings::key_bar_bindings(app.focus);
+    const SEP: &str = "  ·  ";
+    let width = usize::from(area.width);
 
-    for (i, binding) in bindings.iter().enumerate() {
-        if i > 0 {
-            spans.push(sep.clone());
+    // The bar has no wrap, so anything past the terminal width is simply cut.
+    // Both rows are wider than the 80-column minimum, and the entries that used
+    // to fall off the end included `? help`, the key that opens everything
+    // else. Fill until the width runs out, always reserving room for the help
+    // key so it survives at any width.
+    let help_entry = bindings.iter().find(|b| b.key == "?");
+    let reserved = help_entry
+        .map(|b| SEP.chars().count() + b.key.chars().count() + 1 + b.desc.chars().count())
+        .unwrap_or(0);
+
+    let mut spans: Vec<Span> = Vec::new();
+    let mut used = 0usize;
+    for binding in bindings.iter().filter(|b| b.key != "?") {
+        let sep_cols = if spans.is_empty() {
+            0
+        } else {
+            SEP.chars().count()
+        };
+        let cols = sep_cols + binding.key.chars().count() + 1 + binding.desc.chars().count();
+        if used + cols + reserved > width {
+            break;
+        }
+        if sep_cols > 0 {
+            spans.push(Span::styled(SEP, theme::muted()));
         }
         spans.push(Span::styled(binding.key, theme::text()));
         spans.push(Span::styled(format!(" {}", binding.desc), theme::muted()));
+        used += cols;
+    }
+    if let Some(b) = help_entry {
+        if !spans.is_empty() {
+            spans.push(Span::styled(SEP, theme::muted()));
+        }
+        spans.push(Span::styled(b.key, theme::text()));
+        spans.push(Span::styled(format!(" {}", b.desc), theme::muted()));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -1366,22 +1397,20 @@ fn render_diff_overlay(state: &crate::tui::screens::diff::DiffViewerState, frame
     );
 }
 
-fn render_help_overlay(frame: &mut Frame) {
+fn render_help_overlay(help: &crate::tui::screens::help::HelpState, frame: &mut Frame) {
     use ratatui::widgets::Clear;
 
     let groups = crate::tui::keybindings::all_groups();
+    let total = crate::tui::keybindings::rendered_row_count();
 
-    // Calculate height: 1 header + N bindings per group + 1 gap between groups + 1 bottom hint
-    let content_rows: u16 = groups
-        .iter()
-        .map(|g| 1 + g.bindings.len() as u16)
-        .sum::<u16>()
-        + (groups.len() as u16).saturating_sub(1) // gaps between groups
-        + 1; // bottom hint line
-    let height = (content_rows + 2).min(frame.area().height); // +2 for border
-                                                              // Height is clamped to terminal height — content clips on very short terminals
-                                                              // (< 27 rows). Acceptable: 24+ rows is the practical minimum for a terminal.
-    let dialog_w = (frame.area().width * 70 / 100).max(50);
+    // The dialog takes the height it needs, capped by the terminal. The
+    // registry is far taller than any terminal, so in practice it is capped
+    // and the list scrolls: `height` is the cap, not a promise to fit.
+    let height = (total as u16 + 3).min(frame.area().height); // +2 border, +1 footer
+                                                              // Floor of 56 rather than 50: 56 leaves the 54-column interior that the
+                                                              // registry test asserts every row fits, so that budget is now true at
+                                                              // every width where the dialog is drawn, not only at 80 columns.
+    let dialog_w = (frame.area().width * 70 / 100).max(56);
     let area = centered_rect_fixed(dialog_w, height, frame.area());
     frame.render_widget(Clear, area);
 
@@ -1393,15 +1422,20 @@ fn render_help_overlay(frame: &mut Frame) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut lines: Vec<Line> = Vec::new();
+    let sections = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    let visible = usize::from(sections[0].height);
+    let offset = help.offset(total, visible);
 
+    let mut lines: Vec<Line> = Vec::new();
     for (i, group) in groups.iter().enumerate() {
         if i > 0 {
             lines.push(Line::from("")); // gap between groups
         }
         lines.push(Line::from(Span::styled(group.name, theme::title())));
         for binding in group.bindings {
-            let padding = 12_usize.saturating_sub(binding.key.chars().count());
+            // Pad to 12, then always at least one space: a 12-character key
+            // used to run straight into its description.
+            let padding = 12_usize.saturating_sub(binding.key.chars().count()) + 1;
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("  {}{}", binding.key, " ".repeat(padding)),
@@ -1411,12 +1445,27 @@ fn render_help_overlay(frame: &mut Frame) {
             ]));
         }
     }
+    let end = (offset + visible).min(lines.len());
+    let window: Vec<Line> = lines[offset.min(lines.len())..end].to_vec();
 
-    let sections = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    frame.render_widget(Paragraph::new(window), sections[0]);
 
-    frame.render_widget(Paragraph::new(lines), sections[0]);
+    // The hint must fit the 54-column interior of the narrowest dialog, so the
+    // scrolled form uses the short `Esc/q/? close`: at its widest
+    // ("rows 81-101 of 101") it is 51 columns.
+    let scrolled = total > visible;
+    let hint = if scrolled {
+        format!(
+            "rows {}-{} of {}  ·  ↑↓ scroll  ·  Esc/q/? close",
+            offset + 1,
+            end,
+            total
+        )
+    } else {
+        "Esc / q / ? to close".to_string()
+    };
     frame.render_widget(
-        Paragraph::new("Esc / q / ? to close")
+        Paragraph::new(hint)
             .style(theme::muted())
             .alignment(Alignment::Center),
         sections[1],

@@ -98,6 +98,17 @@ impl AddState {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
+        // `?` opens help from the stages that are not typing. In the typed
+        // stages it is a legitimate character and falls through to the text
+        // input; `F1` covers those, and is handled app-wide.
+        if key.code == KeyCode::Char('?')
+            && matches!(
+                self.stage,
+                AddStage::Syncing | AddStage::PickBranchStrategy | AddStage::Creating
+            )
+        {
+            return ScreenAction::OpenHelp;
+        }
         match self.stage {
             AddStage::PickRepos => self.handle_pick_repos(key),
             AddStage::Syncing => self.handle_syncing(key),

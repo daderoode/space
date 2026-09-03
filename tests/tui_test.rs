@@ -1796,46 +1796,48 @@ fn phase1_right_arrow_on_workspace_pane_then_enter_expands_repo() {
 fn dashboard_question_mark_opens_help() {
     let mut app = test_app(vec![], vec![]);
     app.handle_key(key(KeyCode::Char('?')));
-    assert!(
-        matches!(app.screen, Screen::Help),
-        "expected Help screen, got {:?}",
-        std::mem::discriminant(&app.screen)
-    );
-}
-
-#[test]
-fn help_esc_returns_to_dashboard() {
-    let mut app = test_app(vec![], vec![]);
-    app.handle_key(key(KeyCode::Char('?')));
-    assert!(matches!(app.screen, Screen::Help));
-
-    app.handle_key(key(KeyCode::Esc));
+    assert!(app.help.is_some(), "expected the help overlay to be open");
     assert!(
         matches!(app.screen, Screen::Dashboard),
-        "expected Dashboard after Esc from Help"
+        "help is an overlay layer: the screen beneath it never changes"
     );
 }
 
 #[test]
-fn help_q_returns_to_dashboard() {
+fn help_esc_closes_the_overlay() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('?')));
+    assert!(app.help.is_some());
+
+    app.handle_key(key(KeyCode::Esc));
+    assert!(app.help.is_none(), "expected the overlay closed after Esc");
+    assert!(matches!(app.screen, Screen::Dashboard));
+}
+
+#[test]
+fn help_q_closes_the_overlay() {
     let mut app = test_app(vec![], vec![]);
     app.handle_key(key(KeyCode::Char('?')));
     app.handle_key(key(KeyCode::Char('q')));
+    assert!(app.help.is_none(), "expected the overlay closed after q");
     assert!(
-        matches!(app.screen, Screen::Dashboard),
-        "expected Dashboard after q from Help"
+        !app.should_quit,
+        "q closes the overlay, it does not fall through and quit the app"
     );
 }
 
 #[test]
-fn help_question_mark_returns_to_dashboard() {
-    let mut app = test_app(vec![], vec![]);
-    app.handle_key(key(KeyCode::Char('?')));
-    app.handle_key(key(KeyCode::Char('?')));
-    assert!(
-        matches!(app.screen, Screen::Dashboard),
-        "expected Dashboard after ? toggles Help off"
-    );
+fn help_question_mark_and_f1_both_close_the_overlay() {
+    for closer in [KeyCode::Char('?'), KeyCode::F(1)] {
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        app.handle_key(key(closer));
+        assert!(
+            app.help.is_none(),
+            "{:?} must toggle the overlay off",
+            closer
+        );
+    }
 }
 
 #[test]
@@ -1843,18 +1845,25 @@ fn help_other_keys_are_noop() {
     let mut app = test_app(vec![], vec![]);
     app.handle_key(key(KeyCode::Char('?')));
 
-    // Press various keys that should not close help
-    app.handle_key(key(KeyCode::Char('j')));
-    app.handle_key(key(KeyCode::Char('k')));
-    app.handle_key(key(KeyCode::Char('c')));
-    app.handle_key(key(KeyCode::Down));
-    app.handle_key(key(KeyCode::Up));
-    app.handle_key(key(KeyCode::Enter));
-
-    assert!(
-        matches!(app.screen, Screen::Help),
-        "Help should remain open after non-close keys"
-    );
+    // Keys that must not close help, and must not reach the screen beneath.
+    for code in [
+        KeyCode::Char('c'),
+        KeyCode::Char('d'),
+        KeyCode::Enter,
+        KeyCode::Tab,
+    ] {
+        app.handle_key(key(code));
+        assert!(
+            app.help.is_some(),
+            "{:?} should not close the help overlay",
+            code
+        );
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "{:?} must not reach the screen beneath the overlay",
+            code
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4795,19 +4804,22 @@ mod rescan_tests {
             !ws_pane.bindings.iter().any(|b| b.key == "r"),
             "r is a general key, not a workspace-pane key"
         );
-        let left = space::tui::keybindings::status_bar_bindings(Pane::Left);
+        let left = space::tui::keybindings::key_bar_bindings(Pane::Left);
         assert!(
             left.iter().any(|b| b.key == "r" && b.desc == "rescan"),
             "status bar must read 'r rescan'"
         );
 
-        // The help overlay must still render every group with the extra group.
-        // Tall enough for the whole registry: the 24-row clip is item 1.4's.
+        // The rescan wording must survive all the way to the rendered overlay.
+        // The registry is taller than any terminal now, so scroll to the end
+        // where General lives; that every group is reachable at all is asserted
+        // by `every_group_is_reachable_by_scrolling_at_eighty_by_twenty_four`.
         let mut app = test_app(vec![], vec![]);
         app.handle_key(key(KeyCode::Char('?')));
+        app.handle_key(key(KeyCode::End));
         let rendered = render_text(&app, 100, 70);
-        assert!(rendered.contains("Repo Picker"), "got:\n{}", rendered);
         assert!(rendered.contains("General"), "got:\n{}", rendered);
+        assert!(rendered.contains("Rescan repo list"), "got:\n{}", rendered);
     }
 }
 
@@ -5163,7 +5175,7 @@ fn filter_rows_use_singular_for_one_repo() {
 
 #[test]
 fn filter_help_registry_and_status_bar_wording() {
-    use space::tui::keybindings::{all_groups, status_bar_bindings};
+    use space::tui::keybindings::{all_groups, key_bar_bindings};
 
     let find = |group: &str, key: &str| -> Option<&'static str> {
         all_groups()
@@ -5176,7 +5188,7 @@ fn filter_help_registry_and_status_bar_wording() {
     assert_eq!(find("Repo Pane", "/"), Some("Search repos"));
 
     let bar = |pane: Pane| -> Option<&'static str> {
-        status_bar_bindings(pane)
+        key_bar_bindings(pane)
             .iter()
             .find(|b| b.key == "/")
             .map(|b| b.desc)
@@ -7015,5 +7027,460 @@ mod paging_tests {
             matches!(app.screen, Screen::Dashboard),
             "`g` on the repo pane still opens nothing (Wave 0 gate)"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ---- 1.4 `?` help inside overlays, and a complete registry ----
+// ---------------------------------------------------------------------------
+
+mod help_overlay_tests {
+    use super::*;
+    use space::tui::keybindings;
+
+    /// A dashboard app sitting on the git-ops menu for the first repo.
+    fn gitops_menu_app() -> App {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(shift_key(KeyCode::Char('G')));
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "fixture must reach the git-ops overlay"
+        );
+        app
+    }
+
+    // --- opening from mid-flow, and returning to it ---
+
+    #[test]
+    fn question_mark_opens_help_from_a_gitops_stage_and_returns_to_it() {
+        let mut app = gitops_menu_app();
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_some(), "? must open help from the git-ops menu");
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "the git-ops state must still be there while help is open"
+        );
+
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.help.is_none());
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "closing help must return to the exact prior screen, not the dashboard"
+        );
+    }
+
+    #[test]
+    fn question_mark_opens_help_from_the_delete_confirm_and_returns_to_it() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.handle_key(key(KeyCode::Char('d')));
+        assert!(matches!(app.screen, Screen::ConfirmDelete(_)));
+
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_some());
+        app.handle_key(key(KeyCode::Esc));
+        assert!(
+            matches!(app.screen, Screen::ConfirmDelete(_)),
+            "help must not cancel the confirmation it was opened over"
+        );
+    }
+
+    #[test]
+    fn question_mark_opens_help_from_the_diff_viewer() {
+        use space::tui::screens::diff::DiffViewerState;
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.screen = Screen::DiffViewer(DiffViewerState {
+            repo_index: 0,
+            repo_name: "repo-a".into(),
+            repo_path: PathBuf::from("/tmp/test-ws/repo-a"),
+            file_path: "a.rs".into(),
+            staged: false,
+            diff: Err("no diff".into()),
+            scroll_offset: 0,
+            total_lines: 1,
+        });
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_some());
+        app.handle_key(key(KeyCode::Char('q')));
+        assert!(
+            matches!(app.screen, Screen::DiffViewer(_)),
+            "q closes help and leaves the diff viewer open"
+        );
+    }
+
+    // --- ? stays text where text is being typed; F1 always works ---
+
+    #[test]
+    fn question_mark_in_a_picker_query_is_typed_not_help() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.handle_key(key(KeyCode::Char('/')));
+        assert!(
+            matches!(
+                app.screen,
+                Screen::RepoSearch(_) | Screen::FilterWorkspace(_)
+            ),
+            "fixture must open a typed picker"
+        );
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(
+            app.help.is_none(),
+            "? is a legitimate character in a query and must not open help"
+        );
+        let query = match &app.screen {
+            Screen::RepoSearch(s) => s.picker.input.value().to_string(),
+            Screen::FilterWorkspace(s) => s.picker.input.value().to_string(),
+            other => panic!("unexpected screen {:?}", std::mem::discriminant(other)),
+        };
+        assert_eq!(query, "?", "? must reach the query");
+    }
+
+    #[test]
+    fn f1_opens_help_from_a_picker_query_without_disturbing_it() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('/')));
+        app.handle_key(key(KeyCode::Char('r')));
+        app.handle_key(key(KeyCode::F(1)));
+        assert!(
+            app.help.is_some(),
+            "F1 must open help even while a query is being typed"
+        );
+        app.handle_key(key(KeyCode::Esc));
+        let query = match &app.screen {
+            Screen::RepoSearch(s) => s.picker.input.value().to_string(),
+            other => panic!("unexpected screen {:?}", std::mem::discriminant(other)),
+        };
+        assert_eq!(query, "r", "the query must survive the help round trip");
+    }
+
+    // --- ADR 0001: help must not cancel work running behind it ---
+
+    /// The reason help is an overlay layer rather than a `Screen` variant.
+    /// `poll_sync_result` cancels the worker and drops the receiver whenever
+    /// the current screen is not a Syncing stage, so a design that moved the
+    /// screen into a Help variant would kill the sync it was showing.
+    #[test]
+    fn help_over_a_running_sync_leaves_the_sync_running() {
+        let env = TestEnv::new();
+        let repo = env.create_repo("repo-a");
+        let config = config_from_env(&env);
+        let mut app = test_app_with_config(config, vec![], vec![repo]);
+
+        app.handle_key(key(KeyCode::Char('c')));
+        for c in "ws".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter)); // EnterName -> PickRepos
+        app.handle_key(key(KeyCode::Tab)); // toggle the repo
+        app.handle_key(key(KeyCode::Enter)); // PickRepos -> Syncing, starts the worker
+        assert!(
+            matches!(&app.screen, Screen::CreateWorkspace(st)
+                if st.stage == space::tui::screens::create::CreateStage::Syncing),
+            "fixture must reach the Syncing stage"
+        );
+
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(
+            app.help.is_some(),
+            "? must open help over the Syncing stage"
+        );
+
+        // Pump the loop the way run_loop does while the overlay is up.
+        for _ in 0..200 {
+            app.poll_sync_result();
+        }
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.help.is_none());
+
+        drain_sync(&mut app);
+        let report_done = match &app.screen {
+            Screen::CreateWorkspace(st) => st.report.done,
+            other => panic!("unexpected screen {:?}", std::mem::discriminant(other)),
+        };
+        assert!(
+            report_done,
+            "the sync must still finish after help was opened over it"
+        );
+    }
+
+    // --- scrolling ---
+
+    #[test]
+    fn help_scrolls_and_clamps_at_both_ends() {
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+
+        app.handle_key(key(KeyCode::Home));
+        assert_eq!(app.help.as_ref().unwrap().scroll, 0, "Home reaches the top");
+
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(
+            app.help.as_ref().unwrap().scroll,
+            1,
+            "j scrolls down one row"
+        );
+        app.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(app.help.as_ref().unwrap().scroll, 0);
+
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(
+            app.help.as_ref().unwrap().scroll,
+            0,
+            "PgUp clamps at the top"
+        );
+
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(
+            app.help.as_ref().unwrap().scroll,
+            10,
+            "PgDn pages by the shared PAGE_ROWS"
+        );
+    }
+
+    /// Every group must be reachable at the documented minimum terminal size.
+    #[test]
+    fn every_group_is_reachable_by_scrolling_at_eighty_by_twenty_four() {
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        app.handle_key(key(KeyCode::Home));
+
+        let mut seen: Vec<&str> = Vec::new();
+        for _ in 0..80 {
+            let rendered = render_text(&app, 80, 24);
+            for group in keybindings::all_groups() {
+                if rendered.contains(group.name) && !seen.contains(&group.name) {
+                    seen.push(group.name);
+                }
+            }
+            app.handle_key(key(KeyCode::PageDown));
+        }
+        let missing: Vec<&str> = keybindings::all_groups()
+            .iter()
+            .map(|g| g.name)
+            .filter(|n| !seen.contains(n))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these groups can never be seen at 80x24: {:?}",
+            missing
+        );
+    }
+
+    #[test]
+    fn help_opens_on_the_group_for_the_screen_it_was_reached_from() {
+        let mut app = gitops_menu_app();
+        app.handle_key(key(KeyCode::Char('?')));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Git Operations"),
+            "help opened from the git-ops menu must land on its own group, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn help_opened_from_the_repo_pane_lands_on_the_repo_pane_group() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('?')));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("Repo Pane"),
+            "help from the repo pane must land on the Repo Pane group, got:\n{}",
+            rendered
+        );
+    }
+
+    // --- registry completeness and layout ---
+
+    #[test]
+    fn the_registry_documents_every_screen() {
+        let names: Vec<&str> = keybindings::all_groups().iter().map(|g| g.name).collect();
+        for expected in [
+            "Navigation",
+            "Workspace Pane",
+            "Repo Pane",
+            "Repo Picker",
+            "Create / Add Flow",
+            "Delete Confirm",
+            "Switch Branch",
+            "Config Editor",
+            "Space & Repo Pickers",
+            "Git Operations",
+            "Diff Viewer",
+            "Sync Report",
+            "Help Overlay",
+            "General",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "the registry is missing the {:?} group; it has {:?}",
+                expected,
+                names
+            );
+        }
+    }
+
+    #[test]
+    fn f1_is_documented_as_a_general_key() {
+        let general = keybindings::all_groups()
+            .iter()
+            .find(|g| g.name == "General")
+            .unwrap();
+        assert!(
+            general.bindings.iter().any(|b| b.key.contains("F1")),
+            "F1 works everywhere, so it belongs in General"
+        );
+    }
+
+    #[test]
+    fn git_operations_is_documented_in_the_readme_and_the_guide() {
+        let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))
+            .expect("README.md");
+        let guide = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/GUIDE.md"))
+            .expect("docs/GUIDE.md");
+        for (name, text) in [("README.md", &readme), ("docs/GUIDE.md", &guide)] {
+            assert!(
+                text.contains("| `G` |"),
+                "{} must document the G git-operations key",
+                name
+            );
+        }
+    }
+
+    /// The overlay pads the key column, so a key and its description can never
+    /// run together, whatever the key's length.
+    #[test]
+    fn every_row_keeps_a_gap_between_key_and_description() {
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        app.handle_key(key(KeyCode::Home));
+        for _ in 0..40 {
+            let rendered = render_text(&app, 100, 40);
+            for group in keybindings::all_groups() {
+                for binding in group.bindings {
+                    if let Some(line) = rendered
+                        .lines()
+                        .find(|l| l.contains(binding.key) && l.contains(binding.desc))
+                    {
+                        let joined = format!("{}{}", binding.key, binding.desc);
+                        assert!(
+                            !line.contains(&joined),
+                            "{:?} runs into its description: {:?}",
+                            binding.key,
+                            line.trim()
+                        );
+                    }
+                }
+            }
+            app.handle_key(key(KeyCode::PageDown));
+        }
+    }
+
+    /// The registry test asserts a 54-column budget. That is only meaningful if
+    /// the dialog is never narrower than 56, which is what the width floor now
+    /// guarantees at every width where the overlay is drawn.
+    #[test]
+    fn the_dialog_is_never_narrower_than_the_budget_the_registry_test_asserts() {
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        for width in [56u16, 60, 72, 80, 120] {
+            let rendered = render_text(&app, width, 40);
+            let widest = rendered
+                .lines()
+                .filter(|l| l.contains('│') || l.contains('╭'))
+                .map(|l| l.trim_end().chars().count())
+                .max()
+                .unwrap_or(0);
+            assert!(
+                widest >= 56,
+                "at {} columns the help dialog is only {} wide, under the 56 the registry test assumes",
+                width,
+                widest
+            );
+        }
+    }
+
+    /// The footer carries the only on-screen hint that the list scrolls, so it
+    /// must never be clipped by the dialog it sits in.
+    #[test]
+    fn the_overlay_footer_is_never_clipped() {
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        for jump in [KeyCode::Home, KeyCode::PageDown, KeyCode::End] {
+            app.handle_key(key(jump));
+            let rendered = render_text(&app, 80, 24);
+            let footer = rendered
+                .lines()
+                .find(|l| l.contains("close"))
+                .unwrap_or_else(|| panic!("no footer after {:?}", jump));
+            assert!(
+                footer.contains("Esc/q/? close") || footer.contains("Esc / q / ? to close"),
+                "footer clipped after {:?}: {:?}",
+                jump,
+                footer.trim_end()
+            );
+        }
+    }
+
+    /// The overlay is modal, but Ctrl-C is checked before it: the documented
+    /// force quit must not become unreachable behind help.
+    #[test]
+    fn ctrl_c_still_quits_from_under_the_overlay() {
+        use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_some());
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit, "Ctrl-C must still quit while help is open");
+    }
+
+    // --- the key bar ---
+
+    #[test]
+    fn the_key_bar_always_shows_the_help_key_at_eighty_columns() {
+        for pane in [Pane::Left, Pane::Right] {
+            let mut app = test_app(vec![common::workspace_with_repos(&["repo-a"])], vec![]);
+            app.focus = pane;
+            let rendered = render_text(&app, 80, 24);
+            let bar = rendered.lines().last().unwrap();
+            assert!(
+                bar.contains("? help"),
+                "the {:?} key bar drops the help key at 80 columns: {:?}",
+                pane,
+                bar.trim_end()
+            );
+            assert!(
+                bar.trim_end().chars().count() <= 80,
+                "the key bar must not overflow the terminal"
+            );
+        }
+    }
+
+    #[test]
+    fn the_key_bar_never_overflows_a_narrow_terminal() {
+        let mut app = test_app(vec![common::workspace_with_repos(&["repo-a"])], vec![]);
+        app.focus = Pane::Right;
+        for width in [80u16, 90, 100, 140] {
+            let rendered = render_text(&app, width, 24);
+            let bar = rendered.lines().last().unwrap().trim_end();
+            assert!(
+                bar.chars().count() <= width as usize,
+                "at {} columns the key bar is {} wide",
+                width,
+                bar.chars().count()
+            );
+            assert!(
+                bar.contains("? help"),
+                "help key dropped at {} columns",
+                width
+            );
+        }
     }
 }

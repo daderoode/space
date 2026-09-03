@@ -49,6 +49,8 @@ impl DiffViewerState {
                 self.scroll_offset = self.total_lines.saturating_sub(1);
                 ScreenAction::Continue
             }
+            // Nothing is typed here, so `?` opens help.
+            KeyCode::Char('?') => ScreenAction::OpenHelp,
             KeyCode::Char('s') | KeyCode::Char(' ') => ScreenAction::StageFile {
                 repo_index: self.repo_index,
                 repo_path: self.repo_path.clone(),

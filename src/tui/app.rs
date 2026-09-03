@@ -115,7 +115,6 @@ pub enum Screen {
     DiffViewer(crate::tui::screens::diff::DiffViewerState),
     SwitchBranch(crate::tui::screens::switch_branch::SwitchBranchState),
     GitOps(crate::tui::screens::gitops::GitOpsState),
-    Help,
 }
 
 #[derive(Debug)]
@@ -232,6 +231,9 @@ pub struct App {
     pub table_scroll_x: u16,
     pub focus: Pane,
     pub screen: Screen,
+    /// The help overlay, when open. A layer over `screen`, never a replacement
+    /// for it: see `docs/adr/0001-help-is-an-overlay-layer-not-a-screen.md`.
+    pub help: Option<crate::tui::screens::help::HelpState>,
     pub should_quit: bool,
     pub space_cd_target: Option<PathBuf>,
     pub status_message: Option<String>,
@@ -313,6 +315,7 @@ impl App {
             table_scroll_x: 0,
             focus: Pane::Left,
             screen: Screen::Dashboard,
+            help: None,
             should_quit: false,
             space_cd_target: None,
             status_message: None,
@@ -811,6 +814,13 @@ impl App {
         }
     }
 
+    /// Open the help overlay over the current screen, scrolled to the group
+    /// documenting that screen.
+    pub fn open_help(&mut self) {
+        let group = crate::tui::screens::help::landing_group(&self.screen, self.focus);
+        self.help = Some(crate::tui::screens::help::HelpState::opening_at(group));
+    }
+
     fn set_status(&mut self, msg: impl Into<String>, kind: StatusKind) {
         self.status_message = Some(msg.into());
         self.status_kind = kind;
@@ -1168,6 +1178,9 @@ impl App {
         use crate::tui::actions::ScreenAction;
         match action {
             ScreenAction::Continue => {}
+            ScreenAction::OpenHelp => {
+                self.open_help();
+            }
             ScreenAction::Back => {
                 // Refresh workspaces when leaving Creating stage (catches partial creates)
                 self.refresh_if_leaving_creating_stage();
@@ -1368,8 +1381,24 @@ impl App {
             config: &self.config,
         };
 
+        // The help overlay is modal: while it is open it consumes every key,
+        // so nothing reaches the screen beneath it.
+        if let Some(help) = &mut self.help {
+            let total = crate::tui::keybindings::rendered_row_count();
+            if help.handle_key(key, total) {
+                self.help = None;
+            }
+            return;
+        }
+
+        // F1 opens help from anywhere, including a text input, where `?` is a
+        // legitimate character and must be typed instead.
+        if key.code == ratatui::crossterm::event::KeyCode::F(1) {
+            self.open_help();
+            return;
+        }
+
         let action = match &mut self.screen {
-            Screen::Help => crate::tui::screens::help::handle_key(key, &ctx),
             Screen::ConfirmDelete(state) => state.handle_key(key, &ctx),
             Screen::GoWorkspace(state) => state.handle_key(key, &ctx),
             Screen::FilterWorkspace(state) => state.handle_key(key, &ctx),
@@ -1968,7 +1997,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             None
         }
         Message::StartHelp => {
-            app.screen = Screen::Help;
+            app.open_help();
             None
         }
         Message::CollapseAllRepos => {
@@ -2338,6 +2367,7 @@ mod tests {
             table_scroll_x: 0,
             focus: Pane::Left,
             screen: Screen::Dashboard,
+            help: None,
             should_quit: false,
             space_cd_target: None,
             status_message: None,
@@ -2484,6 +2514,7 @@ mod tests {
             table_scroll_x: 0,
             focus: Pane::Left,
             screen: Screen::Dashboard,
+            help: None,
             should_quit: false,
             space_cd_target: None,
             status_message: None,
