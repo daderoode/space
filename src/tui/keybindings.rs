@@ -167,7 +167,7 @@ const GIT_OPS: BindingGroup = BindingGroup {
         },
         Binding {
             key: "\u{2191}\u{2193}/jk",
-            desc: "Navigate (menu and log; the rebase picker is arrows only)",
+            desc: "Navigate (menu and log only)",
         },
         Binding {
             key: "enter",
@@ -363,5 +363,31 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
     match pane {
         crate::tui::app::Pane::Left => &LEFT,
         crate::tui::app::Pane::Right => &RIGHT,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::all_groups;
+
+    /// The help overlay is at least 50 columns wide (48 inside the border)
+    /// and renders each row as two spaces, the key padded to 12 columns and
+    /// the description with no wrapping. Every registered binding must fit
+    /// that minimum so no description is clipped on a narrow terminal.
+    #[test]
+    fn every_binding_fits_the_minimum_help_dialog() {
+        for group in all_groups() {
+            for binding in group.bindings {
+                let key_cols = binding.key.chars().count().max(12);
+                let row = 2 + key_cols + binding.desc.chars().count();
+                assert!(
+                    row <= 48,
+                    "{} / {:?} is {} columns wide, over the 48-column help minimum",
+                    group.name,
+                    binding.desc,
+                    row
+                );
+            }
+        }
     }
 }
