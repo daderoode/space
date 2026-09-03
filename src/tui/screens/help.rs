@@ -64,29 +64,34 @@ impl HelpState {
 /// The registry group help should open on, given the screen it was reached
 /// from. The group order itself never changes; only the landing row does.
 pub fn landing_group(screen: &Screen, focus: Pane) -> &'static str {
+    use crate::tui::keybindings as kb;
     use crate::tui::screens::{add::AddStage, create::CreateStage};
     match screen {
         Screen::Dashboard => match focus {
-            Pane::Left => "Workspace Pane",
-            Pane::Right => "Repo Pane",
+            Pane::Left => kb::WORKSPACE_PANE_NAME,
+            Pane::Right => kb::REPO_PANE_NAME,
         },
         Screen::CreateWorkspace(st) => match st.stage {
-            CreateStage::PickRepos => "Repo Picker",
-            CreateStage::Syncing => "Sync Report",
-            _ => "Create / Add Flow",
+            CreateStage::PickRepos => kb::REPO_PICKER_NAME,
+            CreateStage::Syncing => kb::SYNC_REPORT_NAME,
+            // The Creating stage is a scrollable log, not a flow prompt: its
+            // keys are nothing like the flow's.
+            CreateStage::Creating => kb::CREATING_LOG_NAME,
+            _ => kb::CREATE_ADD_FLOW_NAME,
         },
         Screen::AddRepos(st) => match st.stage {
-            AddStage::PickRepos => "Repo Picker",
-            AddStage::Syncing => "Sync Report",
-            _ => "Create / Add Flow",
+            AddStage::PickRepos => kb::REPO_PICKER_NAME,
+            AddStage::Syncing => kb::SYNC_REPORT_NAME,
+            AddStage::Creating => kb::CREATING_LOG_NAME,
+            _ => kb::CREATE_ADD_FLOW_NAME,
         },
         Screen::GoWorkspace(_) | Screen::FilterWorkspace(_) | Screen::RepoSearch(_) => {
-            "Space & Repo Pickers"
+            kb::SPACE_REPO_PICKERS_NAME
         }
-        Screen::ConfirmDelete(_) => "Delete Confirm",
-        Screen::ConfigEditor(_) => "Config Editor",
-        Screen::DiffViewer(_) => "Diff Viewer",
-        Screen::SwitchBranch(_) => "Switch Branch",
-        Screen::GitOps(_) => "Git Operations",
+        Screen::ConfirmDelete(_) => kb::DELETE_CONFIRM_NAME,
+        Screen::ConfigEditor(_) => kb::CONFIG_EDITOR_NAME,
+        Screen::DiffViewer(_) => kb::DIFF_VIEWER_NAME,
+        Screen::SwitchBranch(_) => kb::SWITCH_BRANCH_NAME,
+        Screen::GitOps(_) => kb::GIT_OPS_NAME,
     }
 }

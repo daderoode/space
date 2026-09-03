@@ -182,8 +182,15 @@ pub enum ListJump {
 impl ListJump {
     /// The row this jump targets in a list of `len` rows, starting from
     /// `current`. Clamped at both ends; never wraps. An empty list targets 0.
+    ///
+    /// `current` is clamped first because the caller's cursor can outlive the
+    /// rows it indexes: `ScreenAction::StageFile` returns to the dashboard
+    /// without repositioning, so a refetch that yields fewer rows leaves the
+    /// cursor past the end. Without this, `PageUp` from a stale cursor stays
+    /// past the end and the caller indexes out of bounds.
     fn target(self, current: usize, len: usize) -> usize {
         let last = len.saturating_sub(1);
+        let current = current.min(last);
         match self {
             ListJump::PageUp => current.saturating_sub(PAGE_ROWS),
             ListJump::PageDown => current.saturating_add(PAGE_ROWS).min(last),
@@ -762,7 +769,7 @@ impl App {
                 .any(|e| e.path == path && e.status == crate::core::git::FileStatus::Conflicted)
             {
                 self.set_status(
-                    "Cannot stage conflicted file \u{2014} resolve conflicts first".to_string(),
+                    "Cannot stage conflicted file: resolve conflicts first".to_string(),
                     StatusKind::Warning,
                 );
                 return;
@@ -1860,11 +1867,16 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             let target = jump.target(app.cursor_row, rows.len());
             // First and Last cannot land on a header (see the `flattened_rows`
             // invariant), but a page can. Step out of it the way the jump was
-            // travelling, so a PgUp never resolves downwards.
-            app.cursor_row = if matches!(rows[target], RepoRow::SectionHeader { .. }) {
-                skip_headers(&rows, target, target >= app.cursor_row)
-            } else {
-                target
+            // travelling, so a PgUp never resolves downwards. `.get()` matches
+            // every other `cursor_row` read in this file: the cursor can be
+            // stale, and `target` is only clamped against the rows we just
+            // built.
+            app.cursor_row = match rows.get(target) {
+                Some(RepoRow::SectionHeader { .. }) => {
+                    skip_headers(&rows, target, target >= app.cursor_row)
+                }
+                Some(_) => target,
+                None => 0,
             };
             None
         }

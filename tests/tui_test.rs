@@ -6985,6 +6985,40 @@ mod paging_tests {
         }
     }
 
+    /// `cursor_row` can outlive the rows it indexes: `ScreenAction::StageFile`
+    /// (the diff-viewer path) calls `do_stage` and returns to the dashboard
+    /// without the `reposition_after_section_change` its `Message::StageFile`
+    /// twin performs, so a refetch that returns fewer rows leaves the cursor
+    /// past the end. A page from there must not index out of bounds.
+    #[test]
+    fn paging_from_a_stale_cursor_does_not_panic() {
+        let mut app = expanded_repo_app(30);
+        assert!(app.flattened_rows().len() > 20);
+
+        // The repo's files vanish underneath the cursor (external commit, then
+        // a stage from the diff viewer refetches an empty list).
+        app.cursor_row = 25;
+        app.repo_file_cache.insert(0, vec![]);
+        assert_eq!(app.flattened_rows().len(), 1, "only the repo row is left");
+
+        for code in [
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Home,
+            KeyCode::End,
+        ] {
+            app.cursor_row = 25;
+            app.handle_key(key(code));
+            assert!(
+                app.cursor_row < app.flattened_rows().len(),
+                "{:?} left the cursor at {} for {} rows",
+                code,
+                app.cursor_row,
+                app.flattened_rows().len()
+            );
+        }
+    }
+
     #[test]
     fn repo_paging_on_an_empty_workspace_is_a_noop() {
         let ws = Workspace {
@@ -7209,6 +7243,69 @@ mod help_overlay_tests {
         assert_eq!(query, "r", "the query must survive the help round trip");
     }
 
+    /// `?` must reach the input in every stage that types, not just the one
+    /// picker the first test covered. The per-screen stage lists are hand
+    /// maintained, so adding a stage to the wrong list would otherwise swallow
+    /// a typed `?` with the suite still green.
+    #[test]
+    fn question_mark_types_in_every_text_stage() {
+        let env = TestEnv::new();
+        let repo = env.create_repo("repo-a");
+        let cfg = || config_from_env(&env);
+
+        // create: EnterName
+        let mut app = test_app_with_config(cfg(), vec![], vec![repo.clone()]);
+        app.handle_key(key(KeyCode::Char('c')));
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "create EnterName: ? must type");
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(st.ws_name.value(), "?"),
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // create: PickRepos query
+        app.handle_key(key(KeyCode::Char('w')));
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "create PickRepos: ? must type");
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(st.picker.input.value(), "?", "query must take the ?")
+            }
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // git-ops: Committing (single-line commit message)
+        let mut app = gitops_menu_app();
+        if let Screen::GitOps(st) = &mut app.screen {
+            st.stage = space::tui::screens::gitops::GitOpsStage::Committing;
+        }
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "git-ops Committing: ? must type");
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(st.message_input.value(), "?"),
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // config editor while editing
+        let env2 = TestEnv::new();
+        let mut app = test_app_with_config(config_from_env(&env2), vec![], vec![]);
+        app.handle_key(shift_key(KeyCode::Char('S')));
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "config editor editing: ? must type");
+        match &app.screen {
+            Screen::ConfigEditor(st) => {
+                assert!(
+                    st.input.value().ends_with('?'),
+                    "got {:?}",
+                    st.input.value()
+                )
+            }
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+    }
+
     // --- ADR 0001: help must not cancel work running behind it ---
 
     /// The reason help is an overlay layer rather than a `Screen` variant.
@@ -7259,12 +7356,83 @@ mod help_overlay_tests {
         );
     }
 
+    /// ADR 0001's invariant, enforced by the renderer rather than by the `?`
+    /// gate. `F1` deliberately opens help from inside text inputs, which is
+    /// exactly where the three `set_cursor_position` paths live, and ratatui
+    /// 0.30 cannot unset a cursor once a frame has set one. So the screen
+    /// beneath the overlay must not set it in the first place.
+    #[test]
+    fn no_cursor_is_drawn_beneath_the_help_overlay() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        /// Draw once without help to prove this screen does place a cursor,
+        /// then park the terminal cursor on a sentinel and draw again with
+        /// help open. ratatui only moves the terminal cursor when the frame
+        /// set one, so an unmoved sentinel proves the frame set none.
+        fn cursor_with_help(mut app: App, label: &str) {
+            use ratatui::layout::Position;
+            const SENTINEL: Position = Position { x: 79, y: 23 };
+
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+
+            terminal.draw(|f| space::tui::ui::view(&app, f)).unwrap();
+            let without_help = terminal.get_cursor_position().unwrap();
+            assert_ne!(
+                without_help, SENTINEL,
+                "{}: fixture must be a screen that places a cursor",
+                label
+            );
+
+            app.handle_key(key(KeyCode::F(1)));
+            assert!(app.help.is_some(), "{}: F1 must open help", label);
+
+            terminal.set_cursor_position(SENTINEL).unwrap();
+            terminal.draw(|f| space::tui::ui::view(&app, f)).unwrap();
+            assert_eq!(
+                terminal.get_cursor_position().unwrap(),
+                SENTINEL,
+                "{}: the frame set a cursor while help was open, so it is \
+                 painted over the overlay",
+                label
+            );
+        }
+
+        // 1. A fuzzy picker query (fuzzy_picker::render).
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('/')));
+        app.handle_key(key(KeyCode::Char('r')));
+        cursor_with_help(app, "repo search picker");
+
+        // 2. A text input dialog (render_text_input_dialog).
+        let env = TestEnv::new();
+        let repo = env.create_repo("repo-a");
+        let mut app = test_app_with_config(config_from_env(&env), vec![], vec![repo]);
+        app.handle_key(key(KeyCode::Char('c')));
+        app.handle_key(key(KeyCode::Char('w')));
+        cursor_with_help(app, "create flow name input");
+
+        // 3. The config editor while editing.
+        let env = TestEnv::new();
+        let mut app = test_app_with_config(config_from_env(&env), vec![], vec![]);
+        app.handle_key(shift_key(KeyCode::Char('S')));
+        app.handle_key(key(KeyCode::Enter));
+        cursor_with_help(app, "config editor editing");
+    }
+
     // --- scrolling ---
 
     #[test]
     fn help_scrolls_and_clamps_at_both_ends() {
         let mut app = test_app(vec![], vec![]);
         app.handle_key(key(KeyCode::Char('?')));
+        // Draw first: `viewport` is only written by the renderer, so without a
+        // frame the handler falls back to a 1-row viewport and the real clamp
+        // is never exercised.
+        let _ = render_text(&app, 80, 24);
 
         app.handle_key(key(KeyCode::Home));
         assert_eq!(app.help.as_ref().unwrap().scroll, 0, "Home reaches the top");
@@ -7348,6 +7516,59 @@ mod help_overlay_tests {
         );
     }
 
+    /// Every group `landing_group` can return must exist in the registry, or
+    /// help silently opens at the top instead of on the screen's own group.
+    /// The two share one set of constants, so this pins that they stay shared.
+    #[test]
+    fn every_landing_group_exists_in_the_registry() {
+        let names: Vec<&str> = keybindings::all_groups().iter().map(|g| g.name).collect();
+        for landing in [
+            keybindings::WORKSPACE_PANE_NAME,
+            keybindings::REPO_PANE_NAME,
+            keybindings::REPO_PICKER_NAME,
+            keybindings::SYNC_REPORT_NAME,
+            keybindings::CREATING_LOG_NAME,
+            keybindings::CREATE_ADD_FLOW_NAME,
+            keybindings::SPACE_REPO_PICKERS_NAME,
+            keybindings::DELETE_CONFIRM_NAME,
+            keybindings::CONFIG_EDITOR_NAME,
+            keybindings::DIFF_VIEWER_NAME,
+            keybindings::SWITCH_BRANCH_NAME,
+            keybindings::GIT_OPS_NAME,
+        ] {
+            assert!(
+                names.contains(&landing),
+                "landing group {:?} is not in the registry: {:?}",
+                landing,
+                names
+            );
+        }
+    }
+
+    /// Landing behaviour for screens the first two landing tests did not cover.
+    #[test]
+    fn help_lands_on_the_right_group_from_more_screens() {
+        // Delete confirm.
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.handle_key(key(KeyCode::Char('d')));
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(
+            render_text(&app, 80, 24).contains(keybindings::DELETE_CONFIRM_NAME),
+            "help from the delete confirm must land on its own group"
+        );
+
+        // Config editor, not editing.
+        let env = TestEnv::new();
+        let mut app = test_app_with_config(config_from_env(&env), vec![], vec![]);
+        app.handle_key(shift_key(KeyCode::Char('S')));
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(
+            render_text(&app, 80, 24).contains(keybindings::CONFIG_EDITOR_NAME),
+            "help from the config editor must land on its own group"
+        );
+    }
+
     // --- registry completeness and layout ---
 
     #[test]
@@ -7359,6 +7580,7 @@ mod help_overlay_tests {
             "Repo Pane",
             "Repo Picker",
             "Create / Add Flow",
+            "Creating Log",
             "Delete Confirm",
             "Switch Branch",
             "Config Editor",
@@ -7472,7 +7694,7 @@ mod help_overlay_tests {
                 .find(|l| l.contains("close"))
                 .unwrap_or_else(|| panic!("no footer after {:?}", jump));
             assert!(
-                footer.contains("Esc/q/? close") || footer.contains("Esc / q / ? to close"),
+                footer.contains("Esc/q/?/F1 close") || footer.contains("Esc / q / ? / F1 to close"),
                 "footer clipped after {:?}: {:?}",
                 jump,
                 footer.trim_end()
@@ -7517,21 +7739,31 @@ mod help_overlay_tests {
     #[test]
     fn the_key_bar_never_overflows_a_narrow_terminal() {
         let mut app = test_app(vec![common::workspace_with_repos(&["repo-a"])], vec![]);
-        app.focus = Pane::Right;
-        for width in [80u16, 90, 100, 140] {
-            let rendered = render_text(&app, width, 24);
-            let bar = rendered.lines().last().unwrap().trim_end();
-            assert!(
-                bar.chars().count() <= width as usize,
-                "at {} columns the key bar is {} wide",
-                width,
-                bar.chars().count()
-            );
-            assert!(
-                bar.contains("? help"),
-                "help key dropped at {} columns",
-                width
-            );
+        // Genuinely narrow widths too: below the 80-column dashboard minimum
+        // the bar still must not overflow, including the degenerate case where
+        // not even the reserved gateway keys fit.
+        for width in [5u16, 12, 20, 40, 60, 79, 80, 90, 100, 140] {
+            for pane in [Pane::Left, Pane::Right] {
+                app.focus = pane;
+                let rendered = render_text(&app, width, 24);
+                let bar = rendered.lines().last().unwrap().trim_end();
+                assert!(
+                    UnicodeWidthStr::width(bar) <= width as usize,
+                    "at {} columns the {:?} key bar is {} wide: {:?}",
+                    width,
+                    pane,
+                    UnicodeWidthStr::width(bar),
+                    bar
+                );
+                if width >= 80 {
+                    assert!(
+                        bar.contains("? help") && bar.contains("q quit"),
+                        "a gateway key was dropped at {} columns: {:?}",
+                        width,
+                        bar
+                    );
+                }
+            }
         }
     }
 }

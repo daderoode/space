@@ -102,7 +102,8 @@ files with `s`/`space`, or bulk stage/unstage all files in the selected repo wit
 | Key | Action |
 |-----|--------|
 | `r` | Rescan the repo list and reload the repos pane |
-| `?` | Open help overlay |
+| `?` | Open help overlay (not while typing) |
+| `F1` | Open help overlay (works while typing, e.g. in a picker) |
 | `q` | Quit |
 | `Ctrl-C` | Force quit (works on every screen) |
 

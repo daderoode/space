@@ -374,7 +374,10 @@ fn build_highlighted_spans<'a>(
 }
 
 /// Render the picker as a centered overlay popup.
-pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
+/// `show_cursor` is false while the help overlay is up: ratatui 0.30 cannot
+/// unset a cursor once a frame has set one, so a picker drawn beneath the
+/// overlay would leave its input cursor sitting on top of the help text.
+pub fn render(picker: &FuzzyPicker, show_cursor: bool, frame: &mut Frame) {
     let area = centered_rect(70, 60, frame.area());
 
     // Clear background
@@ -406,9 +409,11 @@ pub fn render(picker: &FuzzyPicker, frame: &mut Frame) {
     let input_text = format!("> {}", picker.input.value());
     frame.render_widget(Paragraph::new(input_text).style(theme::text()), sections[0]);
     // Show cursor at correct position (offset +2 for "> " prefix)
-    let cursor_x = sections[0].x + 2 + picker.input.visual_cursor() as u16;
-    let cursor_y = sections[0].y;
-    frame.set_cursor_position((cursor_x, cursor_y));
+    if show_cursor {
+        let cursor_x = sections[0].x + 2 + picker.input.visual_cursor() as u16;
+        let cursor_y = sections[0].y;
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
 
     // Scope line
     if show_scope {

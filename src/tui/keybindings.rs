@@ -10,8 +10,27 @@ pub struct BindingGroup {
     pub bindings: &'static [Binding],
 }
 
+/// Group names, shared by the registry below and by
+/// `screens::help::landing_group`, so a rename cannot silently send help
+/// to the top of the list instead of to the group for the current screen.
+pub const NAVIGATION_NAME: &str = "Navigation";
+pub const WORKSPACE_PANE_NAME: &str = "Workspace Pane";
+pub const REPO_PANE_NAME: &str = "Repo Pane";
+pub const REPO_PICKER_NAME: &str = "Repo Picker";
+pub const CREATE_ADD_FLOW_NAME: &str = "Create / Add Flow";
+pub const CREATING_LOG_NAME: &str = "Creating Log";
+pub const DELETE_CONFIRM_NAME: &str = "Delete Confirm";
+pub const SWITCH_BRANCH_NAME: &str = "Switch Branch";
+pub const CONFIG_EDITOR_NAME: &str = "Config Editor";
+pub const SPACE_REPO_PICKERS_NAME: &str = "Space & Repo Pickers";
+pub const GIT_OPS_NAME: &str = "Git Operations";
+pub const DIFF_VIEWER_NAME: &str = "Diff Viewer";
+pub const SYNC_REPORT_NAME: &str = "Sync Report";
+pub const HELP_OVERLAY_NAME: &str = "Help Overlay";
+pub const GENERAL_NAME: &str = "General";
+
 const NAVIGATION: BindingGroup = BindingGroup {
-    name: "Navigation",
+    name: NAVIGATION_NAME,
     bindings: &[
         Binding {
             key: "Tab",
@@ -49,7 +68,7 @@ const NAVIGATION: BindingGroup = BindingGroup {
 };
 
 const WORKSPACE_PANE: BindingGroup = BindingGroup {
-    name: "Workspace Pane",
+    name: WORKSPACE_PANE_NAME,
     bindings: &[
         Binding {
             key: "Enter",
@@ -83,7 +102,7 @@ const WORKSPACE_PANE: BindingGroup = BindingGroup {
 };
 
 const REPO_PANE: BindingGroup = BindingGroup {
-    name: "Repo Pane",
+    name: REPO_PANE_NAME,
     bindings: &[
         Binding {
             key: "Enter (repo)",
@@ -125,7 +144,7 @@ const REPO_PANE: BindingGroup = BindingGroup {
 };
 
 const REPO_PICKER: BindingGroup = BindingGroup {
-    name: "Repo Picker",
+    name: REPO_PICKER_NAME,
     bindings: &[
         Binding {
             key: "Tab",
@@ -143,7 +162,7 @@ const REPO_PICKER: BindingGroup = BindingGroup {
 };
 
 const GIT_OPS: BindingGroup = BindingGroup {
-    name: "Git Operations",
+    name: GIT_OPS_NAME,
     bindings: &[
         Binding {
             key: "f",
@@ -174,6 +193,14 @@ const GIT_OPS: BindingGroup = BindingGroup {
             desc: "Navigate (menu and log only)",
         },
         Binding {
+            key: "PgUp/PgDn",
+            desc: "Page the log",
+        },
+        Binding {
+            key: "Home/End",
+            desc: "Log top / bottom",
+        },
+        Binding {
             key: "enter",
             desc: "Select",
         },
@@ -185,7 +212,7 @@ const GIT_OPS: BindingGroup = BindingGroup {
 };
 
 const DIFF_VIEWER: BindingGroup = BindingGroup {
-    name: "Diff Viewer",
+    name: DIFF_VIEWER_NAME,
     bindings: &[
         Binding {
             key: "up/k",
@@ -215,7 +242,7 @@ const DIFF_VIEWER: BindingGroup = BindingGroup {
 };
 
 const SYNC_REPORT: BindingGroup = BindingGroup {
-    name: "Sync Report",
+    name: SYNC_REPORT_NAME,
     bindings: &[
         Binding {
             key: "\u{2191}\u{2193}/jk",
@@ -241,7 +268,7 @@ const SYNC_REPORT: BindingGroup = BindingGroup {
 };
 
 const GENERAL: BindingGroup = BindingGroup {
-    name: "General",
+    name: GENERAL_NAME,
     bindings: &[
         Binding {
             key: "r",
@@ -267,7 +294,7 @@ const GENERAL: BindingGroup = BindingGroup {
 };
 
 const CREATE_ADD_FLOW: BindingGroup = BindingGroup {
-    name: "Create / Add Flow",
+    name: CREATE_ADD_FLOW_NAME,
     bindings: &[
         Binding {
             key: "Tab",
@@ -288,8 +315,30 @@ const CREATE_ADD_FLOW: BindingGroup = BindingGroup {
     ],
 };
 
+const CREATING_LOG: BindingGroup = BindingGroup {
+    name: CREATING_LOG_NAME,
+    bindings: &[
+        Binding {
+            key: "\u{2191}\u{2193}/jk",
+            desc: "Scroll the log",
+        },
+        Binding {
+            key: "PgUp/PgDn",
+            desc: "Page the log",
+        },
+        Binding {
+            key: "Home/End",
+            desc: "Top / bottom (End resumes follow)",
+        },
+        Binding {
+            key: "Esc",
+            desc: "Back to the dashboard",
+        },
+    ],
+};
+
 const DELETE_CONFIRM: BindingGroup = BindingGroup {
-    name: "Delete Confirm",
+    name: DELETE_CONFIRM_NAME,
     bindings: &[
         Binding {
             key: "y",
@@ -307,7 +356,7 @@ const DELETE_CONFIRM: BindingGroup = BindingGroup {
 };
 
 const SWITCH_BRANCH: BindingGroup = BindingGroup {
-    name: "Switch Branch",
+    name: SWITCH_BRANCH_NAME,
     bindings: &[
         Binding {
             key: "↑↓/jk",
@@ -325,7 +374,7 @@ const SWITCH_BRANCH: BindingGroup = BindingGroup {
 };
 
 const CONFIG_EDITOR: BindingGroup = BindingGroup {
-    name: "Config Editor",
+    name: CONFIG_EDITOR_NAME,
     bindings: &[
         Binding {
             key: "↑↓/jk",
@@ -347,7 +396,7 @@ const CONFIG_EDITOR: BindingGroup = BindingGroup {
 };
 
 const SPACE_REPO_PICKERS: BindingGroup = BindingGroup {
-    name: "Space & Repo Pickers",
+    name: SPACE_REPO_PICKERS_NAME,
     bindings: &[
         Binding {
             key: "↑↓",
@@ -369,7 +418,7 @@ const SPACE_REPO_PICKERS: BindingGroup = BindingGroup {
 };
 
 const HELP_OVERLAY: BindingGroup = BindingGroup {
-    name: "Help Overlay",
+    name: HELP_OVERLAY_NAME,
     bindings: &[
         Binding {
             key: "↑↓/jk",
@@ -392,12 +441,13 @@ const HELP_OVERLAY: BindingGroup = BindingGroup {
 
 /// All binding groups — consumed by the help overlay.
 pub fn all_groups() -> &'static [BindingGroup] {
-    static GROUPS: [BindingGroup; 14] = [
+    static GROUPS: [BindingGroup; 15] = [
         NAVIGATION,
         WORKSPACE_PANE,
         REPO_PANE,
         REPO_PICKER,
         CREATE_ADD_FLOW,
+        CREATING_LOG,
         DELETE_CONFIRM,
         SWITCH_BRANCH,
         CONFIG_EDITOR,
