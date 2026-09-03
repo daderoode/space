@@ -877,10 +877,13 @@ impl App {
     /// Residual: this loop is synchronous inside `handle_key`, so the
     /// pre-create fetch blocks the whole TUI for up to
     /// `UNATTENDED_FETCH_TIMEOUT` per repo with no repaint and no Esc. The
-    /// unattended-run policy bounds that hang; it does not make it
-    /// interruptible. The design doc records the same cost for sync (a hung
-    /// repo costs a silent minute), where Esc at least leaves the report;
-    /// here Esc has nowhere to act. Whether this stage should move to the
+    /// limit is per repo and the repos run in sequence, so the cost adds up:
+    /// N unreachable repos freeze the stage for N times the limit, which for
+    /// a selection off VPN is minutes, not one. The unattended-run policy
+    /// bounds that hang; it does not make it interruptible. The design doc
+    /// records the same cost for sync (a hung repo costs a silent minute),
+    /// where Esc at least leaves the report; here Esc has nowhere to act.
+    /// Whether this stage should move to the
     /// background worker pattern, so Esc does have somewhere to act, is left
     /// open deliberately: the fetch is bounded first, the stage stays
     /// synchronous, and the worker move is its own change because it
