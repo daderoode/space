@@ -4576,22 +4576,6 @@ mod rescan_tests {
             .collect()
     }
 
-    /// Open the create flow and land in PickRepos with the given space name.
-    fn open_create_picker(app: &mut App, name: &str) {
-        app.handle_key(key(KeyCode::Char('c')));
-        for ch in name.chars() {
-            app.handle_key(key(KeyCode::Char(ch)));
-        }
-        app.handle_key(key(KeyCode::Enter));
-        match &app.screen {
-            Screen::CreateWorkspace(st) => assert_eq!(
-                st.stage,
-                space::tui::screens::create::CreateStage::PickRepos
-            ),
-            _ => panic!("expected CreateWorkspace screen"),
-        }
-    }
-
     #[test]
     fn ctrl_r_in_create_picker_shows_new_repo_and_keeps_toggle_and_query() {
         with_config_dir(|env| {
@@ -6041,20 +6025,26 @@ fn switch_branch_picker(app: &App) -> &FuzzyPicker {
     }
 }
 
-fn open_create_pick_repos(app: &mut App) {
+/// Open the create flow and land in PickRepos with the given space name.
+fn open_create_picker(app: &mut App, name: &str) {
     app.handle_key(key(KeyCode::Char('c')));
-    if let Screen::CreateWorkspace(ref mut st) = app.screen {
-        st.ws_name = tui_input::Input::default().with_value("ws".to_string());
-        st.stage = space::tui::screens::create::CreateStage::PickRepos;
-    } else {
-        panic!("expected CreateWorkspace screen");
+    for ch in name.chars() {
+        app.handle_key(key(KeyCode::Char(ch)));
+    }
+    app.handle_key(key(KeyCode::Enter));
+    match &app.screen {
+        Screen::CreateWorkspace(st) => assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::PickRepos
+        ),
+        _ => panic!("expected CreateWorkspace screen"),
     }
 }
 
 #[test]
 fn create_pick_repos_jk_type_into_an_empty_query() {
     let mut app = test_app(vec![], jk_repo_paths());
-    open_create_pick_repos(&mut app);
+    open_create_picker(&mut app, "ws");
 
     assert_jk_types_into_the_query(&mut app, create_repos_picker, "create PickRepos");
 }
@@ -6062,7 +6052,7 @@ fn create_pick_repos_jk_type_into_an_empty_query() {
 #[test]
 fn create_pick_repos_jk_type_into_a_non_empty_query() {
     let mut app = test_app(vec![], jk_repo_paths());
-    open_create_pick_repos(&mut app);
+    open_create_picker(&mut app, "ws");
 
     // 'a' opens the query; from here j/k are literal characters.
     app.handle_key(key(KeyCode::Char('a')));
@@ -6083,7 +6073,7 @@ fn create_pick_repos_jk_type_into_a_non_empty_query() {
 #[test]
 fn create_pick_repos_arrows_navigate_even_with_a_query() {
     let mut app = test_app(vec![], jk_repo_paths());
-    open_create_pick_repos(&mut app);
+    open_create_picker(&mut app, "ws");
 
     // A query that keeps at least two items in the filtered set.
     app.handle_key(key(KeyCode::Char('a')));
@@ -6120,7 +6110,7 @@ fn create_pick_repos_arrows_navigate_even_with_a_query() {
 #[test]
 fn create_pick_repos_tab_still_toggles_with_a_query() {
     let mut app = test_app(vec![], jk_repo_paths());
-    open_create_pick_repos(&mut app);
+    open_create_picker(&mut app, "ws");
 
     app.handle_key(key(KeyCode::Char('a')));
     app.handle_key(key(KeyCode::Tab));
@@ -6144,7 +6134,7 @@ fn create_pick_repos_ctrl_s_still_cycles_scope_with_a_query() {
     use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
 
     let mut app = test_app(vec![], jk_repo_paths_two_scopes());
-    open_create_pick_repos(&mut app);
+    open_create_picker(&mut app, "ws");
 
     if let Screen::CreateWorkspace(ref st) = app.screen {
         assert_eq!(
@@ -6645,6 +6635,14 @@ fn delete_uppercase_y_deletes_and_uppercase_n_cancels() {
     app.handle_key(key(KeyCode::Char('d')));
     app.handle_key(shift_key(KeyCode::Char('N')));
     assert!(matches!(app.screen, Screen::Dashboard), "N cancels like n");
+    assert_eq!(app.workspaces.len(), 1);
+
+    // q cancels too, the same set of decline keys as the push and rebase
+    // confirmations (they share one default-No helper).
+    let mut app = test_app(keep_me(), vec![]);
+    app.handle_key(key(KeyCode::Char('d')));
+    app.handle_key(key(KeyCode::Char('q')));
+    assert!(matches!(app.screen, Screen::Dashboard), "q cancels like n");
     assert_eq!(app.workspaces.len(), 1);
 
     // Y is accepted as confirmation; the workspace path does not exist on disk,

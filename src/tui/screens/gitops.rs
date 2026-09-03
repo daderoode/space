@@ -1,3 +1,4 @@
+use super::default_no_confirm;
 use crate::core::git::CommitInfo;
 use crate::tui::actions::{GitOp, ScreenAction, ScreenContext};
 use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
@@ -240,23 +241,17 @@ impl GitOpsState {
     /// Handle keys in the ConfirmPush stage (branch has no upstream).
     /// `y`/Enter confirms and pushes with `-u origin <branch>`.
     fn handle_confirm_push_key(&mut self, key: KeyEvent) -> ScreenAction {
-        match key.code {
-            // Only an explicit `y` confirms publishing the branch; Enter
-            // declines, matching the [y/N] prompt (default No) so the remote
-            // is never mutated by a reflexive keypress.
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                self.start_network_op(GitOp::Push { set_upstream: true })
-            }
+        // Only an explicit `y` confirms publishing the branch; Enter
+        // declines, matching the [y/N] prompt (default No) so the remote
+        // is never mutated by a reflexive keypress.
+        match default_no_confirm(key.code) {
+            Some(true) => self.start_network_op(GitOp::Push { set_upstream: true }),
             // Decline: back to the menu without touching the remote.
-            KeyCode::Char('n')
-            | KeyCode::Char('N')
-            | KeyCode::Enter
-            | KeyCode::Esc
-            | KeyCode::Char('q') => {
+            Some(false) => {
                 self.stage = GitOpsStage::Menu;
                 ScreenAction::Continue
             }
-            _ => ScreenAction::Continue,
+            None => ScreenAction::Continue,
         }
     }
 
@@ -477,23 +472,19 @@ impl GitOpsState {
     /// `n`/`Enter`/`Esc`/`q` decline back to the target picker. Enter declines
     /// (default No) so a reflexive keypress never rewrites history.
     fn handle_rebase_confirm_key(&mut self, key: KeyEvent) -> ScreenAction {
-        match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => match self.rebase_onto.clone() {
+        match default_no_confirm(key.code) {
+            Some(true) => match self.rebase_onto.clone() {
                 Some(onto) => self.start_network_op(GitOp::Rebase { onto }),
                 None => {
                     self.stage = GitOpsStage::RebasePickTarget;
                     ScreenAction::Continue
                 }
             },
-            KeyCode::Char('n')
-            | KeyCode::Char('N')
-            | KeyCode::Enter
-            | KeyCode::Esc
-            | KeyCode::Char('q') => {
+            Some(false) => {
                 self.stage = GitOpsStage::RebasePickTarget;
                 ScreenAction::Continue
             }
-            _ => ScreenAction::Continue,
+            None => ScreenAction::Continue,
         }
     }
 }

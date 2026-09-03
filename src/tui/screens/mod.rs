@@ -11,7 +11,25 @@ pub mod switch_branch;
 pub mod sync_report;
 
 use crate::tui::widgets::fuzzy_picker::PickerItem;
+use ratatui::crossterm::event::KeyCode;
 use std::path::PathBuf;
+
+/// The one default-No confirmation used by every destructive dialog (delete
+/// workspace, publish branch, rebase): only an explicit `y`/`Y` confirms, so
+/// a reflex Enter never mutates anything. Returns `Some(true)` to confirm,
+/// `Some(false)` to decline (`n`/`N`/`q`/`Enter`/`Esc`) and `None` for keys
+/// the dialog ignores.
+pub(crate) fn default_no_confirm(code: KeyCode) -> Option<bool> {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => Some(true),
+        KeyCode::Char('n')
+        | KeyCode::Char('N')
+        | KeyCode::Char('q')
+        | KeyCode::Enter
+        | KeyCode::Esc => Some(false),
+        _ => None,
+    }
+}
 
 /// Build repo picker rows from repo paths, filling the branch and remote
 /// columns from each repo's current state. Shared by the create and add
