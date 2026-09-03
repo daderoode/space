@@ -7839,6 +7839,83 @@ mod help_overlay_tests {
         assert!(help_rows(0, 0).is_empty());
     }
 
+    /// The registry says what a key does, and nothing checked that against
+    /// what the key actually does. `q` is the case that bites: it goes back on
+    /// the switch-branch strategy stage but is a character on the two typed
+    /// stages, which Wave 0 fixed deliberately so a branch named `quickfix`
+    /// stays nameable. A row claiming `q` goes back everywhere would be a lie
+    /// the help overlay tells.
+    #[test]
+    fn the_registry_does_not_claim_q_goes_back_where_q_is_typed() {
+        use space::tui::screens::switch_branch::{SwitchBranchStage, SwitchBranchState};
+
+        fn switch_branch_at(stage: SwitchBranchStage) -> App {
+            let env = TestEnv::new();
+            let mut app = test_app_with_config(config_from_env(&env), vec![], vec![]);
+            app.screen = Screen::SwitchBranch(SwitchBranchState::new(
+                "repo-a".into(),
+                PathBuf::from("/tmp/repo-a"),
+            ));
+            let is_pick_branch = stage == SwitchBranchStage::PickBranch;
+            if let Screen::SwitchBranch(st) = &mut app.screen {
+                st.stage = stage;
+                if is_pick_branch {
+                    st.branch_picker = Some(space::tui::widgets::fuzzy_picker::FuzzyPicker::new(
+                        "Pick",
+                        vec![],
+                        false,
+                    ));
+                }
+            }
+            app
+        }
+
+        // Strategy stage: `q` leaves.
+        let mut app = switch_branch_at(SwitchBranchStage::PickStrategy);
+        app.handle_key(key(KeyCode::Char('q')));
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "q must still go back on the strategy stage"
+        );
+
+        // Typed stages: `q` is a character.
+        let mut app = switch_branch_at(SwitchBranchStage::EnterBranchName);
+        app.handle_key(key(KeyCode::Char('q')));
+        match &app.screen {
+            Screen::SwitchBranch(st) => {
+                assert_eq!(st.branch_name_input.value(), "q", "q must be typed here")
+            }
+            other => panic!("q left the screen: {:?}", std::mem::discriminant(other)),
+        }
+        let mut app = switch_branch_at(SwitchBranchStage::PickBranch);
+        app.handle_key(key(KeyCode::Char('q')));
+        match &app.screen {
+            Screen::SwitchBranch(st) => assert_eq!(
+                st.branch_picker.as_ref().unwrap().input.value(),
+                "q",
+                "q must reach the filter here"
+            ),
+            other => panic!("q left the screen: {:?}", std::mem::discriminant(other)),
+        }
+
+        // So the group must not document `q` as an unqualified way back.
+        let group = keybindings::all_groups()
+            .iter()
+            .find(|g| g.name == keybindings::SWITCH_BRANCH_NAME)
+            .unwrap();
+        for b in group.bindings {
+            if b.key.split('/').any(|k| k == "q") {
+                assert!(
+                    b.desc.contains("strategy"),
+                    "the switch-branch {:?} row says {:?}, but q is typed on two \
+                     of the three stages",
+                    b.key,
+                    b.desc
+                );
+            }
+        }
+    }
+
     // --- registry completeness and layout ---
 
     /// Deliberately spelled with literals, not the shared constants: this is

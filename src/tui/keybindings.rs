@@ -215,7 +215,7 @@ const GIT_OPS: BindingGroup = BindingGroup {
         },
         Binding {
             key: "esc/q",
-            desc: "Close",
+            desc: "Close (q: not while typing)",
         },
     ],
 };
@@ -384,8 +384,12 @@ const SWITCH_BRANCH: BindingGroup = BindingGroup {
             desc: "Move the branch highlight",
         },
         Binding {
-            key: "Esc/q",
+            key: "Esc",
             desc: "Back one stage",
+        },
+        Binding {
+            key: "q",
+            desc: "Back, on the strategy stage only",
         },
     ],
 };
