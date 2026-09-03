@@ -167,7 +167,7 @@ const GIT_OPS: BindingGroup = BindingGroup {
         },
         Binding {
             key: "\u{2191}\u{2193}/jk",
-            desc: "Navigate",
+            desc: "Navigate (menu and log; the rebase picker is arrows only)",
         },
         Binding {
             key: "enter",

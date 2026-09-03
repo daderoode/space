@@ -717,7 +717,7 @@ fn delete_confirm_keeps_footer_visible_for_long_repo_lists() {
         rendered
     );
     assert!(
-        rendered.contains("Esc/n/Enter cancel"),
+        rendered.contains("Esc/n/q/Enter cancel"),
         "expected cancel action to remain visible in rendered popup, got:\n{}",
         rendered
     );
@@ -749,7 +749,7 @@ fn delete_confirm_wraps_footer_on_narrow_terminals() {
         rendered
     );
     assert!(
-        rendered.contains("Esc/n/Enter cancel"),
+        rendered.contains("Esc/n/q/Enter cancel"),
         "expected cancel action on a wrapped footer line, got:\n{}",
         rendered
     );
