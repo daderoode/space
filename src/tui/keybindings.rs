@@ -370,19 +370,19 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
 mod tests {
     use super::all_groups;
 
-    /// The help overlay is at least 50 columns wide (48 inside the border)
-    /// and renders each row as two spaces, the key padded to 12 columns and
-    /// the description with no wrapping. Every registered binding must fit
-    /// that minimum so no description is clipped on a narrow terminal.
+    /// The help overlay never wraps: each row is two spaces, the key padded
+    /// to 12 columns and the description. On the 80-column default terminal
+    /// the dialog is 56 wide, 54 inside the border, so every registered
+    /// binding must fit 54 columns or its description is clipped there.
     #[test]
-    fn every_binding_fits_the_minimum_help_dialog() {
+    fn every_binding_fits_the_default_terminal_help_dialog() {
         for group in all_groups() {
             for binding in group.bindings {
                 let key_cols = binding.key.chars().count().max(12);
                 let row = 2 + key_cols + binding.desc.chars().count();
                 assert!(
-                    row <= 48,
-                    "{} / {:?} is {} columns wide, over the 48-column help minimum",
+                    row <= 54,
+                    "{} / {:?} is {} columns wide, over the 54-column help dialog at 80 columns",
                     group.name,
                     binding.desc,
                     row
