@@ -239,7 +239,8 @@ impl GitOpsState {
     }
 
     /// Handle keys in the ConfirmPush stage (branch has no upstream).
-    /// `y`/Enter confirms and pushes with `-u origin <branch>`.
+    /// Only `y`/`Y` confirms, pushing with `-u origin <branch>`; Enter
+    /// declines, because the prompt is `[y/N]` (default No).
     fn handle_confirm_push_key(&mut self, key: KeyEvent) -> ScreenAction {
         // Only an explicit `y` confirms publishing the branch; Enter
         // declines, matching the [y/N] prompt (default No) so the remote

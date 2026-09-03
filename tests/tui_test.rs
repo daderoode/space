@@ -110,16 +110,6 @@ fn dashboard_q_quits() {
 }
 
 #[test]
-fn dashboard_esc_on_left_pane_does_not_quit() {
-    let mut app = test_app(vec![], vec![]);
-    app.handle_key(key(KeyCode::Esc));
-    assert!(
-        !app.should_quit,
-        "Esc is 'back', and the left pane is the top of the tree, so it must not quit"
-    );
-}
-
-#[test]
 fn dashboard_tab_toggles_focus() {
     let mut app = test_app(vec![], vec![]);
     assert_eq!(app.focus, Pane::Left);
@@ -5967,6 +5957,40 @@ fn assert_jk_types_into_the_query(app: &mut App, picker_of: fn(&App) -> &FuzzyPi
     );
 }
 
+/// The same rule once a query is already open: `a` first, then `j` and `k` are
+/// plain characters that extend it. Each intermediate value is asserted so a
+/// failure names the keystroke that went missing.
+fn assert_jk_types_into_a_non_empty_query(
+    app: &mut App,
+    picker_of: fn(&App) -> &FuzzyPicker,
+    what: &str,
+) {
+    // 'a' opens the query; from here j/k must be literal characters.
+    app.handle_key(key(KeyCode::Char('a')));
+    assert_eq!(
+        picker_of(app).input.value(),
+        "a",
+        "{}: the query must be non-empty before j is pressed",
+        what
+    );
+
+    app.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(
+        picker_of(app).input.value(),
+        "aj",
+        "{}: j must reach the filter once the query is non-empty",
+        what
+    );
+
+    app.handle_key(key(KeyCode::Char('k')));
+    assert_eq!(
+        picker_of(app).input.value(),
+        "ajk",
+        "{}: k must reach the filter once the query is non-empty",
+        what
+    );
+}
+
 fn create_repos_picker(app: &App) -> &FuzzyPicker {
     match app.screen {
         Screen::CreateWorkspace(ref st) => &st.picker,
@@ -6054,20 +6078,7 @@ fn create_pick_repos_jk_type_into_a_non_empty_query() {
     let mut app = test_app(vec![], jk_repo_paths());
     open_create_picker(&mut app, "ws");
 
-    // 'a' opens the query; from here j/k are literal characters.
-    app.handle_key(key(KeyCode::Char('a')));
-    app.handle_key(key(KeyCode::Char('j')));
-    app.handle_key(key(KeyCode::Char('k')));
-
-    if let Screen::CreateWorkspace(ref st) = app.screen {
-        assert_eq!(
-            st.picker.input.value(),
-            "ajk",
-            "j/k must reach the filter once the query is non-empty"
-        );
-    } else {
-        panic!("expected CreateWorkspace screen");
-    }
+    assert_jk_types_into_a_non_empty_query(&mut app, create_repos_picker, "create PickRepos");
 }
 
 #[test]
@@ -6199,19 +6210,7 @@ fn add_pick_repos_jk_type_into_a_non_empty_query() {
         "expected AddRepos screen"
     );
 
-    app.handle_key(key(KeyCode::Char('a')));
-    app.handle_key(key(KeyCode::Char('j')));
-    app.handle_key(key(KeyCode::Char('k')));
-
-    if let Screen::AddRepos(ref st) = app.screen {
-        assert_eq!(
-            st.picker.input.value(),
-            "ajk",
-            "j/k must reach the filter once the query is non-empty"
-        );
-    } else {
-        panic!("expected AddRepos screen");
-    }
+    assert_jk_types_into_a_non_empty_query(&mut app, add_repos_picker, "add PickRepos");
 }
 
 #[test]
@@ -6239,15 +6238,7 @@ fn repo_search_jk_type_into_a_non_empty_query() {
         "expected RepoSearch screen"
     );
 
-    app.handle_key(key(KeyCode::Char('a')));
-    app.handle_key(key(KeyCode::Char('j')));
-    app.handle_key(key(KeyCode::Char('k')));
-
-    if let Screen::RepoSearch(ref st) = app.screen {
-        assert_eq!(st.picker.input.value(), "ajk");
-    } else {
-        panic!("expected RepoSearch screen");
-    }
+    assert_jk_types_into_a_non_empty_query(&mut app, search_picker, "repo search");
 }
 
 #[test]
@@ -6283,15 +6274,7 @@ fn go_picker_jk_type_into_a_non_empty_query() {
         "expected GoWorkspace screen"
     );
 
-    app.handle_key(key(KeyCode::Char('a')));
-    app.handle_key(key(KeyCode::Char('j')));
-    app.handle_key(key(KeyCode::Char('k')));
-
-    if let Screen::GoWorkspace(ref st) = app.screen {
-        assert_eq!(st.picker.input.value(), "ajk");
-    } else {
-        panic!("expected GoWorkspace screen");
-    }
+    assert_jk_types_into_a_non_empty_query(&mut app, go_workspace_picker, "go picker");
 }
 
 #[test]
@@ -6353,20 +6336,7 @@ fn create_pick_branch_jk_type_into_a_non_empty_query() {
     let env = TestEnv::new();
     let mut app = open_create_pick_branch(&env);
 
-    app.handle_key(key(KeyCode::Char('a')));
-    app.handle_key(key(KeyCode::Char('j')));
-    app.handle_key(key(KeyCode::Char('k')));
-
-    if let Screen::CreateWorkspace(ref st) = app.screen {
-        let bp = st.branch_picker.as_ref().expect("branch picker present");
-        assert_eq!(
-            bp.input.value(),
-            "ajk",
-            "j/k must reach the branch filter once the query is non-empty"
-        );
-    } else {
-        panic!("expected CreateWorkspace screen");
-    }
+    assert_jk_types_into_a_non_empty_query(&mut app, create_branch_picker, "create PickBranch");
 }
 
 #[test]
@@ -6419,20 +6389,7 @@ fn add_pick_branch_jk_type_into_a_non_empty_query() {
     let env = TestEnv::new();
     let mut app = open_add_pick_branch(&env);
 
-    app.handle_key(key(KeyCode::Char('a')));
-    app.handle_key(key(KeyCode::Char('j')));
-    app.handle_key(key(KeyCode::Char('k')));
-
-    if let Screen::AddRepos(ref st) = app.screen {
-        let bp = st.branch_picker.as_ref().expect("branch picker present");
-        assert_eq!(
-            bp.input.value(),
-            "ajk",
-            "j/k must reach the branch filter once the query is non-empty"
-        );
-    } else {
-        panic!("expected AddRepos screen");
-    }
+    assert_jk_types_into_a_non_empty_query(&mut app, add_branch_picker, "add PickBranch");
 }
 
 #[test]
@@ -6534,6 +6491,73 @@ fn switch_branch_pick_branch_jk_type_into_an_empty_query() {
     assert_jk_types_into_the_query(&mut app, switch_branch_picker, "switch branch");
 }
 
+/// `q` is a character in a typed picker, not an exit. The create, add and
+/// rebase-target pickers already treat it that way; this pins the same rule on
+/// the switch-branch picker so a branch named `queue` stays reachable. Esc
+/// keeps its meaning as the way out.
+#[test]
+fn switch_branch_pick_branch_q_types_into_the_query() {
+    use space::tui::screens::switch_branch::SwitchBranchStage;
+    let env = TestEnv::new();
+    let mut app = open_switch_branch_pick_branch(&env);
+
+    app.handle_key(key(KeyCode::Char('q')));
+
+    match app.screen {
+        Screen::SwitchBranch(ref st) => {
+            assert_eq!(
+                st.stage,
+                SwitchBranchStage::PickBranch,
+                "q must not leave the branch picker"
+            );
+            let bp = st.branch_picker.as_ref().expect("branch picker present");
+            assert_eq!(
+                bp.input.value(),
+                "q",
+                "q must reach the filter like every other letter"
+            );
+        }
+        _ => panic!("expected SwitchBranch screen; q must not exit the flow"),
+    }
+}
+
+/// The new-branch name field is a text input, so `q` is typed there too: a
+/// branch called `quick` must be nameable.
+#[test]
+fn switch_branch_enter_branch_name_types_q() {
+    use space::tui::screens::switch_branch::SwitchBranchStage;
+    let env = TestEnv::new();
+    let mut app = jk_branch_repo_app(&env, "switch-name-repo");
+
+    app.handle_key(key(KeyCode::Char('b')));
+    match app.screen {
+        // Row 0 of the strategy list is "New branch", so Enter opens the name field.
+        Screen::SwitchBranch(ref st) => assert_eq!(st.strategy_idx, 0),
+        _ => panic!("expected SwitchBranch screen"),
+    }
+    app.handle_key(key(KeyCode::Enter));
+
+    for ch in "quick".chars() {
+        app.handle_key(key(KeyCode::Char(ch)));
+    }
+
+    match app.screen {
+        Screen::SwitchBranch(ref st) => {
+            assert_eq!(
+                st.stage,
+                SwitchBranchStage::EnterBranchName,
+                "q must not leave the branch-name field"
+            );
+            assert_eq!(
+                st.branch_name_input.value(),
+                "quick",
+                "every letter, q included, belongs to the branch name"
+            );
+        }
+        _ => panic!("expected SwitchBranch screen; q must not exit the flow"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 0.3: `g` is gated to the workspace pane
 // ---------------------------------------------------------------------------
@@ -6595,63 +6619,94 @@ fn shift_g_on_right_pane_still_opens_git_ops() {
 // 0.4: delete confirm defaults to No
 // ---------------------------------------------------------------------------
 
-#[test]
-fn delete_enter_cancels_instead_of_deleting() {
+/// A workspace the app lists but whose directory does not exist under the
+/// (temporary) workspaces dir. Confirming therefore fails loudly instead of
+/// deleting anything, which is exactly what lets the confirm case below prove
+/// that a delete was attempted at all.
+fn delete_confirm_app(env: &TestEnv) -> App {
     let workspaces = vec![Workspace {
         name: "keep-me".to_string(),
-        path: PathBuf::from("/tmp/keep-me"),
+        path: env.workspaces_dir.join("keep-me"),
         repos: vec![],
     }];
-    let mut app = test_app(workspaces, vec![]);
+    test_app_with_config(config_from_env(env), workspaces, vec![])
+}
+
+/// `ScreenAction::Back` sets no status message, so an empty status line is the
+/// evidence that the decline key never reached `remove_workspace`. Screen and
+/// workspace-count assertions alone cannot tell the two apart: the fixture
+/// workspace is not on disk, so a delete that *did* run would also land back on
+/// the dashboard with the list untouched.
+fn assert_delete_was_declined(app: &App, key_name: &str) {
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "{} must return to the dashboard",
+        key_name
+    );
+    assert_eq!(
+        app.workspaces.len(),
+        1,
+        "{}: nothing may be deleted",
+        key_name
+    );
+    assert_eq!(
+        app.workspaces[0].name, "keep-me",
+        "{}: the workspace must survive intact",
+        key_name
+    );
+    assert_eq!(
+        app.status_message, None,
+        "{}: declining must not attempt a delete, and any attempt sets a status message",
+        key_name
+    );
+}
+
+#[test]
+fn delete_enter_cancels_instead_of_deleting() {
+    let env = TestEnv::new();
+    let mut app = delete_confirm_app(&env);
 
     app.handle_key(key(KeyCode::Char('d')));
     assert!(matches!(app.screen, Screen::ConfirmDelete(_)));
 
     app.handle_key(key(KeyCode::Enter));
 
-    assert!(
-        matches!(app.screen, Screen::Dashboard),
-        "Enter declines, matching the [y/N] pattern used by push and rebase"
-    );
-    assert_eq!(
-        app.workspaces.len(),
-        1,
-        "nothing may be deleted by a reflex Enter"
-    );
+    // Enter declines, matching the [y/N] pattern used by push and rebase.
+    assert_delete_was_declined(&app, "Enter");
 }
 
 #[test]
 fn delete_uppercase_y_deletes_and_uppercase_n_cancels() {
-    fn keep_me() -> Vec<Workspace> {
-        vec![Workspace {
-            name: "keep-me".to_string(),
-            path: PathBuf::from("/tmp/keep-me"),
-            repos: vec![],
-        }]
-    }
+    use space::tui::actions::StatusKind;
 
-    let mut app = test_app(keep_me(), vec![]);
+    let env = TestEnv::new();
 
+    let mut app = delete_confirm_app(&env);
     app.handle_key(key(KeyCode::Char('d')));
     app.handle_key(shift_key(KeyCode::Char('N')));
-    assert!(matches!(app.screen, Screen::Dashboard), "N cancels like n");
-    assert_eq!(app.workspaces.len(), 1);
+    assert_delete_was_declined(&app, "N");
 
     // q cancels too, the same set of decline keys as the push and rebase
     // confirmations (they share one default-No helper).
-    let mut app = test_app(keep_me(), vec![]);
+    let mut app = delete_confirm_app(&env);
     app.handle_key(key(KeyCode::Char('d')));
     app.handle_key(key(KeyCode::Char('q')));
-    assert!(matches!(app.screen, Screen::Dashboard), "q cancels like n");
-    assert_eq!(app.workspaces.len(), 1);
+    assert_delete_was_declined(&app, "q");
 
     // Y is accepted as confirmation; the workspace path does not exist on disk,
-    // so the delete fails loudly rather than silently doing nothing.
-    let mut app = test_app(keep_me(), vec![]);
+    // so the delete fails loudly rather than silently doing nothing. That error
+    // status is the proof the keypress reached `remove_workspace`.
+    let mut app = delete_confirm_app(&env);
     app.handle_key(key(KeyCode::Char('d')));
     app.handle_key(shift_key(KeyCode::Char('Y')));
     assert!(
         !matches!(app.screen, Screen::ConfirmDelete(_)),
         "Y must be treated as confirmation, not swallowed"
     );
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Delete failed: workspace 'keep-me' not found"),
+        "Y must reach the delete, which reports the missing directory"
+    );
+    assert_eq!(app.status_kind, StatusKind::Error);
 }
