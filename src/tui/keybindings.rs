@@ -194,6 +194,10 @@ const GIT_OPS: BindingGroup = BindingGroup {
             desc: "Navigate (menu and log only)",
         },
         Binding {
+            key: "\u{2191}\u{2193}",
+            desc: "Move the rebase-target highlight",
+        },
+        Binding {
             key: "PgUp/PgDn",
             desc: "Page the log",
         },
@@ -214,8 +218,12 @@ const GIT_OPS: BindingGroup = BindingGroup {
             desc: "Decline (the default)",
         },
         Binding {
-            key: "esc/q",
-            desc: "Close (q: not while typing)",
+            key: "esc",
+            desc: "Back a stage, or close from the menu",
+        },
+        Binding {
+            key: "q",
+            desc: "Same as Esc, except while typing",
         },
     ],
 };
@@ -314,8 +322,12 @@ const CREATE_ADD_FLOW: BindingGroup = BindingGroup {
             desc: "Confirm and continue",
         },
         Binding {
-            key: "↑↓",
+            key: "↑↓/jk",
             desc: "Choose branch strategy",
+        },
+        Binding {
+            key: "letters",
+            desc: "Type a name, or filter the picker",
         },
         Binding {
             key: "Esc",
@@ -410,8 +422,12 @@ const CONFIG_EDITOR: BindingGroup = BindingGroup {
             desc: "Save and exit",
         },
         Binding {
-            key: "Esc/q",
-            desc: "Cancel edit / close (q: not editing)",
+            key: "Esc",
+            desc: "Cancel edit, or close",
+        },
+        Binding {
+            key: "q",
+            desc: "Close, when not editing",
         },
     ],
 };

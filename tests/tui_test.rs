@@ -7898,20 +7898,94 @@ mod help_overlay_tests {
             other => panic!("q left the screen: {:?}", std::mem::discriminant(other)),
         }
 
-        // So the group must not document `q` as an unqualified way back.
-        let group = keybindings::all_groups()
-            .iter()
-            .find(|g| g.name == keybindings::SWITCH_BRANCH_NAME)
-            .unwrap();
-        for b in group.bindings {
-            if b.key.split('/').any(|k| k == "q") {
-                assert!(
-                    b.desc.contains("strategy"),
-                    "the switch-branch {:?} row says {:?}, but q is typed on two \
-                     of the three stages",
-                    b.key,
-                    b.desc
-                );
+        // git-ops: `q` declines a confirmation without leaving the overlay, so
+        // it neither closes nor types there.
+        let mut app = gitops_menu_app();
+        if let Screen::GitOps(st) = &mut app.screen {
+            st.stage = space::tui::screens::gitops::GitOpsStage::ConfirmPush;
+        }
+        app.handle_key(key(KeyCode::Char('q')));
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                space::tui::screens::gitops::GitOpsStage::Menu,
+                "q on ConfirmPush declines back to the menu, it does not close"
+            ),
+            other => panic!("q closed the overlay: {:?}", std::mem::discriminant(other)),
+        }
+
+        // Every `q` row is pinned to its exact wording. A substring check is a
+        // loophole: "Back everywhere, including the strategy stage" contains
+        // "strategy" and is still false. Rewording one of these is meant to be
+        // a deliberate act that forces re-reading the handler it describes.
+        let expected: &[(&str, &str, &str)] = &[
+            (
+                keybindings::SWITCH_BRANCH_NAME,
+                "q",
+                "Back, on the strategy stage only",
+            ),
+            (
+                keybindings::GIT_OPS_NAME,
+                "q",
+                "Same as Esc, except while typing",
+            ),
+            (keybindings::DELETE_CONFIRM_NAME, "q", "Cancel"),
+            (
+                keybindings::CONFIG_EDITOR_NAME,
+                "q",
+                "Close, when not editing",
+            ),
+        ];
+        for (group_name, wanted_key, wanted_desc) in expected {
+            let group = keybindings::all_groups()
+                .iter()
+                .find(|g| g.name == *group_name)
+                .unwrap_or_else(|| panic!("no group {:?}", group_name));
+            let row = group
+                .bindings
+                .iter()
+                .find(|b| b.key == *wanted_key)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{:?} has no {:?} row; q must be documented separately \
+                           wherever its meaning is stage-dependent",
+                        group_name, wanted_key
+                    )
+                });
+            assert_eq!(
+                row.desc, *wanted_desc,
+                "the {:?} {:?} row changed wording: re-read the handler before \
+                 updating this expectation",
+                group_name, wanted_key
+            );
+        }
+
+        // And no group may fold `q` into a combined key, which is how the false
+        // "Esc/q: Back one stage" row got in. The one exception is a group
+        // covering a single stage where the keys genuinely coincide.
+        const COMBINED_Q_IS_HONEST: &[&str] = &[
+            // Each of these is a single screen or stage whose handler really
+            // does map every key in the row to the same action, so the combined
+            // form is accurate rather than a papered-over difference.
+            // `create.rs`/`add.rs` `handle_creating`: Enter | Esc | q => Back.
+            keybindings::CREATING_LOG_NAME,
+            // `diff.rs:22`: Esc | q => Back.
+            keybindings::DIFF_VIEWER_NAME,
+            // `help.rs`: Esc | q | ? | F1 all close the overlay.
+            keybindings::HELP_OVERLAY_NAME,
+        ];
+        for group in keybindings::all_groups() {
+            if COMBINED_Q_IS_HONEST.contains(&group.name) {
+                continue;
+            }
+            for b in group.bindings {
+                if b.key.contains('/') && b.key.split('/').any(|k| k.eq_ignore_ascii_case("q")) {
+                    panic!(
+                        "{:?} folds q into {:?} ({:?}); q's meaning varies by \
+                         stage, so it needs its own row",
+                        group.name, b.key, b.desc
+                    );
+                }
             }
         }
     }
