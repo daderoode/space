@@ -17,6 +17,10 @@ pub struct WorktreeParams {
     pub repos: Vec<PathBuf>,
     pub branch_strategy: BranchStrategy,
     pub is_new: bool,
+    /// Repos the sync report already fetched successfully in this flow, so the
+    /// worktree creation skips its own fetch for them. A repo missing here is
+    /// fetched: an empty list (no sync ran) is the safe default.
+    pub fresh_repos: Vec<PathBuf>,
 }
 
 /// A git operation dispatched to the background git-ops worker.

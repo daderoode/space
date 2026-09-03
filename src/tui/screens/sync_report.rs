@@ -221,6 +221,25 @@ fn first_stderr_line(stderr: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The one line the Creating log shows when the pre-create fetch did not
+/// succeed. `None` for a fetch that succeeded: a successful fetch is not
+/// news at this stage. The wording mirrors the sync report's status line,
+/// with the promise it made ("branch picker will use local refs") in the
+/// past tense.
+pub fn creating_fetch_note(fetch: &FetchOutcome) -> Option<String> {
+    match fetch {
+        FetchOutcome::Ok => None,
+        FetchOutcome::Failed { exit_code, stderr } => Some(format!(
+            "fetch failed ({}) \u{b7} using local refs",
+            exit_label(*exit_code, stderr)
+        )),
+        FetchOutcome::TimedOut { after, .. } => Some(format!(
+            "fetch timed out after {}s, git was stopped \u{b7} using local refs",
+            after.as_secs()
+        )),
+    }
+}
+
 /// A path for display, with the home directory shortened to `~`.
 pub fn display_path(path: &Path) -> String {
     if let Some(home) = dirs::home_dir() {
@@ -474,6 +493,16 @@ impl SyncReport {
                 return text;
             }
         }
+    }
+
+    /// Paths of the repos whose fetch succeeded in this run. `create_worktree`
+    /// skips its own fetch for these: their refs are already fresh.
+    pub fn fetched_ok_paths(&self) -> Vec<PathBuf> {
+        self.rows
+            .iter()
+            .filter(|r| r.is_ok())
+            .map(|r| r.path.clone())
+            .collect()
     }
 
     /// The rows on screen for a list of `list_rows` rows: `start..end`. The
@@ -1160,6 +1189,73 @@ mod tests {
         log.handle_key(key(KeyCode::Down), 45);
         assert!(log.follow, "scrolling back to the tail resumes following");
         assert!(!log.handle_key(key(KeyCode::Enter), 45));
+    }
+
+    #[test]
+    fn creating_fetch_note_reports_only_what_went_wrong() {
+        assert_eq!(
+            creating_fetch_note(&FetchOutcome::Ok),
+            None,
+            "a successful fetch is not news at the Creating stage"
+        );
+        assert_eq!(
+            creating_fetch_note(&FetchOutcome::Failed {
+                exit_code: Some(128),
+                stderr: "fatal: nope".to_string(),
+            })
+            .as_deref(),
+            Some("fetch failed (git exit 128) \u{b7} using local refs")
+        );
+        assert_eq!(
+            creating_fetch_note(&FetchOutcome::Failed {
+                exit_code: None,
+                stderr: format!("{}: boom", SPAWN_FAILURE_PREFIX),
+            })
+            .as_deref(),
+            Some("fetch failed (git did not start) \u{b7} using local refs"),
+            "the wording tracks the report's own exit label"
+        );
+        assert_eq!(
+            creating_fetch_note(&FetchOutcome::TimedOut {
+                after: Duration::from_secs(60),
+                stderr: String::new(),
+            })
+            .as_deref(),
+            Some("fetch timed out after 60s, git was stopped \u{b7} using local refs")
+        );
+    }
+
+    #[test]
+    fn fetched_ok_paths_lists_only_ok_rows_in_row_order() {
+        let mut r = report(4);
+        r.finished(0, ok(&["main"], &[]));
+        r.finished(1, failed("fatal: nope"));
+        r.finished(
+            2,
+            SyncOutcome {
+                fetch: FetchOutcome::TimedOut {
+                    after: Duration::from_secs(60),
+                    stderr: String::new(),
+                },
+                forwarded: vec![],
+                skipped: vec![],
+            },
+        );
+        r.finished(3, ok(&[], &["dev"]));
+        assert_eq!(
+            r.fetched_ok_paths(),
+            vec![PathBuf::from("/r/repo0"), PathBuf::from("/r/repo3")],
+            "only rows whose fetch succeeded, in row order"
+        );
+        let mut waiting = report(2);
+        waiting.finished(1, ok(&[], &[]));
+        waiting.finish();
+        assert_eq!(
+            waiting.fetched_ok_paths(),
+            vec![PathBuf::from("/r/repo1")],
+            "a not-synced row is not fresh"
+        );
+        assert!(SyncReport::empty().fetched_ok_paths().is_empty());
     }
 
     #[test]

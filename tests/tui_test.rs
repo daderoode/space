@@ -313,6 +313,169 @@ fn create_strategy_new_branch_creates() {
     assert!(env.workspaces_dir.join("test-ws").join("my-repo").exists());
 }
 
+/// The Creating stage's pre-create fetch, both halves of the policy.
+///
+/// The repo's `origin` points at a `file://` path that does not exist, so its
+/// fetch fails instantly and offline. Half A (no sync report) must show the
+/// failure as one log line and still create the worktree; half B (the sync
+/// report already fetched that repo) must not run the fetch at all, which is
+/// visible precisely because the fetch would have failed loudly.
+///
+/// A second, deliberately broken repo is appended to the selection so the
+/// flow ends with an error and stays on the Creating stage: on success the
+/// app replaces the screen with the Dashboard and the log is gone. That repo
+/// also pins the other half of the contract: its `git worktree add` refuses,
+/// and its fetch line is still logged.
+#[test]
+fn creating_logs_failed_pre_create_fetch_and_skips_it_for_already_fetched_repos() {
+    use space::core::workspace::{FetchOutcome, SyncOutcome};
+    use space::tui::screens::sync_report::SyncReport;
+
+    fn git(args: &[&str], dir: &std::path::Path) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Drive create → Creating for `ws_name` with the given report, and
+    /// return the Creating log.
+    fn run_flow(
+        env: &TestEnv,
+        repos: Vec<PathBuf>,
+        ws_name: &str,
+        report: SyncReport,
+    ) -> Vec<String> {
+        let config = config_from_env(env);
+        let mut app = test_app_with_config(config, vec![], repos.clone());
+        app.handle_key(key(KeyCode::Char('c')));
+        if let Screen::CreateWorkspace(ref mut st) = app.screen {
+            st.selected_repos = repos;
+            st.ws_name = tui_input::Input::default().with_value(ws_name.to_string());
+            st.branch_strategy_idx = 2; // DetachedHead: no branch name stage
+            st.report = report;
+            st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
+        }
+        app.handle_key(key(KeyCode::Enter));
+        match app.screen {
+            Screen::CreateWorkspace(ref st) => {
+                assert_eq!(
+                    st.stage,
+                    space::tui::screens::create::CreateStage::Creating,
+                    "the failing second repo must keep the flow on the Creating stage"
+                );
+                st.progress.clone()
+            }
+            ref other => panic!(
+                "expected the Creating stage, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+    }
+
+    let env = TestEnv::new();
+    let repo = env.create_repo("broken-remote");
+    let dead = env.dir.path().join("no-such-origin.git");
+    git(
+        &[
+            "remote",
+            "add",
+            "origin",
+            &format!("file://{}", dead.display()),
+        ],
+        &repo,
+    );
+    // Not a git repo: `git worktree add` fails, so the flow keeps the log.
+    let pin = env.repos_dir.join("not-a-repo");
+    std::fs::create_dir_all(&pin).unwrap();
+
+    /// The line above `outcome` in the log, for pinning where a note landed.
+    fn line_above(log: &[String], outcome: &str) -> String {
+        let at = log
+            .iter()
+            .position(|l| l == outcome)
+            .unwrap_or_else(|| panic!("no {:?} line in:\n{}", outcome, log.join("\n")));
+        assert!(at > 0, "{:?} is the first line", outcome);
+        log[at - 1].clone()
+    }
+
+    fn is_note(line: &str) -> bool {
+        line.contains("fetch failed") && line.contains("using local refs")
+    }
+
+    // Half A: nothing was fetched, so the pre-create fetch runs and fails.
+    let log = run_flow(
+        &env,
+        vec![repo.clone(), pin.clone()],
+        "ws-a",
+        SyncReport::empty(),
+    );
+    let above_tick = line_above(&log, "  \u{2713} broken-remote");
+    assert!(
+        is_note(&above_tick),
+        "the note belongs immediately above the repo's tick, got {:?} in:\n{}",
+        above_tick,
+        log.join("\n")
+    );
+    assert!(
+        env.workspaces_dir
+            .join("ws-a")
+            .join("broken-remote")
+            .exists(),
+        "a failed fetch must not stop the worktree being created"
+    );
+    // The pin repo's add refused, and its fetch line is reported anyway.
+    let above_cross = line_above(
+        &log,
+        "  \u{2717} not-a-repo: not a git repository (or any of the parent directories): .git",
+    );
+    assert!(
+        is_note(&above_cross),
+        "a refused add must still carry its fetch line, got {:?} in:\n{}",
+        above_cross,
+        log.join("\n")
+    );
+
+    // Half B: the sync report already fetched this repo, so no fetch runs.
+    let mut report = SyncReport::new(std::slice::from_ref(&repo));
+    report.finished(
+        0,
+        SyncOutcome {
+            fetch: FetchOutcome::Ok,
+            forwarded: vec![],
+            skipped: vec![],
+        },
+    );
+    report.finish();
+    let log = run_flow(&env, vec![repo, pin], "ws-b", report);
+    assert_eq!(
+        line_above(&log, "  \u{2713} broken-remote"),
+        "Creating worktree for broken-remote...",
+        "a repo the report already fetched must not be fetched again:\n{}",
+        log.join("\n")
+    );
+    assert_eq!(
+        log.iter().filter(|l| is_note(l)).count(),
+        1,
+        "only the pin repo, which the report never fetched, is fetched here:\n{}",
+        log.join("\n")
+    );
+    assert!(
+        env.workspaces_dir
+            .join("ws-b")
+            .join("broken-remote")
+            .exists(),
+        "skipping the fetch must not stop the worktree being created"
+    );
+}
+
 #[test]
 fn create_esc_from_enter_name_exits_to_dashboard() {
     let mut app = test_app(vec![], vec![]);

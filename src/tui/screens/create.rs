@@ -289,6 +289,7 @@ impl CreateState {
                         repos: self.selected_repos.clone(),
                         branch_strategy: BranchStrategy::ExistingBranch(branch_name),
                         is_new: true,
+                        fresh_repos: self.report.fetched_ok_paths(),
                     })
                 } else if self.branch_strategy_idx == 0 {
                     // New branch — open branch name editing stage.
@@ -310,6 +311,7 @@ impl CreateState {
                         repos: self.selected_repos.clone(),
                         branch_strategy: self.branch_strategy(),
                         is_new: true,
+                        fresh_repos: self.report.fetched_ok_paths(),
                     })
                 }
             }
@@ -345,6 +347,7 @@ impl CreateState {
                     repos: self.selected_repos.clone(),
                     branch_strategy: BranchStrategy::NewBranch(name),
                     is_new: true,
+                    fresh_repos: self.report.fetched_ok_paths(),
                 })
             }
             _ => {
@@ -401,6 +404,7 @@ impl CreateState {
                     repos: self.selected_repos.clone(),
                     branch_strategy: BranchStrategy::ExistingBranch(branch),
                     is_new: true,
+                    fresh_repos: self.report.fetched_ok_paths(),
                 })
             }
             _ => {

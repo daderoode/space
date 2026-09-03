@@ -871,8 +871,23 @@ impl App {
         }
     }
 
+    /// Create or add every selected repo's worktree, logging one block per
+    /// repo into the active screen's Creating log.
+    ///
+    /// Residual: this loop is synchronous inside `handle_key`, so the
+    /// pre-create fetch blocks the whole TUI for up to
+    /// `UNATTENDED_FETCH_TIMEOUT` per repo with no repaint and no Esc. The
+    /// unattended-run policy bounds that hang; it does not make it
+    /// interruptible. The design doc records the same cost for sync (a hung
+    /// repo costs a silent minute), where Esc at least leaves the report;
+    /// here Esc has nowhere to act. Whether this stage should move to the
+    /// background worker pattern, so Esc does have somewhere to act, is left
+    /// open deliberately: the fetch is bounded first, the stage stays
+    /// synchronous, and the worker move is its own change because it
+    /// reshapes this stage's key handling and state.
     fn execute_worktree_flow(&mut self, params: crate::tui::actions::WorktreeParams) {
-        use crate::core::workspace::create_worktree;
+        use crate::core::workspace::{self, create_worktree_with_fetch, PreCreateFetch};
+        use crate::tui::screens::sync_report::creating_fetch_note;
 
         // Clear progress/error on whichever screen is active
         match &mut self.screen {
@@ -910,12 +925,37 @@ impl App {
                 _ => return,
             }
 
-            match create_worktree(
+            // Only a repo the report fetched successfully is skipped: those
+            // refs are known fresh. A row that timed out is fetched again
+            // here and can cost another `UNATTENDED_FETCH_TIMEOUT` on the UI
+            // thread. Kept deliberately: a timed-out row proves nothing about
+            // the refs, so skipping it would be creating from refs of unknown
+            // age.
+            let fetch = if params.fresh_repos.iter().any(|p| p == repo_path) {
+                PreCreateFetch::Skip
+            } else {
+                PreCreateFetch::Run(workspace::UNATTENDED_FETCH_TIMEOUT)
+            };
+
+            let attempt = create_worktree_with_fetch(
                 repo_path,
                 &params.workspace_dir,
                 &params.workspace_name,
                 &params.branch_strategy,
-            ) {
+                fetch,
+            );
+
+            // The fetch line goes in before the outcome, so a `git worktree
+            // add` that then refused on stale refs still carries the reason.
+            if let Some(note) = attempt.fetch.as_ref().and_then(creating_fetch_note) {
+                match &mut self.screen {
+                    Screen::CreateWorkspace(st) => st.progress.push(format!("  {}", note)),
+                    Screen::AddRepos(st) => st.progress.push(format!("  {}", note)),
+                    _ => return,
+                }
+            }
+
+            match attempt.created {
                 Ok(_) => match &mut self.screen {
                     Screen::CreateWorkspace(st) => {
                         st.progress.push(format!("  \u{2713} {}", repo_name));
@@ -1625,7 +1665,7 @@ fn run_sync_worker(
         }
         let outcome = crate::core::workspace::sync_repo_cancellable(
             repo_path,
-            crate::core::workspace::SYNC_FETCH_TIMEOUT,
+            crate::core::workspace::UNATTENDED_FETCH_TIMEOUT,
             &cancel,
         );
         if cancel.load(Ordering::Relaxed) {
