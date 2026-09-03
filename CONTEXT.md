@@ -39,3 +39,19 @@ _Avoid_: navigate, switch
 **Repo search**:
 Fuzzy search across the repo list, landing on the space that contains the chosen repo, if any does.
 _Avoid_: filter
+
+**Help overlay**:
+The keybinding reference layered over whatever screen is showing, listing every group in the binding registry. It never replaces the screen beneath it.
+_Avoid_: help screen, help page, cheatsheet
+
+**Binding registry**:
+The single list of key groups that both the help overlay and the key bar are rendered from, so documented keys and real keys cannot drift apart.
+_Avoid_: keymap, help text, key table
+
+**Key bar**:
+The always-visible bottom row listing the keys available on the focused pane.
+_Avoid_: status bar, keybindings bar, hint bar
+
+**Status message**:
+The transient one-line notice shown above the key bar and cleared after five seconds.
+_Avoid_: status bar, toast, flash

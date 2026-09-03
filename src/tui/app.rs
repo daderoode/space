@@ -4,6 +4,7 @@ use crate::core::{
     workspace::{self, SyncOutcome, Workspace},
 };
 use crate::tui::actions::StatusKind;
+use crate::tui::screens::sync_report::PAGE_ROWS;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -125,6 +126,8 @@ pub enum Message {
     SelectWorkspaceDown,
     SelectRepoUp,
     SelectRepoDown,
+    JumpWorkspace(ListJump),
+    JumpRepo(ListJump),
     GoToWorkspace,
     StartGo,
     StartFilter,
@@ -159,6 +162,36 @@ pub enum Message {
     StartGitOps {
         repo_index: usize,
     },
+}
+
+/// A jump requested on one of the two dashboard lists. `PageUp`/`PageDown`
+/// move by `PAGE_ROWS`, the same page the diff viewer, the git-ops log and the
+/// sync report use; `First`/`Last` go to the ends.
+///
+/// Deliberately not bound to `g`/`G`: both letters already carry shipped
+/// meanings on the dashboard (`g` opens the space picker on the left pane,
+/// `G` the git-ops overlay on the right), so a `g`/`G` paging scheme would give
+/// one letter two meanings across the two panes. Design doc open question 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListJump {
+    PageUp,
+    PageDown,
+    First,
+    Last,
+}
+
+impl ListJump {
+    /// The row this jump targets in a list of `len` rows, starting from
+    /// `current`. Clamped at both ends; never wraps. An empty list targets 0.
+    fn target(self, current: usize, len: usize) -> usize {
+        let last = len.saturating_sub(1);
+        match self {
+            ListJump::PageUp => current.saturating_sub(PAGE_ROWS),
+            ListJump::PageDown => current.saturating_add(PAGE_ROWS).min(last),
+            ListJump::First => 0,
+            ListJump::Last => last,
+        }
+    }
 }
 
 /// A row in the flattened repo table (repo header or file entry).
@@ -1374,9 +1407,20 @@ impl App {
                     // `g` is documented as a workspace-pane key; ungated it
                     // would yank the user out of the repo rows they are browsing.
                     (KeyCode::Char('g'), _) if self.focus == Pane::Left => Some(Message::StartGo),
-                    (KeyCode::Char('c'), _) => Some(Message::StartCreate),
-                    (KeyCode::Char('a'), _) => Some(Message::StartAdd),
-                    (KeyCode::Char('d'), _) => Some(Message::StartDelete),
+                    // `c`, `a` and `d` act on the selected space, so they
+                    // belong to the pane that selects it. Ungated, `d` popped a
+                    // delete-space confirm from a file row: the same surprise
+                    // the `g` gate above removed.
+                    (KeyCode::Char('c'), _) if self.focus == Pane::Left => {
+                        Some(Message::StartCreate)
+                    }
+                    (KeyCode::Char('a'), _) if self.focus == Pane::Left => Some(Message::StartAdd),
+                    (KeyCode::Char('d'), _) if self.focus == Pane::Left => {
+                        Some(Message::StartDelete)
+                    }
+                    // `r` is a general key, not a workspace-pane key: it rescans
+                    // the repo list and also reloads the repo pane, so it stays
+                    // available from the pane it reloads.
                     (KeyCode::Char('r'), _) => Some(Message::RefreshRepos),
                     // /: pane-gated. Workspaces pane filters spaces, repos pane searches repos.
                     (KeyCode::Char('/'), _) => match self.focus {
@@ -1449,6 +1493,22 @@ impl App {
                         Pane::Right => Some(Message::SelectRepoDown),
                     },
                     // Right arrow: context-sensitive
+                    (KeyCode::PageUp, _) => Some(match self.focus {
+                        Pane::Left => Message::JumpWorkspace(ListJump::PageUp),
+                        Pane::Right => Message::JumpRepo(ListJump::PageUp),
+                    }),
+                    (KeyCode::PageDown, _) => Some(match self.focus {
+                        Pane::Left => Message::JumpWorkspace(ListJump::PageDown),
+                        Pane::Right => Message::JumpRepo(ListJump::PageDown),
+                    }),
+                    (KeyCode::Home, _) => Some(match self.focus {
+                        Pane::Left => Message::JumpWorkspace(ListJump::First),
+                        Pane::Right => Message::JumpRepo(ListJump::First),
+                    }),
+                    (KeyCode::End, _) => Some(match self.focus {
+                        Pane::Left => Message::JumpWorkspace(ListJump::Last),
+                        Pane::Right => Message::JumpRepo(ListJump::Last),
+                    }),
                     (KeyCode::Right, _) => match self.focus {
                         Pane::Left => Some(Message::FocusNext),
                         Pane::Right => {
@@ -1748,6 +1808,35 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
         Message::SelectRepoDown => {
             let rows = app.flattened_rows();
             app.cursor_row = skip_headers(&rows, app.cursor_row, true);
+            None
+        }
+        Message::JumpWorkspace(jump) => {
+            let target = jump.target(app.selected_ws, app.workspaces.len());
+            // A jump that changes nothing must not fire the reset and the
+            // reload: a reflex End on an already-last space would otherwise
+            // discard the repo pane's expansions and caches.
+            if target != app.selected_ws {
+                app.selected_ws = target;
+                app.selected_repo = 0;
+                app.reset_repo_pane_state();
+                app.begin_workspace_load();
+            }
+            None
+        }
+        Message::JumpRepo(jump) => {
+            let rows = app.flattened_rows();
+            if rows.is_empty() {
+                return None;
+            }
+            let target = jump.target(app.cursor_row, rows.len());
+            // First and Last cannot land on a header (see the `flattened_rows`
+            // invariant), but a page can. Step out of it the way the jump was
+            // travelling, so a PgUp never resolves downwards.
+            app.cursor_row = if matches!(rows[target], RepoRow::SectionHeader { .. }) {
+                skip_headers(&rows, target, target >= app.cursor_row)
+            } else {
+                target
+            };
             None
         }
         Message::RefreshRepos => {

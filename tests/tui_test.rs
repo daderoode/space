@@ -4779,13 +4779,21 @@ mod rescan_tests {
                 ("Ctrl-R", "Rescan repo list"),
             ]
         );
-        let ws_pane = groups.iter().find(|g| g.name == "Workspace Pane").unwrap();
+        // `r` sits in General, not Workspace Pane: it rescans the repo list and
+        // also reloads the repos pane, so item 1.3 left it ungated while gating
+        // `c`, `a` and `d` to the workspaces pane.
+        let general = groups.iter().find(|g| g.name == "General").unwrap();
         assert!(
-            ws_pane
+            general
                 .bindings
                 .iter()
                 .any(|b| b.key == "r" && b.desc == "Rescan repo list"),
             "dashboard r must read 'Rescan repo list' in the help registry"
+        );
+        let ws_pane = groups.iter().find(|g| g.name == "Workspace Pane").unwrap();
+        assert!(
+            !ws_pane.bindings.iter().any(|b| b.key == "r"),
+            "r is a general key, not a workspace-pane key"
         );
         let left = space::tui::keybindings::status_bar_bindings(Pane::Left);
         assert!(
@@ -6709,4 +6717,303 @@ fn delete_uppercase_y_deletes_and_uppercase_n_cancels() {
         "Y must reach the delete, which reports the missing directory"
     );
     assert_eq!(app.status_kind, StatusKind::Error);
+}
+
+// ---------------------------------------------------------------------------
+// ---- 1.3 List paging on the workspace and repo lists ----
+// ---------------------------------------------------------------------------
+
+mod paging_tests {
+    use super::*;
+
+    /// `n` bare spaces, the first selected, focus on the workspaces pane.
+    fn spaces_app(n: usize) -> App {
+        let workspaces = (0..n)
+            .map(|i| Workspace {
+                name: format!("space-{:02}", i),
+                path: PathBuf::from(format!("/tmp/space-{:02}", i)),
+                repos: vec![],
+            })
+            .collect();
+        test_app(workspaces, vec![])
+    }
+
+    /// One space holding `repo-a`, expanded over `files` unstaged file rows, so
+    /// the flattened list is Repo, SectionHeader, then one File per name.
+    fn expanded_repo_app(files: usize) -> App {
+        use space::core::git::{FileEntry, FileStatus};
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.expanded_repos.insert(0);
+        app.repo_file_cache.insert(
+            0,
+            (0..files)
+                .map(|i| FileEntry {
+                    path: format!("file-{:02}.rs", i),
+                    status: FileStatus::Modified,
+                    staged: false,
+                    insertions: 1,
+                    deletions: 0,
+                })
+                .collect(),
+        );
+        app
+    }
+
+    // --- left pane ---
+
+    #[test]
+    fn workspace_page_down_moves_by_one_page_and_page_up_returns() {
+        let mut app = spaces_app(30);
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.selected_ws, 10, "PgDn pages by 10 rows");
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.selected_ws, 20);
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(app.selected_ws, 10, "PgUp pages back by 10 rows");
+    }
+
+    #[test]
+    fn workspace_paging_clamps_at_both_ends() {
+        let mut app = spaces_app(15);
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(app.selected_ws, 0, "PgUp at the top stays at the top");
+        app.handle_key(key(KeyCode::PageDown));
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.selected_ws, 14, "PgDn clamps to the last space");
+    }
+
+    #[test]
+    fn workspace_home_and_end_jump_to_the_ends() {
+        let mut app = spaces_app(30);
+        app.handle_key(key(KeyCode::End));
+        assert_eq!(app.selected_ws, 29);
+        app.handle_key(key(KeyCode::Home));
+        assert_eq!(app.selected_ws, 0);
+    }
+
+    #[test]
+    fn workspace_paging_on_an_empty_list_is_a_noop() {
+        let mut app = test_app(vec![], vec![]);
+        for code in [
+            KeyCode::PageDown,
+            KeyCode::PageUp,
+            KeyCode::End,
+            KeyCode::Home,
+        ] {
+            app.handle_key(key(code));
+            assert_eq!(
+                app.selected_ws, 0,
+                "{:?} on an empty list must not move",
+                code
+            );
+        }
+    }
+
+    /// A jump that does not change the selection must not fire the repo-pane
+    /// reset, so a reflex `End` on an already-bottom list keeps expansions.
+    #[test]
+    fn workspace_end_on_the_last_space_keeps_the_repo_pane_state() {
+        let mut app = spaces_app(3);
+        app.handle_key(key(KeyCode::End));
+        assert_eq!(app.selected_ws, 2);
+        app.expanded_repos.insert(0);
+        app.cursor_row = 4;
+
+        app.handle_key(key(KeyCode::End));
+        assert_eq!(app.selected_ws, 2);
+        assert!(
+            app.expanded_repos.contains(&0),
+            "End on an already-last space must not reset the repo pane"
+        );
+        assert_eq!(app.cursor_row, 4, "nor move the repo cursor");
+    }
+
+    #[test]
+    fn workspace_home_at_the_top_keeps_the_repo_pane_state() {
+        let mut app = spaces_app(3);
+        app.expanded_repos.insert(0);
+        app.handle_key(key(KeyCode::Home));
+        assert_eq!(app.selected_ws, 0);
+        assert!(app.expanded_repos.contains(&0));
+    }
+
+    // --- right pane ---
+
+    #[test]
+    fn repo_page_down_moves_by_one_page_over_flattened_rows() {
+        // rows: Repo(0), SectionHeader(1), File(2)..File(31)
+        let mut app = expanded_repo_app(30);
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.cursor_row, 10, "PgDn pages over flattened rows");
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(app.cursor_row, 0);
+    }
+
+    #[test]
+    fn repo_paging_clamps_at_both_ends() {
+        let mut app = expanded_repo_app(5);
+        // rows: Repo(0), SectionHeader(1), File(2)..File(6) => 7 rows
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(app.cursor_row, 0);
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.cursor_row, 6, "PgDn clamps to the last row");
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.cursor_row, 6);
+    }
+
+    #[test]
+    fn repo_home_and_end_jump_to_the_ends() {
+        let mut app = expanded_repo_app(12);
+        app.handle_key(key(KeyCode::End));
+        assert_eq!(app.cursor_row, 13, "End lands on the last file row");
+        app.handle_key(key(KeyCode::Home));
+        assert_eq!(app.cursor_row, 0, "Home lands on the repo row");
+    }
+
+    /// A page must never leave the cursor on a section header, in either
+    /// direction: those rows are not selectable by `j`/`k` either.
+    #[test]
+    fn repo_paging_never_rests_on_a_section_header() {
+        use space::core::git::{FileEntry, FileStatus};
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.expanded_repos.insert(0);
+        // 9 unstaged then 9 staged files, so the "Staged" header sits at row 11
+        // and a PgDn from row 1 would land exactly on it.
+        let mut entries: Vec<FileEntry> = (0..9)
+            .map(|i| FileEntry {
+                path: format!("u-{}.rs", i),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 1,
+                deletions: 0,
+            })
+            .collect();
+        entries.extend((0..9).map(|i| FileEntry {
+            path: format!("s-{}.rs", i),
+            status: FileStatus::Modified,
+            staged: true,
+            insertions: 1,
+            deletions: 0,
+        }));
+        app.repo_file_cache.insert(0, entries);
+
+        // Walk every landing spot a page can reach from every start.
+        let total = app.flattened_rows().len();
+        for start in 0..total {
+            for code in [KeyCode::PageDown, KeyCode::PageUp] {
+                app.cursor_row = start;
+                app.handle_key(key(code));
+                let rows = app.flattened_rows();
+                assert!(
+                    !matches!(
+                        rows[app.cursor_row],
+                        space::tui::app::RepoRow::SectionHeader { .. }
+                    ),
+                    "{:?} from row {} landed on a section header at row {}",
+                    code,
+                    start,
+                    app.cursor_row
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repo_paging_on_an_empty_workspace_is_a_noop() {
+        let ws = Workspace {
+            name: "empty".into(),
+            path: PathBuf::from("/tmp/empty"),
+            repos: vec![],
+        };
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        for code in [
+            KeyCode::PageDown,
+            KeyCode::End,
+            KeyCode::PageUp,
+            KeyCode::Home,
+        ] {
+            app.handle_key(key(code));
+            assert_eq!(
+                app.cursor_row, 0,
+                "{:?} on an empty repo list must not move",
+                code
+            );
+        }
+    }
+
+    // --- pane gating of c / a / d, and r staying general ---
+
+    #[test]
+    fn create_add_and_delete_are_ignored_on_the_repo_pane() {
+        for k in ['c', 'a', 'd'] {
+            let ws = common::workspace_with_repos(&["repo-a"]);
+            let mut app = test_app(vec![ws], vec![]);
+            app.focus = Pane::Right;
+            app.handle_key(key(KeyCode::Char(k)));
+            assert!(
+                matches!(app.screen, Screen::Dashboard),
+                "`{}` on the repo pane must not leave the dashboard",
+                k
+            );
+        }
+    }
+
+    #[test]
+    fn create_add_and_delete_still_fire_on_the_workspaces_pane() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.handle_key(key(KeyCode::Char('d')));
+        assert!(
+            matches!(app.screen, Screen::ConfirmDelete(_)),
+            "`d` on the workspaces pane still opens the delete confirm"
+        );
+    }
+
+    /// `r` is a general key, not a workspace-pane key: it also reloads the repo
+    /// pane, so it must keep working from the repo pane.
+    #[test]
+    fn rescan_still_fires_on_the_repo_pane() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.expanded_repos.insert(0);
+        app.handle_key(key(KeyCode::Char('r')));
+        assert!(
+            app.status_message.is_some(),
+            "`r` on the repo pane must still rescan and report"
+        );
+        assert!(
+            app.expanded_repos.is_empty(),
+            "`r` still resets the repo pane it is looking at"
+        );
+    }
+
+    // --- g and G keep their shipped meanings (closed open question 2) ---
+
+    #[test]
+    fn g_and_shift_g_are_not_paging_keys() {
+        let mut app = spaces_app(30);
+        app.handle_key(shift_key(KeyCode::Char('G')));
+        assert_eq!(
+            app.selected_ws, 0,
+            "`G` on the workspaces pane is not go-to-bottom"
+        );
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "`G` on the workspaces pane opens nothing"
+        );
+
+        let mut app = expanded_repo_app(30);
+        app.handle_key(key(KeyCode::Char('g')));
+        assert_eq!(app.cursor_row, 0, "`g` on the repo pane is not go-to-top");
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "`g` on the repo pane still opens nothing (Wave 0 gate)"
+        );
+    }
 }

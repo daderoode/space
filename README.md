@@ -65,11 +65,10 @@ files with `s`/`space`, or bulk stage/unstage all files in the selected repo wit
 | `c` | Create a new workspace |
 | `a` | Add repos to selected workspace |
 | `d` | Delete selected workspace |
-| `r` | Rescan the repo list |
+| `PgUp` / `PgDn` | Page up / down |
+| `Home` / `End` | First / last workspace |
 | `/` | Filter spaces (selects in place) |
-| `?` | Open help overlay |
 | `S` | Open config editor |
-| `q` | Quit |
 
 **Key bindings — Repos pane:**
 
@@ -84,8 +83,9 @@ files with `s`/`space`, or bulk stage/unstage all files in the selected repo wit
 | `S` | Stage all unstaged files in repo |
 | `U` | Unstage all staged files in repo |
 | `b` | Switch branch for selected repo |
+| `PgUp` / `PgDn` | Page up / down |
+| `Home` / `End` | First / last row |
 | `/` | Search all repos |
-| `q` | Quit |
 
 **Key bindings, repo picker** (create and add flows):
 
@@ -95,6 +95,15 @@ files with `s`/`space`, or bulk stage/unstage all files in the selected repo wit
 | `Tab` | Toggle the highlighted repo |
 | `Ctrl-S` | Cycle the parent-directory scope |
 | `Ctrl-R` | Rescan the repo list without leaving the picker |
+
+**Key bindings, general** (either pane):
+
+| Key | Action |
+|-----|--------|
+| `r` | Rescan the repo list and reload the repos pane |
+| `?` | Open help overlay |
+| `q` | Quit |
+| `Ctrl-C` | Force quit (works on every screen) |
 
 Interactive commands (`go`, `create`, `add`, `config`, `rm` without `--force`)
 also launch TUI flows when invoked from the command line.

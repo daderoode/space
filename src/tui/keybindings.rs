@@ -26,6 +26,14 @@ const NAVIGATION: BindingGroup = BindingGroup {
             desc: "Down",
         },
         Binding {
+            key: "PgUp/PgDn",
+            desc: "Page up/down",
+        },
+        Binding {
+            key: "Home/End",
+            desc: "First / last row",
+        },
+        Binding {
             key: "h/l",
             desc: "Scroll table left/right (repo pane)",
         },
@@ -62,10 +70,6 @@ const WORKSPACE_PANE: BindingGroup = BindingGroup {
         Binding {
             key: "g",
             desc: "Go (fuzzy picker)",
-        },
-        Binding {
-            key: "r",
-            desc: "Rescan repo list",
         },
         Binding {
             key: "/",
@@ -239,6 +243,10 @@ const SYNC_REPORT: BindingGroup = BindingGroup {
 const GENERAL: BindingGroup = BindingGroup {
     name: "General",
     bindings: &[
+        Binding {
+            key: "r",
+            desc: "Rescan repo list",
+        },
         Binding {
             key: "?",
             desc: "Help",
