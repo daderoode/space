@@ -4777,7 +4777,7 @@ mod rescan_tests {
         let groups = space::tui::keybindings::all_groups();
         let picker = groups
             .iter()
-            .find(|g| g.name == "Repo Picker")
+            .find(|g| g.name == space::tui::keybindings::REPO_PICKER_NAME)
             .expect("help registry must have a Repo Picker group");
         let rows: Vec<(&str, &str)> = picker.bindings.iter().map(|b| (b.key, b.desc)).collect();
         assert_eq!(
@@ -4791,7 +4791,10 @@ mod rescan_tests {
         // `r` sits in General, not Workspace Pane: it rescans the repo list and
         // also reloads the repos pane, so item 1.3 left it ungated while gating
         // `c`, `a` and `d` to the workspaces pane.
-        let general = groups.iter().find(|g| g.name == "General").unwrap();
+        let general = groups
+            .iter()
+            .find(|g| g.name == space::tui::keybindings::GENERAL_NAME)
+            .unwrap();
         assert!(
             general
                 .bindings
@@ -4799,7 +4802,10 @@ mod rescan_tests {
                 .any(|b| b.key == "r" && b.desc == "Rescan repo list"),
             "dashboard r must read 'Rescan repo list' in the help registry"
         );
-        let ws_pane = groups.iter().find(|g| g.name == "Workspace Pane").unwrap();
+        let ws_pane = groups
+            .iter()
+            .find(|g| g.name == space::tui::keybindings::WORKSPACE_PANE_NAME)
+            .unwrap();
         assert!(
             !ws_pane.bindings.iter().any(|b| b.key == "r"),
             "r is a general key, not a workspace-pane key"
@@ -7293,6 +7299,69 @@ mod help_overlay_tests {
             other => panic!("unexpected {:?}", std::mem::discriminant(other)),
         }
 
+        // create: EnterBranchName. The stage is set directly, as for the
+        // git-ops and switch-branch cases below: what is under test is `?`
+        // dispatch at that stage, not the route to it.
+        let mut app = test_app_with_config(cfg(), vec![], vec![repo.clone()]);
+        app.handle_key(key(KeyCode::Char('c')));
+        if let Screen::CreateWorkspace(st) = &mut app.screen {
+            st.stage = space::tui::screens::create::CreateStage::EnterBranchName;
+        }
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "create EnterBranchName: ? must type");
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(st.branch_name_input.value(), "?"),
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // add: PickRepos query and EnterBranchName share the same shape.
+        let mut app = test_app_with_config(cfg(), vec![], vec![repo.clone()]);
+        app.workspaces.push(space::core::workspace::Workspace {
+            name: "ws".into(),
+            path: PathBuf::from("/tmp/ws"),
+            repos: vec![],
+        });
+        app.handle_key(key(KeyCode::Char('a')));
+        assert!(
+            matches!(app.screen, Screen::AddRepos(_)),
+            "fixture must open the add flow"
+        );
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "add PickRepos: ? must type");
+        match &app.screen {
+            Screen::AddRepos(st) => assert_eq!(st.picker.input.value(), "?"),
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+        if let Screen::AddRepos(st) = &mut app.screen {
+            st.stage = space::tui::screens::add::AddStage::EnterBranchName;
+        }
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "add EnterBranchName: ? must type");
+        match &app.screen {
+            Screen::AddRepos(st) => assert_eq!(st.branch_name_input.value(), "?"),
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // switch-branch: EnterBranchName
+        let mut app = test_app_with_config(cfg(), vec![], vec![]);
+        app.screen =
+            Screen::SwitchBranch(space::tui::screens::switch_branch::SwitchBranchState::new(
+                "repo-a".into(),
+                PathBuf::from("/tmp/repo-a"),
+            ));
+        if let Screen::SwitchBranch(st) = &mut app.screen {
+            st.stage = space::tui::screens::switch_branch::SwitchBranchStage::EnterBranchName;
+        }
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(
+            app.help.is_none(),
+            "switch-branch EnterBranchName: ? must type"
+        );
+        match &app.screen {
+            Screen::SwitchBranch(st) => assert_eq!(st.branch_name_input.value(), "?"),
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
         // config editor while editing
         let env2 = TestEnv::new();
         let mut app = test_app_with_config(config_from_env(&env2), vec![], vec![]);
@@ -7502,7 +7571,7 @@ mod help_overlay_tests {
         app.handle_key(key(KeyCode::Char('?')));
         let rendered = render_text(&app, 80, 24);
         assert!(
-            rendered.contains("Git Operations"),
+            rendered.contains(keybindings::GIT_OPS_NAME),
             "help opened from the git-ops menu must land on its own group, got:\n{}",
             rendered
         );
@@ -7516,7 +7585,7 @@ mod help_overlay_tests {
         app.handle_key(key(KeyCode::Char('?')));
         let rendered = render_text(&app, 80, 24);
         assert!(
-            rendered.contains("Repo Pane"),
+            rendered.contains(keybindings::REPO_PANE_NAME),
             "help from the repo pane must land on the Repo Pane group, got:\n{}",
             rendered
         );
@@ -7575,8 +7644,59 @@ mod help_overlay_tests {
         );
     }
 
+    /// The overlay renders only the visible window, so the windowing has to be
+    /// exact: an off-by-one shifts what is shown without changing anything a
+    /// content-sampling test would notice. The reference walk here is written
+    /// out independently of the implementation.
+    #[test]
+    fn the_help_window_shows_exactly_the_requested_rows() {
+        use space::tui::keybindings::{help_rows, rendered_row_count, HelpRow};
+
+        // An independent expansion of the whole registry.
+        let mut expected: Vec<HelpRow> = Vec::new();
+        for (i, g) in keybindings::all_groups().iter().enumerate() {
+            if i > 0 {
+                expected.push(HelpRow::Gap);
+            }
+            expected.push(HelpRow::Header(g.name));
+            for b in g.bindings {
+                expected.push(HelpRow::Binding(b));
+            }
+        }
+        let total = rendered_row_count();
+        assert_eq!(expected.len(), total, "reference walk must match the count");
+
+        // Every window, at several sizes, must equal the matching slice.
+        for visible in [1usize, 2, 7, 21, 40] {
+            for offset in 0..=total {
+                let got = help_rows(offset, visible);
+                let want = &expected[offset.min(total)..(offset + visible).min(total)];
+                assert_eq!(
+                    got.len(),
+                    want.len(),
+                    "offset {} visible {}: wrong row count",
+                    offset,
+                    visible
+                );
+                assert_eq!(
+                    got.as_slice(),
+                    want,
+                    "offset {} visible {}: wrong rows",
+                    offset,
+                    visible
+                );
+            }
+        }
+
+        // A zero-height window yields nothing rather than panicking.
+        assert!(help_rows(0, 0).is_empty());
+    }
+
     // --- registry completeness and layout ---
 
+    /// Deliberately spelled with literals, not the shared constants: this is
+    /// the tripwire that makes a group rename a visible, failing decision
+    /// rather than a silent one.
     #[test]
     fn the_registry_documents_every_screen() {
         let names: Vec<&str> = keybindings::all_groups().iter().map(|g| g.name).collect();

@@ -581,7 +581,18 @@ pub const KEY_BAR_SEP: &str = "  \u{b7}  ";
 
 fn render_key_bar(app: &App, frame: &mut Frame, area: Rect) {
     let bindings = crate::tui::keybindings::key_bar_bindings(app.focus);
-    let entries = fit_key_bar(bindings, usize::from(area.width));
+    let width = usize::from(area.width);
+    let entries = fit_key_bar(bindings, width);
+    // The two gateways are emitted whatever the width and the terminal clips
+    // them; everything else must fit. ratatui clips silently, so without this
+    // a fit bug would never surface at runtime.
+    debug_assert!(
+        entries.len() <= 2 || key_bar_width(&entries) <= width,
+        "key bar is {} columns in {}: {:?}",
+        key_bar_width(&entries),
+        width,
+        entries.iter().map(|b| b.key).collect::<Vec<_>>()
+    );
 
     let mut spans: Vec<Span> = Vec::new();
     for (i, b) in entries.iter().enumerate() {
@@ -1453,7 +1464,7 @@ fn render_diff_overlay(state: &crate::tui::screens::diff::DiffViewerState, frame
 fn render_help_overlay(help: &crate::tui::screens::help::HelpState, frame: &mut Frame) {
     use ratatui::widgets::Clear;
 
-    let groups = crate::tui::keybindings::all_groups();
+    use crate::tui::keybindings::help_rows;
     let total = crate::tui::keybindings::rendered_row_count();
 
     // The dialog takes the height it needs, capped by the terminal. The
@@ -1479,46 +1490,29 @@ fn render_help_overlay(help: &crate::tui::screens::help::HelpState, frame: &mut 
     let visible = usize::from(sections[0].height);
     let offset = help.offset(total, visible);
 
-    // Only the visible window is formatted. The whole registry is ~100 rows
-    // and `run_loop` redraws every 16 ms, so building all of them and throwing
-    // most away allocated a few thousand strings a second while help was open.
-    let mut lines: Vec<Line> = Vec::new();
-    let mut row = 0usize;
-    let end = offset + visible;
-    let push = |row: &mut usize, line: Line<'static>, lines: &mut Vec<Line<'static>>| {
-        if *row >= offset && *row < end {
-            lines.push(line);
-        }
-        *row += 1;
-    };
-    for (i, group) in groups.iter().enumerate() {
-        if i > 0 {
-            push(&mut row, Line::from(""), &mut lines);
-        }
-        push(
-            &mut row,
-            Line::from(Span::styled(group.name, theme::title())),
-            &mut lines,
-        );
-        for binding in group.bindings {
-            // Pad to 12, then always at least one space: a 12-character key
-            // used to run straight into its description.
-            let padding = 12_usize.saturating_sub(binding.key.chars().count()) + 1;
-            let line = Line::from(vec![
-                Span::styled(
-                    format!("  {}{}", binding.key, " ".repeat(padding)),
-                    theme::text().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(binding.desc, theme::muted()),
-            ]);
-            push(&mut row, line, &mut lines);
-        }
-        if row >= end {
-            break;
-        }
-    }
-    let window = lines;
+    let window: Vec<Line> = help_rows(offset, visible)
+        .into_iter()
+        .map(|row| match row {
+            crate::tui::keybindings::HelpRow::Gap => Line::from(""),
+            crate::tui::keybindings::HelpRow::Header(name) => {
+                Line::from(Span::styled(name, theme::title()))
+            }
+            crate::tui::keybindings::HelpRow::Binding(b) => {
+                // Pad to 12, then always at least one space: a 12-character
+                // key used to run straight into its description.
+                let padding = 12_usize.saturating_sub(b.key.chars().count()) + 1;
+                Line::from(vec![
+                    Span::styled(
+                        format!("  {}{}", b.key, " ".repeat(padding)),
+                        theme::text().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(b.desc, theme::muted()),
+                ])
+            }
+        })
+        .collect();
 
+    let end = offset + window.len();
     frame.render_widget(Paragraph::new(window), sections[0]);
 
     // The hint must fit the 54-column interior of the narrowest dialog, so the

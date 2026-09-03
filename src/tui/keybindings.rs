@@ -1,5 +1,6 @@
 //! Shared keybinding definitions consumed by the help overlay and status bar.
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct Binding {
     pub key: &'static str,
     pub desc: &'static str,
@@ -331,7 +332,7 @@ const CREATING_LOG: BindingGroup = BindingGroup {
             desc: "Top / bottom (End resumes follow)",
         },
         Binding {
-            key: "Esc",
+            key: "Enter/Esc/q",
             desc: "Back to the dashboard",
         },
     ],
@@ -466,6 +467,54 @@ pub fn all_groups() -> &'static [BindingGroup] {
 pub fn rendered_row_count() -> usize {
     let groups = all_groups();
     groups.iter().map(|g| 1 + g.bindings.len()).sum::<usize>() + groups.len().saturating_sub(1)
+}
+
+/// One rendered line of the help overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpRow {
+    /// The blank line between two groups.
+    Gap,
+    /// A group's title line.
+    Header(&'static str),
+    /// One key and its description.
+    Binding(&'static Binding),
+}
+
+/// The `visible` rendered rows starting at `offset`.
+///
+/// Pure so the windowing can be tested directly: an off-by-one here shifts
+/// what the overlay shows without changing anything a content-sampling test
+/// would notice. Row numbering matches `rendered_row_count` and
+/// `group_row_offset` exactly, since all three walk the same shape.
+pub fn help_rows(offset: usize, visible: usize) -> Vec<HelpRow> {
+    let end = offset.saturating_add(visible);
+    let mut out = Vec::new();
+    let mut row = 0usize;
+    for (i, group) in all_groups().iter().enumerate() {
+        if row >= end {
+            break;
+        }
+        if i > 0 {
+            if row >= offset && row < end {
+                out.push(HelpRow::Gap);
+            }
+            row += 1;
+        }
+        if row >= offset && row < end {
+            out.push(HelpRow::Header(group.name));
+        }
+        row += 1;
+        for binding in group.bindings {
+            if row >= end {
+                break;
+            }
+            if row >= offset {
+                out.push(HelpRow::Binding(binding));
+            }
+            row += 1;
+        }
+    }
+    out
 }
 
 /// The rendered line `group` starts on, for the help overlay's opening scroll.
