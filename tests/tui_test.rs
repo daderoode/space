@@ -7001,11 +7001,17 @@ mod paging_tests {
         app.repo_file_cache.insert(0, vec![]);
         assert_eq!(app.flattened_rows().len(), 1, "only the repo row is left");
 
+        // Arrows too, not just the paging keys: `skip_headers` reads the raw
+        // cursor, so `k`/Up is the likeliest way a user meets this.
         for code in [
             KeyCode::PageUp,
             KeyCode::PageDown,
             KeyCode::Home,
             KeyCode::End,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Char('k'),
+            KeyCode::Char('j'),
         ] {
             app.cursor_row = 25;
             app.handle_key(key(code));
@@ -7714,6 +7720,51 @@ mod help_overlay_tests {
         assert!(app.should_quit, "Ctrl-C must still quit while help is open");
     }
 
+    /// The footer carries the only on-screen hint that the list scrolls, so it
+    /// must fit the narrowest dialog the code can draw. Derived from the
+    /// registry rather than asserted in prose: the widest form uses the largest
+    /// row numbers `rendered_row_count()` can produce, so this fails if the
+    /// registry grows past the digits the footer budgeted for, or if anyone
+    /// adds a word to the hint.
+    #[test]
+    fn overlay_footer_fits_the_dialog() {
+        let total = keybindings::rendered_row_count();
+        // The widest scrolled form: "rows <start>-<total> of <total>" with the
+        // largest numbers, plus the separators and the close hint.
+        let widest = format!(
+            "rows {}-{} of {}  \u{b7}  \u{2191}\u{2193} scroll  \u{b7}  Esc/q/?/F1 close",
+            total, total, total
+        );
+        let interior = 54; // 56-column dialog floor, minus two border columns
+        assert!(
+            UnicodeWidthStr::width(widest.as_str()) <= interior,
+            "the widest footer is {} columns, over the {}-column interior: {:?}",
+            UnicodeWidthStr::width(widest.as_str()),
+            interior,
+            widest
+        );
+
+        // And it is not clipped in practice, including on a short terminal
+        // where the row numbers are largest.
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        for (w, h) in [(80u16, 24u16), (80, 10), (80, 8)] {
+            app.handle_key(key(KeyCode::End));
+            let rendered = render_text(&app, w, h);
+            let footer = rendered
+                .lines()
+                .find(|l| l.contains("close"))
+                .unwrap_or_else(|| panic!("no footer at {}x{}", w, h));
+            assert!(
+                footer.contains("Esc/q/?/F1 close") || footer.contains("Esc / q / ? / F1 to close"),
+                "footer clipped at {}x{}: {:?}",
+                w,
+                h,
+                footer.trim_end()
+            );
+        }
+    }
+
     // --- the key bar ---
 
     #[test]
@@ -7736,34 +7787,69 @@ mod help_overlay_tests {
         }
     }
 
+    /// The fit arithmetic, tested through the pure seam rather than through a
+    /// render. `render_dashboard` returns before the bar below 80 columns and
+    /// ratatui clips a `Paragraph` at its area, so a test that renders and
+    /// measures can never observe an overflow: it would pass whatever the
+    /// arithmetic did.
     #[test]
-    fn the_key_bar_never_overflows_a_narrow_terminal() {
-        let mut app = test_app(vec![common::workspace_with_repos(&["repo-a"])], vec![]);
-        // Genuinely narrow widths too: below the 80-column dashboard minimum
-        // the bar still must not overflow, including the degenerate case where
-        // not even the reserved gateway keys fit.
-        for width in [5u16, 12, 20, 40, 60, 79, 80, 90, 100, 140] {
-            for pane in [Pane::Left, Pane::Right] {
-                app.focus = pane;
-                let rendered = render_text(&app, width, 24);
-                let bar = rendered.lines().last().unwrap().trim_end();
-                assert!(
-                    UnicodeWidthStr::width(bar) <= width as usize,
-                    "at {} columns the {:?} key bar is {} wide: {:?}",
-                    width,
+    fn the_key_bar_fits_the_width_and_drops_the_gateways_last() {
+        use space::tui::ui::{fit_key_bar, key_bar_width};
+
+        for pane in [Pane::Left, Pane::Right] {
+            let bindings = keybindings::key_bar_bindings(pane);
+            let gateways = 2; // `?` and `q`
+
+            for width in [5usize, 12, 20, 40, 60, 79, 80, 90, 100, 140, 200] {
+                let entries = fit_key_bar(bindings, width);
+                let rendered = key_bar_width(&entries);
+
+                // The gateways are always present, and are the only entries
+                // allowed to exceed the width (the terminal clips them).
+                assert_eq!(
+                    entries
+                        .iter()
+                        .filter(|b| b.key == "?" || b.key == "q")
+                        .count(),
+                    gateways,
+                    "{:?} @{}: a gateway key was dropped: {:?}",
                     pane,
-                    UnicodeWidthStr::width(bar),
-                    bar
+                    width,
+                    entries.iter().map(|b| b.key).collect::<Vec<_>>()
                 );
-                if width >= 80 {
+                if entries.len() > gateways {
                     assert!(
-                        bar.contains("? help") && bar.contains("q quit"),
-                        "a gateway key was dropped at {} columns: {:?}",
+                        rendered <= width,
+                        "{:?} @{}: bar is {} columns wide: {:?}",
+                        pane,
                         width,
-                        bar
+                        rendered,
+                        entries.iter().map(|b| b.key).collect::<Vec<_>>()
                     );
                 }
+                // Entries are admitted in registry order, never reordered.
+                let order: Vec<&str> = entries
+                    .iter()
+                    .filter(|b| b.key != "?" && b.key != "q")
+                    .map(|b| b.key)
+                    .collect();
+                let expected: Vec<&str> = bindings
+                    .iter()
+                    .filter(|b| b.key != "?" && b.key != "q")
+                    .map(|b| b.key)
+                    .take(order.len())
+                    .collect();
+                assert_eq!(order, expected, "{:?} @{}: entries reordered", pane, width);
             }
+
+            // Wide enough for everything: nothing is dropped.
+            let all = fit_key_bar(bindings, 400);
+            assert_eq!(
+                all.len(),
+                bindings.len(),
+                "{:?}: 400 columns fits all",
+                pane
+            );
         }
     }
 }

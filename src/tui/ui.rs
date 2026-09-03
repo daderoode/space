@@ -525,47 +525,68 @@ fn render_status_message(app: &App, frame: &mut Frame, area: Rect) {
 }
 
 /// Render the always-visible key bar at the bottom.
-fn render_key_bar(app: &App, frame: &mut Frame, area: Rect) {
-    let bindings = crate::tui::keybindings::key_bar_bindings(app.focus);
-    const SEP: &str = "  \u{b7}  ";
-    let width = usize::from(area.width);
-    // Column width, not char count: the rest of the codebase measures terminal
-    // columns with unicode_width, and a future CJK or emoji label would make a
-    // char count under-measure and overflow the very bar this guards.
+/// The key-bar entries that fit `width` columns, in render order.
+///
+/// Pure so the fit arithmetic is testable: the bar itself is only drawn above
+/// the 80-column dashboard minimum, and ratatui clips a `Paragraph` at its
+/// area, so a test that renders and measures the result can never observe an
+/// overflow. This can.
+///
+/// `?` and `q` are the gateway keys named in the defect this fixes: `?` opens
+/// everything else and `q` is the documented way out. Room for both is
+/// reserved before anything else is admitted, so they are the last to go, and
+/// below the width that fits even them they are returned alone and the caller
+/// lets the terminal clip.
+pub fn fit_key_bar(
+    bindings: &'static [crate::tui::keybindings::Binding],
+    width: usize,
+) -> Vec<&'static crate::tui::keybindings::Binding> {
     let cols_of = |b: &crate::tui::keybindings::Binding| {
         UnicodeWidthStr::width(b.key) + 1 + UnicodeWidthStr::width(b.desc)
     };
-    let sep_cols = UnicodeWidthStr::width(SEP);
+    let sep_cols = UnicodeWidthStr::width(KEY_BAR_SEP);
 
-    // The bar has no wrap, so anything past the terminal width is simply cut,
-    // and both rows are wider than the 80-column minimum. The two keys that
-    // must never be cut are the gateways named in the defect this fixes: `?`
-    // opens everything else, and `q` is the documented way out. Reserve both,
-    // then fill with as many of the rest as fit.
     let gateways: Vec<&crate::tui::keybindings::Binding> = bindings
         .iter()
         .filter(|b| b.key == "?" || b.key == "q")
         .collect();
     let reserved: usize = gateways.iter().map(|b| sep_cols + cols_of(b)).sum();
 
-    let mut spans: Vec<Span> = Vec::new();
+    let mut out: Vec<&crate::tui::keybindings::Binding> = Vec::new();
     let mut used = 0usize;
     for binding in bindings.iter().filter(|b| b.key != "?" && b.key != "q") {
-        let lead = if spans.is_empty() { 0 } else { sep_cols };
+        let lead = if out.is_empty() { 0 } else { sep_cols };
         let cols = lead + cols_of(binding);
         if used + cols + reserved > width {
             break;
         }
-        if lead > 0 {
-            spans.push(Span::styled(SEP, theme::muted()));
-        }
-        spans.push(Span::styled(binding.key, theme::text()));
-        spans.push(Span::styled(format!(" {}", binding.desc), theme::muted()));
+        out.push(binding);
         used += cols;
     }
-    for b in gateways {
-        if !spans.is_empty() {
-            spans.push(Span::styled(SEP, theme::muted()));
+    out.extend(gateways);
+    out
+}
+
+/// Columns `fit_key_bar`'s result occupies once rendered.
+pub fn key_bar_width(entries: &[&crate::tui::keybindings::Binding]) -> usize {
+    let sep_cols = UnicodeWidthStr::width(KEY_BAR_SEP);
+    entries
+        .iter()
+        .map(|b| UnicodeWidthStr::width(b.key) + 1 + UnicodeWidthStr::width(b.desc))
+        .sum::<usize>()
+        + sep_cols * entries.len().saturating_sub(1)
+}
+
+pub const KEY_BAR_SEP: &str = "  \u{b7}  ";
+
+fn render_key_bar(app: &App, frame: &mut Frame, area: Rect) {
+    let bindings = crate::tui::keybindings::key_bar_bindings(app.focus);
+    let entries = fit_key_bar(bindings, usize::from(area.width));
+
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, b) in entries.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(KEY_BAR_SEP, theme::muted()));
         }
         spans.push(Span::styled(b.key, theme::text()));
         spans.push(Span::styled(format!(" {}", b.desc), theme::muted()));
@@ -1501,8 +1522,11 @@ fn render_help_overlay(help: &crate::tui::screens::help::HelpState, frame: &mut 
     frame.render_widget(Paragraph::new(window), sections[0]);
 
     // The hint must fit the 54-column interior of the narrowest dialog, so the
-    // scrolled form uses the short `Esc/q/? close`: at its widest
-    // ("rows 81-101 of 101") it is 51 columns.
+    // scrolled form is the short one. Its widest case is the largest row
+    // numbers the registry can produce, which currently lands exactly on the
+    // 54-column interior with no margin: `overlay_footer_fits_the_dialog`
+    // derives that worst case from `rendered_row_count()` and fails if either
+    // side moves, so do not add words here without checking that test.
     let scrolled = total > visible;
     let hint = if scrolled {
         format!(

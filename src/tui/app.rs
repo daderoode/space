@@ -1332,6 +1332,12 @@ impl App {
             } => {
                 self.do_stage(repo_index, &repo_path, &path, currently_staged);
                 self.screen = Screen::Dashboard;
+                // Staging refetches the repo's file list, so the row the cursor
+                // was on may be gone. `Message::StageFile` repositions for the
+                // same reason; without this the cursor is left indexing rows
+                // that no longer exist.
+                let rows = self.flattened_rows();
+                self.cursor_row = reposition_after_section_change(&rows, self.cursor_row);
             }
             ScreenAction::SwitchRepoBranch {
                 repo_path,
@@ -1752,7 +1758,11 @@ fn run_gitop_worker(
 /// The `debug_assert` below catches any future violation in debug builds.
 fn skip_headers(rows: &[RepoRow<'_>], from: usize, down: bool) -> usize {
     let max = rows.len().saturating_sub(1);
-    let mut pos = from;
+    // `from` is clamped for the same reason `reposition_after_section_change`
+    // clamps its cursor: callers pass `app.cursor_row`, which can outlive the
+    // rows it indexes. Clamping here means every caller inherits the guarantee
+    // instead of each one re-deriving it.
+    let mut pos = from.min(max);
     loop {
         if down {
             if pos >= max {
