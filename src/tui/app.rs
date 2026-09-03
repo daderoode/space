@@ -183,11 +183,13 @@ impl ListJump {
     /// The row this jump targets in a list of `len` rows, starting from
     /// `current`. Clamped at both ends; never wraps. An empty list targets 0.
     ///
-    /// `current` is clamped first because the caller's cursor can outlive the
-    /// rows it indexes: `ScreenAction::StageFile` returns to the dashboard
-    /// without repositioning, so a refetch that yields fewer rows leaves the
-    /// cursor past the end. Without this, `PageUp` from a stale cursor stays
-    /// past the end and the caller indexes out of bounds.
+    /// `current` is clamped first as defence in depth: the cursor is an index
+    /// into rows rebuilt on demand, so any path that shrinks the list between
+    /// a keypress and this call would otherwise leave `PageUp` past the end and
+    /// the caller indexing out of bounds. The one such path that existed,
+    /// `ScreenAction::StageFile` returning to the dashboard without
+    /// repositioning, is fixed at its source; `skip_headers` clamps for the
+    /// same reason.
     fn target(self, current: usize, len: usize) -> usize {
         let last = len.saturating_sub(1);
         let current = current.min(last);

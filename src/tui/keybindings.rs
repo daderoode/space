@@ -206,6 +206,14 @@ const GIT_OPS: BindingGroup = BindingGroup {
             desc: "Select",
         },
         Binding {
+            key: "y",
+            desc: "Confirm a push or rebase",
+        },
+        Binding {
+            key: "n/Enter/Esc",
+            desc: "Decline (the default)",
+        },
+        Binding {
             key: "esc/q",
             desc: "Close",
         },
@@ -368,7 +376,15 @@ const SWITCH_BRANCH: BindingGroup = BindingGroup {
             desc: "Confirm",
         },
         Binding {
-            key: "Esc",
+            key: "letters",
+            desc: "Type a new branch name / filter",
+        },
+        Binding {
+            key: "↑↓",
+            desc: "Move the branch highlight",
+        },
+        Binding {
+            key: "Esc/q",
             desc: "Back one stage",
         },
     ],
@@ -390,8 +406,8 @@ const CONFIG_EDITOR: BindingGroup = BindingGroup {
             desc: "Save and exit",
         },
         Binding {
-            key: "Esc",
-            desc: "Cancel edit / close",
+            key: "Esc/q",
+            desc: "Cancel edit / close (q: not editing)",
         },
     ],
 };

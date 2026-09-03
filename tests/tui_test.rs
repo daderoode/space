@@ -7031,6 +7031,68 @@ mod paging_tests {
         }
     }
 
+    /// Staging from the diff viewer refetches the repo's file list, so the row
+    /// the cursor was on can disappear. `ScreenAction::StageFile` repositions
+    /// for that reason; nothing else asserts it, and removing the call leaves
+    /// the rest of the suite green because `skip_headers` clamps defensively.
+    /// This drives the real path rather than simulating its symptom.
+    #[test]
+    fn staging_from_the_diff_viewer_leaves_the_cursor_on_a_real_row() {
+        use space::tui::screens::diff::DiffViewerState;
+        let (_env, repo_path, mut app) = setup_real_repo_app();
+
+        // Two unstaged files, so staging one splits the list into two sections
+        // and pushes a header under the cursor's old index. With a single file
+        // the row count is unchanged and nothing is stranded.
+        std::fs::write(repo_path.join("second.txt"), "new file").unwrap();
+        std::fs::write(repo_path.join("file.txt"), "modified").unwrap();
+
+        app.focus = Pane::Right;
+        app.expanded_repos.insert(0);
+        app.refresh_file_diff_cache();
+        let rows_before = app.flattened_rows();
+        assert_eq!(
+            rows_before.len(),
+            4,
+            "fixture must be Repo, Unstaged header, two files"
+        );
+
+        // The last file row: staging the first file puts the Staged header here.
+        app.cursor_row = 3;
+        let entry = app.repo_file_cache.get(&0).unwrap()[0].clone();
+        app.screen = Screen::DiffViewer(DiffViewerState {
+            repo_index: 0,
+            repo_name: "testrepo".into(),
+            repo_path: repo_path.clone(),
+            file_path: entry.path.clone(),
+            staged: entry.staged,
+            diff: Err("unused".into()),
+            scroll_offset: 0,
+            total_lines: 1,
+        });
+
+        app.handle_key(key(KeyCode::Char('s')));
+
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "staging returns to the dashboard"
+        );
+        let rows = app.flattened_rows();
+        assert!(
+            app.cursor_row < rows.len(),
+            "cursor {} is past the {} rows left after staging",
+            app.cursor_row,
+            rows.len()
+        );
+        assert!(
+            !matches!(
+                rows[app.cursor_row],
+                space::tui::app::RepoRow::SectionHeader { .. }
+            ),
+            "the cursor must not be parked on a section header"
+        );
+    }
+
     #[test]
     fn repo_paging_on_an_empty_workspace_is_a_noop() {
         let ws = Workspace {
@@ -7359,6 +7421,91 @@ mod help_overlay_tests {
         );
         match &app.screen {
             Screen::SwitchBranch(st) => assert_eq!(st.branch_name_input.value(), "?"),
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // The four branch-picker stages. Each types into its own
+        // `branch_picker` / `rebase_picker`, and each is gated by the same
+        // hand-maintained list, so each needs its own case.
+        fn a_picker() -> space::tui::widgets::fuzzy_picker::FuzzyPicker {
+            space::tui::widgets::fuzzy_picker::FuzzyPicker::new(
+                "Pick a branch",
+                vec![space::tui::widgets::fuzzy_picker::PickerItem::from_path(
+                    PathBuf::from("/tmp/main"),
+                )],
+                false,
+            )
+        }
+
+        // create: PickBranch
+        let mut app = test_app_with_config(cfg(), vec![], vec![repo.clone()]);
+        app.handle_key(key(KeyCode::Char('c')));
+        if let Screen::CreateWorkspace(st) = &mut app.screen {
+            st.stage = space::tui::screens::create::CreateStage::PickBranch;
+            st.branch_picker = Some(a_picker());
+        }
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "create PickBranch: ? must type");
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(st.branch_picker.as_ref().unwrap().input.value(), "?")
+            }
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // add: PickBranch
+        let mut app = test_app_with_config(cfg(), vec![], vec![repo.clone()]);
+        app.workspaces.push(space::core::workspace::Workspace {
+            name: "ws".into(),
+            path: PathBuf::from("/tmp/ws"),
+            repos: vec![],
+        });
+        app.handle_key(key(KeyCode::Char('a')));
+        if let Screen::AddRepos(st) = &mut app.screen {
+            st.stage = space::tui::screens::add::AddStage::PickBranch;
+            st.branch_picker = Some(a_picker());
+        }
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "add PickBranch: ? must type");
+        match &app.screen {
+            Screen::AddRepos(st) => {
+                assert_eq!(st.branch_picker.as_ref().unwrap().input.value(), "?")
+            }
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // switch-branch: PickBranch
+        let mut app = test_app_with_config(cfg(), vec![], vec![]);
+        app.screen =
+            Screen::SwitchBranch(space::tui::screens::switch_branch::SwitchBranchState::new(
+                "repo-a".into(),
+                PathBuf::from("/tmp/repo-a"),
+            ));
+        if let Screen::SwitchBranch(st) = &mut app.screen {
+            st.stage = space::tui::screens::switch_branch::SwitchBranchStage::PickBranch;
+            st.branch_picker = Some(a_picker());
+        }
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "switch-branch PickBranch: ? must type");
+        match &app.screen {
+            Screen::SwitchBranch(st) => {
+                assert_eq!(st.branch_picker.as_ref().unwrap().input.value(), "?")
+            }
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // git-ops: RebasePickTarget
+        let mut app = gitops_menu_app();
+        if let Screen::GitOps(st) = &mut app.screen {
+            st.stage = space::tui::screens::gitops::GitOpsStage::RebasePickTarget;
+            st.rebase_picker = Some(a_picker());
+        }
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "git-ops RebasePickTarget: ? must type");
+        match &app.screen {
+            Screen::GitOps(st) => {
+                assert_eq!(st.rebase_picker.as_ref().unwrap().input.value(), "?")
+            }
             other => panic!("unexpected {:?}", std::mem::discriminant(other)),
         }
 
