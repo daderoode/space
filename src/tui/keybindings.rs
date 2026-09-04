@@ -1,4 +1,4 @@
-//! Shared keybinding definitions consumed by the help overlay and status bar.
+//! Shared keybinding definitions consumed by the help overlay and the key bar.
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Binding {

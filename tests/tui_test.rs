@@ -7377,14 +7377,41 @@ mod paging_tests {
         }
     }
 
+    /// The gate is only correct if it still lets all three keys through on the
+    /// pane they belong to, so all three are asserted, not just the one whose
+    /// screen is cheapest to reach.
     #[test]
     fn create_add_and_delete_still_fire_on_the_workspaces_pane() {
-        let ws = common::workspace_with_repos(&["repo-a"]);
-        let mut app = test_app(vec![ws], vec![]);
+        let env = TestEnv::new();
+        let repo = env.create_repo("repo-a");
+
+        // `d` opens the delete confirm for the selected space.
+        let mut app = test_app(vec![common::workspace_with_repos(&["repo-a"])], vec![]);
         app.handle_key(key(KeyCode::Char('d')));
         assert!(
             matches!(app.screen, Screen::ConfirmDelete(_)),
             "`d` on the workspaces pane still opens the delete confirm"
+        );
+
+        // `c` opens the create flow.
+        let mut app = test_app_with_config(config_from_env(&env), vec![], vec![repo.clone()]);
+        app.handle_key(key(KeyCode::Char('c')));
+        assert!(
+            matches!(app.screen, Screen::CreateWorkspace(_)),
+            "`c` on the workspaces pane still opens the create flow"
+        );
+
+        // `a` opens the add flow for the selected space.
+        let mut app = test_app_with_config(config_from_env(&env), vec![], vec![repo]);
+        app.workspaces.push(space::core::workspace::Workspace {
+            name: "ws".into(),
+            path: PathBuf::from("/tmp/ws"),
+            repos: vec![],
+        });
+        app.handle_key(key(KeyCode::Char('a')));
+        assert!(
+            matches!(app.screen, Screen::AddRepos(_)),
+            "`a` on the workspaces pane still opens the add flow"
         );
     }
 

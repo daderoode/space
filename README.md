@@ -65,6 +65,7 @@ files with `s`/`space`, or bulk stage/unstage all files in the selected repo wit
 | `c` | Create a new workspace |
 | `a` | Add repos to selected workspace |
 | `d` | Delete selected workspace |
+| `g` | Go to a workspace (fuzzy picker, cd and exit) |
 | `PgUp` / `PgDn` | Page up / down |
 | `Home` / `End` | First / last workspace |
 | `/` | Filter spaces (selects in place) |
