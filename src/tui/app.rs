@@ -890,7 +890,7 @@ impl App {
     /// not one. And it is per attempt, not per flow: an add that refuses
     /// with "already checked out" bounces to `PickBranchStrategy`, and the
     /// next strategy the user picks re-runs this loop and re-fetches every
-    /// repo that is not in `fresh_repos`.
+    /// repo in neither `fresh_repos` nor `unreachable_repos`.
     ///
     /// So the unattended-run policy bounds the hang without making it
     /// interruptible, and the glossary's "never waits indefinitely for a
@@ -940,17 +940,32 @@ impl App {
                 _ => return,
             }
 
-            // Only a repo the report fetched successfully is skipped: those
-            // refs are known fresh. A row that timed out is fetched again
-            // here and can cost another `UNATTENDED_FETCH_TIMEOUT` on the UI
-            // thread. Kept deliberately: a timed-out row proves nothing about
-            // the refs, so skipping it would be creating from refs of unknown
-            // age.
-            let fetch = if params.fresh_repos.iter().any(|p| p == repo_path) {
+            // The report settles this for two kinds of repo, for opposite
+            // reasons. A repo it fetched has the remote's refs, so skipping
+            // is free and silent. A repo whose fetch timed out has refs of
+            // unknown age, and another attempt would very likely spend the
+            // whole limit again on this thread to learn the same nothing,
+            // so it is skipped and the log says so. Everything else is
+            // fetched. That includes a fetch that failed, which usually
+            // failed fast and is cheap to retry: usually, because `Failed`
+            // carries no elapsed time, so a slow failure (an ssh
+            // `ConnectTimeout`, say) is fetched again here and costs its
+            // wait a second time. Fixing that needs an elapsed time on
+            // every outcome; it is not in this change.
+            let unreachable = params.unreachable_repos.iter().any(|p| p == repo_path);
+            let fetch = if unreachable || params.fresh_repos.iter().any(|p| p == repo_path) {
                 PreCreateFetch::Skip
             } else {
                 PreCreateFetch::Run(workspace::UNATTENDED_FETCH_TIMEOUT)
             };
+            if unreachable {
+                let note = crate::tui::screens::sync_report::SKIPPED_AFTER_TIMEOUT_NOTE;
+                match &mut self.screen {
+                    Screen::CreateWorkspace(st) => st.progress.push(format!("  {}", note)),
+                    Screen::AddRepos(st) => st.progress.push(format!("  {}", note)),
+                    _ => return,
+                }
+            }
 
             let attempt = create_worktree_with_fetch(
                 repo_path,

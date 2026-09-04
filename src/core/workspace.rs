@@ -1200,8 +1200,11 @@ fn current_branch_name(repo_path: &Path) -> Option<String> {
 /// worktree, and under what limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreCreateFetch {
-    /// The sync report already fetched this repo successfully in this
-    /// flow, so its refs are fresh and no fetch is run.
+    /// No fetch is run. The caller has decided this repo does not need
+    /// one: either the sync already fetched it, or the sync's own fetch of
+    /// that remote timed out and repeating it here would very likely cost
+    /// the whole limit again. `create_worktree` does not distinguish the
+    /// two; the caller does, and reports them differently.
     Skip,
     /// Fetch `origin` under the unattended-run policy with this wall-clock
     /// limit. The user-facing value is `UNATTENDED_FETCH_TIMEOUT`; tests
@@ -1215,8 +1218,8 @@ pub enum PreCreateFetch {
 /// fetch line that explains it.
 #[derive(Debug)]
 pub struct WorktreeAttempt {
-    /// The fetch outcome; `None` when it was skipped as already fresh, or
-    /// when the attempt failed before the fetch could run.
+    /// The fetch outcome; `None` when `PreCreateFetch::Skip` meant none
+    /// ran, or when the attempt failed before the fetch could run.
     pub fetch: Option<FetchOutcome>,
     /// The new worktree's path, or why the creation refused.
     pub created: Result<PathBuf>,

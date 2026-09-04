@@ -460,7 +460,7 @@ fn creating_logs_failed_pre_create_fetch_and_skips_it_for_already_fetched_repos(
         },
     );
     report.finish();
-    let log = run_flow(&env, vec![repo, pin], "ws-b", report);
+    let log = run_flow(&env, vec![repo.clone(), pin.clone()], "ws-b", report);
     assert_eq!(
         line_above(&log, "  \u{2713} broken-remote"),
         "Creating worktree for broken-remote...",
@@ -479,6 +479,77 @@ fn creating_logs_failed_pre_create_fetch_and_skips_it_for_already_fetched_repos(
             .join("broken-remote")
             .exists(),
         "skipping the fetch must not stop the worktree being created"
+    );
+
+    // Half C: the repo's sync fetch timed out, so it is not fetched again.
+    // A timed-out remote did not answer inside the whole limit minutes ago,
+    // and this call blocks the loop, so retrying would very likely spend the
+    // limit again for nothing. Same observable shape as half B, reached from
+    // the opposite outcome.
+    let mut report = SyncReport::new(std::slice::from_ref(&repo));
+    report.finished(
+        0,
+        SyncOutcome {
+            fetch: FetchOutcome::TimedOut {
+                after: std::time::Duration::from_secs(60),
+                stderr: String::new(),
+            },
+            forwarded: vec![],
+            skipped: vec![],
+        },
+    );
+    report.finish();
+    let log = run_flow(&env, vec![repo.clone(), pin.clone()], "ws-c", report);
+    assert_eq!(
+        line_above(&log, "  \u{2713} broken-remote"),
+        format!(
+            "  {}",
+            space::tui::screens::sync_report::SKIPPED_AFTER_TIMEOUT_NOTE
+        ),
+        "a timed-out repo is not fetched again, and unlike a fresh one it \
+         says so: these refs are of unknown age:\n{}",
+        log.join("\n")
+    );
+    assert!(
+        !log.iter()
+            .any(|l| is_note(l) && l.contains("broken-remote")),
+        "the skip must not also emit a fetch-failed note:\n{}",
+        log.join("\n")
+    );
+    assert_eq!(
+        log.iter().filter(|l| is_note(l)).count(),
+        1,
+        "the pin repo, which the report never covered, is still fetched:\n{}",
+        log.join("\n")
+    );
+    assert!(
+        env.workspaces_dir
+            .join("ws-c")
+            .join("broken-remote")
+            .exists(),
+        "skipping a timed-out repo's fetch must not stop the worktree"
+    );
+
+    // Half D: a fetch that merely FAILED is cheap to retry, so it still runs.
+    // This is the line between the two: pointless, versus pointless and slow.
+    let mut report = SyncReport::new(std::slice::from_ref(&repo));
+    report.finished(
+        0,
+        SyncOutcome {
+            fetch: FetchOutcome::Failed {
+                exit_code: Some(128),
+                stderr: "fatal: could not read Username".to_string(),
+            },
+            forwarded: vec![],
+            skipped: vec![],
+        },
+    );
+    report.finish();
+    let log = run_flow(&env, vec![repo, pin], "ws-d", report);
+    assert!(
+        is_note(&line_above(&log, "  \u{2713} broken-remote")),
+        "a fetch that failed fast is retried here, so its note is back:\n{}",
+        log.join("\n")
     );
 }
 

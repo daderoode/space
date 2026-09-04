@@ -77,6 +77,16 @@ impl SyncRow {
         matches!(&self.phase, RowPhase::Done(o) if o.fetch_ok())
     }
 
+    /// The fetch ran the whole limit without the remote answering. A subset
+    /// of `is_failed`, kept apart because it is the one failure that says
+    /// something about how long a retry would take.
+    pub fn timed_out(&self) -> bool {
+        matches!(
+            &self.phase,
+            RowPhase::Done(o) if matches!(o.fetch, FetchOutcome::TimedOut { .. })
+        )
+    }
+
     /// Every finished row that is not ok: fetch failed, timed out, not synced.
     pub fn is_failed(&self) -> bool {
         self.is_finished() && !self.is_ok()
@@ -240,6 +250,14 @@ fn first_stderr_line(stderr: &str) -> Option<String> {
 /// than the sync report's and able to fail differently, and the report is
 /// unreachable from the Creating stage. Without it a create-time failure
 /// would show an exit code whose cause appears nowhere in the app.
+/// The Creating log's line for a fetch that was skipped because the sync's
+/// own fetch of that remote timed out. Unlike a skip for freshness, this one
+/// is worth saying: the worktree is about to be created from refs of unknown
+/// age, and the alternative was spending the limit again to find out. Same
+/// column budget as `creating_fetch_note`, promise last.
+pub const SKIPPED_AFTER_TIMEOUT_NOTE: &str =
+    "fetch skipped after sync timed out \u{b7} using local refs";
+
 pub fn creating_fetch_note(fetch: &FetchOutcome) -> Option<String> {
     match fetch {
         FetchOutcome::Ok => None,
@@ -515,12 +533,36 @@ impl SyncReport {
         }
     }
 
-    /// Paths of the repos whose fetch succeeded in this run. `create_worktree`
-    /// skips its own fetch for these: their refs are already fresh.
+    /// Paths of the repos whose fetch succeeded in this run. Their refs are
+    /// the remote's, so the pre-create fetch is skipped and says nothing:
+    /// there is no news.
     pub fn fetched_ok_paths(&self) -> Vec<PathBuf> {
         self.rows
             .iter()
             .filter(|r| r.is_ok())
+            .map(|r| r.path.clone())
+            .collect()
+    }
+
+    /// Paths of the repos whose fetch ran the whole limit without the remote
+    /// answering. The pre-create fetch is skipped for these too, but for the
+    /// opposite reason: not because the refs are fresh but because they are
+    /// of unknown age and another attempt would very likely spend the limit
+    /// again, on the UI thread, to learn the same nothing. That difference is
+    /// why this is a separate list rather than merged with
+    /// `fetched_ok_paths`: the skip is silent for a fresh repo and reported
+    /// for this one.
+    ///
+    /// Known limit: `TimedOut` is the only outcome that is certainly slow,
+    /// not the only slow outcome. A `Failed` carries no elapsed time (see
+    /// `FetchOutcome`), so a fetch that failed after 30 seconds, say an ssh
+    /// `ConnectTimeout`, is indistinguishable here from one that failed in
+    /// 200ms and is fetched again. Catching those needs an elapsed time on
+    /// every outcome, which the worker does not record yet.
+    pub fn timed_out_paths(&self) -> Vec<PathBuf> {
+        self.rows
+            .iter()
+            .filter(|r| r.timed_out())
             .map(|r| r.path.clone())
             .collect()
     }
@@ -1285,6 +1327,13 @@ mod tests {
                 stderr: String::new(),
             }),
         ];
+        assert!(
+            INDENT + UnicodeWidthStr::width(SKIPPED_AFTER_TIMEOUT_NOTE) <= INNER,
+            "SKIPPED_AFTER_TIMEOUT_NOTE is {} columns with the log's indent; \
+             the Creating log truncates at {}",
+            INDENT + UnicodeWidthStr::width(SKIPPED_AFTER_TIMEOUT_NOTE),
+            INNER
+        );
         for note in notes.iter().flatten() {
             let end = note
                 .find(promise)
@@ -1302,37 +1351,88 @@ mod tests {
         }
     }
 
+    fn timed_out_outcome() -> SyncOutcome {
+        SyncOutcome {
+            fetch: FetchOutcome::TimedOut {
+                after: Duration::from_secs(60),
+                stderr: String::new(),
+            },
+            forwarded: vec![],
+            skipped: vec![],
+        }
+    }
+
     #[test]
-    fn fetched_ok_paths_lists_only_ok_rows_in_row_order() {
+    fn fetched_ok_and_timed_out_paths_are_separate_lists() {
         let mut r = report(4);
         r.finished(0, ok(&["main"], &[]));
         r.finished(1, failed("fatal: nope"));
-        r.finished(
-            2,
-            SyncOutcome {
-                fetch: FetchOutcome::TimedOut {
-                    after: Duration::from_secs(60),
-                    stderr: String::new(),
-                },
-                forwarded: vec![],
-                skipped: vec![],
-            },
-        );
+        r.finished(2, timed_out_outcome());
         r.finished(3, ok(&[], &["dev"]));
         assert_eq!(
             r.fetched_ok_paths(),
             vec![PathBuf::from("/r/repo0"), PathBuf::from("/r/repo3")],
             "only rows whose fetch succeeded, in row order"
         );
+        assert_eq!(
+            r.timed_out_paths(),
+            vec![PathBuf::from("/r/repo2")],
+            "only rows whose fetch ran out the limit"
+        );
+        assert!(
+            !r.timed_out_paths().contains(&PathBuf::from("/r/repo1")),
+            "a fetch that failed is retried, so it is not in either list"
+        );
+
+        // A cancelled sync returns `Failed { exit_code: None }` (see
+        // `sync_repo_cancellable`). It must not be read as a timeout and
+        // silently skipped: nothing was fetched, so the create must fetch.
+        let mut cancelled = report(1);
+        cancelled.finished(
+            0,
+            SyncOutcome {
+                fetch: FetchOutcome::Failed {
+                    exit_code: None,
+                    stderr: "sync cancelled".to_string(),
+                },
+                forwarded: vec![],
+                skipped: vec![],
+            },
+        );
+        assert!(
+            cancelled.timed_out_paths().is_empty() && cancelled.fetched_ok_paths().is_empty(),
+            "a cancelled sync fetched nothing and did not time out"
+        );
+
         let mut waiting = report(2);
         waiting.finished(1, ok(&[], &[]));
         waiting.finish();
         assert_eq!(
             waiting.fetched_ok_paths(),
             vec![PathBuf::from("/r/repo1")],
-            "a not-synced row is not fresh"
+            "a not-synced row was never fetched"
         );
+        assert!(waiting.timed_out_paths().is_empty());
         assert!(SyncReport::empty().fetched_ok_paths().is_empty());
+        assert!(SyncReport::empty().timed_out_paths().is_empty());
+    }
+
+    #[test]
+    fn timed_out_is_the_only_failure_that_skips() {
+        let mut r = report(3);
+        r.finished(0, timed_out_outcome());
+        r.finished(1, failed("fatal: nope"));
+        r.finished(2, ok(&[], &[]));
+        assert!(r.rows[0].timed_out() && r.rows[0].is_failed());
+        assert!(!r.rows[1].timed_out() && r.rows[1].is_failed());
+        assert!(!r.rows[2].timed_out() && !r.rows[2].is_failed());
+
+        let mut not_synced = report(1);
+        not_synced.finish();
+        assert!(
+            !not_synced.rows[0].timed_out(),
+            "a row the worker never reached did not time out"
+        );
     }
 
     #[test]
