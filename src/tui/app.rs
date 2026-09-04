@@ -1059,6 +1059,11 @@ impl App {
         // the run is over whether or not `Done` has been sent. Not `created`,
         // which a failed repo leaves short while the run is just as over.
         if let Some(job) = &self.create_job {
+            // Safe because the worker has exactly two successors after its
+            // last `Finished`, not safe in general: this predicate is a lower
+            // bound on the worker's progress and can never name its next
+            // statement. See the comment at the worker's terminal region.
+            //
             // Blind spot, deliberate and currently unreachable. `finished`
             // reaches the total one statement before the worker decides which
             // terminal message to send: it sends `Finished` for the last repo,
@@ -2035,6 +2040,17 @@ fn run_create_worker(
             .as_ref()
             .err()
             .is_some_and(|e| crate::core::workspace::refuses_because_checked_out(e));
+        // Everything after this send and before the terminal message is a
+        // window `cancel_creating`'s guard cannot see. Its predicate is over
+        // counters, and the counters reach their final values when this send
+        // lands, one or more statements before the worker commits to which
+        // terminal message follows. Today that interval holds exactly two
+        // successors, the `stop` branch below and the `Done` after the loop,
+        // and both are handled. Adding a third terminal message, or any
+        // statement between here and the decision, opens a window with
+        // nothing positioned to catch it, and no test will fail, because the
+        // window will not exist until it is written. Change this region and
+        // read `cancel_creating`'s guard first.
         if tx
             .send(CreateProgress::Finished {
                 index,

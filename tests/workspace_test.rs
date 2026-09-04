@@ -602,8 +602,20 @@ fn refuses_because_checked_out_matches_only_the_pre_2_42_wording() {
 /// for STARTED, at which point the fetch is provably running and checkpoint 1
 /// has provably passed with the flag clear, sets the flag, and only then
 /// touches RELEASE. Checkpoint 2 therefore always reads a flag that was false
-/// at entry and true by the time the fetch returned, with no timing assumption
-/// anywhere.
+/// at entry and true by the time the fetch returned, with no assumption about
+/// ordering anywhere.
+///
+/// Visibility is a separate question from ordering, and this test does rely on
+/// one property. The flipper's store is `Relaxed` and the chain from it to the
+/// checkpoint's load runs through a file write, a child process and a `wait`,
+/// with no Rust synchronisation between the two threads. What guarantees the
+/// load sees the store is atomic coherence, that is, eventual visibility, plus
+/// the fetch taking non-zero time to return. That is safe on every platform
+/// this app supports and is the same property production relies on for this
+/// flag. It is written down because a reader who believes the memory model is
+/// doing the ordering work will make a confident wrong edit, and this test is
+/// the only thing standing between a collapsed checkpoint and a silent
+/// 60-second hang.
 ///
 /// Collapsing both reads into one at entry, which `create_worktree_cancellable`
 /// explicitly forbids in its own doc comment, passes every other test in this
@@ -670,7 +682,11 @@ fn create_worktree_cancellable_reads_the_flag_again_after_the_fetch() {
     let flipper = {
         let cancel = Arc::clone(&cancel);
         std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(60);
+            // Comfortably shorter than the fetch's own limit below. If the
+            // gate never starts, this fires first and says so, instead of
+            // expiring together with the timeout it exists to test around and
+            // leaving the failure ambiguous.
+            let deadline = Instant::now() + Duration::from_secs(20);
             while !started.exists() {
                 assert!(Instant::now() < deadline, "the gated fetch never started");
                 std::thread::sleep(Duration::from_millis(2));
