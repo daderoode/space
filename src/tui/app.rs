@@ -1051,6 +1051,24 @@ impl App {
         // repos", which is a success reported as a failure, and an
         // `AlreadyCheckedOut` stop loses its bounce to the strategy picker.
         self.poll_create_result();
+        // The drain narrows the window; it cannot close it. `run_create_worker`
+        // sends `Finished` for the last repo inside its loop and `Done` as a
+        // separate statement after it, and a thread can be preempted between
+        // the two, so a run can be over with nothing yet in the channel to
+        // drain. `finished` settles it either way: every repo attempted means
+        // the run is over whether or not `Done` has been sent. Not `created`,
+        // which a failed repo leaves short while the run is just as over.
+        if let Some(job) = &self.create_job {
+            if job.finished >= job.params.repos.len() {
+                // Left for the next drain, which finishes the run through the
+                // one completion path. Esc costs a frame nobody perceives.
+                // Synthesising the completion here instead would duplicate what
+                // `Done` does and would bypass the disconnect rule in the case
+                // where the worker actually died between its last `Finished`
+                // and its `Done`, which that rule already handles correctly.
+                return;
+            }
+        }
         let job = match self.create_job.take() {
             Some(job) => job,
             None => {
@@ -1103,11 +1121,13 @@ impl App {
     /// repo, or a worker that died, both of which keep the stage up so the log
     /// can be read.
     ///
-    /// Residual, deliberately not fixed here: `Enter` in that same window is
-    /// swallowed once, because the stage ignores it while the job still looks
-    /// live. The screen is correct on the next frame and a second press works.
-    /// The asymmetry is intended: Esc's misfire wrote a false message about
-    /// durable state, while Enter's costs one keystroke.
+    /// `Enter` in that same window is swallowed once, and that is protective
+    /// rather than merely cheap. If the drain has already processed `Done` the
+    /// screen beneath is the dashboard, where Enter with the workspaces pane
+    /// focused is `Message::GoToWorkspace`: it sets `space_cd_target` and
+    /// `should_quit`, so a replayed Enter would EXIT THE APPLICATION. Swallowing
+    /// it is the same protection `run_loop`'s startup drain provides. Do not
+    /// "fix" the asymmetry with Esc by letting the key through.
     fn leave_failed_creating(&mut self) {
         let (verb, err) = match &self.screen {
             Screen::CreateWorkspace(st)
@@ -3990,6 +4010,66 @@ mod tests {
             !cancel.load(Ordering::Relaxed),
             "the screen must never be able to cancel the run"
         );
+    }
+
+    /// The interleaving the drain alone does not cover: the terminal message
+    /// has not been SENT yet, so draining finds nothing and the job survives.
+    ///
+    /// `run_create_worker` sends `Finished` for the last repo inside its loop
+    /// and `Done` as a separate statement after it, and a thread can be
+    /// preempted between the two. Draining there consumes `Finished { last }`,
+    /// brings the counts to their final values, and finds the channel empty, so
+    /// a completed run would be reported as `Stopped creating 'ws-a' after 1 of
+    /// 1 repos. Press a to add the rest.`: a success called a failure, with a
+    /// count in the same sentence that contradicts it and a hint pointing at
+    /// nothing to add.
+    ///
+    /// `finished` is the discriminator, not `created`, and the second case
+    /// below is the only thing that can tell those two apart: when every repo
+    /// SUCCEEDED the counts are equal and a `created`-based guard behaves
+    /// identically. A repo that failed leaves `created` short while the run is
+    /// just as over, and a `created` guard would fall through to reporting a
+    /// finished run as a cancellation. Without that case this test passes under
+    /// the wrong discriminator, which is the defect it exists to prevent.
+    #[test]
+    fn esc_after_every_repo_finished_is_not_a_cancellation() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        // (started, finished, created), for one repo, with nothing left in the
+        // channel: the worker is between its last `Finished` and its `Done`.
+        for (label, created) in [("every repo succeeded", 1), ("a repo failed", 0)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let ws_dir = tmp.path().join("spaces");
+
+            let mut app = make_app(vec![]);
+            app.config.workspaces.dir = ws_dir.clone();
+            app.screen = creating_screen();
+            let params = create_params(&ws_dir, "ws-a", vec![PathBuf::from("/r/a")]);
+            let (_tx, _cancel, mut job) = make_job(params);
+            job.started = 1;
+            job.finished = 1;
+            job.created = created;
+            app.create_job = Some(job);
+
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+            assert_eq!(
+                app.status_message, None,
+                "{}: a run with every repo attempted must not be reported as stopped",
+                label
+            );
+            assert!(
+                app.create_job.is_some(),
+                "{}: the job is left for the next drain to finish through the \
+                 one completion path, rather than synthesised here",
+                label
+            );
+            assert!(
+                matches!(app.screen, Screen::CreateWorkspace(_)),
+                "{}: the stage stays up for the frame it takes",
+                label
+            );
+        }
     }
 
     /// The add flow's success wording, which the end-to-end add tests exercise
