@@ -3746,6 +3746,33 @@ mod tests {
     /// asserted is B's absence from disk and the absence of any terminal
     /// message. Asserting A EXISTS is not decoration: without it the whole test
     /// would pass vacuously if the harness never created anything at all.
+    ///
+    /// Be precise about what the rendezvous buys, because it is easy to
+    /// overstate. It is what makes this test DETERMINISTIC; the two checkpoints
+    /// inside `create_worktree_cancellable` are what make it PASS. Measured at
+    /// capacity 64 in a clean copy of this tree, it still passed 8 runs out of
+    /// 8: with a buffer the worker can be past `send(Started { index: 1 })`
+    /// before the store, the interleaving above no longer holds, and the
+    /// checkpoints catch it anyway because a fetch plus a `git worktree add`
+    /// takes far longer than the store. So raising the capacity would not fail
+    /// here. It would quietly convert a proof into a race that is merely very
+    /// likely to be won, on a window milliseconds wide.
+    ///
+    /// The capacity also does memory-model work, which is the second reason not
+    /// to treat it as a performance knob. `Relaxed` is right in both places but
+    /// for different reasons: in production the flag is the only thing
+    /// communicated, so the worker need only see it eventually, which is all
+    /// `Relaxed` promises. Here the test needs the load to see the store at a
+    /// specific point, and it is the CHANNEL that supplies the happens-before
+    /// edge: the store precedes this test's receive, which pairs with the
+    /// worker's send, which precedes the worker's next load. A buffered channel
+    /// removes that edge as surely as it removes the scheduling guarantee.
+    ///
+    /// This is not hypothetical. While this branch was under review an agent
+    /// changed that 0 to 64 in this tree, the whole suite stayed green, and the
+    /// only thing that caught it was a human-scale "I did not touch that line".
+    /// Nothing else can: not the suite, not clippy, not a reviewer's eye
+    /// sliding over a one-character change to a test's channel capacity.
     #[test]
     fn cancelling_mid_run_creates_no_further_worktrees() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3754,6 +3781,9 @@ mod tests {
         let ws_dir = tmp.path().join("spaces");
         let params = create_params(&ws_dir, "ws-a", vec![repo_a, repo_b]);
 
+        // Capacity 0 is load-bearing and there is nothing to assert it against:
+        // at any other capacity this test still passes, it just stops proving
+        // anything. See the interleaving argument above before changing it.
         let (tx, rx) = mpsc::sync_channel::<CreateProgress>(0);
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
