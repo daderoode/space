@@ -871,8 +871,38 @@ impl App {
         }
     }
 
+    /// Create or add every selected repo's worktree, logging one block per
+    /// repo into the active screen's Creating log.
+    ///
+    /// Residual, and it is a frozen UI rather than a slow one. This loop runs
+    /// synchronously inside `handle_key`, and `run_loop` draws once per
+    /// iteration and only then polls for a key, so while a pre-create fetch
+    /// is in flight the loop is not running at all: no repaint, no spinner,
+    /// and no key is read. Esc is not ignored, it is never seen. It sits in
+    /// the terminal's buffer until the fetch returns and then replays into
+    /// whatever screen is on show by then, which is the same corruption
+    /// `run_loop`'s startup drain exists to prevent, in a window this change
+    /// makes longer. The app is indistinguishable from hung throughout.
+    ///
+    /// The cost compounds three ways. It is `UNATTENDED_FETCH_TIMEOUT` per
+    /// repo, and repos run in sequence, so N unreachable repos freeze the
+    /// stage for N times the limit: for a selection off VPN that is minutes,
+    /// not one. And it is per attempt, not per flow: an add that refuses
+    /// with "already checked out" bounces to `PickBranchStrategy`, and the
+    /// next strategy the user picks re-runs this loop and re-fetches every
+    /// repo in neither `fresh_repos` nor `unreachable_repos`.
+    ///
+    /// So the unattended-run policy bounds the hang without making it
+    /// interruptible, and the glossary's "never waits indefinitely for a
+    /// person" is doing less work here than it does for sync: there the
+    /// fetch is on a worker, the report keeps painting and Esc leaves at
+    /// once, which is what made the same 60s worst case acceptable. Moving
+    /// this stage to that worker pattern is the fix and is left open
+    /// deliberately: bounding the fetch comes first, and the move reshapes
+    /// this stage's key handling and state, so it is its own change.
     fn execute_worktree_flow(&mut self, params: crate::tui::actions::WorktreeParams) {
-        use crate::core::workspace::create_worktree;
+        use crate::core::workspace::{self, create_worktree_with_fetch, PreCreateFetch};
+        use crate::tui::screens::sync_report::creating_fetch_note;
 
         // Clear progress/error on whichever screen is active
         match &mut self.screen {
@@ -910,12 +940,52 @@ impl App {
                 _ => return,
             }
 
-            match create_worktree(
+            // The report settles this for two kinds of repo, for opposite
+            // reasons. A repo it fetched has the remote's refs, so skipping
+            // is free and silent. A repo whose fetch timed out has refs of
+            // unknown age, and another attempt would very likely spend the
+            // whole limit again on this thread to learn the same nothing,
+            // so it is skipped and the log says so. Everything else is
+            // fetched. That includes a fetch that failed, which usually
+            // failed fast and is cheap to retry: usually, because `Failed`
+            // carries no elapsed time, so a slow failure (an ssh
+            // `ConnectTimeout`, say) is fetched again here and costs its
+            // wait a second time. Fixing that needs an elapsed time on
+            // every outcome; it is not in this change.
+            let unreachable = params.unreachable_repos.iter().any(|p| p == repo_path);
+            let fetch = if unreachable || params.fresh_repos.iter().any(|p| p == repo_path) {
+                PreCreateFetch::Skip
+            } else {
+                PreCreateFetch::Run(workspace::UNATTENDED_FETCH_TIMEOUT)
+            };
+            if unreachable {
+                let note = crate::tui::screens::sync_report::SKIPPED_AFTER_TIMEOUT_NOTE;
+                match &mut self.screen {
+                    Screen::CreateWorkspace(st) => st.progress.push(format!("  {}", note)),
+                    Screen::AddRepos(st) => st.progress.push(format!("  {}", note)),
+                    _ => return,
+                }
+            }
+
+            let attempt = create_worktree_with_fetch(
                 repo_path,
                 &params.workspace_dir,
                 &params.workspace_name,
                 &params.branch_strategy,
-            ) {
+                fetch,
+            );
+
+            // The fetch line goes in before the outcome, so a `git worktree
+            // add` that then refused on stale refs still carries the reason.
+            if let Some(note) = attempt.fetch.as_ref().and_then(creating_fetch_note) {
+                match &mut self.screen {
+                    Screen::CreateWorkspace(st) => st.progress.push(format!("  {}", note)),
+                    Screen::AddRepos(st) => st.progress.push(format!("  {}", note)),
+                    _ => return,
+                }
+            }
+
+            match attempt.created {
                 Ok(_) => match &mut self.screen {
                     Screen::CreateWorkspace(st) => {
                         st.progress.push(format!("  \u{2713} {}", repo_name));
@@ -1625,7 +1695,7 @@ fn run_sync_worker(
         }
         let outcome = crate::core::workspace::sync_repo_cancellable(
             repo_path,
-            crate::core::workspace::SYNC_FETCH_TIMEOUT,
+            crate::core::workspace::UNATTENDED_FETCH_TIMEOUT,
             &cancel,
         );
         if cancel.load(Ordering::Relaxed) {

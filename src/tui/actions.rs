@@ -17,6 +17,20 @@ pub struct WorktreeParams {
     pub repos: Vec<PathBuf>,
     pub branch_strategy: BranchStrategy,
     pub is_new: bool,
+    /// Repos the sync report fetched successfully in this flow. Their refs
+    /// are the remote's, so the worktree creation skips its own fetch and
+    /// says nothing about it.
+    pub fresh_repos: Vec<PathBuf>,
+    /// Repos whose sync fetch ran the whole limit without the remote
+    /// answering. The creation skips its fetch for these too, because
+    /// another attempt would very likely spend that limit again on the UI
+    /// thread, but it says so in the log: unlike `fresh_repos` these refs
+    /// are of unknown age. See `SyncReport::timed_out_paths` for what this
+    /// does and does not catch.
+    ///
+    /// A repo in neither list is fetched: two empty lists (no sync ran) are
+    /// the safe default.
+    pub unreachable_repos: Vec<PathBuf>,
 }
 
 /// A git operation dispatched to the background git-ops worker.

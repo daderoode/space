@@ -28,6 +28,10 @@ _Avoid_: progress log, syncing dialog
 The per-repo result inside a sync report: whether the fetch worked, which branches were fast-forwarded, and which were skipped and why.
 _Avoid_: sync result, repo result
 
+**Unattended run**:
+A git subprocess the app starts with nobody attending it: its own session with no controlling terminal, stdin closed, and a wall-clock limit after which its process group is stopped. With no terminal and no askpass helper configured, a prompt for a credential, passphrase or host key is refused rather than waited on; where the user has an askpass helper, git and ssh call that instead and the run waits on its dialog until the limit. Either way the limit is what guarantees the end. Both the sync and the fetch before a worktree is created run this way, in the TUI and over MCP. The limit bounds the wait; it says nothing about whether the app stays responsive during it, and the two call sites differ there: sync runs on a worker, so its report keeps painting and Esc leaves at once, while the fetch before a worktree is created runs on the UI thread, so nothing repaints and no key is read until it ends.
+_Avoid_: background job, detached fetch, headless git
+
 **Space filter**:
 Fuzzy selection of a space from the dashboard that changes the selected space and stays in the dashboard.
 _Avoid_: search, go

@@ -315,16 +315,16 @@ impl SyncOutcome {
     }
 }
 
-/// Wall-clock limit on the fetch of a sync. Fixed in Wave 1; the fast-forward
-/// calls are local and run without a limit.
-pub const SYNC_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
-/// How long a timed-out fetch gets to clean up after SIGTERM before SIGKILL.
-const SYNC_KILL_GRACE: Duration = Duration::from_secs(2);
-const SYNC_POLL_INTERVAL: Duration = Duration::from_millis(20);
+/// Wall-clock limit on a fetch run under the unattended-run policy. Fixed in
+/// Wave 1; a sync's fast-forward calls are local and run without a limit.
+pub const UNATTENDED_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a timed-out child gets to clean up after SIGTERM before SIGKILL.
+const UNATTENDED_KILL_GRACE: Duration = Duration::from_secs(2);
+const UNATTENDED_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// How long to wait for git's stderr pipe to close after git itself exited.
 /// A helper that outlived git and still holds the pipe must not stall the
-/// sync: after this the captured text is used as is.
-const SYNC_READER_GRACE: Duration = Duration::from_secs(1);
+/// caller: after this the captured text is used as is.
+const UNATTENDED_READER_GRACE: Duration = Duration::from_secs(1);
 
 /// Fetch from `origin` and fast-forward all local branches that are strictly
 /// behind their `origin/<branch>` ref (0 ahead, N behind); this assumes a single
@@ -333,16 +333,16 @@ const SYNC_READER_GRACE: Duration = Duration::from_secs(1);
 /// untouched and the refusals are reported as skips.
 ///
 /// The fetch runs under the unattended-run policy (see `fetch_origin_unattended`)
-/// with the fixed `SYNC_FETCH_TIMEOUT`. When it does not succeed the outcome
+/// with the fixed `UNATTENDED_FETCH_TIMEOUT`. When it does not succeed the outcome
 /// carries the failure and no branch work is attempted; the caller continues
 /// with local refs.
 #[allow(dead_code)] // public API; the TUI worker calls sync_repo_cancellable
 pub fn sync_repo(repo_path: &Path) -> SyncOutcome {
-    sync_repo_with_timeout(repo_path, SYNC_FETCH_TIMEOUT)
+    sync_repo_with_timeout(repo_path, UNATTENDED_FETCH_TIMEOUT)
 }
 
 /// `sync_repo` with an explicit fetch limit. The limit is a parameter so tests
-/// can use a short one; the user-facing value is `SYNC_FETCH_TIMEOUT`.
+/// can use a short one; the user-facing value is `UNATTENDED_FETCH_TIMEOUT`.
 #[allow(dead_code)] // public API; the TUI worker calls sync_repo_cancellable
 pub fn sync_repo_with_timeout(repo_path: &Path, timeout: Duration) -> SyncOutcome {
     sync_repo_cancellable(repo_path, timeout, &AtomicBool::new(false))
@@ -430,16 +430,30 @@ fn parse_skip_reason(stderr: &str) -> SkipReason {
     SkipReason::Other(line.to_string())
 }
 
-/// Run `git fetch --quiet origin` under the unattended-run policy (see
-/// `run_unattended`). `GIT_TERMINAL_PROMPT=0` makes the https refusal read
-/// "terminal prompts disabled". `GIT_SSH_COMMAND` is deliberately not set so
+/// Run `git <args>` in `cwd` under the unattended-run policy (see
+/// `run_unattended`), with `GIT_TERMINAL_PROMPT=0` so an https remote that
+/// would prompt fails as "terminal prompts disabled" rather than
+/// "Device not configured". `GIT_SSH_COMMAND` is deliberately not set so
 /// the user's own ssh configuration applies.
-fn fetch_origin_unattended(repo_path: &Path, timeout: Duration) -> FetchOutcome {
+///
+/// Only stderr is captured: `run_unattended` discards stdout, and
+/// `Unattended` has nowhere to carry it. That suits a command whose useful
+/// output is on stderr, which is why `git fetch --quiet` fits. It does not
+/// suit `git pull`, whose fast-forward summary goes to stdout, or `git log`,
+/// whose output is all stdout: an adopter that needs stdout has to extend
+/// the helper to capture it first, or it will silently log nothing.
+pub fn run_git_unattended(args: &[&str], cwd: &Path, timeout: Duration) -> Unattended {
     let mut cmd = Command::new("git");
-    cmd.args(["fetch", "--quiet", "origin"])
-        .current_dir(repo_path)
+    cmd.args(args)
+        .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0");
-    match run_unattended(cmd, timeout) {
+    run_unattended(cmd, timeout)
+}
+
+/// Run `git fetch --quiet origin` under the unattended-run policy and report
+/// it as a `FetchOutcome`.
+fn fetch_origin_unattended(repo_path: &Path, timeout: Duration) -> FetchOutcome {
+    match run_git_unattended(&["fetch", "--quiet", "origin"], repo_path, timeout) {
         Unattended::Exited { status, stderr } => {
             if status.success() {
                 FetchOutcome::Ok
@@ -468,7 +482,7 @@ fn fetch_origin_unattended(repo_path: &Path, timeout: Duration) -> FetchOutcome 
 /// How a child run by `run_unattended` ended. `stderr` is what the child
 /// wrote before it ended (or before it was stopped).
 #[derive(Debug)]
-enum Unattended {
+pub enum Unattended {
     /// The child exited on its own: within the limit with any status, or
     /// with a success status during the grace after SIGTERM (a non-success
     /// exit after the limit is a `TimedOut`).
@@ -532,7 +546,7 @@ fn run_unattended(mut cmd: Command, timeout: Duration) -> Unattended {
             // The child has exited, so the pipe normally reaches end-of-file
             // at once: give the reader a moment to copy the last write, but
             // never wait on a helper that outlived the child.
-            join_bounded(&stderr_reader, SYNC_READER_GRACE);
+            join_bounded(&stderr_reader, UNATTENDED_READER_GRACE);
             Unattended::Exited {
                 status,
                 stderr: snapshot(&stderr),
@@ -542,7 +556,7 @@ fn run_unattended(mut cmd: Command, timeout: Duration) -> Unattended {
             let status = stop_process_group(&mut child, pgid);
             // Nothing in the group survives the SIGKILL, so the pipe closes
             // and the reader finishes; the bound is a backstop.
-            join_bounded(&stderr_reader, SYNC_READER_GRACE);
+            join_bounded(&stderr_reader, UNATTENDED_READER_GRACE);
             let stderr = snapshot(&stderr);
             match status {
                 Some(status) if status.success() => Unattended::Exited { status, stderr },
@@ -559,7 +573,7 @@ fn run_unattended(mut cmd: Command, timeout: Duration) -> Unattended {
 fn join_bounded(reader: &std::thread::JoinHandle<()>, limit: Duration) {
     let deadline = Instant::now() + limit;
     while !reader.is_finished() && Instant::now() < deadline {
-        std::thread::sleep(SYNC_POLL_INTERVAL);
+        std::thread::sleep(UNATTENDED_POLL_INTERVAL);
     }
 }
 
@@ -615,11 +629,11 @@ fn wait_until(child: &mut Child, deadline: Instant) -> Wait {
         if now >= deadline {
             return Wait::Timeout;
         }
-        std::thread::sleep(SYNC_POLL_INTERVAL.min(deadline - now));
+        std::thread::sleep(UNATTENDED_POLL_INTERVAL.min(deadline - now));
     }
 }
 
-/// SIGTERM the child's process group, give the leader up to `SYNC_KILL_GRACE`
+/// SIGTERM the child's process group, give the leader up to `UNATTENDED_KILL_GRACE`
 /// to exit, then SIGKILL the whole group regardless: a helper in the session
 /// that ignored SIGTERM (askpass, a credential helper) must not outlive git
 /// holding the remote connection and the stderr pipe. The leader is only
@@ -634,10 +648,12 @@ fn stop_process_group(child: &mut Child, pgid: libc::pid_t) -> Option<ExitStatus
     unsafe {
         libc::killpg(pgid, libc::SIGTERM);
     }
-    let deadline = Instant::now() + SYNC_KILL_GRACE;
+    let deadline = Instant::now() + UNATTENDED_KILL_GRACE;
     loop {
         match leader_state(pid) {
-            Leader::Running if Instant::now() < deadline => std::thread::sleep(SYNC_POLL_INTERVAL),
+            Leader::Running if Instant::now() < deadline => {
+                std::thread::sleep(UNATTENDED_POLL_INTERVAL)
+            }
             Leader::Running | Leader::Exited => break,
             // Not ours to wait for, so nothing pins the group id: it must
             // not be signalled. Cannot happen while `wait_until` is the only
@@ -1180,26 +1196,106 @@ fn current_branch_name(repo_path: &Path) -> Option<String> {
     }
 }
 
+/// Whether `create_worktree` refreshes the repo's refs before it adds the
+/// worktree, and under what limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreCreateFetch {
+    /// No fetch is run. The caller has decided this repo does not need
+    /// one: either the sync already fetched it, or the sync's own fetch of
+    /// that remote timed out and repeating it here would very likely cost
+    /// the whole limit again. `create_worktree` does not distinguish the
+    /// two; the caller does, and reports them differently.
+    Skip,
+    /// Fetch `origin` under the unattended-run policy with this wall-clock
+    /// limit. The user-facing value is `UNATTENDED_FETCH_TIMEOUT`; tests
+    /// pass a short one.
+    Run(Duration),
+}
+
+/// A worktree creation attempt: how its pre-create fetch went, and what
+/// the creation itself did. The fetch outcome is reported whether or not
+/// the worktree was added, so a failed add on stale refs still shows the
+/// fetch line that explains it.
+#[derive(Debug)]
+pub struct WorktreeAttempt {
+    /// The fetch outcome; `None` when `PreCreateFetch::Skip` meant none
+    /// ran, or when the attempt failed before the fetch could run.
+    pub fetch: Option<FetchOutcome>,
+    /// The new worktree's path, or why the creation refused.
+    pub created: Result<PathBuf>,
+}
+
 /// Returns the path to the created worktree.
+///
+/// The pre-create fetch runs under the unattended-run policy with the fixed
+/// `UNATTENDED_FETCH_TIMEOUT`, and its outcome is discarded: creation
+/// continues with local refs whatever happened. Callers that want to report
+/// the fetch use `create_worktree_with_fetch`.
 pub fn create_worktree(
     repo_path: &Path,
     ws_dir: &Path,
     ws_name: &str,
     strategy: &BranchStrategy,
 ) -> Result<PathBuf> {
+    create_worktree_with_fetch(
+        repo_path,
+        ws_dir,
+        ws_name,
+        strategy,
+        PreCreateFetch::Run(UNATTENDED_FETCH_TIMEOUT),
+    )
+    .created
+}
+
+/// `create_worktree` that also reports its pre-create fetch. A fetch that
+/// failed or timed out is not an error: the worktree is added from local
+/// refs and the outcome is returned for the caller to log. It is returned
+/// even when the add then refused, because stale refs are a likely reason
+/// for that refusal.
+pub fn create_worktree_with_fetch(
+    repo_path: &Path,
+    ws_dir: &Path,
+    ws_name: &str,
+    strategy: &BranchStrategy,
+    fetch: PreCreateFetch,
+) -> WorktreeAttempt {
     let repo_name = repo_path.file_name().unwrap_or_default().to_string_lossy();
     let wt_path = ws_dir.join(ws_name).join(repo_name.as_ref());
 
-    std::fs::create_dir_all(wt_path.parent().unwrap())?;
+    if let Err(e) = std::fs::create_dir_all(wt_path.parent().unwrap()) {
+        return WorktreeAttempt {
+            fetch: None,
+            created: Err(e.into()),
+        };
+    }
 
+    // Detected before the fetch, as it always has been, then moved into the
+    // add: the fetch must not change which branch counts as the base.
     let base_branch = git::detect_base_branch(repo_path);
-    let wt = wt_path.to_string_lossy();
 
-    // Auto-fetch — ignore errors for offline use
-    let _ = Command::new("git")
-        .args(["fetch", "--quiet", "origin"])
-        .current_dir(repo_path)
-        .status();
+    // Pre-create fetch under the unattended-run policy; a failure is ignored
+    // for offline use and creation continues with local refs.
+    let fetch = match fetch {
+        PreCreateFetch::Skip => None,
+        PreCreateFetch::Run(limit) => Some(fetch_origin_unattended(repo_path, limit)),
+    };
+
+    WorktreeAttempt {
+        fetch,
+        created: add_worktree(repo_path, &wt_path, base_branch, strategy),
+    }
+}
+
+/// `git worktree add` for one repo, per strategy. Split out of
+/// `create_worktree_with_fetch` so its `?` short-circuits into the attempt's
+/// `created` without discarding the fetch outcome alongside it.
+fn add_worktree(
+    repo_path: &Path,
+    wt_path: &Path,
+    base_branch: String,
+    strategy: &BranchStrategy,
+) -> Result<PathBuf> {
+    let wt = wt_path.to_string_lossy();
 
     match strategy {
         BranchStrategy::NewBranch(branch_name) => {
@@ -1280,7 +1376,7 @@ pub fn create_worktree(
         }
     }
 
-    Ok(wt_path)
+    Ok(wt_path.to_path_buf())
 }
 
 /// Remove a workspace: call `git worktree remove` for each repo worktree,
@@ -1669,7 +1765,7 @@ mod tests {
             other => panic!("expected Unattended::Exited, got {:?}", other),
         }
         assert!(
-            elapsed < SYNC_KILL_GRACE,
+            elapsed < UNATTENDED_KILL_GRACE,
             "the grace must end when the child exits, took {:?}",
             elapsed
         );
@@ -1694,7 +1790,7 @@ mod tests {
             outcome
         );
         assert!(
-            elapsed < SYNC_KILL_GRACE + Duration::from_secs(2),
+            elapsed < UNATTENDED_KILL_GRACE + Duration::from_secs(2),
             "the child must be killed once the grace ends, took {:?}",
             elapsed
         );
@@ -1862,6 +1958,256 @@ mod tests {
             }
             other => panic!("expected FetchOutcome::Failed, got {:?}", other),
         }
+    }
+
+    /// The pre-create fetch runs under the unattended-run policy, so a remote
+    /// that would prompt for credentials fails at once with git's own
+    /// "terminal prompts disabled" text instead of prompting on the raw-mode
+    /// terminal behind the alternate screen. A failed fetch is not an error:
+    /// the worktree is still created from local refs. Needs the network:
+    /// skipped when github.com is unreachable or an askpass helper is
+    /// configured (it would answer the prompt instead).
+    #[test]
+    fn create_worktree_refused_https_prompt_still_creates_from_local_refs() {
+        use std::net::{TcpStream, ToSocketAddrs};
+        let core_askpass = Cmd::new("git")
+            .args(["config", "--get", "core.askPass"])
+            .output()
+            .map(|o| o.status.success() && !o.stdout.is_empty())
+            .unwrap_or(false);
+        if core_askpass
+            || std::env::var_os("GIT_ASKPASS").is_some()
+            || std::env::var_os("SSH_ASKPASS").is_some()
+        {
+            eprintln!("skipping: an askpass helper is configured");
+            return;
+        }
+        let reachable = "github.com:443"
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut addrs| addrs.next())
+            .map(|addr| TcpStream::connect_timeout(&addr, Duration::from_secs(3)).is_ok())
+            .unwrap_or(false);
+        if !reachable {
+            eprintln!("skipping: github.com is unreachable");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        Cmd::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        git_setup(&repo);
+        git(&["commit", "--allow-empty", "-m", "init"], &repo);
+        git(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/space-wayfinder-probe-nonexistent/repo.git",
+            ],
+            &repo,
+        );
+        // An empty value resets the helper list, so a stored credential on the
+        // machine cannot answer the 401 before the prompt logic runs.
+        git(&["config", "credential.helper", ""], &repo);
+
+        let base_tip = get_sha(&repo, "main");
+        let ws_dir = tmp.path().join("workspaces");
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::NewBranch("feature".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+
+        match &attempt.fetch {
+            Some(FetchOutcome::Failed { exit_code, stderr }) => {
+                assert_eq!(*exit_code, Some(128));
+                assert!(
+                    stderr.contains("terminal prompts disabled"),
+                    "expected git's refused-prompt text, got: {:?}",
+                    stderr
+                );
+            }
+            other => panic!("expected Some(FetchOutcome::Failed), got {:?}", other),
+        }
+        let path = attempt
+            .created
+            .expect("a refused prompt must not fail the creation");
+        assert!(
+            path.exists(),
+            "the worktree must still be created: {}",
+            path.display()
+        );
+        assert_eq!(
+            get_sha(&repo, "feature"),
+            base_tip,
+            "the new branch must start at the local base tip"
+        );
+    }
+
+    /// A remote that never answers must not block the creation for git's own
+    /// network timeout: the fetch is stopped at the limit and the worktree is
+    /// created from local refs. The remote is a `file://` origin whose
+    /// upload-pack is a script that sleeps, so nothing touches the network.
+    #[test]
+    fn create_worktree_timed_out_fetch_still_creates_from_local_refs() {
+        let (tmp, local) = make_behind_repo();
+        let script = tmp.path().join("slow-upload-pack.sh");
+        std::fs::write(&script, "exec sleep 30\n").unwrap();
+        let origin_url = format!("file://{}", tmp.path().join("origin.git").display());
+        git(&["remote", "set-url", "origin", &origin_url], &local);
+        git(
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                &format!("/bin/sh {}", script.display()),
+            ],
+            &local,
+        );
+
+        let limit = Duration::from_millis(1000);
+        let ws_dir = tmp.path().join("workspaces");
+        let started = Instant::now();
+        let attempt = create_worktree_with_fetch(
+            &local,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::NewBranch("feature".to_string()),
+            PreCreateFetch::Run(limit),
+        );
+        let elapsed = started.elapsed();
+
+        match &attempt.fetch {
+            Some(FetchOutcome::TimedOut { after, .. }) => assert_eq!(*after, limit),
+            other => panic!("expected Some(FetchOutcome::TimedOut), got {:?}", other),
+        }
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "creation must return shortly after the limit, took {:?}",
+            elapsed
+        );
+        let path = attempt
+            .created
+            .expect("a timed-out fetch must not fail the creation");
+        assert!(
+            path.exists(),
+            "the worktree must still be created: {}",
+            path.display()
+        );
+    }
+
+    /// `PreCreateFetch::Skip` runs no fetch at all. The origin is a path that
+    /// does not exist, so a fetch would fail instantly and loudly; `Run` on
+    /// the same repo is the contrast that proves the skip did something.
+    #[test]
+    fn create_worktree_skip_runs_no_fetch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        Cmd::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        git_setup(&repo);
+        git(&["commit", "--allow-empty", "-m", "init"], &repo);
+        let dead_url = format!("file://{}", tmp.path().join("no-such-origin.git").display());
+        git(&["remote", "add", "origin", &dead_url], &repo);
+
+        let ws_dir = tmp.path().join("workspaces");
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "skipped",
+            &BranchStrategy::NewBranch("feature".to_string()),
+            PreCreateFetch::Skip,
+        );
+        assert!(
+            attempt.fetch.is_none(),
+            "Skip must not run a fetch, got {:?}",
+            attempt.fetch
+        );
+        assert!(
+            attempt.created.unwrap().exists(),
+            "the worktree must be created"
+        );
+
+        // Contrast: the same repo with `Run` does fetch, and it fails.
+        let ran = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "fetched",
+            &BranchStrategy::NewBranch("other".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        assert!(
+            matches!(ran.fetch, Some(FetchOutcome::Failed { .. })),
+            "Run against a dead origin must report the failure, got {:?}",
+            ran.fetch
+        );
+        assert!(
+            ran.created.unwrap().exists(),
+            "the worktree must still be created"
+        );
+    }
+
+    /// The fetch outcome survives an add that then refused. Stale refs are a
+    /// likely reason for such a refusal, so the caller must still get the
+    /// fetch line that explains it. Offline: the origin is a path that does
+    /// not exist, and the add is refused because the branch is already
+    /// checked out in the first worktree.
+    #[test]
+    fn create_worktree_reports_the_fetch_even_when_the_add_refuses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        Cmd::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        git_setup(&repo);
+        git(&["commit", "--allow-empty", "-m", "init"], &repo);
+        let dead_url = format!("file://{}", tmp.path().join("no-such-origin.git").display());
+        git(&["remote", "add", "origin", &dead_url], &repo);
+
+        let ws_dir = tmp.path().join("workspaces");
+        let first = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "first",
+            &BranchStrategy::NewBranch("feature".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        assert!(first.created.is_ok(), "the first worktree must be created");
+
+        let second = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "second",
+            &BranchStrategy::ExistingBranch("feature".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let err = second
+            .created
+            .expect_err("a branch checked out elsewhere must refuse the add");
+        assert!(
+            err.to_string().contains("already"),
+            "expected git's refusal, got: {}",
+            err
+        );
+        assert!(
+            matches!(second.fetch, Some(FetchOutcome::Failed { .. })),
+            "the fetch outcome must survive a refused add, got {:?}",
+            second.fetch
+        );
     }
 
     #[test]
