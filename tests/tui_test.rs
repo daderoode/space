@@ -7380,6 +7380,11 @@ mod paging_tests {
     /// The gate is only correct if it still lets all three keys through on the
     /// pane they belong to, so all three are asserted, not just the one whose
     /// screen is cheapest to reach.
+    ///
+    /// This is the positive half only. `create_add_and_delete_are_ignored_on_the_repo_pane`
+    /// is the half that pins the gate itself: remove a `Pane::Left` guard and
+    /// that one fails while this one still passes, because this test never
+    /// focuses the repo pane. Read them as a pair.
     #[test]
     fn create_add_and_delete_still_fire_on_the_workspaces_pane() {
         let env = TestEnv::new();

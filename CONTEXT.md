@@ -17,7 +17,7 @@ Re-walking the configured roots to rebuild the repo list.
 _Avoid_: refresh, reload
 
 **Sync**:
-Bringing a selected repo's local view of its remote up to date before a branch is chosen: fetch, then fast-forward only the local branches that are strictly behind. Branches that are ahead, diverged, or checked out are left as they are. Sync never waits indefinitely for a person: the fetch runs with no terminal and with git's own prompt disabled, so a request for a credential, passphrase or host-key answer is refused rather than waited on; where the user has an askpass helper configured, git and ssh call that instead and the run waits on its dialog until the limit. The fetch runs on a worker, so the report keeps redrawing and Esc leaves at once: being bounded and being interruptible are separate guarantees, and this is the call site that has both.
+Bringing a selected repo's local view of its remote up to date before a branch is chosen: fetch, then fast-forward only the local branches that are strictly behind. Branches that are ahead, diverged, or checked out are left as they are. The fetch is an **unattended run**, so it never waits indefinitely for a person, and it runs on a worker, so the report keeps painting and Esc leaves at once while it does.
 _Avoid_: pull, update, refresh
 
 **Sync report**:
