@@ -308,7 +308,11 @@ Pressing `g` or running `space go` opens a fuzzy picker listing all workspaces. 
 
 ## Repo Search
 
-Pressing `/` opens a fuzzy search across all cached repos. Matching is powered by nucleo (same engine as the Helix editor). Selecting a repo navigates to the workspace containing it.
+Pressing `/` **on the repos pane** opens a fuzzy search across all cached repos. Matching is powered by nucleo (same engine as the Helix editor). Selecting a repo navigates to the workspace containing it. From the workspaces pane, `/` is the space filter instead (see below), so repo search from there is `→` then `/`.
+
+## Space Filter
+
+Pressing `/` **on the workspaces pane** opens a fuzzy picker over the spaces and selects the chosen one in place, without leaving the TUI. Focus stays on the workspaces pane and the repos pane reloads for the new space. This is the difference from `g`, which changes directory and exits.
 
 ---
 
