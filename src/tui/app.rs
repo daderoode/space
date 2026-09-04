@@ -1,7 +1,7 @@
 use crate::core::{
     config::SpaceConfig,
     git::{FileDiff, FileEntry},
-    workspace::{self, SyncOutcome, Workspace},
+    workspace::{self, FetchOutcome, SyncOutcome, Workspace},
 };
 use crate::tui::actions::StatusKind;
 use crate::tui::screens::sync_report::PAGE_ROWS;
@@ -43,6 +43,34 @@ pub enum SyncProgress {
     Done,
 }
 
+/// Sent from the Creating worker thread back to the App during the Creating
+/// stage. `index` addresses the repo's position in `WorktreeParams::repos`.
+pub enum CreateProgress {
+    Started {
+        index: usize,
+    },
+    Finished {
+        index: usize,
+        fetch: Option<FetchOutcome>,
+        /// Flattened to the text at the worker boundary: the App only ever
+        /// needs what to print, and this keeps `anyhow::Error` off the channel.
+        created: Result<(), String>,
+    },
+    /// The worker chose to end early and says why. Distinct from `Done` so a
+    /// deliberate stop is stated rather than inferred from a short count, and
+    /// distinct from a silent disconnect, which means the worker died.
+    Stopped(CreateStop),
+    /// Every repo was attempted.
+    Done,
+}
+
+/// Why the Creating worker ended its run early.
+pub enum CreateStop {
+    /// `git worktree add` refused because the branch is checked out
+    /// elsewhere. The App bounces back to the branch-strategy picker.
+    AlreadyCheckedOut { index: usize },
+}
+
 /// Sent from the git-ops worker thread back to the App during the Running stage.
 ///
 /// Unlike `SyncProgress::Done`, the terminal `Done` here carries `success` so the
@@ -50,6 +78,38 @@ pub enum SyncProgress {
 pub enum GitOpProgress {
     Line(String),
     Done { success: bool },
+}
+
+/// The Creating stage's live worker: its channel, its cancel flag, the
+/// parameters it was started with, and the three counts the UI reads.
+///
+/// The counts are separate because they answer different questions and are
+/// never derived from one another: the footer shows how far the run has got,
+/// the cancel message says how many worktrees exist, and the disconnect path
+/// asks whether every repo was attempted.
+///
+/// No generation counter, unlike `ws_generation` on the workspace loader, and
+/// the asymmetry is deliberate rather than an oversight. That loader reuses one
+/// long-lived channel, so a stale reply can arrive on it and has to be
+/// recognised and dropped. Here every write to `App::create_job` replaces the
+/// whole struct, including a brand-new `sync_channel`, so the previous `rx` is
+/// dropped at that instant: the old worker's next `send` returns `Err` and it
+/// returns, and a message can only ever be received on the channel it was sent
+/// on. Applying one run's message to another run's state is structurally
+/// impossible here, not merely avoided, so there is nothing for an id to
+/// discriminate.
+pub struct CreateJob {
+    rx: mpsc::Receiver<CreateProgress>,
+    // Relaxed ordering is sufficient: this flag guards no other shared state,
+    // so there is no happens-before relationship to establish with the worker.
+    cancel: Arc<AtomicBool>,
+    params: crate::tui::actions::WorktreeParams,
+    /// Repos whose `Started` has arrived; what the footer counts.
+    started: usize,
+    /// Repos whose `Finished` has arrived, however it went.
+    finished: usize,
+    /// Repos whose worktree was confirmed created; what the cancel message counts.
+    created: usize,
 }
 
 const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(5);
@@ -264,6 +324,10 @@ pub struct App {
     pub gitop_rx: Option<mpsc::Receiver<GitOpProgress>>,
     pub gitop_cancel: Option<Arc<AtomicBool>>,
 
+    // Background worktree worker (Creating stage). Channel, flag, parameters
+    // and counts travel together: `Some` IS "a run is in flight".
+    pub create_job: Option<CreateJob>,
+
     // Debounce
     pub nav_pending: Option<Instant>,
 
@@ -337,6 +401,7 @@ impl App {
             sync_cancel: None,
             gitop_rx: None,
             gitop_cancel: None,
+            create_job: None,
             nav_pending: None,
             ws_loading: false,
             ws_loading_since: None,
@@ -871,203 +936,422 @@ impl App {
         }
     }
 
-    /// Create or add every selected repo's worktree, logging one block per
-    /// repo into the active screen's Creating log.
-    ///
-    /// Residual, and it is a frozen UI rather than a slow one. This loop runs
-    /// synchronously inside `handle_key`, and `run_loop` draws once per
-    /// iteration and only then polls for a key, so while a pre-create fetch
-    /// is in flight the loop is not running at all: no repaint, no spinner,
-    /// and no key is read. Esc is not ignored, it is never seen. It sits in
-    /// the terminal's buffer until the fetch returns and then replays into
-    /// whatever screen is on show by then, which is the same corruption
-    /// `run_loop`'s startup drain exists to prevent, in a window this change
-    /// makes longer. The app is indistinguishable from hung throughout.
-    ///
-    /// The cost compounds three ways. It is `UNATTENDED_FETCH_TIMEOUT` per
-    /// repo, and repos run in sequence, so N unreachable repos freeze the
-    /// stage for N times the limit: for a selection off VPN that is minutes,
-    /// not one. And it is per attempt, not per flow: an add that refuses
-    /// with "already checked out" bounces to `PickBranchStrategy`, and the
-    /// next strategy the user picks re-runs this loop and re-fetches every
-    /// repo in neither `fresh_repos` nor `unreachable_repos`.
-    ///
-    /// So the unattended-run policy bounds the hang without making it
-    /// interruptible, and the glossary's "never waits indefinitely for a
-    /// person" is doing less work here than it does for sync: there the
-    /// fetch is on a worker, the report keeps painting and Esc leaves at
-    /// once, which is what made the same 60s worst case acceptable. Moving
-    /// this stage to that worker pattern is the fix and is left open
-    /// deliberately: bounding the fetch comes first, and the move reshapes
-    /// this stage's key handling and state, so it is its own change.
-    fn execute_worktree_flow(&mut self, params: crate::tui::actions::WorktreeParams) {
-        use crate::core::workspace::{self, create_worktree_with_fetch, PreCreateFetch};
-        use crate::tui::screens::sync_report::creating_fetch_note;
+    /// Whether the Creating stage's worker is running.
+    pub fn creating_in_flight(&self) -> bool {
+        self.create_job.is_some()
+    }
 
-        // Clear progress/error on whichever screen is active
+    /// How far the Creating run has got: `(in_flight, started, total)`.
+    /// All zero with no run, which is what the footer renders as done.
+    pub fn creating_progress(&self) -> (bool, usize, usize) {
+        match &self.create_job {
+            Some(job) => (true, job.started, job.params.repos.len()),
+            None => (false, 0, 0),
+        }
+    }
+
+    /// The Creating log of the active screen, if it is in the Creating stage:
+    /// its lines, its error slot and its scroll state.
+    ///
+    /// Every screen mutation in `poll_create_result` goes through this, so a
+    /// late message can only ever touch a screen that is actually showing the
+    /// log it describes.
+    fn creating_mut(
+        &mut self,
+    ) -> Option<(
+        &mut Vec<String>,
+        &mut Option<String>,
+        &mut crate::tui::screens::sync_report::LogView,
+    )> {
         match &mut self.screen {
-            Screen::CreateWorkspace(st) => {
-                st.progress.clear();
-                st.log_view.reset();
-                st.error = None;
+            Screen::CreateWorkspace(st)
+                if st.stage == crate::tui::screens::create::CreateStage::Creating =>
+            {
+                Some((&mut st.progress, &mut st.error, &mut st.log_view))
             }
-            Screen::AddRepos(st) => {
-                st.progress.clear();
-                st.log_view.reset();
-                st.error = None;
+            Screen::AddRepos(st) if st.stage == crate::tui::screens::add::AddStage::Creating => {
+                Some((&mut st.progress, &mut st.error, &mut st.log_view))
+            }
+            _ => None,
+        }
+    }
+
+    /// The Creating stage's success path: refresh the space list, select the
+    /// space this run built BY NAME, and return to the dashboard.
+    fn finish_create_run(&mut self, params: &crate::tui::actions::WorktreeParams) {
+        if let Ok(ws_list) = crate::core::workspace::list_workspaces(&params.workspace_dir) {
+            self.workspaces = ws_list;
+            if let Some(idx) = self
+                .workspaces
+                .iter()
+                .position(|w| w.name == params.workspace_name)
+            {
+                self.selected_ws = idx;
+            }
+            self.reset_repo_pane_state();
+            // Intentionally synchronous: worktree creation is infrequent and
+            // the user expects the new workspace to appear fully loaded.
+            self.load_selected_workspace_detail();
+        }
+        let verb = if params.is_new {
+            "Created"
+        } else {
+            "Added repos to"
+        };
+        self.screen = Screen::Dashboard;
+        self.set_status(
+            format!("{} workspace '{}'", verb, params.workspace_name),
+            StatusKind::Success,
+        );
+    }
+
+    /// Stop the Creating run at the worker's next boundary and leave for the
+    /// dashboard, with the partially created space selected and named.
+    ///
+    /// The count is creations the UI confirmed, and it can undercount by one.
+    /// Cancellation is boundary-only, so an in-flight `git worktree add`
+    /// finishes AFTER this message is written and that repo can appear on the
+    /// next refresh. Making the count exact would mean waiting for the child,
+    /// which is the freeze this whole change removes. The message also expires
+    /// after `STATUS_MESSAGE_TTL` (five seconds), while the late repo may
+    /// arrive after that.
+    ///
+    /// The recovery offered is "add the rest", not "run it again", and that is
+    /// verified rather than assumed: on git 2.50.1, retrying the same space
+    /// name makes every repo that already succeeded fail with
+    /// `fatal: '<path>' already exists`, and because the flow does not stop on
+    /// a generic failure it creates the missing repos anyway and then reports
+    /// the whole run as failed. The space ends up complete and the app says it
+    /// failed. The add path is clean because a repo that was never created has
+    /// neither the target directory nor the branch.
+    ///
+    /// "Leaves at once" has one asterisk, and it is not the network wait this
+    /// change removes. The refresh below calls `load_selected_workspace_detail`
+    /// synchronously, which opens every repo in the partial space with git2 to
+    /// read its status. That is local work bounded by the repos already
+    /// created, the same call every dashboard navigation makes, and it is what
+    /// makes the space appear correctly on the way out; it is not bounded by
+    /// `UNATTENDED_FETCH_TIMEOUT` the way the old freeze was.
+    ///
+    /// Nothing is cleaned up. `create_worktree_cancellable` runs
+    /// `create_dir_all` before the fetch and `list_workspaces` lists any
+    /// directory, so cancelling before any worktree exists still leaves an
+    /// empty space on the dashboard. That is left deliberately, for
+    /// CONSISTENCY: the error path produces the identical empty directory, and
+    /// a cleanup that fired for one and not the other would be the
+    /// inconsistency. Cancel means stop, not undo.
+    fn cancel_creating(&mut self) {
+        // Drain first. `run_loop` drains, draws, then waits up to 16ms for a
+        // key, so the worker's terminal message can land inside that wait and
+        // still be undrained when Esc is read. The user is pressing Esc
+        // against the screen they were shown, so leaving is right either way,
+        // but a run that had already finished must be reported as finished,
+        // not as a cancellation with a count frozen at the last drain. Without
+        // this a fully successful run says "Stopped creating 'ws' after 4 of 5
+        // repos", which is a success reported as a failure, and an
+        // `AlreadyCheckedOut` stop loses its bounce to the strategy picker.
+        self.poll_create_result();
+        // The drain narrows the window; it cannot close it. `run_create_worker`
+        // sends `Finished` for the last repo inside its loop and `Done` as a
+        // separate statement after it, and a thread can be preempted between
+        // the two, so a run can be over with nothing yet in the channel to
+        // drain. `finished` settles it either way: every repo attempted means
+        // the run is over whether or not `Done` has been sent. Not `created`,
+        // which a failed repo leaves short while the run is just as over.
+        if let Some(job) = &self.create_job {
+            // Safe because the worker has exactly two successors after its
+            // last `Finished`, not safe in general: this predicate is a lower
+            // bound on the worker's progress and can never name its next
+            // statement. See the comment at the worker's terminal region.
+            //
+            // Blind spot, deliberate and currently unreachable. `finished`
+            // reaches the total one statement before the worker decides which
+            // terminal message to send: it sends `Finished` for the last repo,
+            // then evaluates whether to send `Stopped(AlreadyCheckedOut)`. An
+            // Esc in that window is swallowed here and the next drain bounces
+            // to the strategy picker, so the user pressed Esc to leave and
+            // arrives at the picker instead, with the key gone rather than
+            // delayed. Accepted: it beats reporting a finished run as a stop,
+            // and it does not replay a key into a screen the user has not seen.
+            // It cannot fire today because the predicate behind `stop` is dead
+            // on git 2.42 and later; ticket 09's follow-up 6 owns fixing that
+            // and says to pin this interaction in the same change.
+            if job.finished >= job.params.repos.len() {
+                // Left for the next drain, which finishes the run through the
+                // one completion path. Esc costs a frame nobody perceives.
+                // Synthesising the completion here instead would duplicate what
+                // `Done` does and would bypass the disconnect rule in the case
+                // where the worker actually died between its last `Finished`
+                // and its `Done`, which that rule already handles correctly.
+                return;
+            }
+        }
+        let job = match self.create_job.take() {
+            Some(job) => job,
+            None => {
+                // The run ended in this very frame. If the drain left the
+                // Creating stage up it did so because a repo failed, and Esc
+                // still means leave. If it moved the screen itself (the
+                // dashboard on success, the strategy picker on a bounce) this
+                // is a no-op: the key is consumed rather than replayed into a
+                // screen the user has not seen yet, which is the corruption
+                // `run_loop`'s own startup drain exists to prevent.
+                self.leave_failed_creating();
+                return;
+            }
+        };
+        job.cancel.store(true, Ordering::Relaxed);
+
+        if let Ok(ws) = crate::core::workspace::list_workspaces(&job.params.workspace_dir) {
+            self.workspaces = ws;
+        }
+        self.selected_ws = self
+            .workspaces
+            .iter()
+            .position(|w| w.name == job.params.workspace_name)
+            .unwrap_or(0);
+        self.reset_repo_pane_state();
+        self.load_selected_workspace_detail();
+        self.screen = Screen::Dashboard;
+
+        let verb = if job.params.is_new {
+            "Stopped creating"
+        } else {
+            "Stopped adding"
+        };
+        // The space name is deliberately not in here. `render_status_message`
+        // is an unwrapped one-row `Paragraph`, so it clips rather than wraps,
+        // and the dashboard's documented minimum is 80 columns. With a name
+        // interpolated, any name of 16 characters or more pushed the line past
+        // 80 and the part that fell off the end was "Press a to add the rest.",
+        // the only actionable half. Without it the longest this can be is 65
+        // columns at 999 of 999, which fits with room. The name is not lost:
+        // the lines just above select that space and load it, so it is the
+        // highlighted row on the dashboard the moment this message appears.
+        self.set_status(
+            format!(
+                "{} after {} of {} repos. Press a to add the rest.",
+                verb,
+                job.created,
+                job.params.repos.len()
+            ),
+            StatusKind::Warning,
+        );
+    }
+
+    /// Leave a finished-but-failed Creating stage for the dashboard, exactly
+    /// as the stage's own Esc does. A no-op unless that stage is still up.
+    ///
+    /// Only reachable in the frame where the run ended: `Done` with a failed
+    /// repo, or a worker that died, both of which keep the stage up so the log
+    /// can be read.
+    ///
+    /// `Enter` in that same window is swallowed once, and that is protective
+    /// rather than merely cheap. If the drain has already processed `Done` the
+    /// screen beneath is the dashboard, where Enter with the workspaces pane
+    /// focused is `Message::GoToWorkspace`: it sets `space_cd_target` and
+    /// `should_quit`, so a replayed Enter would EXIT THE APPLICATION. Swallowing
+    /// it is the same protection `run_loop`'s startup drain provides. Do not
+    /// "fix" the asymmetry with Esc by letting the key through.
+    fn leave_failed_creating(&mut self) {
+        let (verb, err) = match &self.screen {
+            Screen::CreateWorkspace(st)
+                if st.stage == crate::tui::screens::create::CreateStage::Creating =>
+            {
+                ("Create", st.error.clone())
+            }
+            Screen::AddRepos(st) if st.stage == crate::tui::screens::add::AddStage::Creating => {
+                ("Add", st.error.clone())
             }
             _ => return,
+        };
+        self.refresh_if_leaving_creating_stage();
+        self.screen = Screen::Dashboard;
+        if let Some(err) = err {
+            self.set_status(format!("{} failed: {}", verb, err), StatusKind::Error);
         }
+    }
 
-        let verb = if params.is_new { "Creating" } else { "Adding" };
-
-        for repo_path in &params.repos {
-            let repo_name = repo_path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "?".to_string());
-
-            // Push progress message
-            match &mut self.screen {
-                Screen::CreateWorkspace(st) => {
-                    st.progress
-                        .push(format!("{} worktree for {}...", verb, repo_name));
-                }
-                Screen::AddRepos(st) => {
-                    st.progress
-                        .push(format!("{} worktree for {}...", verb, repo_name));
-                }
-                _ => return,
-            }
-
-            // The report settles this for two kinds of repo, for opposite
-            // reasons. A repo it fetched has the remote's refs, so skipping
-            // is free and silent. A repo whose fetch timed out has refs of
-            // unknown age, and another attempt would very likely spend the
-            // whole limit again on this thread to learn the same nothing,
-            // so it is skipped and the log says so. Everything else is
-            // fetched. That includes a fetch that failed, which usually
-            // failed fast and is cheap to retry: usually, because `Failed`
-            // carries no elapsed time, so a slow failure (an ssh
-            // `ConnectTimeout`, say) is fetched again here and costs its
-            // wait a second time. Fixing that needs an elapsed time on
-            // every outcome; it is not in this change.
-            let unreachable = params.unreachable_repos.iter().any(|p| p == repo_path);
-            let fetch = if unreachable || params.fresh_repos.iter().any(|p| p == repo_path) {
-                PreCreateFetch::Skip
-            } else {
-                PreCreateFetch::Run(workspace::UNATTENDED_FETCH_TIMEOUT)
+    /// Poll the Creating worker channel once per frame. Non-blocking.
+    ///
+    /// Applies `Started` and `Finished` to the active screen's log, bounces to
+    /// the branch-strategy picker on `Stopped`, and leaves for the dashboard on
+    /// `Done` unless a repo failed, in which case the stage stays up so the log
+    /// can be read. `Finished` is purely a logging message: no control flow
+    /// hangs off it, only off `Stopped`, `Done` and a disconnect.
+    ///
+    /// It deliberately differs from `poll_sync_result` in what the screen may
+    /// do. That poller treats "the screen is not the one I expect" as a reason
+    /// to cancel the worker and drop the receiver, which is what made a
+    /// `Screen::Help { return_to }` wrapper unsafe in PR #29: wrapping a
+    /// mid-sync screen made the gate false and cancelled the sync it was
+    /// displaying. Here the screen gates only whether messages are drained this
+    /// frame; the JOB is what says a run exists. Dropping the receiver would be
+    /// the same hazard one step removed, because the worker's next send would
+    /// then fail and it would stop. So an unrecognised screen leaves the job
+    /// untouched and the buffered messages queue (the channel holds 64, far
+    /// more than any realistic repo count) until the log comes back.
+    ///
+    /// That is safe because every exit from the Creating stage cancels and
+    /// drops the job explicitly: `CancelCreating`, the `Stopped` bounce,
+    /// re-entry into `ExecuteWorktreeFlow`, and completion. The residual is
+    /// that a screen which never returns to the Creating stage would leave the
+    /// job in place until the App is dropped, which is unreachable today and
+    /// in any case a far better failure than a cancelled run.
+    pub fn poll_create_result(&mut self) {
+        let is_creating = self.creating_mut().is_some();
+        if !is_creating || self.create_job.is_none() {
+            return;
+        }
+        loop {
+            let recv = match &self.create_job {
+                Some(job) => job.rx.try_recv(),
+                None => return,
             };
-            if unreachable {
-                let note = crate::tui::screens::sync_report::SKIPPED_AFTER_TIMEOUT_NOTE;
-                match &mut self.screen {
-                    Screen::CreateWorkspace(st) => st.progress.push(format!("  {}", note)),
-                    Screen::AddRepos(st) => st.progress.push(format!("  {}", note)),
-                    _ => return,
-                }
-            }
-
-            let attempt = create_worktree_with_fetch(
-                repo_path,
-                &params.workspace_dir,
-                &params.workspace_name,
-                &params.branch_strategy,
-                fetch,
-            );
-
-            // The fetch line goes in before the outcome, so a `git worktree
-            // add` that then refused on stale refs still carries the reason.
-            if let Some(note) = attempt.fetch.as_ref().and_then(creating_fetch_note) {
-                match &mut self.screen {
-                    Screen::CreateWorkspace(st) => st.progress.push(format!("  {}", note)),
-                    Screen::AddRepos(st) => st.progress.push(format!("  {}", note)),
-                    _ => return,
-                }
-            }
-
-            match attempt.created {
-                Ok(_) => match &mut self.screen {
-                    Screen::CreateWorkspace(st) => {
-                        st.progress.push(format!("  \u{2713} {}", repo_name));
-                    }
-                    Screen::AddRepos(st) => {
-                        st.progress.push(format!("  \u{2713} {}", repo_name));
-                    }
-                    _ => return,
-                },
-                Err(e) => {
-                    if e.to_string().contains("already checked out") {
-                        match &mut self.screen {
-                            Screen::CreateWorkspace(st) => {
-                                st.stage =
-                                    crate::tui::screens::create::CreateStage::PickBranchStrategy;
-                                st.progress.clear();
-                                st.error = Some(format!(
-                                    "'{}' is already checked out — pick a different strategy",
-                                    repo_name
+            match recv {
+                Ok(CreateProgress::Started { index }) => {
+                    let lines = match &mut self.create_job {
+                        Some(job) => {
+                            job.started = index + 1;
+                            let verb = if job.params.is_new {
+                                "Creating"
+                            } else {
+                                "Adding"
+                            };
+                            let mut lines = vec![format!(
+                                "{} worktree for {}...",
+                                verb,
+                                repo_label(&job.params, index)
+                            )];
+                            // Unlike a skip for freshness, this one is worth
+                            // saying: these refs are of unknown age.
+                            if job
+                                .params
+                                .repos
+                                .get(index)
+                                .is_some_and(|p| job.params.skipped_after_timeout(p))
+                            {
+                                lines.push(format!(
+                                    "  {}",
+                                    crate::tui::screens::sync_report::SKIPPED_AFTER_TIMEOUT_NOTE
                                 ));
                             }
-                            Screen::AddRepos(st) => {
-                                st.stage = crate::tui::screens::add::AddStage::PickBranchStrategy;
-                                st.progress.clear();
-                                st.error = Some(format!(
-                                    "'{}' is already checked out — pick a different strategy",
-                                    repo_name
-                                ));
-                            }
-                            _ => {}
+                            lines
                         }
-                        return;
+                        None => return,
+                    };
+                    if let Some((progress, _, _)) = self.creating_mut() {
+                        progress.extend(lines);
                     }
+                }
+                Ok(CreateProgress::Finished {
+                    index,
+                    fetch,
+                    created,
+                }) => {
+                    let (lines, failure) = match &mut self.create_job {
+                        Some(job) => {
+                            job.finished += 1;
+                            let name = repo_label(&job.params, index);
+                            let mut lines = Vec::new();
+                            // The fetch line goes in before the outcome, so a
+                            // `git worktree add` that then refused on stale
+                            // refs still carries the reason.
+                            if let Some(note) = fetch
+                                .as_ref()
+                                .and_then(crate::tui::screens::sync_report::creating_fetch_note)
+                            {
+                                lines.push(format!("  {}", note));
+                            }
+                            let failure = match created {
+                                Ok(()) => {
+                                    job.created += 1;
+                                    lines.push(format!("  \u{2713} {}", name));
+                                    None
+                                }
+                                Err(e) => {
+                                    lines.push(format!("  \u{2717} {}: {}", name, e));
+                                    Some(format!("Failed: {}", e))
+                                }
+                            };
+                            (lines, failure)
+                        }
+                        None => return,
+                    };
+                    if let Some((progress, error, _)) = self.creating_mut() {
+                        progress.extend(lines);
+                        if failure.is_some() {
+                            *error = failure;
+                        }
+                    }
+                }
+                Ok(CreateProgress::Stopped(CreateStop::AlreadyCheckedOut { index })) => {
+                    let job = match self.create_job.take() {
+                        Some(job) => job,
+                        None => return,
+                    };
+                    job.cancel.store(true, Ordering::Relaxed);
+                    let msg = format!(
+                        "'{}' is already checked out — pick a different strategy",
+                        repo_label(&job.params, index)
+                    );
                     match &mut self.screen {
                         Screen::CreateWorkspace(st) => {
-                            st.progress.push(format!("  \u{2717} {}: {}", repo_name, e));
-                            st.error = Some(format!("Failed: {}", e));
+                            st.stage = crate::tui::screens::create::CreateStage::PickBranchStrategy;
+                            st.progress.clear();
+                            st.error = Some(msg);
                         }
                         Screen::AddRepos(st) => {
-                            st.progress.push(format!("  \u{2717} {}: {}", repo_name, e));
-                            st.error = Some(format!("Failed: {}", e));
+                            st.stage = crate::tui::screens::add::AddStage::PickBranchStrategy;
+                            st.progress.clear();
+                            st.error = Some(msg);
                         }
-                        _ => return,
+                        _ => {}
                     }
+                    return;
+                }
+                Ok(CreateProgress::Done) => {
+                    let job = match self.create_job.take() {
+                        Some(job) => job,
+                        None => return,
+                    };
+                    self.finish_create_run_unless_failed(&job.params);
+                    return;
+                }
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    let job = match self.create_job.take() {
+                        Some(job) => job,
+                        None => return,
+                    };
+                    if job.finished < job.params.repos.len() {
+                        // The worker died without saying so: a cancelled one
+                        // stops after a `Stopped` or without a job at all.
+                        if let Some((progress, error, _)) = self.creating_mut() {
+                            progress.push(
+                                "  \u{2717} the worktree worker stopped unexpectedly".to_string(),
+                            );
+                            *error = Some("the worktree worker stopped unexpectedly".to_string());
+                        }
+                    } else {
+                        self.finish_create_run_unless_failed(&job.params);
+                    }
+                    return;
                 }
             }
         }
+    }
 
-        // Check result — need fresh borrow after the loop
-        let had_error = match &self.screen {
-            Screen::CreateWorkspace(st) => st.error.is_some(),
-            Screen::AddRepos(st) => st.error.is_some(),
-            _ => false,
-        };
-
-        if !had_error {
-            if let Ok(ws_list) = crate::core::workspace::list_workspaces(&params.workspace_dir) {
-                self.workspaces = ws_list;
-                if let Some(idx) = self
-                    .workspaces
-                    .iter()
-                    .position(|w| w.name == params.workspace_name)
-                {
-                    self.selected_ws = idx;
-                }
-                self.reset_repo_pane_state();
-                // Intentionally synchronous: worktree creation is infrequent and
-                // the user expects the new workspace to appear fully loaded.
-                self.load_selected_workspace_detail();
-            }
-            let verb = if params.is_new {
-                "Created"
-            } else {
-                "Added repos to"
-            };
-            self.screen = Screen::Dashboard;
-            self.set_status(
-                format!("{} workspace '{}'", verb, params.workspace_name),
-                StatusKind::Success,
-            );
+    /// Leave for the dashboard, unless a repo failed: then the Creating stage
+    /// stays up so the log can be read (Esc/Enter leaves with the error).
+    fn finish_create_run_unless_failed(&mut self, params: &crate::tui::actions::WorktreeParams) {
+        let failed = self
+            .creating_mut()
+            .map(|(_, error, _)| error.is_some())
+            .unwrap_or(false);
+        if !failed {
+            self.finish_create_run(params);
         }
-        // If error, stay on Creating stage so user can see the log
     }
 
     /// Load recent branches for the first selected repo and advance the active
@@ -1316,7 +1600,36 @@ impl App {
                 }
             }
             ScreenAction::ExecuteWorktreeFlow(params) => {
-                self.execute_worktree_flow(params);
+                // Clear the log on whichever screen is active. A screen in
+                // neither flow has nowhere to report, so nothing is started.
+                match self.creating_mut() {
+                    Some((progress, error, log_view)) => {
+                        progress.clear();
+                        log_view.reset();
+                        *error = None;
+                    }
+                    None => return,
+                }
+                // Cancel any worker still live from a previous attempt before
+                // dropping its handle, so it stops at its next boundary rather
+                // than creating worktrees for a run the user has replaced.
+                if let Some(old) = &self.create_job {
+                    old.cancel.store(true, Ordering::Relaxed);
+                }
+                let (tx, rx) = mpsc::sync_channel::<CreateProgress>(64);
+                let cancel = Arc::new(AtomicBool::new(false));
+                self.create_job = Some(CreateJob {
+                    rx,
+                    cancel: cancel.clone(),
+                    params: params.clone(),
+                    started: 0,
+                    finished: 0,
+                    created: 0,
+                });
+                std::thread::spawn(move || run_create_worker(params, tx, cancel));
+            }
+            ScreenAction::CancelCreating => {
+                self.cancel_creating();
             }
             ScreenAction::ContinueFromSyncReport => {
                 self.advance_to_branch_strategy();
@@ -1464,6 +1777,7 @@ impl App {
         // Build read-only context from split borrows (disjoint from &mut self.screen)
         let ctx = crate::tui::actions::ScreenContext {
             config: &self.config,
+            creating_in_flight: self.creating_in_flight(),
         };
 
         // The help overlay is modal: while it is open it consumes every key,
@@ -1672,6 +1986,97 @@ impl App {
 
         self.process_action(action);
     }
+}
+
+/// The name the Creating log shows for the repo at `index`: its directory
+/// name, with the same `"?"` fallback the synchronous loop used for a path
+/// with no file name.
+fn repo_label(params: &crate::tui::actions::WorktreeParams, index: usize) -> String {
+    params
+        .repos
+        .get(index)
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// Background worker for the Creating stage: create or add one worktree per
+/// repo, sending `Started` and `Finished` per repo over `tx`, then `Done`.
+///
+/// Cancellation is checked before every repo and again after its attempt
+/// returns: when `cancel` is set, the in-flight git call runs to completion,
+/// nothing further is started, and neither `Finished` for that repo nor `Done`
+/// is ever sent. The flag is monotonic (see `create_worktree_cancellable`), so
+/// the post-call read cannot miss a cancel that already stopped the attempt: a
+/// cancelled attempt is never reported. A `send` failing means the receiver was
+/// dropped, so the worker stops there.
+///
+/// The run costs at most `UNATTENDED_FETCH_TIMEOUT` per repo whose refs are not
+/// already fresh, and the repos run in sequence, so a selection off VPN takes
+/// that limit several times over. It is on this thread rather than the UI's
+/// precisely so that cost is waited out with a painting screen and a live Esc.
+///
+/// It ends itself on the "already checked out" refusal rather than letting the
+/// App do it, because the App cannot retroactively stop a worker: carrying on
+/// would create worktrees for later repos while the UI had already returned to
+/// the strategy picker, and the next attempt would then double-create.
+fn run_create_worker(
+    params: crate::tui::actions::WorktreeParams,
+    tx: mpsc::SyncSender<CreateProgress>,
+    cancel: Arc<AtomicBool>,
+) {
+    for (index, repo_path) in params.repos.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        if tx.send(CreateProgress::Started { index }).is_err() {
+            return;
+        }
+        let attempt = crate::core::workspace::create_worktree_cancellable(
+            repo_path,
+            &params.workspace_dir,
+            &params.workspace_name,
+            &params.branch_strategy,
+            params.pre_create_fetch(repo_path),
+            &cancel,
+        );
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let created = attempt.created.map(|_| ()).map_err(|e| e.to_string());
+        let stop = created
+            .as_ref()
+            .err()
+            .is_some_and(|e| crate::core::workspace::refuses_because_checked_out(e));
+        // Everything after this send and before the terminal message is a
+        // window `cancel_creating`'s guard cannot see. Its predicate is over
+        // counters, and the counters reach their final values when this send
+        // lands, one or more statements before the worker commits to which
+        // terminal message follows. Today that interval holds exactly two
+        // successors, the `stop` branch below and the `Done` after the loop,
+        // and both are handled. Adding a third terminal message, or any
+        // statement between here and the decision, opens a window with
+        // nothing positioned to catch it, and no test will fail, because the
+        // window will not exist until it is written. Change this region and
+        // read `cancel_creating`'s guard first.
+        if tx
+            .send(CreateProgress::Finished {
+                index,
+                fetch: attempt.fetch,
+                created,
+            })
+            .is_err()
+        {
+            return;
+        }
+        if stop {
+            let _ = tx.send(CreateProgress::Stopped(CreateStop::AlreadyCheckedOut {
+                index,
+            }));
+            return;
+        }
+    }
+    let _ = tx.send(CreateProgress::Done);
 }
 
 /// Background worker for the Syncing stage: fetch + fast-forward each repo,
@@ -2408,6 +2813,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()
         app.poll_background_result();
         app.poll_sync_result();
         app.poll_gitop_result();
+        app.poll_create_result();
         app.spinner_tick = app.spinner_tick.wrapping_add(1);
 
         app.expire_status_message(Instant::now());
@@ -2474,6 +2880,7 @@ mod tests {
             sync_cancel: None,
             gitop_rx: None,
             gitop_cancel: None,
+            create_job: None,
             nav_pending: None,
             ws_loading: false,
             ws_loading_since: None,
@@ -2621,6 +3028,7 @@ mod tests {
             sync_cancel: None,
             gitop_rx: None,
             gitop_cancel: None,
+            create_job: None,
             nav_pending: None,
             ws_loading: false,
             ws_loading_since: None,
@@ -3364,6 +3772,712 @@ mod tests {
         }
         assert!(matches!(rx.recv().unwrap(), SyncProgress::Done));
         assert!(rx.try_recv().is_err(), "nothing follows Done");
+    }
+
+    // ── Creating flow tests ───────────────────────────────────────────────────
+
+    fn init_repo(dir: &std::path::Path) {
+        fn git(args: &[&str], dir: &std::path::Path) {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        git(&["init", "-b", "main"], dir);
+        git(&["config", "user.email", "t@local"], dir);
+        git(&["config", "user.name", "T"], dir);
+        git(&["config", "commit.gpgsign", "false"], dir);
+        git(&["commit", "--allow-empty", "-m", "init"], dir);
+    }
+
+    /// A repo at `<parent>/<name>`, initialised with one commit on `main`.
+    fn make_repo(parent: &std::path::Path, name: &str) -> PathBuf {
+        let path = parent.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        init_repo(&path);
+        path
+    }
+
+    /// Params for a create run. Every repo is listed as fresh, so no
+    /// pre-create fetch runs: these tests are about the loop's boundaries,
+    /// and a fetch of a repo with no `origin` would only add noise.
+    fn create_params(
+        ws_dir: &std::path::Path,
+        ws_name: &str,
+        repos: Vec<PathBuf>,
+    ) -> crate::tui::actions::WorktreeParams {
+        crate::tui::actions::WorktreeParams {
+            workspace_name: ws_name.to_string(),
+            workspace_dir: ws_dir.to_path_buf(),
+            repos: repos.clone(),
+            branch_strategy: crate::core::workspace::BranchStrategy::DetachedHead,
+            is_new: true,
+            fresh_repos: repos,
+            unreachable_repos: vec![],
+        }
+    }
+
+    fn make_job(
+        params: crate::tui::actions::WorktreeParams,
+    ) -> (mpsc::SyncSender<CreateProgress>, Arc<AtomicBool>, CreateJob) {
+        let (tx, rx) = mpsc::sync_channel::<CreateProgress>(8);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let job = CreateJob {
+            rx,
+            cancel: cancel.clone(),
+            params,
+            started: 0,
+            finished: 0,
+            created: 0,
+        };
+        (tx, cancel, job)
+    }
+
+    /// A Creating-stage create screen, with the log already cleared.
+    fn creating_screen() -> Screen {
+        use crate::tui::screens::create::{CreateStage, CreateState};
+        let mut st = CreateState::new(vec![], vec![]);
+        st.stage = CreateStage::Creating;
+        Screen::CreateWorkspace(st)
+    }
+
+    /// Cancelling mid-run stops the repos that had not started, and the
+    /// rendezvous channel makes that deterministic without a single sleep.
+    ///
+    /// The channel has capacity 0, so a `send` completes only when this test
+    /// receives. Receiving `Finished { index: 0 }` proves the worker is past
+    /// repo A in its entirety, because that message is sent only after A's
+    /// post-call cancel check passed. Setting the flag then leaves exactly two
+    /// interleavings, and both leave B untouched:
+    ///
+    /// - the worker had not yet reached B's top-of-loop check, so it reads the
+    ///   flag, returns, and never sends `Started { index: 1 }`; or
+    /// - it had passed that check and is BLOCKED in `send(Started { index: 1 })`.
+    ///   It cannot proceed until this test receives, and this test only
+    ///   receives after the store, so when it unblocks both checkpoints inside
+    ///   `create_worktree_cancellable` read a flag that is already true, and
+    ///   the post-call check means no `Finished { index: 1 }` follows either.
+    ///
+    /// The load-bearing step is that the worker CANNOT be past
+    /// `send(Started { index: 1 })` before the store, because completing that
+    /// send requires a receive that only happens after it. So a
+    /// `Started { index: 1 }` is permitted and is not asserted against; what is
+    /// asserted is B's absence from disk and the absence of any terminal
+    /// message. Asserting A EXISTS is not decoration: without it the whole test
+    /// would pass vacuously if the harness never created anything at all.
+    ///
+    /// Be precise about what the rendezvous buys, because it is easy to
+    /// overstate. It is what makes this test DETERMINISTIC; the two checkpoints
+    /// inside `create_worktree_cancellable` are what make it PASS. Measured at
+    /// capacity 64 in a clean copy of this tree, it still passed 8 runs out of
+    /// 8: with a buffer the worker can be past `send(Started { index: 1 })`
+    /// before the store, the interleaving above no longer holds, and the
+    /// checkpoints catch it anyway because a fetch plus a `git worktree add`
+    /// takes far longer than the store. So raising the capacity would not fail
+    /// here. It would quietly convert a proof into a race that is merely very
+    /// likely to be won, on a window milliseconds wide.
+    ///
+    /// The capacity also does memory-model work, which is the second reason not
+    /// to treat it as a performance knob. `Relaxed` is right in both places but
+    /// for different reasons: in production the flag is the only thing
+    /// communicated, so the worker need only see it eventually, which is all
+    /// `Relaxed` promises. Here the test needs the load to see the store at a
+    /// specific point, and it is the CHANNEL that supplies the happens-before
+    /// edge: the store precedes this test's receive, which pairs with the
+    /// worker's send, which precedes the worker's next load. A buffered channel
+    /// removes that edge as surely as it removes the scheduling guarantee.
+    ///
+    /// This is not hypothetical. While this branch was under review, another
+    /// session changed that 0 to a 64 directly in this working tree. The whole
+    /// suite stayed green throughout, and the only thing that caught it was a
+    /// reviewer noticing a line it had not touched. Nothing else could: not the
+    /// suite, not clippy, and not the strongest gate any one author has, which
+    /// is knowing what they themselves changed.
+    #[test]
+    fn cancelling_mid_run_creates_no_further_worktrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_a = make_repo(tmp.path(), "repo-a");
+        let repo_b = make_repo(tmp.path(), "repo-b");
+        let ws_dir = tmp.path().join("spaces");
+        let params = create_params(&ws_dir, "ws-a", vec![repo_a, repo_b]);
+
+        // Capacity 0 is load-bearing and there is nothing to assert it against:
+        // at any other capacity this test still passes, it just stops proving
+        // anything. See the interleaving argument above before changing it.
+        let (tx, rx) = mpsc::sync_channel::<CreateProgress>(0);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let worker = std::thread::spawn(move || run_create_worker(params, tx, worker_cancel));
+
+        match rx.recv().expect("Started for repo A") {
+            CreateProgress::Started { index } => assert_eq!(index, 0),
+            _ => panic!("expected Started for repo A"),
+        }
+        match rx.recv().expect("Finished for repo A") {
+            CreateProgress::Finished { index, created, .. } => {
+                assert_eq!(index, 0);
+                assert_eq!(created, Ok(()), "repo A must be created before the cancel");
+            }
+            _ => panic!("expected Finished for repo A"),
+        }
+
+        cancel.store(true, Ordering::Relaxed);
+
+        while let Ok(msg) = rx.recv() {
+            match msg {
+                CreateProgress::Started { index: 1 } => {} // permitted, see above
+                CreateProgress::Started { index } => {
+                    panic!("unexpected Started for repo {}", index)
+                }
+                CreateProgress::Finished { index, .. } => {
+                    panic!("repo {} was attempted after the cancel", index)
+                }
+                CreateProgress::Stopped(_) => panic!("a cancelled run must not report a stop"),
+                CreateProgress::Done => panic!("a cancelled run must never send Done"),
+            }
+        }
+        worker.join().unwrap();
+
+        assert!(
+            ws_dir.join("ws-a").join("repo-a").join(".git").exists(),
+            "repo A was created before the cancel, so the harness does create worktrees"
+        );
+        assert!(
+            !ws_dir.join("ws-a").join("repo-b").exists(),
+            "nothing further may start after the cancel"
+        );
+    }
+
+    /// The counterpart to the cancellation test: `Finished` absent means
+    /// cancelled, `Finished` with an `Err` means failed, and the two must not
+    /// be confusable. An ordinary failure does not end the run.
+    #[test]
+    fn a_failed_add_is_reported_and_the_run_continues() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Not a git repo, so its `git worktree add` fails for an ordinary reason.
+        let not_a_repo = tmp.path().join("not-a-repo");
+        std::fs::create_dir_all(&not_a_repo).unwrap();
+        let repo_b = make_repo(tmp.path(), "repo-b");
+        let ws_dir = tmp.path().join("spaces");
+        let params = create_params(&ws_dir, "ws-a", vec![not_a_repo, repo_b]);
+
+        let (tx, rx) = mpsc::sync_channel::<CreateProgress>(64);
+        run_create_worker(params, tx, Arc::new(AtomicBool::new(false)));
+
+        assert!(matches!(
+            rx.recv().unwrap(),
+            CreateProgress::Started { index: 0 }
+        ));
+        match rx.recv().unwrap() {
+            CreateProgress::Finished { index, created, .. } => {
+                assert_eq!(index, 0);
+                let err = created.expect_err("a repo that is not a git repo cannot be added");
+                assert!(
+                    err.contains("not a git repository"),
+                    "the log needs git's reason, got {:?}",
+                    err
+                );
+            }
+            _ => panic!("expected Finished for the failing repo"),
+        }
+        assert!(
+            matches!(rx.recv().unwrap(), CreateProgress::Started { index: 1 }),
+            "an ordinary failure must not end the run"
+        );
+        match rx.recv().unwrap() {
+            CreateProgress::Finished { index, created, .. } => {
+                assert_eq!(index, 1);
+                assert_eq!(created, Ok(()));
+            }
+            _ => panic!("expected Finished for repo B"),
+        }
+        assert!(matches!(rx.recv().unwrap(), CreateProgress::Done));
+        assert!(
+            ws_dir.join("ws-a").join("repo-b").join(".git").exists(),
+            "the repo after the failure is still created"
+        );
+    }
+
+    #[test]
+    fn run_create_worker_honors_preset_cancel_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("spaces");
+        let params = create_params(
+            &ws_dir,
+            "ws-a",
+            vec![
+                PathBuf::from("/nonexistent/repo-a"),
+                PathBuf::from("/nonexistent/repo-b"),
+            ],
+        );
+        let (tx, rx) = mpsc::sync_channel::<CreateProgress>(64);
+        run_create_worker(params, tx, Arc::new(AtomicBool::new(true)));
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing at all is sent when cancel is preset: no repo is attempted"
+        );
+    }
+
+    /// The #29 regression guard. `poll_sync_result` gates on the screen and
+    /// cancels when it does not match, which is what made wrapping a mid-sync
+    /// screen unsafe. This poller must not do either: a screen the App did not
+    /// expect may never cancel or discard a run the user asked for.
+    #[test]
+    fn poll_create_result_keeps_the_job_when_the_screen_is_not_creating() {
+        let mut app = make_app(vec![]);
+        let params = create_params(std::path::Path::new("/ws"), "ws-a", vec![]);
+        let (_tx, cancel, job) = make_job(params);
+        app.create_job = Some(job);
+        // Dashboard: not the Creating stage.
+        app.poll_create_result();
+
+        assert!(
+            app.create_job.is_some(),
+            "the job must survive a screen the poller does not recognise"
+        );
+        assert!(
+            !cancel.load(Ordering::Relaxed),
+            "the screen must never be able to cancel the run"
+        );
+    }
+
+    /// The interleaving the drain alone does not cover: the terminal message
+    /// has not been SENT yet, so draining finds nothing and the job survives.
+    ///
+    /// `run_create_worker` sends `Finished` for the last repo inside its loop
+    /// and `Done` as a separate statement after it, and a thread can be
+    /// preempted between the two. Draining there consumes `Finished { last }`,
+    /// brings the counts to their final values, and finds the channel empty, so
+    /// a completed run would be reported as `Stopped creating 'ws-a' after 1 of
+    /// 1 repos. Press a to add the rest.`: a success called a failure, with a
+    /// count in the same sentence that contradicts it and a hint pointing at
+    /// nothing to add.
+    ///
+    /// `finished` is the discriminator, not `created`, and the second case
+    /// below is the only thing that can tell those two apart: when every repo
+    /// SUCCEEDED the counts are equal and a `created`-based guard behaves
+    /// identically. A repo that failed leaves `created` short while the run is
+    /// just as over, and a `created` guard would fall through to reporting a
+    /// finished run as a cancellation. Without that case this test passes under
+    /// the wrong discriminator, which is the defect it exists to prevent.
+    #[test]
+    fn esc_after_every_repo_finished_is_not_a_cancellation() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        // (started, finished, created), for one repo, with nothing left in the
+        // channel: the worker is between its last `Finished` and its `Done`.
+        for (label, created) in [("every repo succeeded", 1), ("a repo failed", 0)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let ws_dir = tmp.path().join("spaces");
+
+            let mut app = make_app(vec![]);
+            app.config.workspaces.dir = ws_dir.clone();
+            app.screen = creating_screen();
+            let params = create_params(&ws_dir, "ws-a", vec![PathBuf::from("/r/a")]);
+            let (_tx, _cancel, mut job) = make_job(params);
+            job.started = 1;
+            job.finished = 1;
+            job.created = created;
+            app.create_job = Some(job);
+
+            app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+            assert_eq!(
+                app.status_message, None,
+                "{}: a run with every repo attempted must not be reported as stopped",
+                label
+            );
+            assert!(
+                app.create_job.is_some(),
+                "{}: the job is left for the next drain to finish through the \
+                 one completion path, rather than synthesised here",
+                label
+            );
+            assert!(
+                matches!(app.screen, Screen::CreateWorkspace(_)),
+                "{}: the stage stays up for the frame it takes",
+                label
+            );
+        }
+    }
+
+    /// The add flow's success wording, which the end-to-end add tests exercise
+    /// but never assert. Without this, a typo in the "Added repos to" verb
+    /// would pass the whole suite, since only the create side is pinned.
+    #[test]
+    fn poll_create_result_done_says_added_for_the_add_flow() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("spaces");
+        std::fs::create_dir_all(ws_dir.join("ws-a")).unwrap();
+
+        let mut app = make_app(vec![]);
+        app.config.workspaces.dir = ws_dir.clone();
+        app.screen = Screen::AddRepos(crate::tui::screens::add::AddState::new(
+            "ws-a".to_string(),
+            vec![],
+            vec![],
+        ));
+        if let Screen::AddRepos(st) = &mut app.screen {
+            st.stage = crate::tui::screens::add::AddStage::Creating;
+        }
+        let mut params = create_params(&ws_dir, "ws-a", vec![PathBuf::from("/r/a")]);
+        params.is_new = false;
+        let (tx, _cancel, job) = make_job(params);
+        app.create_job = Some(job);
+
+        tx.send(CreateProgress::Done).unwrap();
+        app.poll_create_result();
+
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Added repos to workspace 'ws-a'")
+        );
+        assert_eq!(app.status_kind, StatusKind::Success);
+    }
+
+    /// The footer's live counter must advance past zero, and by one per repo.
+    ///
+    /// `started` feeds only `creating_progress`, which feeds only the "N of M"
+    /// footer, and the only footer assertion in the suite is taken before any
+    /// poll, so it reads `Creating 0 of 2` and never sees N non-zero. Mutating
+    /// `job.started = index + 1` to `index` therefore left the whole suite
+    /// green while the footer counted one repo behind for the entire run.
+    #[test]
+    fn started_counts_the_repo_being_worked_on_not_the_one_before_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("spaces");
+        let mut app = make_app(vec![]);
+        app.screen = Screen::CreateWorkspace(crate::tui::screens::create::CreateState::new(
+            vec![],
+            vec![],
+        ));
+        if let Screen::CreateWorkspace(st) = &mut app.screen {
+            st.stage = crate::tui::screens::create::CreateStage::Creating;
+        }
+        let params = create_params(
+            &ws_dir,
+            "ws-a",
+            vec![PathBuf::from("/r/a"), PathBuf::from("/r/b")],
+        );
+        let (tx, _cancel, job) = make_job(params);
+        app.create_job = Some(job);
+
+        assert_eq!(app.creating_progress(), (true, 0, 2), "nothing started yet");
+
+        tx.send(CreateProgress::Started { index: 0 }).unwrap();
+        app.poll_create_result();
+        assert_eq!(
+            app.creating_progress(),
+            (true, 1, 2),
+            "the first repo is the 1st of 2, not the 0th"
+        );
+
+        tx.send(CreateProgress::Started { index: 1 }).unwrap();
+        app.poll_create_result();
+        assert_eq!(
+            app.creating_progress(),
+            (true, 2, 2),
+            "the last repo is the 2nd of 2"
+        );
+    }
+
+    #[test]
+    fn poll_create_result_done_selects_the_new_space_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("spaces");
+        // Two spaces, so selecting by name is distinguishable from index 0.
+        std::fs::create_dir_all(ws_dir.join("aaa-other")).unwrap();
+        std::fs::create_dir_all(ws_dir.join("ws-a")).unwrap();
+
+        let mut app = make_app(vec![]);
+        app.config.workspaces.dir = ws_dir.clone();
+        app.screen = creating_screen();
+        let params = create_params(&ws_dir, "ws-a", vec![PathBuf::from("/r/a")]);
+        let (tx, _cancel, job) = make_job(params);
+        app.create_job = Some(job);
+
+        tx.send(CreateProgress::Done).unwrap();
+        app.poll_create_result();
+
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "a run with no error returns to the dashboard"
+        );
+        assert_eq!(
+            app.workspaces.get(app.selected_ws).map(|w| w.name.as_str()),
+            Some("ws-a"),
+            "the new space is selected by name, not by index"
+        );
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Created workspace 'ws-a'")
+        );
+        assert_eq!(app.status_kind, StatusKind::Success);
+        assert!(app.create_job.is_none(), "the finished job is dropped");
+    }
+
+    #[test]
+    fn poll_create_result_stopped_bounces_to_the_branch_strategy_picker() {
+        use crate::tui::screens::create::CreateStage;
+        let mut app = make_app(vec![]);
+        app.screen = creating_screen();
+        if let Screen::CreateWorkspace(st) = &mut app.screen {
+            st.progress
+                .push("Creating worktree for repo-a...".to_string());
+        }
+        let params = create_params(
+            std::path::Path::new("/ws"),
+            "ws-a",
+            vec![PathBuf::from("/r/repo-a")],
+        );
+        let (tx, cancel, job) = make_job(params);
+        app.create_job = Some(job);
+
+        tx.send(CreateProgress::Stopped(CreateStop::AlreadyCheckedOut {
+            index: 0,
+        }))
+        .unwrap();
+        app.poll_create_result();
+
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(st.stage, CreateStage::PickBranchStrategy);
+                assert!(st.progress.is_empty(), "the log is cleared on the bounce");
+                assert_eq!(
+                    st.error.as_deref(),
+                    Some("'repo-a' is already checked out — pick a different strategy")
+                );
+            }
+            _ => panic!("expected the create screen"),
+        }
+        assert!(
+            cancel.load(Ordering::Relaxed),
+            "the worker must be stopped before the user picks again"
+        );
+        assert!(app.create_job.is_none(), "the stopped job is dropped");
+    }
+
+    #[test]
+    fn poll_create_result_disconnect_before_every_repo_records_an_error() {
+        let mut app = make_app(vec![]);
+        app.screen = creating_screen();
+        let params = create_params(
+            std::path::Path::new("/ws"),
+            "ws-a",
+            vec![PathBuf::from("/r/a"), PathBuf::from("/r/b")],
+        );
+        let (tx, _cancel, job) = make_job(params);
+        app.create_job = Some(job);
+
+        // The worker died after one repo: its sender is gone, Done never came.
+        tx.send(CreateProgress::Finished {
+            index: 0,
+            fetch: None,
+            created: Ok(()),
+        })
+        .unwrap();
+        drop(tx);
+        app.poll_create_result();
+
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                let err = st.error.as_deref().expect("a dead worker must be reported");
+                assert!(
+                    err.contains("stopped unexpectedly"),
+                    "the error must name what happened, got {:?}",
+                    err
+                );
+            }
+            _ => panic!("a half-finished run stays on the Creating stage"),
+        }
+        assert!(app.create_job.is_none(), "the dead job is dropped");
+    }
+
+    #[test]
+    fn reentering_execute_worktree_flow_cancels_previous_worker() {
+        use crate::tui::actions::ScreenAction;
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("spaces");
+        let mut app = make_app(vec![]);
+        app.screen = creating_screen();
+
+        app.process_action(ScreenAction::ExecuteWorktreeFlow(create_params(
+            &ws_dir,
+            "ws-a",
+            vec![],
+        )));
+        let first = app
+            .create_job
+            .as_ref()
+            .map(|j| j.cancel.clone())
+            .expect("first job stored");
+        assert!(!first.load(Ordering::Relaxed), "first flag starts unset");
+
+        app.process_action(ScreenAction::ExecuteWorktreeFlow(create_params(
+            &ws_dir,
+            "ws-a",
+            vec![],
+        )));
+        assert!(
+            first.load(Ordering::Relaxed),
+            "the previous worker's cancel flag must be set on re-entry"
+        );
+        assert!(
+            app.create_job.is_some(),
+            "a fresh job must be stored for the new worker"
+        );
+    }
+
+    #[test]
+    fn cancel_creating_leaves_for_the_dashboard_and_says_what_it_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("spaces");
+        // Two spaces, so selecting by name is distinguishable from index 0.
+        std::fs::create_dir_all(ws_dir.join("aaa-other")).unwrap();
+        std::fs::create_dir_all(ws_dir.join("ws-a")).unwrap();
+
+        let mut app = make_app(vec![]);
+        app.config.workspaces.dir = ws_dir.clone();
+        app.screen = creating_screen();
+        let params = create_params(
+            &ws_dir,
+            "ws-a",
+            vec![
+                PathBuf::from("/r/a"),
+                PathBuf::from("/r/b"),
+                PathBuf::from("/r/c"),
+            ],
+        );
+        let (_tx, cancel, mut job) = make_job(params);
+        job.created = 2;
+        app.create_job = Some(job);
+
+        app.process_action(crate::tui::actions::ScreenAction::CancelCreating);
+
+        assert!(
+            cancel.load(Ordering::Relaxed),
+            "the worker must be told to stop at its next boundary"
+        );
+        assert!(matches!(app.screen, Screen::Dashboard));
+        assert_eq!(
+            app.workspaces.get(app.selected_ws).map(|w| w.name.as_str()),
+            Some("ws-a"),
+            "the partial space is refreshed in and selected by name"
+        );
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Stopped creating after 2 of 3 repos. Press a to add the rest.")
+        );
+        assert_eq!(
+            app.status_kind,
+            StatusKind::Warning,
+            "a partial space needs attention, but stopping is not a failure"
+        );
+        assert!(app.create_job.is_none(), "the cancelled job is dropped");
+    }
+
+    /// A key can arrive in the same frame as the worker's terminal message.
+    /// `run_loop` drains, draws, then waits up to 16ms for a key, so `Done`
+    /// can land inside that wait and still be undrained when Esc is read.
+    /// The user is pressing Esc against the screen they were shown, so
+    /// leaving is right; calling it a cancellation is not. The run had
+    /// finished, and reporting a finished run as "Stopped ... after 0 of 0
+    /// repos" is a success reported as a failure, the same class of defect
+    /// as retrying a partial space.
+    #[test]
+    fn esc_in_the_frame_the_run_finished_reports_the_run_not_a_cancellation() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("spaces");
+        std::fs::create_dir_all(ws_dir.join("ws-a")).unwrap();
+
+        let mut app = make_app(vec![]);
+        app.config.workspaces.dir = ws_dir.clone();
+        app.screen = creating_screen();
+        let params = create_params(&ws_dir, "ws-a", vec![]);
+        let (tx, _cancel, job) = make_job(params);
+        app.create_job = Some(job);
+        // Queued but not yet drained: exactly the window run_loop leaves.
+        tx.send(CreateProgress::Done).unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(matches!(app.screen, Screen::Dashboard));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Created workspace 'ws-a'"),
+            "a run that finished must be reported as finished, not as a stop"
+        );
+        assert_eq!(app.status_kind, StatusKind::Success);
+        assert!(app.create_job.is_none());
+    }
+
+    /// The worse half of the same race. An `AlreadyCheckedOut` stop exists to
+    /// put the user back on the strategy picker with a reason they can act on.
+    /// Treating that frame's Esc as a cancellation would drop them on the
+    /// dashboard with a generic message and silently lose the recovery path
+    /// the `Stopped` variant was added to provide.
+    #[test]
+    fn esc_in_the_frame_a_stop_arrived_still_bounces_to_the_picker() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("spaces");
+
+        let mut app = make_app(vec![]);
+        app.config.workspaces.dir = ws_dir.clone();
+        app.screen = creating_screen();
+        let params = create_params(&ws_dir, "ws-a", vec![PathBuf::from("/r/repo-a")]);
+        let (tx, _cancel, job) = make_job(params);
+        app.create_job = Some(job);
+        tx.send(CreateProgress::Stopped(CreateStop::AlreadyCheckedOut {
+            index: 0,
+        }))
+        .unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(
+                    st.stage,
+                    crate::tui::screens::create::CreateStage::PickBranchStrategy,
+                    "the bounce must survive an Esc in the same frame"
+                );
+                assert_eq!(
+                    st.error.as_deref(),
+                    Some("'repo-a' is already checked out — pick a different strategy"),
+                    "the actionable reason must not be replaced by a generic stop"
+                );
+            }
+            _ => panic!("expected the strategy picker, not the dashboard"),
+        }
+        assert!(app.create_job.is_none());
+    }
+
+    #[test]
+    fn cancel_creating_says_adding_for_the_add_flow() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("spaces");
+        let mut app = make_app(vec![]);
+        app.config.workspaces.dir = ws_dir.clone();
+        let mut params = create_params(&ws_dir, "ws-a", vec![PathBuf::from("/r/a")]);
+        params.is_new = false;
+        let (_tx, _cancel, job) = make_job(params);
+        app.create_job = Some(job);
+
+        app.process_action(crate::tui::actions::ScreenAction::CancelCreating);
+
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Stopped adding after 0 of 1 repos. Press a to add the rest.")
+        );
     }
 
     #[test]
