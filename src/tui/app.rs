@@ -1059,6 +1059,18 @@ impl App {
         // the run is over whether or not `Done` has been sent. Not `created`,
         // which a failed repo leaves short while the run is just as over.
         if let Some(job) = &self.create_job {
+            // Blind spot, deliberate and currently unreachable. `finished`
+            // reaches the total one statement before the worker decides which
+            // terminal message to send: it sends `Finished` for the last repo,
+            // then evaluates whether to send `Stopped(AlreadyCheckedOut)`. An
+            // Esc in that window is swallowed here and the next drain bounces
+            // to the strategy picker, so the user pressed Esc to leave and
+            // arrives at the picker instead, with the key gone rather than
+            // delayed. Accepted: it beats reporting a finished run as a stop,
+            // and it does not replay a key into a screen the user has not seen.
+            // It cannot fire today because the predicate behind `stop` is dead
+            // on git 2.42 and later; ticket 09's follow-up 6 owns fixing that
+            // and says to pin this interaction in the same change.
             if job.finished >= job.params.repos.len() {
                 // Left for the next drain, which finishes the run through the
                 // one completion path. Esc costs a frame nobody perceives.
