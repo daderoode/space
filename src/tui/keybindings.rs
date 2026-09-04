@@ -352,8 +352,12 @@ const CREATING_LOG: BindingGroup = BindingGroup {
             desc: "Top / bottom (End resumes follow)",
         },
         Binding {
-            key: "Enter/Esc/q",
-            desc: "Back to the dashboard",
+            key: "Esc/q",
+            desc: "Stop creating, or leave when done",
+        },
+        Binding {
+            key: "Enter",
+            desc: "Continue (ignored while creating)",
         },
     ],
 };

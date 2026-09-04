@@ -196,7 +196,12 @@ pub fn view(app: &App, frame: &mut Frame) {
         Screen::Dashboard => render_dashboard(app, frame),
         Screen::CreateWorkspace(state) => {
             render_dashboard(app, frame);
-            render_create_overlay(state, show_cursor, frame);
+            render_create_overlay(
+                state,
+                creating_footer_state(app, "Creating"),
+                show_cursor,
+                frame,
+            );
         }
         Screen::GoWorkspace(state) => {
             render_dashboard(app, frame);
@@ -208,7 +213,12 @@ pub fn view(app: &App, frame: &mut Frame) {
         }
         Screen::AddRepos(state) => {
             render_dashboard(app, frame);
-            render_add_overlay(state, show_cursor, frame);
+            render_add_overlay(
+                state,
+                creating_footer_state(app, "Adding"),
+                show_cursor,
+                frame,
+            );
         }
         Screen::ConfirmDelete(state) => {
             render_dashboard(app, frame);
@@ -606,8 +616,35 @@ fn render_key_bar(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// What the Creating log's footer needs from the App: the flow's verb, whether
+/// the worker is running, how far it has got, and the spinner phase.
+///
+/// Bundled rather than passed one at a time because `render_creating_log`
+/// already takes five arguments and clippy's budget is seven.
+struct CreatingFooter {
+    verb: &'static str,
+    in_flight: bool,
+    started: usize,
+    total: usize,
+    spinner_tick: u64,
+}
+
+/// Read the live Creating counts off the App, the way `render_gitops_overlay`
+/// is handed `app.spinner_tick`.
+fn creating_footer_state(app: &App, verb: &'static str) -> CreatingFooter {
+    let (in_flight, started, total) = app.creating_progress();
+    CreatingFooter {
+        verb,
+        in_flight,
+        started,
+        total,
+        spinner_tick: app.spinner_tick,
+    }
+}
+
 fn render_create_overlay(
     state: &crate::tui::screens::create::CreateState,
+    footer: CreatingFooter,
     show_cursor: bool,
     frame: &mut Frame,
 ) {
@@ -644,6 +681,7 @@ fn render_create_overlay(
             &state.progress,
             state.error.as_deref(),
             &state.log_view,
+            footer,
         ),
     }
 }
@@ -1022,6 +1060,7 @@ fn render_creating_log(
     progress: &[String],
     error: Option<&str>,
     log: &LogView,
+    footer: CreatingFooter,
 ) {
     use ratatui::widgets::Clear;
     let area = progress_dialog_area(frame.area(), progress.len());
@@ -1054,21 +1093,32 @@ fn render_creating_log(
         .collect();
     frame.render_widget(Paragraph::new(lines), sections[0]);
 
-    if let Some(err) = error {
-        frame.render_widget(
-            Paragraph::new(format!("Error: {}  [ESC to dismiss]", err)).style(theme::error()),
-            sections[1],
-        );
+    // Same precedence as the text: a live run is muted progress, a stopped one
+    // is its error or its success.
+    let style = if footer.in_flight {
+        theme::muted()
+    } else if error.is_some() {
+        theme::error()
     } else {
-        frame.render_widget(
-            Paragraph::new("Done! [ENTER to continue]").style(theme::success()),
-            sections[1],
-        );
-    }
+        theme::success()
+    };
+    frame.render_widget(
+        Paragraph::new(crate::tui::screens::sync_report::creating_footer(
+            footer.verb,
+            footer.in_flight,
+            footer.started,
+            footer.total,
+            error,
+            footer.spinner_tick,
+        ))
+        .style(style),
+        sections[1],
+    );
 }
 
 fn render_add_overlay(
     state: &crate::tui::screens::add::AddState,
+    footer: CreatingFooter,
     show_cursor: bool,
     frame: &mut Frame,
 ) {
@@ -1104,6 +1154,7 @@ fn render_add_overlay(
             &state.progress,
             state.error.as_deref(),
             &state.log_view,
+            footer,
         ),
     }
 }

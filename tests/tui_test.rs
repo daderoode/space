@@ -57,6 +57,21 @@ fn max_rendered_width(rendered: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// Drive the background worktree worker (Creating stage) to completion by
+/// polling `poll_create_result`, mirroring what the real run loop does each
+/// frame. Bounded so a wedged worker fails the test rather than hanging it.
+fn pump_creating(app: &mut App) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while app.creating_in_flight() {
+        app.poll_create_result();
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the creating worker did not finish"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
 /// Drive the background sync worker (Syncing stage) to completion by polling
 /// `poll_sync_result`, mirroring what the real run loop does each frame, then
 /// continue past the finished sync report with Enter.
@@ -303,6 +318,7 @@ fn create_strategy_new_branch_creates() {
     app.handle_key(key(KeyCode::Enter));
     // Second Enter: EnterBranchName → Creating (confirms pre-filled name)
     app.handle_key(key(KeyCode::Enter));
+    pump_creating(&mut app);
 
     // Workspace dir should have been created, and screen should be Dashboard
     assert!(
@@ -364,6 +380,7 @@ fn creating_logs_failed_pre_create_fetch_and_skips_it_for_already_fetched_repos(
             st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
         }
         app.handle_key(key(KeyCode::Enter));
+        pump_creating(&mut app);
         match app.screen {
             Screen::CreateWorkspace(ref st) => {
                 assert_eq!(
@@ -553,6 +570,90 @@ fn creating_logs_failed_pre_create_fetch_and_skips_it_for_already_fetched_repos(
     );
 }
 
+/// Esc during the Creating stage stops the run, leaves at once, and says what
+/// it left behind. Nothing is cleaned up: the partially built space is still
+/// on the dashboard, selected by name.
+///
+/// The count is deterministic at 0 here, and that is the point rather than an
+/// accident: it counts creations the UI has confirmed, and the UI confirms
+/// them in `poll_create_result`, which this test has not called. The space
+/// directory it waits for was made by the worker, so the message can undercount
+/// what is on disk exactly as its doc comment says.
+#[test]
+fn creating_esc_stops_the_run_and_leaves_the_partial_space() {
+    let env = TestEnv::new();
+    let repo_a = env.create_repo("cancel-repo-a");
+    let repo_b = env.create_repo("cancel-repo-b");
+
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![], vec![repo_a.clone(), repo_b.clone()]);
+
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_a, repo_b];
+        st.ws_name = tui_input::Input::default().with_value("ws-cancel".to_string());
+        st.branch_strategy_idx = 2; // DetachedHead: straight to Creating
+        st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
+    }
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        app.creating_in_flight(),
+        "Enter must hand the work to the background worker"
+    );
+
+    // The worker makes the space directory as it starts the first repo, so
+    // this waits until the run is provably under way before cancelling it.
+    let space_dir = env.workspaces_dir.join("ws-cancel");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !space_dir.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker never started the first repo"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    // The footer says what is happening rather than claiming the run is over.
+    // The count is 0 because it advances in `poll_create_result`, which this
+    // test has not called; the spinner is on its first frame for the same
+    // reason, so both are deterministic here.
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("Creating 0 of 2 \u{b7}   \u{b7} ESC cancel"),
+        "a live run shows its progress and the key that stops it:\n{}",
+        rendered
+    );
+    assert!(
+        !rendered.contains("Done!"),
+        "the footer must not claim a run still in flight has finished:\n{}",
+        rendered
+    );
+
+    app.handle_key(key(KeyCode::Esc));
+
+    assert!(
+        matches!(app.screen, Screen::Dashboard),
+        "Esc leaves for the dashboard immediately, with no confirm dialog"
+    );
+    assert!(
+        !app.creating_in_flight(),
+        "the job is dropped on the way out"
+    );
+    assert!(
+        space_dir.exists(),
+        "the partial space is left in place: cancel means stop, not undo"
+    );
+    assert_eq!(
+        app.workspaces.get(app.selected_ws).map(|w| w.name.as_str()),
+        Some("ws-cancel"),
+        "the partial space is refreshed in and selected by name"
+    );
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Stopped creating 'ws-cancel' after 0 of 2 repos. Press a to add the rest.")
+    );
+}
+
 #[test]
 fn create_esc_from_enter_name_exits_to_dashboard() {
     let mut app = test_app(vec![], vec![]);
@@ -702,6 +803,7 @@ fn add_strategy_creates_worktrees() {
     app.handle_key(key(KeyCode::Enter));
     // Second Enter: EnterBranchName → Creating (confirms pre-filled name)
     app.handle_key(key(KeyCode::Enter));
+    pump_creating(&mut app);
 
     assert!(
         matches!(app.screen, Screen::Dashboard),
@@ -1062,6 +1164,7 @@ fn create_select_recent_branch_creates_worktree() {
     }
 
     app.handle_key(key(KeyCode::Enter));
+    pump_creating(&mut app);
 
     assert!(
         matches!(app.screen, Screen::Dashboard),
@@ -1163,6 +1266,7 @@ fn add_select_recent_branch_creates_worktree() {
     }
 
     app.handle_key(key(KeyCode::Enter));
+    pump_creating(&mut app);
 
     assert!(
         matches!(app.screen, Screen::Dashboard),
@@ -2663,7 +2767,10 @@ fn diff_viewer_page_and_home_end_scrolling() {
     };
 
     let config = SpaceConfig::default();
-    let ctx = ScreenContext { config: &config };
+    let ctx = ScreenContext {
+        config: &config,
+        creating_in_flight: false,
+    };
 
     // PageDown from 0 → 10
     state.handle_key(key(KeyCode::PageDown), &ctx);
@@ -3286,6 +3393,7 @@ fn create_new_branch_custom_name_creates_worktree() {
     }
 
     app.handle_key(key(KeyCode::Enter));
+    pump_creating(&mut app);
 
     assert!(
         matches!(app.screen, Screen::Dashboard),
@@ -3419,6 +3527,7 @@ fn add_new_branch_custom_name_creates_worktree() {
     }
 
     app.handle_key(key(KeyCode::Enter));
+    pump_creating(&mut app);
 
     assert!(
         matches!(app.screen, Screen::Dashboard),
@@ -3535,7 +3644,10 @@ mod switch_branch_tests {
         use space::core::config::SpaceConfig;
         static CFG: std::sync::OnceLock<SpaceConfig> = std::sync::OnceLock::new();
         let cfg = CFG.get_or_init(SpaceConfig::default);
-        space::tui::actions::ScreenContext { config: cfg }
+        space::tui::actions::ScreenContext {
+            config: cfg,
+            creating_in_flight: false,
+        }
     }
 
     #[test]
@@ -8247,7 +8359,9 @@ mod help_overlay_tests {
             // Each of these is a single screen or stage whose handler really
             // does map every key in the row to the same action, so the combined
             // form is accurate rather than a papered-over difference.
-            // `create.rs`/`add.rs` `handle_creating`: Enter | Esc | q => Back.
+            // `create.rs`/`add.rs` `handle_creating`: Esc and q are the same
+            // key throughout, cancelling a run in flight and leaving once it
+            // is over. Enter differs, and has its own row.
             keybindings::CREATING_LOG_NAME,
             // `diff.rs:22`: Esc | q => Back.
             keybindings::DIFF_VIEWER_NAME,
@@ -8340,7 +8454,8 @@ mod help_overlay_tests {
                 "Home/End",
                 "Top / bottom (End resumes follow)",
             ),
-            ("Creating Log", "Enter/Esc/q", "Back to the dashboard"),
+            ("Creating Log", "Esc/q", "Stop creating, or leave when done"),
+            ("Creating Log", "Enter", "Continue (ignored while creating)"),
             ("Delete Confirm", "y", "Delete the space"),
             ("Delete Confirm", "n/Esc/Enter", "Cancel (the default)"),
             ("Delete Confirm", "q", "Cancel"),

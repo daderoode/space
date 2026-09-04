@@ -446,3 +446,142 @@ fn switch_worktree_branch_origin_prefix_creates_local_tracking_branch() {
         "should create local 'feature-x' from origin/feature-x"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Cancellable creation (the Creating stage's background worker)
+// ---------------------------------------------------------------------------
+
+/// Checkpoint 2: a flag that is already set stops the attempt before
+/// `git worktree add` runs, so nothing lands on disk.
+///
+/// A preset flag exercises the same code path as a flag set while the fetch
+/// was running: checkpoint 2 is a single branch on one `load`, and the flag is
+/// monotonic (set once, never cleared), so *when* it was set cannot change
+/// which side of that branch runs. Presetting it only removes the thread
+/// scheduling a test would otherwise have to win.
+#[test]
+fn create_worktree_cancellable_stops_before_the_add() {
+    use space::core::workspace::{create_worktree_cancellable, PreCreateFetch};
+    use std::sync::atomic::AtomicBool;
+
+    let repo_dir = TempDir::new().unwrap();
+    common::init_repo(repo_dir.path());
+    let ws_dir = TempDir::new().unwrap();
+    let repo_name = repo_dir.path().file_name().unwrap().to_owned();
+
+    let attempt = create_worktree_cancellable(
+        repo_dir.path(),
+        ws_dir.path(),
+        "test-ws",
+        &BranchStrategy::DetachedHead,
+        PreCreateFetch::Skip,
+        &AtomicBool::new(true),
+    );
+
+    let err = attempt
+        .created
+        .expect_err("a cancelled attempt must not report a created worktree");
+    assert!(
+        err.to_string().contains("cancelled"),
+        "the error must name the cancellation, got {:?}",
+        err.to_string()
+    );
+    assert!(
+        !ws_dir.path().join("test-ws").join(&repo_name).exists(),
+        "cancelling before the add must leave no worktree on disk"
+    );
+}
+
+/// Checkpoint 1: the pre-create fetch does not run either, and `fetch: None`
+/// is how the caller observes that.
+#[test]
+fn create_worktree_cancellable_skips_the_pre_create_fetch() {
+    use space::core::workspace::{create_worktree_cancellable, PreCreateFetch};
+    use std::sync::atomic::AtomicBool;
+
+    let repo_dir = TempDir::new().unwrap();
+    common::init_repo(repo_dir.path());
+    let ws_dir = TempDir::new().unwrap();
+    let repo_name = repo_dir.path().file_name().unwrap().to_owned();
+
+    let attempt = create_worktree_cancellable(
+        repo_dir.path(),
+        ws_dir.path(),
+        "test-ws",
+        &BranchStrategy::DetachedHead,
+        PreCreateFetch::Run(std::time::Duration::from_secs(5)),
+        &AtomicBool::new(true),
+    );
+
+    assert!(
+        attempt.fetch.is_none(),
+        "a cancelled attempt must not have run its fetch, got {:?}",
+        attempt.fetch
+    );
+    assert!(
+        attempt.created.is_err(),
+        "a cancelled attempt must not report a created worktree"
+    );
+    assert!(
+        !ws_dir.path().join("test-ws").join(&repo_name).exists(),
+        "cancelling before the fetch must leave no worktree on disk"
+    );
+}
+
+/// The uncancelled path is the one the flow actually takes, and it is what
+/// makes the two cancellation tests above non-vacuous: the same call with an
+/// unset flag creates the worktree.
+#[test]
+fn create_worktree_cancellable_creates_when_the_flag_is_unset() {
+    use space::core::workspace::{create_worktree_cancellable, PreCreateFetch};
+    use std::sync::atomic::AtomicBool;
+
+    let repo_dir = TempDir::new().unwrap();
+    common::init_repo(repo_dir.path());
+    let ws_dir = TempDir::new().unwrap();
+
+    let attempt = create_worktree_cancellable(
+        repo_dir.path(),
+        ws_dir.path(),
+        "test-ws",
+        &BranchStrategy::DetachedHead,
+        PreCreateFetch::Skip,
+        &AtomicBool::new(false),
+    );
+
+    assert!(
+        attempt.fetch.is_none(),
+        "PreCreateFetch::Skip runs no fetch whatever the flag says"
+    );
+    let wt_path = attempt.created.expect("uncancelled creation must succeed");
+    assert!(wt_path.join(".git").exists(), "worktree should have .git");
+    let branch = space::core::git::current_branch(&wt_path).unwrap();
+    assert!(
+        branch.starts_with('(') && branch.ends_with(')'),
+        "the strategy must still be applied, expected detached HEAD, got {}",
+        branch
+    );
+}
+
+/// `refuses_because_checked_out` documents a limit rather than asserting a
+/// desirable one: it matches git's pre-2.42 wording only. On git 2.50.1
+/// (Apple Git-155) `git worktree add` refuses with "is already used by
+/// worktree at", which this does not match, so the strategy-picker bounce it
+/// gates is dormant there and the generic failure path runs instead.
+#[test]
+fn refuses_because_checked_out_matches_only_the_pre_2_42_wording() {
+    use space::core::workspace::refuses_because_checked_out;
+
+    assert!(
+        refuses_because_checked_out("fatal: 'main' is already checked out at '/x'"),
+        "the pre-2.42 wording is the one this predicate was written for"
+    );
+    assert!(
+        !refuses_because_checked_out("fatal: 'main' is already used by worktree at '/x'"),
+        "git 2.50.1's wording is NOT matched: the bounce is dormant on modern git"
+    );
+    assert!(
+        !refuses_because_checked_out("fatal: not a git repository"),
+        "an unrelated refusal must not bounce to the strategy picker"
+    );
+}

@@ -26,7 +26,7 @@ pub struct WorkspaceRepo {
     pub behind: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BranchStrategy {
     /// Create a new branch with this name off the repo's default branch.
     NewBranch(String),
@@ -1259,6 +1259,70 @@ pub fn create_worktree_with_fetch(
     strategy: &BranchStrategy,
     fetch: PreCreateFetch,
 ) -> WorktreeAttempt {
+    create_worktree_cancellable(
+        repo_path,
+        ws_dir,
+        ws_name,
+        strategy,
+        fetch,
+        &AtomicBool::new(false),
+    )
+}
+
+/// Whether git refused a `worktree add` because the branch is checked out
+/// elsewhere, which the Creating stage treats as "pick another strategy"
+/// rather than as a plain failure.
+///
+/// One predicate because two layers act on it and they must not drift: the
+/// Creating worker ends its run on it, and the App bounces the flow back to
+/// the branch-strategy picker.
+///
+/// It matches git BEFORE 2.42 only. Verified on git 2.50.1 (Apple Git-155):
+/// `git worktree add` refuses with
+/// `fatal: '<branch>' is already used by worktree at '<path>'`, which this
+/// does not match, so on a modern git the bounce is dormant and the user
+/// gets the generic failure path instead. That is the same wording change
+/// `parse_skip_reason` already handles for `branch -f`, where both spellings
+/// are recognised. It is ported here unchanged on purpose, so moving the
+/// stage onto a worker stays behaviour-neutral; widening it is ticket 09
+/// follow-up 6.
+pub fn refuses_because_checked_out(err: &str) -> bool {
+    err.contains("already checked out")
+}
+
+/// `create_worktree_with_fetch` that can be stopped at a boundary, for the
+/// Creating stage's background worker.
+///
+/// Cancellation is boundary-only and there are exactly two checkpoints in one
+/// repo's attempt: before the pre-create fetch, and before the
+/// `git worktree add`. An in-flight git call is never interrupted, because a
+/// child killed part-way through the add would leave `.git/worktrees/<name>`
+/// registered against an incomplete checkout, which is worse than a complete
+/// worktree the user can delete. There is no third checkpoint between
+/// `git::detect_base_branch`, the `rev-parse --verify` probes inside
+/// `add_worktree` and the add they inform: those probes are local, read-only
+/// and instantaneous, so a checkpoint there would only open a window where the
+/// attempt aborts after deciding the strategy and before applying it.
+///
+/// A cancel at checkpoint 1 leaves `fetch: None`, so "the fetch did not run"
+/// is observable by the caller. The attempt returned after a cancel is
+/// partial and callers that cancelled must discard it, mirroring
+/// `sync_repo_cancellable`.
+///
+/// # Invariant
+/// `cancel` is created fresh per run and only ever stored `true`, never
+/// cleared. It is therefore monotonic: once checkpoint 2 has fired, a later
+/// read by the caller cannot see `false`. That is what lets the worker tell a
+/// cancelled attempt from a completed one with a single check after this
+/// call returns.
+pub fn create_worktree_cancellable(
+    repo_path: &Path,
+    ws_dir: &Path,
+    ws_name: &str,
+    strategy: &BranchStrategy,
+    fetch: PreCreateFetch,
+    cancel: &AtomicBool,
+) -> WorktreeAttempt {
     let repo_name = repo_path.file_name().unwrap_or_default().to_string_lossy();
     let wt_path = ws_dir.join(ws_name).join(repo_name.as_ref());
 
@@ -1274,11 +1338,22 @@ pub fn create_worktree_with_fetch(
     let base_branch = git::detect_base_branch(repo_path);
 
     // Pre-create fetch under the unattended-run policy; a failure is ignored
-    // for offline use and creation continues with local refs.
+    // for offline use and creation continues with local refs. Checkpoint 1:
+    // a cancelled run does not start one.
     let fetch = match fetch {
+        PreCreateFetch::Run(_) if cancel.load(Ordering::Relaxed) => None,
         PreCreateFetch::Skip => None,
         PreCreateFetch::Run(limit) => Some(fetch_origin_unattended(repo_path, limit)),
     };
+
+    // Checkpoint 2: the fetch may have taken the whole limit, so the flag is
+    // read again before the add rather than once at entry.
+    if cancel.load(Ordering::Relaxed) {
+        return WorktreeAttempt {
+            fetch,
+            created: Err(anyhow::anyhow!("worktree creation cancelled")),
+        };
+    }
 
     WorktreeAttempt {
         fetch,
