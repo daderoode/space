@@ -12,7 +12,8 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Rows moved by `PgUp`/`PgDn` in the report and the Creating log.
+/// Rows moved by `PgUp`/`PgDn` everywhere a list pages: the sync report, the
+/// Creating log, the two dashboard lists and the help overlay.
 pub const PAGE_ROWS: usize = 10;
 /// Fewest list rows the report shows before the pane takes any height.
 pub const MIN_LIST_ROWS: usize = 3;

@@ -87,6 +87,15 @@ impl CreateState {
         key: ratatui::crossterm::event::KeyEvent,
         ctx: &crate::tui::actions::ScreenContext,
     ) -> crate::tui::actions::ScreenAction {
+        if super::opens_help(
+            key.code,
+            matches!(
+                self.stage,
+                CreateStage::Syncing | CreateStage::PickBranchStrategy | CreateStage::Creating
+            ),
+        ) {
+            return crate::tui::actions::ScreenAction::OpenHelp;
+        }
         match self.stage {
             CreateStage::EnterName => self.handle_enter_name(key),
             CreateStage::PickRepos => self.handle_pick_repos(key),

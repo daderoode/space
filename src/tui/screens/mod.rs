@@ -31,6 +31,17 @@ pub(crate) fn default_no_confirm(code: KeyCode) -> Option<bool> {
     }
 }
 
+/// Whether this key press should open the help overlay.
+///
+/// `?` is a legitimate character in every text input, so it only opens help on
+/// stages that type nothing; each screen passes a positive list of its own
+/// non-text stages, so a stage added later fails safe by not opening help
+/// rather than by swallowing a typed `?`. `F1` is handled app-wide and works
+/// everywhere, including while typing.
+pub(crate) fn opens_help(code: KeyCode, stage_types_nothing: bool) -> bool {
+    stage_types_nothing && code == KeyCode::Char('?')
+}
+
 /// Build repo picker rows from repo paths, filling the branch and remote
 /// columns from each repo's current state. Shared by the create and add
 /// flows for both the initial picker and a rescan rebuild.

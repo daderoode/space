@@ -188,23 +188,27 @@ fn render_delete_footer(
 }
 
 pub fn view(app: &App, frame: &mut Frame) {
+    // Cursor suppression is a property of the frame, not of the `?` gate: `F1`
+    // opens help from inside a text input, and ratatui 0.30 cannot unset a
+    // cursor once a frame has set one, so the screen beneath must not set it.
+    let show_cursor = app.help.is_none();
     match &app.screen {
         Screen::Dashboard => render_dashboard(app, frame),
         Screen::CreateWorkspace(state) => {
             render_dashboard(app, frame);
-            render_create_overlay(state, frame);
+            render_create_overlay(state, show_cursor, frame);
         }
         Screen::GoWorkspace(state) => {
             render_dashboard(app, frame);
-            crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
+            crate::tui::widgets::fuzzy_picker::render(&state.picker, show_cursor, frame);
         }
         Screen::FilterWorkspace(state) => {
             render_dashboard(app, frame);
-            crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
+            crate::tui::widgets::fuzzy_picker::render(&state.picker, show_cursor, frame);
         }
         Screen::AddRepos(state) => {
             render_dashboard(app, frame);
-            render_add_overlay(state, frame);
+            render_add_overlay(state, show_cursor, frame);
         }
         Screen::ConfirmDelete(state) => {
             render_dashboard(app, frame);
@@ -212,25 +216,27 @@ pub fn view(app: &App, frame: &mut Frame) {
         }
         Screen::RepoSearch(state) => {
             render_dashboard(app, frame);
-            crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
+            crate::tui::widgets::fuzzy_picker::render(&state.picker, show_cursor, frame);
         }
-        Screen::ConfigEditor(state) => render_config_editor(state, frame),
+        Screen::ConfigEditor(state) => render_config_editor(state, show_cursor, frame),
         Screen::DiffViewer(state) => {
             render_dashboard(app, frame);
             render_diff_overlay(state, frame);
         }
-        Screen::Help => {
-            render_dashboard(app, frame);
-            render_help_overlay(frame);
-        }
         Screen::SwitchBranch(state) => {
             render_dashboard(app, frame);
-            render_switch_branch_overlay(state, frame);
+            render_switch_branch_overlay(state, show_cursor, frame);
         }
         Screen::GitOps(state) => {
             render_dashboard(app, frame);
-            render_gitops_overlay(state, app.spinner_tick, frame);
+            render_gitops_overlay(state, app.spinner_tick, show_cursor, frame);
         }
+    }
+
+    // Help is a layer over whatever screen is showing, so it is drawn last and
+    // the screen beneath it is drawn normally.
+    if let Some(help) = &app.help {
+        render_help_overlay(help, frame);
     }
 }
 
@@ -262,7 +268,7 @@ fn render_dashboard(app: &App, frame: &mut Frame) {
         Constraint::Length(1),             // title
         Constraint::Min(0),                // main
         Constraint::Length(status_height), // status message (collapses when idle)
-        Constraint::Length(1),             // keybindings (always visible)
+        Constraint::Length(1),             // key bar (always visible)
     ])
     .split(area);
 
@@ -271,7 +277,7 @@ fn render_dashboard(app: &App, frame: &mut Frame) {
     if app.status_message.is_some() {
         render_status_message(app, frame, outer[2]);
     }
-    render_keybindings_bar(app, frame, outer[3]);
+    render_key_bar(app, frame, outer[3]);
 }
 
 fn render_title(frame: &mut Frame, area: Rect) {
@@ -518,29 +524,98 @@ fn render_status_message(app: &App, frame: &mut Frame, area: Rect) {
     }
 }
 
-/// Render the always-visible keybindings hint bar at the bottom.
-fn render_keybindings_bar(app: &App, frame: &mut Frame, area: Rect) {
-    let bindings = crate::tui::keybindings::status_bar_bindings(app.focus);
-    let sep = Span::styled("  ·  ", theme::muted());
-    let mut spans: Vec<Span> = Vec::new();
+/// Render the always-visible key bar at the bottom.
+/// The key-bar entries that fit `width` columns, in render order.
+///
+/// Pure so the fit arithmetic is testable: the bar itself is only drawn above
+/// the 80-column dashboard minimum, and ratatui clips a `Paragraph` at its
+/// area, so a test that renders and measures the result can never observe an
+/// overflow. This can.
+///
+/// `?` and `q` are the gateway keys named in the defect this fixes: `?` opens
+/// everything else and `q` is the documented way out. Room for both is
+/// reserved before anything else is admitted, so they are the last to go, and
+/// below the width that fits even them they are returned alone and the caller
+/// lets the terminal clip.
+pub fn fit_key_bar(
+    bindings: &'static [crate::tui::keybindings::Binding],
+    width: usize,
+) -> Vec<&'static crate::tui::keybindings::Binding> {
+    let cols_of = |b: &crate::tui::keybindings::Binding| {
+        UnicodeWidthStr::width(b.key) + 1 + UnicodeWidthStr::width(b.desc)
+    };
+    let sep_cols = UnicodeWidthStr::width(KEY_BAR_SEP);
 
-    for (i, binding) in bindings.iter().enumerate() {
-        if i > 0 {
-            spans.push(sep.clone());
+    let gateways: Vec<&crate::tui::keybindings::Binding> = bindings
+        .iter()
+        .filter(|b| b.key == "?" || b.key == "q")
+        .collect();
+    let reserved: usize = gateways.iter().map(|b| sep_cols + cols_of(b)).sum();
+
+    let mut out: Vec<&crate::tui::keybindings::Binding> = Vec::new();
+    let mut used = 0usize;
+    for binding in bindings.iter().filter(|b| b.key != "?" && b.key != "q") {
+        let lead = if out.is_empty() { 0 } else { sep_cols };
+        let cols = lead + cols_of(binding);
+        if used + cols + reserved > width {
+            break;
         }
-        spans.push(Span::styled(binding.key, theme::text()));
-        spans.push(Span::styled(format!(" {}", binding.desc), theme::muted()));
+        out.push(binding);
+        used += cols;
+    }
+    out.extend(gateways);
+    out
+}
+
+/// Columns `fit_key_bar`'s result occupies once rendered.
+pub fn key_bar_width(entries: &[&crate::tui::keybindings::Binding]) -> usize {
+    let sep_cols = UnicodeWidthStr::width(KEY_BAR_SEP);
+    entries
+        .iter()
+        .map(|b| UnicodeWidthStr::width(b.key) + 1 + UnicodeWidthStr::width(b.desc))
+        .sum::<usize>()
+        + sep_cols * entries.len().saturating_sub(1)
+}
+
+pub const KEY_BAR_SEP: &str = "  \u{b7}  ";
+
+fn render_key_bar(app: &App, frame: &mut Frame, area: Rect) {
+    let bindings = crate::tui::keybindings::key_bar_bindings(app.focus);
+    let width = usize::from(area.width);
+    let entries = fit_key_bar(bindings, width);
+    // The two gateways are emitted whatever the width and the terminal clips
+    // them; everything else must fit. ratatui clips silently, so without this
+    // a fit bug would never surface at runtime.
+    debug_assert!(
+        entries.len() <= 2 || key_bar_width(&entries) <= width,
+        "key bar is {} columns in {}: {:?}",
+        key_bar_width(&entries),
+        width,
+        entries.iter().map(|b| b.key).collect::<Vec<_>>()
+    );
+
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, b) in entries.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(KEY_BAR_SEP, theme::muted()));
+        }
+        spans.push(Span::styled(b.key, theme::text()));
+        spans.push(Span::styled(format!(" {}", b.desc), theme::muted()));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn render_create_overlay(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
+fn render_create_overlay(
+    state: &crate::tui::screens::create::CreateState,
+    show_cursor: bool,
+    frame: &mut Frame,
+) {
     use crate::tui::screens::create::CreateStage;
     match &state.stage {
-        CreateStage::EnterName => render_name_input(state, frame),
+        CreateStage::EnterName => render_name_input(state, show_cursor, frame),
         CreateStage::PickRepos => {
-            crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
+            crate::tui::widgets::fuzzy_picker::render(&state.picker, show_cursor, frame);
         }
         CreateStage::PickBranchStrategy => render_branch_strategy_picker(
             frame,
@@ -554,11 +629,12 @@ fn render_create_overlay(state: &crate::tui::screens::create::CreateState, frame
             "New branch name:",
             &state.branch_name_input,
             state.error.as_deref(),
+            show_cursor,
             frame,
         ),
         CreateStage::PickBranch => {
             if let Some(ref picker) = state.branch_picker {
-                crate::tui::widgets::fuzzy_picker::render(picker, frame);
+                crate::tui::widgets::fuzzy_picker::render(picker, show_cursor, frame);
             }
         }
         CreateStage::Syncing => render_sync_report(frame, &state.report),
@@ -577,6 +653,7 @@ fn render_text_input_dialog(
     prompt: &str,
     input: &tui_input::Input,
     error: Option<&str>,
+    show_cursor: bool,
     frame: &mut Frame,
 ) {
     use ratatui::widgets::Clear;
@@ -658,19 +735,26 @@ fn render_text_input_dialog(
     // Cursor: position within the visible text area (clamped to bounds)
     let cursor_x = (text_area.x + cursor_col.saturating_sub(scroll))
         .min(text_area.x + text_area_w.saturating_sub(1));
-    frame.set_cursor_position((cursor_x, text_area.y));
+    if show_cursor {
+        frame.set_cursor_position((cursor_x, text_area.y));
+    }
 
     if let Some(err) = error {
         frame.render_widget(Paragraph::new(err).style(theme::error()), sections[2]);
     }
 }
 
-fn render_name_input(state: &crate::tui::screens::create::CreateState, frame: &mut Frame) {
+fn render_name_input(
+    state: &crate::tui::screens::create::CreateState,
+    show_cursor: bool,
+    frame: &mut Frame,
+) {
     render_text_input_dialog(
         "Workspace Name",
         "Enter workspace name:",
         &state.ws_name,
         state.error.as_deref(),
+        show_cursor,
         frame,
     );
 }
@@ -983,11 +1067,15 @@ fn render_creating_log(
     }
 }
 
-fn render_add_overlay(state: &crate::tui::screens::add::AddState, frame: &mut Frame) {
+fn render_add_overlay(
+    state: &crate::tui::screens::add::AddState,
+    show_cursor: bool,
+    frame: &mut Frame,
+) {
     use crate::tui::screens::add::AddStage;
     match &state.stage {
         AddStage::PickRepos => {
-            crate::tui::widgets::fuzzy_picker::render(&state.picker, frame);
+            crate::tui::widgets::fuzzy_picker::render(&state.picker, show_cursor, frame);
         }
         AddStage::PickBranchStrategy => render_branch_strategy_picker(
             frame,
@@ -1001,11 +1089,12 @@ fn render_add_overlay(state: &crate::tui::screens::add::AddState, frame: &mut Fr
             "New branch name:",
             &state.branch_name_input,
             state.error.as_deref(),
+            show_cursor,
             frame,
         ),
         AddStage::PickBranch => {
             if let Some(ref picker) = state.branch_picker {
-                crate::tui::widgets::fuzzy_picker::render(picker, frame);
+                crate::tui::widgets::fuzzy_picker::render(picker, show_cursor, frame);
             }
         }
         AddStage::Syncing => render_sync_report(frame, &state.report),
@@ -1191,7 +1280,11 @@ mod tests {
     }
 }
 
-fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame: &mut Frame) {
+fn render_config_editor(
+    state: &crate::tui::screens::config::ConfigState,
+    show_cursor: bool,
+    frame: &mut Frame,
+) {
     use ratatui::widgets::Clear;
 
     let area = frame.area();
@@ -1262,10 +1355,12 @@ fn render_config_editor(state: &crate::tui::screens::config::ConfigState, frame:
                 Paragraph::new(state.input.value()).style(theme::input_style()),
                 value_area,
             );
-            // Set terminal cursor position
-            let cursor_x = value_area.x + state.input.visual_cursor() as u16;
-            let cursor_y = value_area.y;
-            frame.set_cursor_position((cursor_x, cursor_y));
+            // Set terminal cursor position, unless help is drawn over us.
+            if show_cursor {
+                let cursor_x = value_area.x + state.input.visual_cursor() as u16;
+                let cursor_y = value_area.y;
+                frame.set_cursor_position((cursor_x, cursor_y));
+            }
         } else {
             let value_style = if is_focused {
                 theme::border_focused() // TEAL for focused-not-editing
@@ -1366,22 +1461,20 @@ fn render_diff_overlay(state: &crate::tui::screens::diff::DiffViewerState, frame
     );
 }
 
-fn render_help_overlay(frame: &mut Frame) {
+fn render_help_overlay(help: &crate::tui::screens::help::HelpState, frame: &mut Frame) {
     use ratatui::widgets::Clear;
 
-    let groups = crate::tui::keybindings::all_groups();
+    use crate::tui::keybindings::help_rows;
+    let total = crate::tui::keybindings::rendered_row_count();
 
-    // Calculate height: 1 header + N bindings per group + 1 gap between groups + 1 bottom hint
-    let content_rows: u16 = groups
-        .iter()
-        .map(|g| 1 + g.bindings.len() as u16)
-        .sum::<u16>()
-        + (groups.len() as u16).saturating_sub(1) // gaps between groups
-        + 1; // bottom hint line
-    let height = (content_rows + 2).min(frame.area().height); // +2 for border
-                                                              // Height is clamped to terminal height — content clips on very short terminals
-                                                              // (< 27 rows). Acceptable: 24+ rows is the practical minimum for a terminal.
-    let dialog_w = (frame.area().width * 70 / 100).max(50);
+    // The dialog takes the height it needs, capped by the terminal. The
+    // registry is far taller than any terminal, so in practice it is capped
+    // and the list scrolls: `height` is the cap, not a promise to fit.
+    let height = (total as u16 + 3).min(frame.area().height); // +2 border, +1 footer
+                                                              // Floor of 56 rather than 50: 56 leaves the 54-column interior that the
+                                                              // registry test asserts every row fits, so that budget is now true at
+                                                              // every width where the dialog is drawn, not only at 80 columns.
+    let dialog_w = (frame.area().width * 70 / 100).max(56);
     let area = centered_rect_fixed(dialog_w, height, frame.area());
     frame.render_widget(Clear, area);
 
@@ -1393,30 +1486,54 @@ fn render_help_overlay(frame: &mut Frame) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut lines: Vec<Line> = Vec::new();
-
-    for (i, group) in groups.iter().enumerate() {
-        if i > 0 {
-            lines.push(Line::from("")); // gap between groups
-        }
-        lines.push(Line::from(Span::styled(group.name, theme::title())));
-        for binding in group.bindings {
-            let padding = 12_usize.saturating_sub(binding.key.chars().count());
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {}{}", binding.key, " ".repeat(padding)),
-                    theme::text().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(binding.desc, theme::muted()),
-            ]));
-        }
-    }
-
     let sections = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    let visible = usize::from(sections[0].height);
+    let offset = help.offset(total, visible);
 
-    frame.render_widget(Paragraph::new(lines), sections[0]);
+    let window: Vec<Line> = help_rows(offset, visible)
+        .into_iter()
+        .map(|row| match row {
+            crate::tui::keybindings::HelpRow::Gap => Line::from(""),
+            crate::tui::keybindings::HelpRow::Header(name) => {
+                Line::from(Span::styled(name, theme::title()))
+            }
+            crate::tui::keybindings::HelpRow::Binding(b) => {
+                // Pad to 12, then always at least one space: a 12-character
+                // key used to run straight into its description.
+                let padding = 12_usize.saturating_sub(b.key.chars().count()) + 1;
+                Line::from(vec![
+                    Span::styled(
+                        format!("  {}{}", b.key, " ".repeat(padding)),
+                        theme::text().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(b.desc, theme::muted()),
+                ])
+            }
+        })
+        .collect();
+
+    let end = offset + window.len();
+    frame.render_widget(Paragraph::new(window), sections[0]);
+
+    // The hint must fit the 54-column interior of the narrowest dialog, so the
+    // scrolled form is the short one. Its widest case is the largest row
+    // numbers the registry can produce, which currently lands exactly on the
+    // 54-column interior with no margin: `overlay_footer_fits_the_dialog`
+    // derives that worst case from `rendered_row_count()` and fails if either
+    // side moves, so do not add words here without checking that test.
+    let scrolled = total > visible;
+    let hint = if scrolled {
+        format!(
+            "rows {}-{} of {}  ·  ↑↓ scroll  ·  Esc/q/?/F1 close",
+            offset + 1,
+            end,
+            total
+        )
+    } else {
+        "Esc / q / ? / F1 to close".to_string()
+    };
     frame.render_widget(
-        Paragraph::new("Esc / q / ? to close")
+        Paragraph::new(hint)
             .style(theme::muted())
             .alignment(Alignment::Center),
         sections[1],
@@ -1425,6 +1542,7 @@ fn render_help_overlay(frame: &mut Frame) {
 
 fn render_switch_branch_overlay(
     state: &crate::tui::screens::switch_branch::SwitchBranchState,
+    show_cursor: bool,
     frame: &mut Frame,
 ) {
     use crate::tui::screens::switch_branch::SwitchBranchStage;
@@ -1441,11 +1559,12 @@ fn render_switch_branch_overlay(
             "Branch name:",
             &state.branch_name_input,
             state.error.as_deref(),
+            show_cursor,
             frame,
         ),
         SwitchBranchStage::PickBranch => {
             if let Some(ref picker) = state.branch_picker {
-                crate::tui::widgets::fuzzy_picker::render(picker, frame);
+                crate::tui::widgets::fuzzy_picker::render(picker, show_cursor, frame);
             }
         }
     }
@@ -1568,6 +1687,7 @@ fn render_switch_strategy_picker(
 fn render_gitops_overlay(
     state: &crate::tui::screens::gitops::GitOpsState,
     spinner_tick: u64,
+    show_cursor: bool,
     frame: &mut Frame,
 ) {
     // Running stage: a network op (Phase 2: fetch) streaming live output.
@@ -1677,7 +1797,7 @@ fn render_gitops_overlay(
     // Rebase target picker: reuse the shared fuzzy branch picker (full-screen).
     if state.stage == crate::tui::screens::gitops::GitOpsStage::RebasePickTarget {
         if let Some(ref picker) = state.rebase_picker {
-            crate::tui::widgets::fuzzy_picker::render(picker, frame);
+            crate::tui::widgets::fuzzy_picker::render(picker, show_cursor, frame);
         }
         return;
     }

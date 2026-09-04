@@ -57,6 +57,9 @@ impl SwitchBranchState {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
+        if super::opens_help(key.code, self.stage == SwitchBranchStage::PickStrategy) {
+            return ScreenAction::OpenHelp;
+        }
         match self.stage {
             SwitchBranchStage::PickStrategy => self.handle_pick_strategy(key, ctx),
             SwitchBranchStage::EnterBranchName => self.handle_enter_branch_name(key, ctx),

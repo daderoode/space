@@ -1,5 +1,6 @@
 use crate::core::git::FileDiff;
 use crate::tui::actions::{ScreenAction, ScreenContext};
+use crate::tui::screens::sync_report::PAGE_ROWS;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use std::path::PathBuf;
 
@@ -31,13 +32,13 @@ impl DiffViewerState {
                 ScreenAction::Continue
             }
             KeyCode::PageUp => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                self.scroll_offset = self.scroll_offset.saturating_sub(PAGE_ROWS as u16);
                 ScreenAction::Continue
             }
             KeyCode::PageDown => {
                 self.scroll_offset = self
                     .scroll_offset
-                    .saturating_add(10)
+                    .saturating_add(PAGE_ROWS as u16)
                     .min(self.total_lines.saturating_sub(1));
                 ScreenAction::Continue
             }
@@ -49,6 +50,8 @@ impl DiffViewerState {
                 self.scroll_offset = self.total_lines.saturating_sub(1);
                 ScreenAction::Continue
             }
+            // Nothing is typed here, so `?` always opens help.
+            c if crate::tui::screens::opens_help(c, true) => ScreenAction::OpenHelp,
             KeyCode::Char('s') | KeyCode::Char(' ') => ScreenAction::StageFile {
                 repo_index: self.repo_index,
                 repo_path: self.repo_path.clone(),

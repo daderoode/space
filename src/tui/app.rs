@@ -4,6 +4,7 @@ use crate::core::{
     workspace::{self, SyncOutcome, Workspace},
 };
 use crate::tui::actions::StatusKind;
+use crate::tui::screens::sync_report::PAGE_ROWS;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -114,7 +115,6 @@ pub enum Screen {
     DiffViewer(crate::tui::screens::diff::DiffViewerState),
     SwitchBranch(crate::tui::screens::switch_branch::SwitchBranchState),
     GitOps(crate::tui::screens::gitops::GitOpsState),
-    Help,
 }
 
 #[derive(Debug)]
@@ -125,6 +125,8 @@ pub enum Message {
     SelectWorkspaceDown,
     SelectRepoUp,
     SelectRepoDown,
+    JumpWorkspace(ListJump),
+    JumpRepo(ListJump),
     GoToWorkspace,
     StartGo,
     StartFilter,
@@ -159,6 +161,45 @@ pub enum Message {
     StartGitOps {
         repo_index: usize,
     },
+}
+
+/// A jump requested on one of the two dashboard lists. `PageUp`/`PageDown`
+/// move by `PAGE_ROWS`, the same page the diff viewer, the git-ops log and the
+/// sync report use; `First`/`Last` go to the ends.
+///
+/// Deliberately not bound to `g`/`G`: both letters already carry shipped
+/// meanings on the dashboard (`g` opens the space picker on the left pane,
+/// `G` the git-ops overlay on the right), so a `g`/`G` paging scheme would give
+/// one letter two meanings across the two panes. Design doc open question 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListJump {
+    PageUp,
+    PageDown,
+    First,
+    Last,
+}
+
+impl ListJump {
+    /// The row this jump targets in a list of `len` rows, starting from
+    /// `current`. Clamped at both ends; never wraps. An empty list targets 0.
+    ///
+    /// `current` is clamped first as defence in depth: the cursor is an index
+    /// into rows rebuilt on demand, so any path that shrinks the list between
+    /// a keypress and this call would otherwise leave `PageUp` past the end and
+    /// the caller indexing out of bounds. The one such path that existed,
+    /// `ScreenAction::StageFile` returning to the dashboard without
+    /// repositioning, is fixed at its source; `skip_headers` clamps for the
+    /// same reason.
+    fn target(self, current: usize, len: usize) -> usize {
+        let last = len.saturating_sub(1);
+        let current = current.min(last);
+        match self {
+            ListJump::PageUp => current.saturating_sub(PAGE_ROWS),
+            ListJump::PageDown => current.saturating_add(PAGE_ROWS).min(last),
+            ListJump::First => 0,
+            ListJump::Last => last,
+        }
+    }
 }
 
 /// A row in the flattened repo table (repo header or file entry).
@@ -199,6 +240,9 @@ pub struct App {
     pub table_scroll_x: u16,
     pub focus: Pane,
     pub screen: Screen,
+    /// The help overlay, when open. A layer over `screen`, never a replacement
+    /// for it: see `docs/adr/0001-help-is-an-overlay-layer-not-a-screen.md`.
+    pub help: Option<crate::tui::screens::help::HelpState>,
     pub should_quit: bool,
     pub space_cd_target: Option<PathBuf>,
     pub status_message: Option<String>,
@@ -280,6 +324,7 @@ impl App {
             table_scroll_x: 0,
             focus: Pane::Left,
             screen: Screen::Dashboard,
+            help: None,
             should_quit: false,
             space_cd_target: None,
             status_message: None,
@@ -726,7 +771,7 @@ impl App {
                 .any(|e| e.path == path && e.status == crate::core::git::FileStatus::Conflicted)
             {
                 self.set_status(
-                    "Cannot stage conflicted file \u{2014} resolve conflicts first".to_string(),
+                    "Cannot stage conflicted file: resolve conflicts first".to_string(),
                     StatusKind::Warning,
                 );
                 return;
@@ -776,6 +821,13 @@ impl App {
                 self.set_status(format!("{} failed: {}", verb, err), StatusKind::Error);
             }
         }
+    }
+
+    /// Open the help overlay over the current screen, scrolled to the group
+    /// documenting that screen.
+    pub fn open_help(&mut self) {
+        let group = crate::tui::screens::help::landing_group(&self.screen, self.focus);
+        self.help = Some(crate::tui::screens::help::HelpState::opening_at(group));
     }
 
     fn set_status(&mut self, msg: impl Into<String>, kind: StatusKind) {
@@ -1135,6 +1187,9 @@ impl App {
         use crate::tui::actions::ScreenAction;
         match action {
             ScreenAction::Continue => {}
+            ScreenAction::OpenHelp => {
+                self.open_help();
+            }
             ScreenAction::Back => {
                 // Refresh workspaces when leaving Creating stage (catches partial creates)
                 self.refresh_if_leaving_creating_stage();
@@ -1279,6 +1334,12 @@ impl App {
             } => {
                 self.do_stage(repo_index, &repo_path, &path, currently_staged);
                 self.screen = Screen::Dashboard;
+                // Staging refetches the repo's file list, so the row the cursor
+                // was on may be gone. `Message::StageFile` repositions for the
+                // same reason; without this the cursor is left indexing rows
+                // that no longer exist.
+                let rows = self.flattened_rows();
+                self.cursor_row = reposition_after_section_change(&rows, self.cursor_row);
             }
             ScreenAction::SwitchRepoBranch {
                 repo_path,
@@ -1335,8 +1396,24 @@ impl App {
             config: &self.config,
         };
 
+        // The help overlay is modal: while it is open it consumes every key,
+        // so nothing reaches the screen beneath it.
+        if let Some(help) = &mut self.help {
+            let total = crate::tui::keybindings::rendered_row_count();
+            if help.handle_key(key, total) {
+                self.help = None;
+            }
+            return;
+        }
+
+        // F1 opens help from anywhere, including a text input, where `?` is a
+        // legitimate character and must be typed instead.
+        if key.code == ratatui::crossterm::event::KeyCode::F(1) {
+            self.open_help();
+            return;
+        }
+
         let action = match &mut self.screen {
-            Screen::Help => crate::tui::screens::help::handle_key(key, &ctx),
             Screen::ConfirmDelete(state) => state.handle_key(key, &ctx),
             Screen::GoWorkspace(state) => state.handle_key(key, &ctx),
             Screen::FilterWorkspace(state) => state.handle_key(key, &ctx),
@@ -1374,9 +1451,20 @@ impl App {
                     // `g` is documented as a workspace-pane key; ungated it
                     // would yank the user out of the repo rows they are browsing.
                     (KeyCode::Char('g'), _) if self.focus == Pane::Left => Some(Message::StartGo),
-                    (KeyCode::Char('c'), _) => Some(Message::StartCreate),
-                    (KeyCode::Char('a'), _) => Some(Message::StartAdd),
-                    (KeyCode::Char('d'), _) => Some(Message::StartDelete),
+                    // `c`, `a` and `d` act on the selected space, so they
+                    // belong to the pane that selects it. Ungated, `d` popped a
+                    // delete-space confirm from a file row: the same surprise
+                    // the `g` gate above removed.
+                    (KeyCode::Char('c'), _) if self.focus == Pane::Left => {
+                        Some(Message::StartCreate)
+                    }
+                    (KeyCode::Char('a'), _) if self.focus == Pane::Left => Some(Message::StartAdd),
+                    (KeyCode::Char('d'), _) if self.focus == Pane::Left => {
+                        Some(Message::StartDelete)
+                    }
+                    // `r` is a general key, not a workspace-pane key: it rescans
+                    // the repo list and also reloads the repo pane, so it stays
+                    // available from the pane it reloads.
                     (KeyCode::Char('r'), _) => Some(Message::RefreshRepos),
                     // /: pane-gated. Workspaces pane filters spaces, repos pane searches repos.
                     (KeyCode::Char('/'), _) => match self.focus {
@@ -1449,6 +1537,22 @@ impl App {
                         Pane::Right => Some(Message::SelectRepoDown),
                     },
                     // Right arrow: context-sensitive
+                    (KeyCode::PageUp, _) => Some(match self.focus {
+                        Pane::Left => Message::JumpWorkspace(ListJump::PageUp),
+                        Pane::Right => Message::JumpRepo(ListJump::PageUp),
+                    }),
+                    (KeyCode::PageDown, _) => Some(match self.focus {
+                        Pane::Left => Message::JumpWorkspace(ListJump::PageDown),
+                        Pane::Right => Message::JumpRepo(ListJump::PageDown),
+                    }),
+                    (KeyCode::Home, _) => Some(match self.focus {
+                        Pane::Left => Message::JumpWorkspace(ListJump::First),
+                        Pane::Right => Message::JumpRepo(ListJump::First),
+                    }),
+                    (KeyCode::End, _) => Some(match self.focus {
+                        Pane::Left => Message::JumpWorkspace(ListJump::Last),
+                        Pane::Right => Message::JumpRepo(ListJump::Last),
+                    }),
                     (KeyCode::Right, _) => match self.focus {
                         Pane::Left => Some(Message::FocusNext),
                         Pane::Right => {
@@ -1656,7 +1760,11 @@ fn run_gitop_worker(
 /// The `debug_assert` below catches any future violation in debug builds.
 fn skip_headers(rows: &[RepoRow<'_>], from: usize, down: bool) -> usize {
     let max = rows.len().saturating_sub(1);
-    let mut pos = from;
+    // `from` is clamped for the same reason `reposition_after_section_change`
+    // clamps its cursor: callers pass `app.cursor_row`, which can outlive the
+    // rows it indexes. Clamping here means every caller inherits the guarantee
+    // instead of each one re-deriving it.
+    let mut pos = from.min(max);
     loop {
         if down {
             if pos >= max {
@@ -1748,6 +1856,40 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
         Message::SelectRepoDown => {
             let rows = app.flattened_rows();
             app.cursor_row = skip_headers(&rows, app.cursor_row, true);
+            None
+        }
+        Message::JumpWorkspace(jump) => {
+            let target = jump.target(app.selected_ws, app.workspaces.len());
+            // A jump that changes nothing must not fire the reset and the
+            // reload: a reflex End on an already-last space would otherwise
+            // discard the repo pane's expansions and caches.
+            if target != app.selected_ws {
+                app.selected_ws = target;
+                app.selected_repo = 0;
+                app.reset_repo_pane_state();
+                app.begin_workspace_load();
+            }
+            None
+        }
+        Message::JumpRepo(jump) => {
+            let rows = app.flattened_rows();
+            if rows.is_empty() {
+                return None;
+            }
+            let target = jump.target(app.cursor_row, rows.len());
+            // First and Last cannot land on a header (see the `flattened_rows`
+            // invariant), but a page can. Step out of it the way the jump was
+            // travelling, so a PgUp never resolves downwards. `.get()` matches
+            // every other `cursor_row` read in this file: the cursor can be
+            // stale, and `target` is only clamped against the rows we just
+            // built.
+            app.cursor_row = match rows.get(target) {
+                Some(RepoRow::SectionHeader { .. }) => {
+                    skip_headers(&rows, target, target >= app.cursor_row)
+                }
+                Some(_) => target,
+                None => 0,
+            };
             None
         }
         Message::RefreshRepos => {
@@ -1879,7 +2021,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
             None
         }
         Message::StartHelp => {
-            app.screen = Screen::Help;
+            app.open_help();
             None
         }
         Message::CollapseAllRepos => {
@@ -2249,6 +2391,7 @@ mod tests {
             table_scroll_x: 0,
             focus: Pane::Left,
             screen: Screen::Dashboard,
+            help: None,
             should_quit: false,
             space_cd_target: None,
             status_message: None,
@@ -2395,6 +2538,7 @@ mod tests {
             table_scroll_x: 0,
             focus: Pane::Left,
             screen: Screen::Dashboard,
+            help: None,
             should_quit: false,
             space_cd_target: None,
             status_message: None,

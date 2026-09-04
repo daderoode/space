@@ -1,5 +1,6 @@
 //! Shared keybinding definitions consumed by the help overlay and status bar.
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct Binding {
     pub key: &'static str,
     pub desc: &'static str,
@@ -10,8 +11,27 @@ pub struct BindingGroup {
     pub bindings: &'static [Binding],
 }
 
+/// Group names, shared by the registry below and by
+/// `screens::help::landing_group`, so a rename cannot silently send help
+/// to the top of the list instead of to the group for the current screen.
+pub const NAVIGATION_NAME: &str = "Navigation";
+pub const WORKSPACE_PANE_NAME: &str = "Workspace Pane";
+pub const REPO_PANE_NAME: &str = "Repo Pane";
+pub const REPO_PICKER_NAME: &str = "Repo Picker";
+pub const CREATE_ADD_FLOW_NAME: &str = "Create / Add Flow";
+pub const CREATING_LOG_NAME: &str = "Creating Log";
+pub const DELETE_CONFIRM_NAME: &str = "Delete Confirm";
+pub const SWITCH_BRANCH_NAME: &str = "Switch Branch";
+pub const CONFIG_EDITOR_NAME: &str = "Config Editor";
+pub const SPACE_REPO_PICKERS_NAME: &str = "Space & Repo Pickers";
+pub const GIT_OPS_NAME: &str = "Git Operations";
+pub const DIFF_VIEWER_NAME: &str = "Diff Viewer";
+pub const SYNC_REPORT_NAME: &str = "Sync Report";
+pub const HELP_OVERLAY_NAME: &str = "Help Overlay";
+pub const GENERAL_NAME: &str = "General";
+
 const NAVIGATION: BindingGroup = BindingGroup {
-    name: "Navigation",
+    name: NAVIGATION_NAME,
     bindings: &[
         Binding {
             key: "Tab",
@@ -24,6 +44,14 @@ const NAVIGATION: BindingGroup = BindingGroup {
         Binding {
             key: "↓/j",
             desc: "Down",
+        },
+        Binding {
+            key: "PgUp/PgDn",
+            desc: "Page up/down",
+        },
+        Binding {
+            key: "Home/End",
+            desc: "First / last row",
         },
         Binding {
             key: "h/l",
@@ -41,7 +69,7 @@ const NAVIGATION: BindingGroup = BindingGroup {
 };
 
 const WORKSPACE_PANE: BindingGroup = BindingGroup {
-    name: "Workspace Pane",
+    name: WORKSPACE_PANE_NAME,
     bindings: &[
         Binding {
             key: "Enter",
@@ -64,10 +92,6 @@ const WORKSPACE_PANE: BindingGroup = BindingGroup {
             desc: "Go (fuzzy picker)",
         },
         Binding {
-            key: "r",
-            desc: "Rescan repo list",
-        },
-        Binding {
             key: "/",
             desc: "Filter spaces",
         },
@@ -79,7 +103,7 @@ const WORKSPACE_PANE: BindingGroup = BindingGroup {
 };
 
 const REPO_PANE: BindingGroup = BindingGroup {
-    name: "Repo Pane",
+    name: REPO_PANE_NAME,
     bindings: &[
         Binding {
             key: "Enter (repo)",
@@ -121,7 +145,7 @@ const REPO_PANE: BindingGroup = BindingGroup {
 };
 
 const REPO_PICKER: BindingGroup = BindingGroup {
-    name: "Repo Picker",
+    name: REPO_PICKER_NAME,
     bindings: &[
         Binding {
             key: "Tab",
@@ -139,7 +163,7 @@ const REPO_PICKER: BindingGroup = BindingGroup {
 };
 
 const GIT_OPS: BindingGroup = BindingGroup {
-    name: "Git Operations",
+    name: GIT_OPS_NAME,
     bindings: &[
         Binding {
             key: "f",
@@ -170,18 +194,42 @@ const GIT_OPS: BindingGroup = BindingGroup {
             desc: "Navigate (menu and log only)",
         },
         Binding {
+            key: "\u{2191}\u{2193}",
+            desc: "Move the rebase-target highlight",
+        },
+        Binding {
+            key: "PgUp/PgDn",
+            desc: "Page the log",
+        },
+        Binding {
+            key: "Home/End",
+            desc: "Log top / bottom",
+        },
+        Binding {
             key: "enter",
             desc: "Select",
         },
         Binding {
-            key: "esc/q",
-            desc: "Close",
+            key: "y",
+            desc: "Confirm a push or rebase",
+        },
+        Binding {
+            key: "n/Enter/Esc",
+            desc: "Decline (the default)",
+        },
+        Binding {
+            key: "esc",
+            desc: "Back a stage (closes from menu/running)",
+        },
+        Binding {
+            key: "q",
+            desc: "Same as Esc, except while typing",
         },
     ],
 };
 
 const DIFF_VIEWER: BindingGroup = BindingGroup {
-    name: "Diff Viewer",
+    name: DIFF_VIEWER_NAME,
     bindings: &[
         Binding {
             key: "up/k",
@@ -211,7 +259,7 @@ const DIFF_VIEWER: BindingGroup = BindingGroup {
 };
 
 const SYNC_REPORT: BindingGroup = BindingGroup {
-    name: "Sync Report",
+    name: SYNC_REPORT_NAME,
     bindings: &[
         Binding {
             key: "\u{2191}\u{2193}/jk",
@@ -237,15 +285,23 @@ const SYNC_REPORT: BindingGroup = BindingGroup {
 };
 
 const GENERAL: BindingGroup = BindingGroup {
-    name: "General",
+    name: GENERAL_NAME,
     bindings: &[
         Binding {
+            key: "r",
+            desc: "Rescan repo list (dashboard)",
+        },
+        Binding {
             key: "?",
-            desc: "Help",
+            desc: "Help (not while typing)",
+        },
+        Binding {
+            key: "F1",
+            desc: "Help (works while typing)",
         },
         Binding {
             key: "q",
-            desc: "Quit",
+            desc: "Quit (dashboard, not while typing)",
         },
         Binding {
             key: "Ctrl-C",
@@ -254,24 +310,270 @@ const GENERAL: BindingGroup = BindingGroup {
     ],
 };
 
+const CREATE_ADD_FLOW: BindingGroup = BindingGroup {
+    name: CREATE_ADD_FLOW_NAME,
+    bindings: &[
+        Binding {
+            key: "Tab",
+            desc: "Toggle repo in picker",
+        },
+        Binding {
+            key: "Enter",
+            desc: "Confirm and continue",
+        },
+        Binding {
+            key: "↑↓/jk",
+            desc: "Choose branch strategy",
+        },
+        Binding {
+            key: "letters",
+            desc: "Type a name, or filter the picker",
+        },
+        Binding {
+            key: "Esc",
+            desc: "Back one stage",
+        },
+    ],
+};
+
+const CREATING_LOG: BindingGroup = BindingGroup {
+    name: CREATING_LOG_NAME,
+    bindings: &[
+        Binding {
+            key: "\u{2191}\u{2193}/jk",
+            desc: "Scroll the log",
+        },
+        Binding {
+            key: "PgUp/PgDn",
+            desc: "Page the log",
+        },
+        Binding {
+            key: "Home/End",
+            desc: "Top / bottom (End resumes follow)",
+        },
+        Binding {
+            key: "Enter/Esc/q",
+            desc: "Back to the dashboard",
+        },
+    ],
+};
+
+const DELETE_CONFIRM: BindingGroup = BindingGroup {
+    name: DELETE_CONFIRM_NAME,
+    bindings: &[
+        Binding {
+            key: "y",
+            desc: "Delete the space",
+        },
+        Binding {
+            key: "n/Esc/Enter",
+            desc: "Cancel (the default)",
+        },
+        Binding {
+            key: "q",
+            desc: "Cancel",
+        },
+    ],
+};
+
+const SWITCH_BRANCH: BindingGroup = BindingGroup {
+    name: SWITCH_BRANCH_NAME,
+    bindings: &[
+        Binding {
+            key: "↑↓/jk",
+            desc: "Choose strategy",
+        },
+        Binding {
+            key: "Enter",
+            desc: "Confirm",
+        },
+        Binding {
+            key: "letters",
+            desc: "Type a new branch name / filter",
+        },
+        Binding {
+            key: "↑↓",
+            desc: "Move the branch highlight",
+        },
+        Binding {
+            key: "Esc",
+            desc: "Back one stage",
+        },
+        Binding {
+            key: "q",
+            desc: "Back, on the strategy stage only",
+        },
+    ],
+};
+
+const CONFIG_EDITOR: BindingGroup = BindingGroup {
+    name: CONFIG_EDITOR_NAME,
+    bindings: &[
+        Binding {
+            key: "↑↓/jk",
+            desc: "Move between fields",
+        },
+        Binding {
+            key: "Enter",
+            desc: "Edit field / commit edit",
+        },
+        Binding {
+            key: "Ctrl-S",
+            desc: "Save and exit",
+        },
+        Binding {
+            key: "Esc",
+            desc: "Cancel edit, or close",
+        },
+        Binding {
+            key: "q",
+            desc: "Close, when not editing",
+        },
+    ],
+};
+
+const SPACE_REPO_PICKERS: BindingGroup = BindingGroup {
+    name: SPACE_REPO_PICKERS_NAME,
+    bindings: &[
+        Binding {
+            key: "↑↓",
+            desc: "Move the highlight",
+        },
+        Binding {
+            key: "Enter",
+            desc: "Select",
+        },
+        Binding {
+            key: "Esc",
+            desc: "Cancel",
+        },
+        Binding {
+            key: "letters",
+            desc: "Type into the filter",
+        },
+    ],
+};
+
+const HELP_OVERLAY: BindingGroup = BindingGroup {
+    name: HELP_OVERLAY_NAME,
+    bindings: &[
+        Binding {
+            key: "↑↓/jk",
+            desc: "Scroll",
+        },
+        Binding {
+            key: "PgUp/PgDn",
+            desc: "Page",
+        },
+        Binding {
+            key: "Home/End",
+            desc: "Top / bottom",
+        },
+        Binding {
+            key: "Esc/q/?/F1",
+            desc: "Close",
+        },
+    ],
+};
+
 /// All binding groups — consumed by the help overlay.
 pub fn all_groups() -> &'static [BindingGroup] {
-    static GROUPS: [BindingGroup; 8] = [
+    static GROUPS: [BindingGroup; 15] = [
         NAVIGATION,
         WORKSPACE_PANE,
         REPO_PANE,
         REPO_PICKER,
+        CREATE_ADD_FLOW,
+        CREATING_LOG,
+        DELETE_CONFIRM,
+        SWITCH_BRANCH,
+        CONFIG_EDITOR,
+        SPACE_REPO_PICKERS,
         GIT_OPS,
         DIFF_VIEWER,
         SYNC_REPORT,
+        HELP_OVERLAY,
         GENERAL,
     ];
     &GROUPS
 }
 
-/// Bindings to show in the status bar for a given pane.
-/// Short labels suited for a single condensed line.
-pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
+/// Rendered lines the help overlay produces for the whole registry: one header
+/// per group, one per binding, and one blank line between groups.
+pub fn rendered_row_count() -> usize {
+    let groups = all_groups();
+    groups.iter().map(|g| 1 + g.bindings.len()).sum::<usize>() + groups.len().saturating_sub(1)
+}
+
+/// One rendered line of the help overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpRow {
+    /// The blank line between two groups.
+    Gap,
+    /// A group's title line.
+    Header(&'static str),
+    /// One key and its description.
+    Binding(&'static Binding),
+}
+
+/// The `visible` rendered rows starting at `offset`.
+///
+/// Pure so the windowing can be tested directly: an off-by-one here shifts
+/// what the overlay shows without changing anything a content-sampling test
+/// would notice. Row numbering matches `rendered_row_count` and
+/// `group_row_offset` exactly, since all three walk the same shape.
+pub fn help_rows(offset: usize, visible: usize) -> Vec<HelpRow> {
+    let end = offset.saturating_add(visible);
+    let mut out = Vec::new();
+    let mut row = 0usize;
+    for (i, group) in all_groups().iter().enumerate() {
+        if row >= end {
+            break;
+        }
+        if i > 0 {
+            if row >= offset && row < end {
+                out.push(HelpRow::Gap);
+            }
+            row += 1;
+        }
+        if row >= offset && row < end {
+            out.push(HelpRow::Header(group.name));
+        }
+        row += 1;
+        for binding in group.bindings {
+            if row >= end {
+                break;
+            }
+            if row >= offset {
+                out.push(HelpRow::Binding(binding));
+            }
+            row += 1;
+        }
+    }
+    out
+}
+
+/// The rendered line `group` starts on, for the help overlay's opening scroll.
+/// An unknown name lands at the top rather than failing: a screen with no group
+/// of its own is not an error.
+pub fn group_row_offset(group: &str) -> usize {
+    let mut row = 0usize;
+    for (i, g) in all_groups().iter().enumerate() {
+        if i > 0 {
+            row += 1; // the blank line between groups
+        }
+        if g.name == group {
+            return row;
+        }
+        row += 1 + g.bindings.len();
+    }
+    0
+}
+
+/// Bindings to show in the key bar for a given pane.
+/// Short labels suited for a single condensed line. The renderer drops
+/// entries that do not fit, always keeping the help key.
+pub fn key_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
     static LEFT: [Binding; 10] = [
         Binding {
             key: "enter",
@@ -368,26 +670,59 @@ pub fn status_bar_bindings(pane: crate::tui::app::Pane) -> &'static [Binding] {
 
 #[cfg(test)]
 mod tests {
-    use super::all_groups;
+    use super::{all_groups, group_row_offset, rendered_row_count};
 
-    /// The help overlay never wraps: each row is two spaces, the key padded
-    /// to 12 columns and the description. On the 80-column default terminal
-    /// the dialog is 56 wide, 54 inside the border, so every registered
-    /// binding must fit 54 columns or its description is clipped there.
+    /// The help overlay never wraps: each row is two spaces, the key padded to
+    /// 12 columns, one guaranteed space and the description. The dialog is at
+    /// least 56 wide, 54 inside the border, so every registered binding must
+    /// fit 54 columns or its description is clipped.
+    ///
+    /// The width floor is 56 rather than 50 precisely so this budget holds at
+    /// every terminal width the overlay is drawn at, not only at 80 columns.
     #[test]
-    fn every_binding_fits_the_default_terminal_help_dialog() {
+    fn every_binding_fits_the_help_dialog() {
         for group in all_groups() {
             for binding in group.bindings {
                 let key_cols = binding.key.chars().count().max(12);
-                let row = 2 + key_cols + binding.desc.chars().count();
+                // +1 for the space the renderer always emits between the key
+                // column and the description, so a 12-character key cannot run
+                // into its own text.
+                let row = 2 + key_cols + 1 + binding.desc.chars().count();
                 assert!(
                     row <= 54,
-                    "{} / {:?} is {} columns wide, over the 54-column help dialog at 80 columns",
+                    "{} / {:?} is {} columns wide, over the 54-column help dialog",
                     group.name,
                     binding.desc,
                     row
                 );
             }
         }
+    }
+
+    /// Group offsets are what the overlay scrolls to when help is opened from
+    /// a flow, so they must match the lines the renderer actually emits.
+    #[test]
+    fn group_row_offsets_match_the_rendered_line_count() {
+        let groups = all_groups();
+        let mut row = 0usize;
+        for (i, g) in groups.iter().enumerate() {
+            if i > 0 {
+                row += 1;
+            }
+            assert_eq!(
+                group_row_offset(g.name),
+                row,
+                "offset for group {:?}",
+                g.name
+            );
+            row += 1 + g.bindings.len();
+        }
+        assert_eq!(row, rendered_row_count(), "total rendered rows");
+    }
+
+    /// An unknown group name lands at the top rather than panicking.
+    #[test]
+    fn an_unknown_group_lands_at_the_top() {
+        assert_eq!(group_row_offset("Nonexistent"), 0);
     }
 }

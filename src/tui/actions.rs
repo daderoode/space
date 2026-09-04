@@ -76,6 +76,9 @@ pub enum ScreenAction {
     Continue,
     /// Return to Dashboard.
     Back,
+    /// Open the help overlay on top of the current screen, which is left
+    /// exactly as it is. Not `Back`: that resets to the Dashboard.
+    OpenHelp,
     /// Return to Dashboard with a transient status message.
     BackWithStatus(String, StatusKind),
     /// Set cd target and quit (used by Go).

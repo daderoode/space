@@ -1796,46 +1796,48 @@ fn phase1_right_arrow_on_workspace_pane_then_enter_expands_repo() {
 fn dashboard_question_mark_opens_help() {
     let mut app = test_app(vec![], vec![]);
     app.handle_key(key(KeyCode::Char('?')));
-    assert!(
-        matches!(app.screen, Screen::Help),
-        "expected Help screen, got {:?}",
-        std::mem::discriminant(&app.screen)
-    );
-}
-
-#[test]
-fn help_esc_returns_to_dashboard() {
-    let mut app = test_app(vec![], vec![]);
-    app.handle_key(key(KeyCode::Char('?')));
-    assert!(matches!(app.screen, Screen::Help));
-
-    app.handle_key(key(KeyCode::Esc));
+    assert!(app.help.is_some(), "expected the help overlay to be open");
     assert!(
         matches!(app.screen, Screen::Dashboard),
-        "expected Dashboard after Esc from Help"
+        "help is an overlay layer: the screen beneath it never changes"
     );
 }
 
 #[test]
-fn help_q_returns_to_dashboard() {
+fn help_esc_closes_the_overlay() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('?')));
+    assert!(app.help.is_some());
+
+    app.handle_key(key(KeyCode::Esc));
+    assert!(app.help.is_none(), "expected the overlay closed after Esc");
+    assert!(matches!(app.screen, Screen::Dashboard));
+}
+
+#[test]
+fn help_q_closes_the_overlay() {
     let mut app = test_app(vec![], vec![]);
     app.handle_key(key(KeyCode::Char('?')));
     app.handle_key(key(KeyCode::Char('q')));
+    assert!(app.help.is_none(), "expected the overlay closed after q");
     assert!(
-        matches!(app.screen, Screen::Dashboard),
-        "expected Dashboard after q from Help"
+        !app.should_quit,
+        "q closes the overlay, it does not fall through and quit the app"
     );
 }
 
 #[test]
-fn help_question_mark_returns_to_dashboard() {
-    let mut app = test_app(vec![], vec![]);
-    app.handle_key(key(KeyCode::Char('?')));
-    app.handle_key(key(KeyCode::Char('?')));
-    assert!(
-        matches!(app.screen, Screen::Dashboard),
-        "expected Dashboard after ? toggles Help off"
-    );
+fn help_question_mark_and_f1_both_close_the_overlay() {
+    for closer in [KeyCode::Char('?'), KeyCode::F(1)] {
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        app.handle_key(key(closer));
+        assert!(
+            app.help.is_none(),
+            "{:?} must toggle the overlay off",
+            closer
+        );
+    }
 }
 
 #[test]
@@ -1843,18 +1845,25 @@ fn help_other_keys_are_noop() {
     let mut app = test_app(vec![], vec![]);
     app.handle_key(key(KeyCode::Char('?')));
 
-    // Press various keys that should not close help
-    app.handle_key(key(KeyCode::Char('j')));
-    app.handle_key(key(KeyCode::Char('k')));
-    app.handle_key(key(KeyCode::Char('c')));
-    app.handle_key(key(KeyCode::Down));
-    app.handle_key(key(KeyCode::Up));
-    app.handle_key(key(KeyCode::Enter));
-
-    assert!(
-        matches!(app.screen, Screen::Help),
-        "Help should remain open after non-close keys"
-    );
+    // Keys that must not close help, and must not reach the screen beneath.
+    for code in [
+        KeyCode::Char('c'),
+        KeyCode::Char('d'),
+        KeyCode::Enter,
+        KeyCode::Tab,
+    ] {
+        app.handle_key(key(code));
+        assert!(
+            app.help.is_some(),
+            "{:?} should not close the help overlay",
+            code
+        );
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "{:?} must not reach the screen beneath the overlay",
+            code
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4768,7 +4777,7 @@ mod rescan_tests {
         let groups = space::tui::keybindings::all_groups();
         let picker = groups
             .iter()
-            .find(|g| g.name == "Repo Picker")
+            .find(|g| g.name == space::tui::keybindings::REPO_PICKER_NAME)
             .expect("help registry must have a Repo Picker group");
         let rows: Vec<(&str, &str)> = picker.bindings.iter().map(|b| (b.key, b.desc)).collect();
         assert_eq!(
@@ -4779,27 +4788,47 @@ mod rescan_tests {
                 ("Ctrl-R", "Rescan repo list"),
             ]
         );
-        let ws_pane = groups.iter().find(|g| g.name == "Workspace Pane").unwrap();
+        // `r` sits in General, not Workspace Pane: it rescans the repo list and
+        // also reloads the repos pane, so item 1.3 left it ungated while gating
+        // `c`, `a` and `d` to the workspaces pane.
+        let general = groups
+            .iter()
+            .find(|g| g.name == space::tui::keybindings::GENERAL_NAME)
+            .unwrap();
         assert!(
-            ws_pane
+            general
                 .bindings
                 .iter()
-                .any(|b| b.key == "r" && b.desc == "Rescan repo list"),
+                // The qualifier matters: git-ops binds `r` to Rebase, and the
+                // overlay shows every group at once. What this test is about is
+                // the glossary word, so it pins the prefix.
+                .any(|b| b.key == "r" && b.desc.starts_with("Rescan repo list")),
             "dashboard r must read 'Rescan repo list' in the help registry"
         );
-        let left = space::tui::keybindings::status_bar_bindings(Pane::Left);
+        let ws_pane = groups
+            .iter()
+            .find(|g| g.name == space::tui::keybindings::WORKSPACE_PANE_NAME)
+            .unwrap();
+        assert!(
+            !ws_pane.bindings.iter().any(|b| b.key == "r"),
+            "r is a general key, not a workspace-pane key"
+        );
+        let left = space::tui::keybindings::key_bar_bindings(Pane::Left);
         assert!(
             left.iter().any(|b| b.key == "r" && b.desc == "rescan"),
             "status bar must read 'r rescan'"
         );
 
-        // The help overlay must still render every group with the extra group.
-        // Tall enough for the whole registry: the 24-row clip is item 1.4's.
+        // The rescan wording must survive all the way to the rendered overlay.
+        // The registry is taller than any terminal now, so scroll to the end
+        // where General lives; that every group is reachable at all is asserted
+        // by `every_group_is_reachable_by_scrolling_at_eighty_by_twenty_four`.
         let mut app = test_app(vec![], vec![]);
         app.handle_key(key(KeyCode::Char('?')));
+        app.handle_key(key(KeyCode::End));
         let rendered = render_text(&app, 100, 70);
-        assert!(rendered.contains("Repo Picker"), "got:\n{}", rendered);
         assert!(rendered.contains("General"), "got:\n{}", rendered);
+        assert!(rendered.contains("Rescan repo list"), "got:\n{}", rendered);
     }
 }
 
@@ -5155,7 +5184,7 @@ fn filter_rows_use_singular_for_one_repo() {
 
 #[test]
 fn filter_help_registry_and_status_bar_wording() {
-    use space::tui::keybindings::{all_groups, status_bar_bindings};
+    use space::tui::keybindings::{all_groups, key_bar_bindings};
 
     let find = |group: &str, key: &str| -> Option<&'static str> {
         all_groups()
@@ -5168,7 +5197,7 @@ fn filter_help_registry_and_status_bar_wording() {
     assert_eq!(find("Repo Pane", "/"), Some("Search repos"));
 
     let bar = |pane: Pane| -> Option<&'static str> {
-        status_bar_bindings(pane)
+        key_bar_bindings(pane)
             .iter()
             .find(|b| b.key == "/")
             .map(|b| b.desc)
@@ -6709,4 +6738,1700 @@ fn delete_uppercase_y_deletes_and_uppercase_n_cancels() {
         "Y must reach the delete, which reports the missing directory"
     );
     assert_eq!(app.status_kind, StatusKind::Error);
+}
+
+// ---------------------------------------------------------------------------
+// ---- 1.3 List paging on the workspace and repo lists ----
+// ---------------------------------------------------------------------------
+
+mod paging_tests {
+    use super::*;
+
+    /// `n` bare spaces, the first selected, focus on the workspaces pane.
+    fn spaces_app(n: usize) -> App {
+        let workspaces = (0..n)
+            .map(|i| Workspace {
+                name: format!("space-{:02}", i),
+                path: PathBuf::from(format!("/tmp/space-{:02}", i)),
+                repos: vec![],
+            })
+            .collect();
+        test_app(workspaces, vec![])
+    }
+
+    /// One space holding `repo-a`, expanded over `files` unstaged file rows, so
+    /// the flattened list is Repo, SectionHeader, then one File per name.
+    fn expanded_repo_app(files: usize) -> App {
+        use space::core::git::{FileEntry, FileStatus};
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.expanded_repos.insert(0);
+        app.repo_file_cache.insert(
+            0,
+            (0..files)
+                .map(|i| FileEntry {
+                    path: format!("file-{:02}.rs", i),
+                    status: FileStatus::Modified,
+                    staged: false,
+                    insertions: 1,
+                    deletions: 0,
+                })
+                .collect(),
+        );
+        app
+    }
+
+    // --- left pane ---
+
+    #[test]
+    fn workspace_page_down_moves_by_one_page_and_page_up_returns() {
+        let mut app = spaces_app(30);
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.selected_ws, 10, "PgDn pages by 10 rows");
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.selected_ws, 20);
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(app.selected_ws, 10, "PgUp pages back by 10 rows");
+    }
+
+    #[test]
+    fn workspace_paging_clamps_at_both_ends() {
+        let mut app = spaces_app(15);
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(app.selected_ws, 0, "PgUp at the top stays at the top");
+        app.handle_key(key(KeyCode::PageDown));
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.selected_ws, 14, "PgDn clamps to the last space");
+    }
+
+    #[test]
+    fn workspace_home_and_end_jump_to_the_ends() {
+        let mut app = spaces_app(30);
+        app.handle_key(key(KeyCode::End));
+        assert_eq!(app.selected_ws, 29);
+        app.handle_key(key(KeyCode::Home));
+        assert_eq!(app.selected_ws, 0);
+    }
+
+    #[test]
+    fn workspace_paging_on_an_empty_list_is_a_noop() {
+        let mut app = test_app(vec![], vec![]);
+        for code in [
+            KeyCode::PageDown,
+            KeyCode::PageUp,
+            KeyCode::End,
+            KeyCode::Home,
+        ] {
+            app.handle_key(key(code));
+            assert_eq!(
+                app.selected_ws, 0,
+                "{:?} on an empty list must not move",
+                code
+            );
+        }
+    }
+
+    /// A jump that does not change the selection must not fire the repo-pane
+    /// reset, so a reflex `End` on an already-bottom list keeps expansions.
+    #[test]
+    fn workspace_end_on_the_last_space_keeps_the_repo_pane_state() {
+        let mut app = spaces_app(3);
+        app.handle_key(key(KeyCode::End));
+        assert_eq!(app.selected_ws, 2);
+        app.expanded_repos.insert(0);
+        app.cursor_row = 4;
+
+        app.handle_key(key(KeyCode::End));
+        assert_eq!(app.selected_ws, 2);
+        assert!(
+            app.expanded_repos.contains(&0),
+            "End on an already-last space must not reset the repo pane"
+        );
+        assert_eq!(app.cursor_row, 4, "nor move the repo cursor");
+    }
+
+    #[test]
+    fn workspace_home_at_the_top_keeps_the_repo_pane_state() {
+        let mut app = spaces_app(3);
+        app.expanded_repos.insert(0);
+        app.handle_key(key(KeyCode::Home));
+        assert_eq!(app.selected_ws, 0);
+        assert!(app.expanded_repos.contains(&0));
+    }
+
+    // --- right pane ---
+
+    #[test]
+    fn repo_page_down_moves_by_one_page_over_flattened_rows() {
+        // rows: Repo(0), SectionHeader(1), File(2)..File(31)
+        let mut app = expanded_repo_app(30);
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.cursor_row, 10, "PgDn pages over flattened rows");
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(app.cursor_row, 0);
+    }
+
+    #[test]
+    fn repo_paging_clamps_at_both_ends() {
+        let mut app = expanded_repo_app(5);
+        // rows: Repo(0), SectionHeader(1), File(2)..File(6) => 7 rows
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(app.cursor_row, 0);
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.cursor_row, 6, "PgDn clamps to the last row");
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(app.cursor_row, 6);
+    }
+
+    #[test]
+    fn repo_home_and_end_jump_to_the_ends() {
+        let mut app = expanded_repo_app(12);
+        app.handle_key(key(KeyCode::End));
+        assert_eq!(app.cursor_row, 13, "End lands on the last file row");
+        app.handle_key(key(KeyCode::Home));
+        assert_eq!(app.cursor_row, 0, "Home lands on the repo row");
+    }
+
+    /// A page must never leave the cursor on a section header, in either
+    /// direction: those rows are not selectable by `j`/`k` either.
+    /// One repo expanded over 9 unstaged then 9 staged files, so the "Staged"
+    /// header sits at row 11 and a page from row 1 lands exactly on it.
+    fn header_heavy_app() -> App {
+        use space::core::git::{FileEntry, FileStatus};
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.expanded_repos.insert(0);
+        let mut entries: Vec<FileEntry> = (0..9)
+            .map(|i| FileEntry {
+                path: format!("u-{}.rs", i),
+                status: FileStatus::Modified,
+                staged: false,
+                insertions: 1,
+                deletions: 0,
+            })
+            .collect();
+        entries.extend((0..9).map(|i| FileEntry {
+            path: format!("s-{}.rs", i),
+            status: FileStatus::Modified,
+            staged: true,
+            insertions: 1,
+            deletions: 0,
+        }));
+        app.repo_file_cache.insert(0, entries);
+        app
+    }
+
+    #[test]
+    fn repo_paging_never_rests_on_a_section_header() {
+        let mut app = header_heavy_app();
+
+        // Walk every landing spot a page can reach from every start.
+        let total = app.flattened_rows().len();
+        for start in 0..total {
+            for code in [KeyCode::PageDown, KeyCode::PageUp] {
+                app.cursor_row = start;
+                app.handle_key(key(code));
+                let rows = app.flattened_rows();
+                assert!(
+                    !matches!(
+                        rows[app.cursor_row],
+                        space::tui::app::RepoRow::SectionHeader { .. }
+                    ),
+                    "{:?} from row {} landed on a section header at row {}",
+                    code,
+                    start,
+                    app.cursor_row
+                );
+            }
+        }
+    }
+
+    /// Stronger than "never rests on a header": a page that lands on a header
+    /// must step out the way it was travelling, so the landing row is on the
+    /// far side of the target. Hardcoding the skip direction to `down` leaves
+    /// the header assertion passing but moves a PgUp *towards* the cursor,
+    /// which this catches.
+    #[test]
+    fn a_page_resolves_a_header_in_its_own_direction_of_travel() {
+        use space::tui::app::RepoRow;
+        let mut app = header_heavy_app();
+        let total = app.flattened_rows().len();
+        const PAGE: usize = 10;
+
+        for start in 0..total {
+            // PgUp: the target is `start - PAGE`; resolving a header there must
+            // move further up, never back down towards `start`.
+            app.cursor_row = start;
+            let target = start.saturating_sub(PAGE);
+            app.handle_key(key(KeyCode::PageUp));
+            assert!(
+                app.cursor_row <= target,
+                "PgUp from {} targeted {} but resolved down to {}",
+                start,
+                target,
+                app.cursor_row
+            );
+
+            // PgDn: the target is `start + PAGE` clamped; resolving a header
+            // there must move further down.
+            app.cursor_row = start;
+            let target = (start + PAGE).min(total - 1);
+            app.handle_key(key(KeyCode::PageDown));
+            assert!(
+                app.cursor_row >= target,
+                "PgDn from {} targeted {} but resolved up to {}",
+                start,
+                target,
+                app.cursor_row
+            );
+            let rows = app.flattened_rows();
+            assert!(!matches!(
+                rows[app.cursor_row],
+                RepoRow::SectionHeader { .. }
+            ));
+        }
+    }
+
+    /// `cursor_row` can outlive the rows it indexes: `ScreenAction::StageFile`
+    /// (the diff-viewer path) calls `do_stage` and returns to the dashboard
+    /// without the `reposition_after_section_change` its `Message::StageFile`
+    /// twin performs, so a refetch that returns fewer rows leaves the cursor
+    /// past the end. A page from there must not index out of bounds.
+    #[test]
+    fn paging_from_a_stale_cursor_does_not_panic() {
+        let mut app = expanded_repo_app(30);
+        assert!(app.flattened_rows().len() > 20);
+
+        // The repo's files vanish underneath the cursor (external commit, then
+        // a stage from the diff viewer refetches an empty list).
+        app.cursor_row = 25;
+        app.repo_file_cache.insert(0, vec![]);
+        assert_eq!(app.flattened_rows().len(), 1, "only the repo row is left");
+
+        // Arrows too, not just the paging keys: `skip_headers` reads the raw
+        // cursor, so `k`/Up is the likeliest way a user meets this.
+        for code in [
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Char('k'),
+            KeyCode::Char('j'),
+        ] {
+            app.cursor_row = 25;
+            app.handle_key(key(code));
+            assert!(
+                app.cursor_row < app.flattened_rows().len(),
+                "{:?} left the cursor at {} for {} rows",
+                code,
+                app.cursor_row,
+                app.flattened_rows().len()
+            );
+        }
+    }
+
+    /// Staging from the diff viewer refetches the repo's file list, so the row
+    /// the cursor was on can disappear. `ScreenAction::StageFile` repositions
+    /// for that reason; nothing else asserts it, and removing the call leaves
+    /// the rest of the suite green because `skip_headers` clamps defensively.
+    /// This drives the real path rather than simulating its symptom.
+    #[test]
+    fn staging_from_the_diff_viewer_leaves_the_cursor_on_a_real_row() {
+        use space::tui::screens::diff::DiffViewerState;
+        let (_env, repo_path, mut app) = setup_real_repo_app();
+
+        // Two unstaged files, so staging one splits the list into two sections
+        // and pushes a header under the cursor's old index. With a single file
+        // the row count is unchanged and nothing is stranded.
+        std::fs::write(repo_path.join("second.txt"), "new file").unwrap();
+        std::fs::write(repo_path.join("file.txt"), "modified").unwrap();
+
+        app.focus = Pane::Right;
+        app.expanded_repos.insert(0);
+        app.refresh_file_diff_cache();
+        let rows_before = app.flattened_rows();
+        assert_eq!(
+            rows_before.len(),
+            4,
+            "fixture must be Repo, Unstaged header, two files"
+        );
+
+        // The last file row: staging the first file puts the Staged header here.
+        app.cursor_row = 3;
+        let entry = app.repo_file_cache.get(&0).unwrap()[0].clone();
+        app.screen = Screen::DiffViewer(DiffViewerState {
+            repo_index: 0,
+            repo_name: "testrepo".into(),
+            repo_path: repo_path.clone(),
+            file_path: entry.path.clone(),
+            staged: entry.staged,
+            diff: Err("unused".into()),
+            scroll_offset: 0,
+            total_lines: 1,
+        });
+
+        app.handle_key(key(KeyCode::Char('s')));
+
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "staging returns to the dashboard"
+        );
+        let rows = app.flattened_rows();
+        assert!(
+            app.cursor_row < rows.len(),
+            "cursor {} is past the {} rows left after staging",
+            app.cursor_row,
+            rows.len()
+        );
+        assert!(
+            !matches!(
+                rows[app.cursor_row],
+                space::tui::app::RepoRow::SectionHeader { .. }
+            ),
+            "the cursor must not be parked on a section header"
+        );
+    }
+
+    #[test]
+    fn repo_paging_on_an_empty_workspace_is_a_noop() {
+        let ws = Workspace {
+            name: "empty".into(),
+            path: PathBuf::from("/tmp/empty"),
+            repos: vec![],
+        };
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        for code in [
+            KeyCode::PageDown,
+            KeyCode::End,
+            KeyCode::PageUp,
+            KeyCode::Home,
+        ] {
+            app.handle_key(key(code));
+            assert_eq!(
+                app.cursor_row, 0,
+                "{:?} on an empty repo list must not move",
+                code
+            );
+        }
+    }
+
+    // --- pane gating of c / a / d, and r staying general ---
+
+    #[test]
+    fn create_add_and_delete_are_ignored_on_the_repo_pane() {
+        for k in ['c', 'a', 'd'] {
+            let ws = common::workspace_with_repos(&["repo-a"]);
+            let mut app = test_app(vec![ws], vec![]);
+            app.focus = Pane::Right;
+            app.handle_key(key(KeyCode::Char(k)));
+            assert!(
+                matches!(app.screen, Screen::Dashboard),
+                "`{}` on the repo pane must not leave the dashboard",
+                k
+            );
+        }
+    }
+
+    #[test]
+    fn create_add_and_delete_still_fire_on_the_workspaces_pane() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.handle_key(key(KeyCode::Char('d')));
+        assert!(
+            matches!(app.screen, Screen::ConfirmDelete(_)),
+            "`d` on the workspaces pane still opens the delete confirm"
+        );
+    }
+
+    /// `r` is a general key, not a workspace-pane key: it also reloads the repo
+    /// pane, so it must keep working from the repo pane.
+    #[test]
+    fn rescan_still_fires_on_the_repo_pane() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.expanded_repos.insert(0);
+        app.handle_key(key(KeyCode::Char('r')));
+        assert!(
+            app.status_message.is_some(),
+            "`r` on the repo pane must still rescan and report"
+        );
+        assert!(
+            app.expanded_repos.is_empty(),
+            "`r` still resets the repo pane it is looking at"
+        );
+    }
+
+    // --- g and G keep their shipped meanings (closed open question 2) ---
+
+    #[test]
+    fn g_and_shift_g_are_not_paging_keys() {
+        let mut app = spaces_app(30);
+        app.handle_key(shift_key(KeyCode::Char('G')));
+        assert_eq!(
+            app.selected_ws, 0,
+            "`G` on the workspaces pane is not go-to-bottom"
+        );
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "`G` on the workspaces pane opens nothing"
+        );
+
+        let mut app = expanded_repo_app(30);
+        app.handle_key(key(KeyCode::Char('g')));
+        assert_eq!(app.cursor_row, 0, "`g` on the repo pane is not go-to-top");
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "`g` on the repo pane still opens nothing (Wave 0 gate)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ---- 1.4 `?` help inside overlays, and a complete registry ----
+// ---------------------------------------------------------------------------
+
+mod help_overlay_tests {
+    use super::*;
+    use space::tui::keybindings;
+
+    /// A dashboard app sitting on the git-ops menu for the first repo.
+    fn gitops_menu_app() -> App {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(shift_key(KeyCode::Char('G')));
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "fixture must reach the git-ops overlay"
+        );
+        app
+    }
+
+    // --- opening from mid-flow, and returning to it ---
+
+    #[test]
+    fn question_mark_opens_help_from_a_gitops_stage_and_returns_to_it() {
+        let mut app = gitops_menu_app();
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_some(), "? must open help from the git-ops menu");
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "the git-ops state must still be there while help is open"
+        );
+
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.help.is_none());
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "closing help must return to the exact prior screen, not the dashboard"
+        );
+    }
+
+    #[test]
+    fn question_mark_opens_help_from_the_delete_confirm_and_returns_to_it() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.handle_key(key(KeyCode::Char('d')));
+        assert!(matches!(app.screen, Screen::ConfirmDelete(_)));
+
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_some());
+        app.handle_key(key(KeyCode::Esc));
+        assert!(
+            matches!(app.screen, Screen::ConfirmDelete(_)),
+            "help must not cancel the confirmation it was opened over"
+        );
+    }
+
+    #[test]
+    fn question_mark_opens_help_from_the_diff_viewer() {
+        use space::tui::screens::diff::DiffViewerState;
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.screen = Screen::DiffViewer(DiffViewerState {
+            repo_index: 0,
+            repo_name: "repo-a".into(),
+            repo_path: PathBuf::from("/tmp/test-ws/repo-a"),
+            file_path: "a.rs".into(),
+            staged: false,
+            diff: Err("no diff".into()),
+            scroll_offset: 0,
+            total_lines: 1,
+        });
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_some());
+        app.handle_key(key(KeyCode::Char('q')));
+        assert!(
+            matches!(app.screen, Screen::DiffViewer(_)),
+            "q closes help and leaves the diff viewer open"
+        );
+    }
+
+    // --- ? stays text where text is being typed; F1 always works ---
+
+    #[test]
+    fn question_mark_in_a_picker_query_is_typed_not_help() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.handle_key(key(KeyCode::Char('/')));
+        assert!(
+            matches!(
+                app.screen,
+                Screen::RepoSearch(_) | Screen::FilterWorkspace(_)
+            ),
+            "fixture must open a typed picker"
+        );
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(
+            app.help.is_none(),
+            "? is a legitimate character in a query and must not open help"
+        );
+        let query = match &app.screen {
+            Screen::RepoSearch(s) => s.picker.input.value().to_string(),
+            Screen::FilterWorkspace(s) => s.picker.input.value().to_string(),
+            other => panic!("unexpected screen {:?}", std::mem::discriminant(other)),
+        };
+        assert_eq!(query, "?", "? must reach the query");
+    }
+
+    #[test]
+    fn f1_opens_help_from_a_picker_query_without_disturbing_it() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('/')));
+        app.handle_key(key(KeyCode::Char('r')));
+        app.handle_key(key(KeyCode::F(1)));
+        assert!(
+            app.help.is_some(),
+            "F1 must open help even while a query is being typed"
+        );
+        app.handle_key(key(KeyCode::Esc));
+        let query = match &app.screen {
+            Screen::RepoSearch(s) => s.picker.input.value().to_string(),
+            other => panic!("unexpected screen {:?}", std::mem::discriminant(other)),
+        };
+        assert_eq!(query, "r", "the query must survive the help round trip");
+    }
+
+    /// `?` must reach the input in every stage that types, not just the one
+    /// picker the first test covered. The per-screen stage lists are hand
+    /// maintained, so adding a stage to the wrong list would otherwise swallow
+    /// a typed `?` with the suite still green.
+    #[test]
+    fn question_mark_types_in_every_text_stage() {
+        let env = TestEnv::new();
+        let repo = env.create_repo("repo-a");
+        let cfg = || config_from_env(&env);
+
+        // create: EnterName
+        let mut app = test_app_with_config(cfg(), vec![], vec![repo.clone()]);
+        app.handle_key(key(KeyCode::Char('c')));
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "create EnterName: ? must type");
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(st.ws_name.value(), "?"),
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // create: PickRepos query
+        app.handle_key(key(KeyCode::Char('w')));
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "create PickRepos: ? must type");
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(st.picker.input.value(), "?", "query must take the ?")
+            }
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // git-ops: Committing (single-line commit message)
+        let mut app = gitops_menu_app();
+        if let Screen::GitOps(st) = &mut app.screen {
+            st.stage = space::tui::screens::gitops::GitOpsStage::Committing;
+        }
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "git-ops Committing: ? must type");
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(st.message_input.value(), "?"),
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // create: EnterBranchName. The stage is set directly, as for the
+        // git-ops and switch-branch cases below: what is under test is `?`
+        // dispatch at that stage, not the route to it.
+        let mut app = test_app_with_config(cfg(), vec![], vec![repo.clone()]);
+        app.handle_key(key(KeyCode::Char('c')));
+        if let Screen::CreateWorkspace(st) = &mut app.screen {
+            st.stage = space::tui::screens::create::CreateStage::EnterBranchName;
+        }
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "create EnterBranchName: ? must type");
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(st.branch_name_input.value(), "?"),
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // add: PickRepos query and EnterBranchName share the same shape.
+        let mut app = test_app_with_config(cfg(), vec![], vec![repo.clone()]);
+        app.workspaces.push(space::core::workspace::Workspace {
+            name: "ws".into(),
+            path: PathBuf::from("/tmp/ws"),
+            repos: vec![],
+        });
+        app.handle_key(key(KeyCode::Char('a')));
+        assert!(
+            matches!(app.screen, Screen::AddRepos(_)),
+            "fixture must open the add flow"
+        );
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "add PickRepos: ? must type");
+        match &app.screen {
+            Screen::AddRepos(st) => assert_eq!(st.picker.input.value(), "?"),
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+        if let Screen::AddRepos(st) = &mut app.screen {
+            st.stage = space::tui::screens::add::AddStage::EnterBranchName;
+        }
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "add EnterBranchName: ? must type");
+        match &app.screen {
+            Screen::AddRepos(st) => assert_eq!(st.branch_name_input.value(), "?"),
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // switch-branch: EnterBranchName
+        let mut app = test_app_with_config(cfg(), vec![], vec![]);
+        app.screen =
+            Screen::SwitchBranch(space::tui::screens::switch_branch::SwitchBranchState::new(
+                "repo-a".into(),
+                PathBuf::from("/tmp/repo-a"),
+            ));
+        if let Screen::SwitchBranch(st) = &mut app.screen {
+            st.stage = space::tui::screens::switch_branch::SwitchBranchStage::EnterBranchName;
+        }
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(
+            app.help.is_none(),
+            "switch-branch EnterBranchName: ? must type"
+        );
+        match &app.screen {
+            Screen::SwitchBranch(st) => assert_eq!(st.branch_name_input.value(), "?"),
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // The four branch-picker stages. Each types into its own
+        // `branch_picker` / `rebase_picker`, and each is gated by the same
+        // hand-maintained list, so each needs its own case.
+        fn a_picker() -> space::tui::widgets::fuzzy_picker::FuzzyPicker {
+            space::tui::widgets::fuzzy_picker::FuzzyPicker::new(
+                "Pick a branch",
+                vec![space::tui::widgets::fuzzy_picker::PickerItem::from_path(
+                    PathBuf::from("/tmp/main"),
+                )],
+                false,
+            )
+        }
+
+        // create: PickBranch
+        let mut app = test_app_with_config(cfg(), vec![], vec![repo.clone()]);
+        app.handle_key(key(KeyCode::Char('c')));
+        if let Screen::CreateWorkspace(st) = &mut app.screen {
+            st.stage = space::tui::screens::create::CreateStage::PickBranch;
+            st.branch_picker = Some(a_picker());
+        }
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "create PickBranch: ? must type");
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(st.branch_picker.as_ref().unwrap().input.value(), "?")
+            }
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // add: PickBranch
+        let mut app = test_app_with_config(cfg(), vec![], vec![repo.clone()]);
+        app.workspaces.push(space::core::workspace::Workspace {
+            name: "ws".into(),
+            path: PathBuf::from("/tmp/ws"),
+            repos: vec![],
+        });
+        app.handle_key(key(KeyCode::Char('a')));
+        if let Screen::AddRepos(st) = &mut app.screen {
+            st.stage = space::tui::screens::add::AddStage::PickBranch;
+            st.branch_picker = Some(a_picker());
+        }
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "add PickBranch: ? must type");
+        match &app.screen {
+            Screen::AddRepos(st) => {
+                assert_eq!(st.branch_picker.as_ref().unwrap().input.value(), "?")
+            }
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // switch-branch: PickBranch
+        let mut app = test_app_with_config(cfg(), vec![], vec![]);
+        app.screen =
+            Screen::SwitchBranch(space::tui::screens::switch_branch::SwitchBranchState::new(
+                "repo-a".into(),
+                PathBuf::from("/tmp/repo-a"),
+            ));
+        if let Screen::SwitchBranch(st) = &mut app.screen {
+            st.stage = space::tui::screens::switch_branch::SwitchBranchStage::PickBranch;
+            st.branch_picker = Some(a_picker());
+        }
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "switch-branch PickBranch: ? must type");
+        match &app.screen {
+            Screen::SwitchBranch(st) => {
+                assert_eq!(st.branch_picker.as_ref().unwrap().input.value(), "?")
+            }
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // git-ops: RebasePickTarget
+        let mut app = gitops_menu_app();
+        if let Screen::GitOps(st) = &mut app.screen {
+            st.stage = space::tui::screens::gitops::GitOpsStage::RebasePickTarget;
+            st.rebase_picker = Some(a_picker());
+        }
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "git-ops RebasePickTarget: ? must type");
+        match &app.screen {
+            Screen::GitOps(st) => {
+                assert_eq!(st.rebase_picker.as_ref().unwrap().input.value(), "?")
+            }
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+
+        // config editor while editing
+        let env2 = TestEnv::new();
+        let mut app = test_app_with_config(config_from_env(&env2), vec![], vec![]);
+        app.handle_key(shift_key(KeyCode::Char('S')));
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_none(), "config editor editing: ? must type");
+        match &app.screen {
+            Screen::ConfigEditor(st) => {
+                assert!(
+                    st.input.value().ends_with('?'),
+                    "got {:?}",
+                    st.input.value()
+                )
+            }
+            other => panic!("unexpected {:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    // --- ADR 0001: help must not cancel work running behind it ---
+
+    /// The reason help is an overlay layer rather than a `Screen` variant.
+    /// `poll_sync_result` cancels the worker and drops the receiver whenever
+    /// the current screen is not a Syncing stage, so a design that moved the
+    /// screen into a Help variant would kill the sync it was showing.
+    #[test]
+    fn help_over_a_running_sync_leaves_the_sync_running() {
+        let env = TestEnv::new();
+        let repo = env.create_repo("repo-a");
+        let config = config_from_env(&env);
+        let mut app = test_app_with_config(config, vec![], vec![repo]);
+
+        app.handle_key(key(KeyCode::Char('c')));
+        for c in "ws".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter)); // EnterName -> PickRepos
+        app.handle_key(key(KeyCode::Tab)); // toggle the repo
+        app.handle_key(key(KeyCode::Enter)); // PickRepos -> Syncing, starts the worker
+        assert!(
+            matches!(&app.screen, Screen::CreateWorkspace(st)
+                if st.stage == space::tui::screens::create::CreateStage::Syncing),
+            "fixture must reach the Syncing stage"
+        );
+
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(
+            app.help.is_some(),
+            "? must open help over the Syncing stage"
+        );
+
+        // Pump the loop the way run_loop does while the overlay is up.
+        for _ in 0..200 {
+            app.poll_sync_result();
+        }
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.help.is_none());
+
+        drain_sync(&mut app);
+        let report_done = match &app.screen {
+            Screen::CreateWorkspace(st) => st.report.done,
+            other => panic!("unexpected screen {:?}", std::mem::discriminant(other)),
+        };
+        assert!(
+            report_done,
+            "the sync must still finish after help was opened over it"
+        );
+    }
+
+    /// ADR 0001's invariant, enforced by the renderer rather than by the `?`
+    /// gate. `F1` deliberately opens help from inside text inputs, which is
+    /// exactly where the three `set_cursor_position` paths live, and ratatui
+    /// 0.30 cannot unset a cursor once a frame has set one. So the screen
+    /// beneath the overlay must not set it in the first place.
+    #[test]
+    fn no_cursor_is_drawn_beneath_the_help_overlay() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        /// Draw once without help to prove this screen does place a cursor,
+        /// then park the terminal cursor on a sentinel and draw again with
+        /// help open. ratatui only moves the terminal cursor when the frame
+        /// set one, so an unmoved sentinel proves the frame set none.
+        fn cursor_with_help(mut app: App, label: &str) {
+            use ratatui::layout::Position;
+            const SENTINEL: Position = Position { x: 79, y: 23 };
+
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+
+            terminal.draw(|f| space::tui::ui::view(&app, f)).unwrap();
+            let without_help = terminal.get_cursor_position().unwrap();
+            assert_ne!(
+                without_help, SENTINEL,
+                "{}: fixture must be a screen that places a cursor",
+                label
+            );
+
+            app.handle_key(key(KeyCode::F(1)));
+            assert!(app.help.is_some(), "{}: F1 must open help", label);
+
+            terminal.set_cursor_position(SENTINEL).unwrap();
+            terminal.draw(|f| space::tui::ui::view(&app, f)).unwrap();
+            assert_eq!(
+                terminal.get_cursor_position().unwrap(),
+                SENTINEL,
+                "{}: the frame set a cursor while help was open, so it is \
+                 painted over the overlay",
+                label
+            );
+        }
+
+        // 1. A fuzzy picker query (fuzzy_picker::render).
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('/')));
+        app.handle_key(key(KeyCode::Char('r')));
+        cursor_with_help(app, "repo search picker");
+
+        // 2. A text input dialog (render_text_input_dialog).
+        let env = TestEnv::new();
+        let repo = env.create_repo("repo-a");
+        let mut app = test_app_with_config(config_from_env(&env), vec![], vec![repo]);
+        app.handle_key(key(KeyCode::Char('c')));
+        app.handle_key(key(KeyCode::Char('w')));
+        cursor_with_help(app, "create flow name input");
+
+        // 3. The config editor while editing.
+        let env = TestEnv::new();
+        let mut app = test_app_with_config(config_from_env(&env), vec![], vec![]);
+        app.handle_key(shift_key(KeyCode::Char('S')));
+        app.handle_key(key(KeyCode::Enter));
+        cursor_with_help(app, "config editor editing");
+    }
+
+    // --- scrolling ---
+
+    #[test]
+    fn help_scrolls_and_clamps_at_both_ends() {
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        // Draw first: `viewport` is only written by the renderer, so without a
+        // frame the handler falls back to a 1-row viewport and the real clamp
+        // is never exercised.
+        let _ = render_text(&app, 80, 24);
+
+        app.handle_key(key(KeyCode::Home));
+        assert_eq!(app.help.as_ref().unwrap().scroll, 0, "Home reaches the top");
+
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(
+            app.help.as_ref().unwrap().scroll,
+            1,
+            "j scrolls down one row"
+        );
+        app.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(app.help.as_ref().unwrap().scroll, 0);
+
+        app.handle_key(key(KeyCode::PageUp));
+        assert_eq!(
+            app.help.as_ref().unwrap().scroll,
+            0,
+            "PgUp clamps at the top"
+        );
+
+        app.handle_key(key(KeyCode::PageDown));
+        assert_eq!(
+            app.help.as_ref().unwrap().scroll,
+            10,
+            "PgDn pages by the shared PAGE_ROWS"
+        );
+    }
+
+    /// Every group must be reachable at the documented minimum terminal size.
+    #[test]
+    fn every_group_is_reachable_by_scrolling_at_eighty_by_twenty_four() {
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        app.handle_key(key(KeyCode::Home));
+
+        let mut seen: Vec<&str> = Vec::new();
+        for _ in 0..80 {
+            let rendered = render_text(&app, 80, 24);
+            for group in keybindings::all_groups() {
+                if rendered.contains(group.name) && !seen.contains(&group.name) {
+                    seen.push(group.name);
+                }
+            }
+            app.handle_key(key(KeyCode::PageDown));
+        }
+        let missing: Vec<&str> = keybindings::all_groups()
+            .iter()
+            .map(|g| g.name)
+            .filter(|n| !seen.contains(n))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these groups can never be seen at 80x24: {:?}",
+            missing
+        );
+    }
+
+    #[test]
+    fn help_opens_on_the_group_for_the_screen_it_was_reached_from() {
+        let mut app = gitops_menu_app();
+        app.handle_key(key(KeyCode::Char('?')));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains(keybindings::GIT_OPS_NAME),
+            "help opened from the git-ops menu must land on its own group, got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn help_opened_from_the_repo_pane_lands_on_the_repo_pane_group() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('?')));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains(keybindings::REPO_PANE_NAME),
+            "help from the repo pane must land on the Repo Pane group, got:\n{}",
+            rendered
+        );
+    }
+
+    /// Every group `landing_group` can return must exist in the registry, or
+    /// help silently opens at the top instead of on the screen's own group.
+    /// The two share one set of constants, so this pins that they stay shared.
+    #[test]
+    fn every_landing_group_exists_in_the_registry() {
+        let names: Vec<&str> = keybindings::all_groups().iter().map(|g| g.name).collect();
+        for landing in [
+            keybindings::WORKSPACE_PANE_NAME,
+            keybindings::REPO_PANE_NAME,
+            keybindings::REPO_PICKER_NAME,
+            keybindings::SYNC_REPORT_NAME,
+            keybindings::CREATING_LOG_NAME,
+            keybindings::CREATE_ADD_FLOW_NAME,
+            keybindings::SPACE_REPO_PICKERS_NAME,
+            keybindings::DELETE_CONFIRM_NAME,
+            keybindings::CONFIG_EDITOR_NAME,
+            keybindings::DIFF_VIEWER_NAME,
+            keybindings::SWITCH_BRANCH_NAME,
+            keybindings::GIT_OPS_NAME,
+        ] {
+            assert!(
+                names.contains(&landing),
+                "landing group {:?} is not in the registry: {:?}",
+                landing,
+                names
+            );
+        }
+    }
+
+    /// Landing behaviour for screens the first two landing tests did not cover.
+    #[test]
+    fn help_lands_on_the_right_group_from_more_screens() {
+        // Delete confirm.
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.handle_key(key(KeyCode::Char('d')));
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(
+            render_text(&app, 80, 24).contains(keybindings::DELETE_CONFIRM_NAME),
+            "help from the delete confirm must land on its own group"
+        );
+
+        // Config editor, not editing.
+        let env = TestEnv::new();
+        let mut app = test_app_with_config(config_from_env(&env), vec![], vec![]);
+        app.handle_key(shift_key(KeyCode::Char('S')));
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(
+            render_text(&app, 80, 24).contains(keybindings::CONFIG_EDITOR_NAME),
+            "help from the config editor must land on its own group"
+        );
+    }
+
+    /// The overlay renders only the visible window, so the windowing has to be
+    /// exact: an off-by-one shifts what is shown without changing anything a
+    /// content-sampling test would notice. The reference walk here is written
+    /// out independently of the implementation.
+    #[test]
+    fn the_help_window_shows_exactly_the_requested_rows() {
+        use space::tui::keybindings::{help_rows, rendered_row_count, HelpRow};
+
+        // An independent expansion of the whole registry.
+        let mut expected: Vec<HelpRow> = Vec::new();
+        for (i, g) in keybindings::all_groups().iter().enumerate() {
+            if i > 0 {
+                expected.push(HelpRow::Gap);
+            }
+            expected.push(HelpRow::Header(g.name));
+            for b in g.bindings {
+                expected.push(HelpRow::Binding(b));
+            }
+        }
+        let total = rendered_row_count();
+        assert_eq!(expected.len(), total, "reference walk must match the count");
+
+        // Every window, at several sizes, must equal the matching slice.
+        for visible in [1usize, 2, 7, 21, 40] {
+            for offset in 0..=total {
+                let got = help_rows(offset, visible);
+                let want = &expected[offset.min(total)..(offset + visible).min(total)];
+                assert_eq!(
+                    got.len(),
+                    want.len(),
+                    "offset {} visible {}: wrong row count",
+                    offset,
+                    visible
+                );
+                assert_eq!(
+                    got.as_slice(),
+                    want,
+                    "offset {} visible {}: wrong rows",
+                    offset,
+                    visible
+                );
+            }
+        }
+
+        // A zero-height window yields nothing rather than panicking.
+        assert!(help_rows(0, 0).is_empty());
+    }
+
+    /// The registry says what a key does, and nothing checked that against
+    /// what the key actually does. `q` is the case that bites: it goes back on
+    /// the switch-branch strategy stage but is a character on the two typed
+    /// stages, which Wave 0 fixed deliberately so a branch named `quickfix`
+    /// stays nameable. A row claiming `q` goes back everywhere would be a lie
+    /// the help overlay tells.
+    #[test]
+    fn the_registry_does_not_claim_q_goes_back_where_q_is_typed() {
+        use space::tui::screens::switch_branch::{SwitchBranchStage, SwitchBranchState};
+
+        fn switch_branch_at(stage: SwitchBranchStage) -> App {
+            let env = TestEnv::new();
+            let mut app = test_app_with_config(config_from_env(&env), vec![], vec![]);
+            app.screen = Screen::SwitchBranch(SwitchBranchState::new(
+                "repo-a".into(),
+                PathBuf::from("/tmp/repo-a"),
+            ));
+            let is_pick_branch = stage == SwitchBranchStage::PickBranch;
+            if let Screen::SwitchBranch(st) = &mut app.screen {
+                st.stage = stage;
+                if is_pick_branch {
+                    st.branch_picker = Some(space::tui::widgets::fuzzy_picker::FuzzyPicker::new(
+                        "Pick",
+                        vec![],
+                        false,
+                    ));
+                }
+            }
+            app
+        }
+
+        // Strategy stage: `q` leaves.
+        let mut app = switch_branch_at(SwitchBranchStage::PickStrategy);
+        app.handle_key(key(KeyCode::Char('q')));
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "q must still go back on the strategy stage"
+        );
+
+        // Typed stages: `q` is a character.
+        let mut app = switch_branch_at(SwitchBranchStage::EnterBranchName);
+        app.handle_key(key(KeyCode::Char('q')));
+        match &app.screen {
+            Screen::SwitchBranch(st) => {
+                assert_eq!(st.branch_name_input.value(), "q", "q must be typed here")
+            }
+            other => panic!("q left the screen: {:?}", std::mem::discriminant(other)),
+        }
+        let mut app = switch_branch_at(SwitchBranchStage::PickBranch);
+        app.handle_key(key(KeyCode::Char('q')));
+        match &app.screen {
+            Screen::SwitchBranch(st) => assert_eq!(
+                st.branch_picker.as_ref().unwrap().input.value(),
+                "q",
+                "q must reach the filter here"
+            ),
+            other => panic!("q left the screen: {:?}", std::mem::discriminant(other)),
+        }
+
+        // git-ops: `q` declines a confirmation without leaving the overlay, so
+        // it neither closes nor types there.
+        let mut app = gitops_menu_app();
+        if let Screen::GitOps(st) = &mut app.screen {
+            st.stage = space::tui::screens::gitops::GitOpsStage::ConfirmPush;
+        }
+        app.handle_key(key(KeyCode::Char('q')));
+        match &app.screen {
+            Screen::GitOps(st) => assert_eq!(
+                st.stage,
+                space::tui::screens::gitops::GitOpsStage::Menu,
+                "q on ConfirmPush declines back to the menu, it does not close"
+            ),
+            other => panic!("q closed the overlay: {:?}", std::mem::discriminant(other)),
+        }
+
+        // Every `q` row is pinned to its exact wording. A substring check is a
+        // loophole: "Back everywhere, including the strategy stage" contains
+        // "strategy" and is still false. Rewording one of these is meant to be
+        // a deliberate act that forces re-reading the handler it describes.
+        let expected: &[(&str, &str, &str)] = &[
+            (
+                keybindings::SWITCH_BRANCH_NAME,
+                "q",
+                "Back, on the strategy stage only",
+            ),
+            (
+                keybindings::GIT_OPS_NAME,
+                "q",
+                "Same as Esc, except while typing",
+            ),
+            (keybindings::DELETE_CONFIRM_NAME, "q", "Cancel"),
+            (
+                keybindings::CONFIG_EDITOR_NAME,
+                "q",
+                "Close, when not editing",
+            ),
+            (
+                keybindings::GENERAL_NAME,
+                "q",
+                "Quit (dashboard, not while typing)",
+            ),
+        ];
+        for (group_name, wanted_key, wanted_desc) in expected {
+            let group = keybindings::all_groups()
+                .iter()
+                .find(|g| g.name == *group_name)
+                .unwrap_or_else(|| panic!("no group {:?}", group_name));
+            let row = group
+                .bindings
+                .iter()
+                .find(|b| b.key == *wanted_key)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{:?} has no {:?} row; q must be documented separately \
+                           wherever its meaning is stage-dependent",
+                        group_name, wanted_key
+                    )
+                });
+            assert_eq!(
+                row.desc, *wanted_desc,
+                "the {:?} {:?} row changed wording: re-read the handler before \
+                 updating this expectation",
+                group_name, wanted_key
+            );
+        }
+
+        // And no group may fold `q` into a combined key, which is how the false
+        // "Esc/q: Back one stage" row got in. The one exception is a group
+        // covering a single stage where the keys genuinely coincide.
+        const COMBINED_Q_IS_HONEST: &[&str] = &[
+            // Each of these is a single screen or stage whose handler really
+            // does map every key in the row to the same action, so the combined
+            // form is accurate rather than a papered-over difference.
+            // `create.rs`/`add.rs` `handle_creating`: Enter | Esc | q => Back.
+            keybindings::CREATING_LOG_NAME,
+            // `diff.rs:22`: Esc | q => Back.
+            keybindings::DIFF_VIEWER_NAME,
+            // `help.rs`: Esc | q | ? | F1 all close the overlay.
+            keybindings::HELP_OVERLAY_NAME,
+        ];
+        for group in keybindings::all_groups() {
+            if COMBINED_Q_IS_HONEST.contains(&group.name) {
+                continue;
+            }
+            for b in group.bindings {
+                // Tokenised on any separator, not just `/`: keying a row
+                // "q or Esc" must not slip past a check coupled to one
+                // formatting convention.
+                let tokens: Vec<&str> = b
+                    .key
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if tokens.len() > 1 && tokens.iter().any(|k| k.eq_ignore_ascii_case("q")) {
+                    panic!(
+                        "{:?} folds q into {:?} ({:?}); q's meaning varies by \
+                         stage, so it needs its own row",
+                        group.name, b.key, b.desc
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every row of the registry, pinned.
+    ///
+    /// Six reviews of this branch found roughly ten rows that documented keys
+    /// the code does not bind, or omitted stages where a key means something
+    /// else. Four consecutive attempts to fix that by hand each introduced a
+    /// fresh instance. Spot checks keep failing because they test the row that
+    /// was just edited rather than the property "this row is true".
+    ///
+    /// So the whole table is pinned here. This test is not evidence that the
+    /// rows are correct; it makes changing one a deliberate act. When it fails,
+    /// re-read the handler for that key, in the stage the group covers, and
+    /// only then update the expectation.
+    #[test]
+    fn the_whole_registry_is_pinned() {
+        let expected: &[(&str, &str, &str)] = &[
+            ("Navigation", "Tab", "Switch pane"),
+            ("Navigation", "↑/k", "Up"),
+            ("Navigation", "↓/j", "Down"),
+            ("Navigation", "PgUp/PgDn", "Page up/down"),
+            ("Navigation", "Home/End", "First / last row"),
+            ("Navigation", "h/l", "Scroll table left/right (repo pane)"),
+            ("Navigation", "→", "Expand / focus repos"),
+            (
+                "Navigation",
+                "←/Esc",
+                "Right pane: collapse / focus workspaces",
+            ),
+            ("Workspace Pane", "Enter", "Go to workspace (cd)"),
+            ("Workspace Pane", "c", "Create workspace"),
+            ("Workspace Pane", "a", "Add repos"),
+            ("Workspace Pane", "d", "Delete workspace"),
+            ("Workspace Pane", "g", "Go (fuzzy picker)"),
+            ("Workspace Pane", "/", "Filter spaces"),
+            ("Workspace Pane", "S", "Config"),
+            ("Repo Pane", "Enter (repo)", "Expand / collapse repo"),
+            ("Repo Pane", "Enter (file)", "View file diff"),
+            ("Repo Pane", "←/Esc", "Collapse all / back"),
+            ("Repo Pane", "s/space", "Stage / unstage file"),
+            ("Repo Pane", "/", "Search repos"),
+            ("Repo Pane", "S", "Stage all unstaged"),
+            ("Repo Pane", "U", "Unstage all staged"),
+            ("Repo Pane", "b", "Switch branch"),
+            ("Repo Pane", "G", "Git operations"),
+            ("Repo Picker", "Tab", "Toggle repo"),
+            ("Repo Picker", "Ctrl-S", "Cycle scope"),
+            ("Repo Picker", "Ctrl-R", "Rescan repo list"),
+            ("Create / Add Flow", "Tab", "Toggle repo in picker"),
+            ("Create / Add Flow", "Enter", "Confirm and continue"),
+            ("Create / Add Flow", "↑↓/jk", "Choose branch strategy"),
+            (
+                "Create / Add Flow",
+                "letters",
+                "Type a name, or filter the picker",
+            ),
+            ("Create / Add Flow", "Esc", "Back one stage"),
+            ("Creating Log", "↑↓/jk", "Scroll the log"),
+            ("Creating Log", "PgUp/PgDn", "Page the log"),
+            (
+                "Creating Log",
+                "Home/End",
+                "Top / bottom (End resumes follow)",
+            ),
+            ("Creating Log", "Enter/Esc/q", "Back to the dashboard"),
+            ("Delete Confirm", "y", "Delete the space"),
+            ("Delete Confirm", "n/Esc/Enter", "Cancel (the default)"),
+            ("Delete Confirm", "q", "Cancel"),
+            ("Switch Branch", "↑↓/jk", "Choose strategy"),
+            ("Switch Branch", "Enter", "Confirm"),
+            (
+                "Switch Branch",
+                "letters",
+                "Type a new branch name / filter",
+            ),
+            ("Switch Branch", "↑↓", "Move the branch highlight"),
+            ("Switch Branch", "Esc", "Back one stage"),
+            ("Switch Branch", "q", "Back, on the strategy stage only"),
+            ("Config Editor", "↑↓/jk", "Move between fields"),
+            ("Config Editor", "Enter", "Edit field / commit edit"),
+            ("Config Editor", "Ctrl-S", "Save and exit"),
+            ("Config Editor", "Esc", "Cancel edit, or close"),
+            ("Config Editor", "q", "Close, when not editing"),
+            ("Space & Repo Pickers", "↑↓", "Move the highlight"),
+            ("Space & Repo Pickers", "Enter", "Select"),
+            ("Space & Repo Pickers", "Esc", "Cancel"),
+            ("Space & Repo Pickers", "letters", "Type into the filter"),
+            ("Git Operations", "f", "Fetch"),
+            ("Git Operations", "p", "Pull"),
+            ("Git Operations", "P", "Push"),
+            ("Git Operations", "c", "Commit"),
+            ("Git Operations", "l", "Log"),
+            ("Git Operations", "r", "Rebase"),
+            ("Git Operations", "↑↓/jk", "Navigate (menu and log only)"),
+            ("Git Operations", "↑↓", "Move the rebase-target highlight"),
+            ("Git Operations", "PgUp/PgDn", "Page the log"),
+            ("Git Operations", "Home/End", "Log top / bottom"),
+            ("Git Operations", "enter", "Select"),
+            ("Git Operations", "y", "Confirm a push or rebase"),
+            ("Git Operations", "n/Enter/Esc", "Decline (the default)"),
+            (
+                "Git Operations",
+                "esc",
+                "Back a stage (closes from menu/running)",
+            ),
+            ("Git Operations", "q", "Same as Esc, except while typing"),
+            ("Diff Viewer", "up/k", "Scroll up"),
+            ("Diff Viewer", "dn/j", "Scroll down"),
+            ("Diff Viewer", "PgUp/PgDn", "Page scroll"),
+            ("Diff Viewer", "Home/End", "Jump to start/end"),
+            ("Diff Viewer", "s/space", "Stage / unstage"),
+            ("Diff Viewer", "Esc/q", "Close"),
+            ("Sync Report", "↑↓/jk", "Select repo (once done)"),
+            ("Sync Report", "PgUp/PgDn", "Page by 10 rows"),
+            ("Sync Report", "Home/End", "First / last repo"),
+            (
+                "Sync Report",
+                "Enter",
+                "Continue to branch picker (once done)",
+            ),
+            ("Sync Report", "Esc", "Cancel / back to repo picker"),
+            ("Help Overlay", "↑↓/jk", "Scroll"),
+            ("Help Overlay", "PgUp/PgDn", "Page"),
+            ("Help Overlay", "Home/End", "Top / bottom"),
+            ("Help Overlay", "Esc/q/?/F1", "Close"),
+            ("General", "r", "Rescan repo list (dashboard)"),
+            ("General", "?", "Help (not while typing)"),
+            ("General", "F1", "Help (works while typing)"),
+            ("General", "q", "Quit (dashboard, not while typing)"),
+            ("General", "Ctrl-C", "Force quit"),
+        ];
+        let actual: Vec<(&str, &str, &str)> = keybindings::all_groups()
+            .iter()
+            .flat_map(|g| g.bindings.iter().map(move |b| (g.name, b.key, b.desc)))
+            .collect();
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "the registry gained or lost rows; see this test's doc comment"
+        );
+        for (i, (got, want)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                got, want,
+                "registry row {} changed; re-read the handler before updating this \
+                 expectation",
+                i
+            );
+        }
+    }
+
+    // --- registry completeness and layout ---
+
+    /// Deliberately spelled with literals, not the shared constants: this is
+    /// the tripwire that makes a group rename a visible, failing decision
+    /// rather than a silent one.
+    #[test]
+    fn the_registry_documents_every_screen() {
+        let names: Vec<&str> = keybindings::all_groups().iter().map(|g| g.name).collect();
+        for expected in [
+            "Navigation",
+            "Workspace Pane",
+            "Repo Pane",
+            "Repo Picker",
+            "Create / Add Flow",
+            "Creating Log",
+            "Delete Confirm",
+            "Switch Branch",
+            "Config Editor",
+            "Space & Repo Pickers",
+            "Git Operations",
+            "Diff Viewer",
+            "Sync Report",
+            "Help Overlay",
+            "General",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "the registry is missing the {:?} group; it has {:?}",
+                expected,
+                names
+            );
+        }
+    }
+
+    #[test]
+    fn f1_is_documented_as_a_general_key() {
+        let general = keybindings::all_groups()
+            .iter()
+            .find(|g| g.name == "General")
+            .unwrap();
+        assert!(
+            general.bindings.iter().any(|b| b.key.contains("F1")),
+            "F1 works everywhere, so it belongs in General"
+        );
+    }
+
+    #[test]
+    fn git_operations_is_documented_in_the_readme_and_the_guide() {
+        let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))
+            .expect("README.md");
+        let guide = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/GUIDE.md"))
+            .expect("docs/GUIDE.md");
+        for (name, text) in [("README.md", &readme), ("docs/GUIDE.md", &guide)] {
+            assert!(
+                text.contains("| `G` |"),
+                "{} must document the G git-operations key",
+                name
+            );
+        }
+    }
+
+    /// The overlay pads the key column, so a key and its description can never
+    /// run together, whatever the key's length.
+    #[test]
+    fn every_row_keeps_a_gap_between_key_and_description() {
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        app.handle_key(key(KeyCode::Home));
+        for _ in 0..40 {
+            let rendered = render_text(&app, 100, 40);
+            for group in keybindings::all_groups() {
+                for binding in group.bindings {
+                    if let Some(line) = rendered
+                        .lines()
+                        .find(|l| l.contains(binding.key) && l.contains(binding.desc))
+                    {
+                        let joined = format!("{}{}", binding.key, binding.desc);
+                        assert!(
+                            !line.contains(&joined),
+                            "{:?} runs into its description: {:?}",
+                            binding.key,
+                            line.trim()
+                        );
+                    }
+                }
+            }
+            app.handle_key(key(KeyCode::PageDown));
+        }
+    }
+
+    /// The registry test asserts a 54-column budget. That is only meaningful if
+    /// the dialog is never narrower than 56, which is what the width floor now
+    /// guarantees at every width where the overlay is drawn.
+    #[test]
+    fn the_dialog_is_never_narrower_than_the_budget_the_registry_test_asserts() {
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        for width in [56u16, 60, 72, 80, 120] {
+            let rendered = render_text(&app, width, 40);
+            let widest = rendered
+                .lines()
+                .filter(|l| l.contains('│') || l.contains('╭'))
+                .map(|l| l.trim_end().chars().count())
+                .max()
+                .unwrap_or(0);
+            assert!(
+                widest >= 56,
+                "at {} columns the help dialog is only {} wide, under the 56 the registry test assumes",
+                width,
+                widest
+            );
+        }
+    }
+
+    /// The footer carries the only on-screen hint that the list scrolls, so it
+    /// must never be clipped by the dialog it sits in.
+    #[test]
+    fn the_overlay_footer_is_never_clipped() {
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        for jump in [KeyCode::Home, KeyCode::PageDown, KeyCode::End] {
+            app.handle_key(key(jump));
+            let rendered = render_text(&app, 80, 24);
+            let footer = rendered
+                .lines()
+                .find(|l| l.contains("close"))
+                .unwrap_or_else(|| panic!("no footer after {:?}", jump));
+            assert!(
+                footer.contains("Esc/q/?/F1 close") || footer.contains("Esc / q / ? / F1 to close"),
+                "footer clipped after {:?}: {:?}",
+                jump,
+                footer.trim_end()
+            );
+        }
+    }
+
+    /// The overlay is modal, but Ctrl-C is checked before it: the documented
+    /// force quit must not become unreachable behind help.
+    #[test]
+    fn ctrl_c_still_quits_from_under_the_overlay() {
+        use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_some());
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.should_quit, "Ctrl-C must still quit while help is open");
+    }
+
+    /// The footer carries the only on-screen hint that the list scrolls, so it
+    /// must fit the narrowest dialog the code can draw. Derived from the
+    /// registry rather than asserted in prose: the widest form uses the largest
+    /// row numbers `rendered_row_count()` can produce, so this fails if the
+    /// registry grows past the digits the footer budgeted for, or if anyone
+    /// adds a word to the hint.
+    #[test]
+    fn overlay_footer_fits_the_dialog() {
+        let total = keybindings::rendered_row_count();
+        // The widest scrolled form: "rows <start>-<total> of <total>" with the
+        // largest numbers, plus the separators and the close hint.
+        let widest = format!(
+            "rows {}-{} of {}  \u{b7}  \u{2191}\u{2193} scroll  \u{b7}  Esc/q/?/F1 close",
+            total, total, total
+        );
+        let interior = 54; // 56-column dialog floor, minus two border columns
+        assert!(
+            UnicodeWidthStr::width(widest.as_str()) <= interior,
+            "the widest footer is {} columns, over the {}-column interior: {:?}",
+            UnicodeWidthStr::width(widest.as_str()),
+            interior,
+            widest
+        );
+
+        // And it is not clipped in practice, including on a short terminal
+        // where the row numbers are largest.
+        let mut app = test_app(vec![], vec![]);
+        app.handle_key(key(KeyCode::Char('?')));
+        for (w, h) in [(80u16, 24u16), (80, 10), (80, 8)] {
+            app.handle_key(key(KeyCode::End));
+            let rendered = render_text(&app, w, h);
+            let footer = rendered
+                .lines()
+                .find(|l| l.contains("close"))
+                .unwrap_or_else(|| panic!("no footer at {}x{}", w, h));
+            assert!(
+                footer.contains("Esc/q/?/F1 close") || footer.contains("Esc / q / ? / F1 to close"),
+                "footer clipped at {}x{}: {:?}",
+                w,
+                h,
+                footer.trim_end()
+            );
+        }
+    }
+
+    // --- the key bar ---
+
+    #[test]
+    fn the_key_bar_always_shows_the_help_key_at_eighty_columns() {
+        for pane in [Pane::Left, Pane::Right] {
+            let mut app = test_app(vec![common::workspace_with_repos(&["repo-a"])], vec![]);
+            app.focus = pane;
+            let rendered = render_text(&app, 80, 24);
+            let bar = rendered.lines().last().unwrap();
+            assert!(
+                bar.contains("? help"),
+                "the {:?} key bar drops the help key at 80 columns: {:?}",
+                pane,
+                bar.trim_end()
+            );
+            assert!(
+                bar.trim_end().chars().count() <= 80,
+                "the key bar must not overflow the terminal"
+            );
+        }
+    }
+
+    /// The fit arithmetic, tested through the pure seam rather than through a
+    /// render. `render_dashboard` returns before the bar below 80 columns and
+    /// ratatui clips a `Paragraph` at its area, so a test that renders and
+    /// measures can never observe an overflow: it would pass whatever the
+    /// arithmetic did.
+    #[test]
+    fn the_key_bar_fits_the_width_and_drops_the_gateways_last() {
+        use space::tui::ui::{fit_key_bar, key_bar_width};
+
+        for pane in [Pane::Left, Pane::Right] {
+            let bindings = keybindings::key_bar_bindings(pane);
+            let gateways = 2; // `?` and `q`
+
+            for width in [5usize, 12, 20, 40, 60, 79, 80, 90, 100, 140, 200] {
+                let entries = fit_key_bar(bindings, width);
+                let rendered = key_bar_width(&entries);
+
+                // The gateways are always present, and are the only entries
+                // allowed to exceed the width (the terminal clips them).
+                assert_eq!(
+                    entries
+                        .iter()
+                        .filter(|b| b.key == "?" || b.key == "q")
+                        .count(),
+                    gateways,
+                    "{:?} @{}: a gateway key was dropped: {:?}",
+                    pane,
+                    width,
+                    entries.iter().map(|b| b.key).collect::<Vec<_>>()
+                );
+                if entries.len() > gateways {
+                    assert!(
+                        rendered <= width,
+                        "{:?} @{}: bar is {} columns wide: {:?}",
+                        pane,
+                        width,
+                        rendered,
+                        entries.iter().map(|b| b.key).collect::<Vec<_>>()
+                    );
+                }
+                // Entries are admitted in registry order, never reordered.
+                let order: Vec<&str> = entries
+                    .iter()
+                    .filter(|b| b.key != "?" && b.key != "q")
+                    .map(|b| b.key)
+                    .collect();
+                let expected: Vec<&str> = bindings
+                    .iter()
+                    .filter(|b| b.key != "?" && b.key != "q")
+                    .map(|b| b.key)
+                    .take(order.len())
+                    .collect();
+                assert_eq!(order, expected, "{:?} @{}: entries reordered", pane, width);
+            }
+
+            // Wide enough for everything: nothing is dropped.
+            let all = fit_key_bar(bindings, 400);
+            assert_eq!(
+                all.len(),
+                bindings.len(),
+                "{:?}: 400 columns fits all",
+                pane
+            );
+        }
+    }
 }

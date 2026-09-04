@@ -171,15 +171,19 @@ Press `Enter` on a file row in the expanded repo list to open a full-screen scro
 | `a` | Add repos to selected workspace |
 | `d` | Delete selected workspace |
 | `g` | Go to workspace (fuzzy picker) |
-| `r` | Rescan the repo list |
+| `PgUp` / `PgDn` | Page up / down |
+| `Home` / `End` | First / last workspace |
 | `/` | Filter spaces (selects in place) |
 | `S` | Open config editor |
-| `q` | Quit |
-| `Ctrl-C` | Force quit (works on all screens) |
 
 `Esc` does nothing on this pane. It means "back", and the workspaces pane is the
 top of the navigation tree, so there is nowhere to go back to. Quitting is `q`
 or `Ctrl-C` only.
+
+`c`, `a` and `d` act on the selected space, so they fire on this pane only and
+do nothing on the repos pane. `r` is not a workspace-pane key: it rescans the
+repo list and reloads the repos pane, so it works from either pane and is listed
+under the general bindings below.
 
 ### Key Bindings — Repos Pane
 
@@ -195,8 +199,10 @@ or `Ctrl-C` only.
 | `S` | Stage all unstaged files in repo |
 | `U` | Unstage all staged files in repo |
 | `b` | Switch branch for selected repo |
+| `G` | Git operations for selected repo (fetch, pull, push, commit, log, rebase) |
+| `PgUp` / `PgDn` | Page up / down |
+| `Home` / `End` | First / last row |
 | `/` | Search all repos |
-| `q` | Quit |
 
 ### Repo Picker Key Bindings (create and add flows)
 
@@ -206,6 +212,16 @@ or `Ctrl-C` only.
 | `Tab` | Toggle the highlighted repo |
 | `Ctrl-S` | Cycle the parent-directory scope |
 | `Ctrl-R` | Rescan the repo list without leaving the picker |
+
+### Key Bindings, general (either pane)
+
+| Key | Action |
+|-----|--------|
+| `r` | Rescan the repo list and reload the repos pane |
+| `?` | Open help overlay (not while typing) |
+| `F1` | Open help overlay (works while typing, e.g. in a picker) |
+| `q` | Quit |
+| `Ctrl-C` | Force quit (works on all screens) |
 
 ### Key Bindings — Diff Viewer
 

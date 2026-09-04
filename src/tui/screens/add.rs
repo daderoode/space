@@ -98,6 +98,15 @@ impl AddState {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
+        if super::opens_help(
+            key.code,
+            matches!(
+                self.stage,
+                AddStage::Syncing | AddStage::PickBranchStrategy | AddStage::Creating
+            ),
+        ) {
+            return ScreenAction::OpenHelp;
+        }
         match self.stage {
             AddStage::PickRepos => self.handle_pick_repos(key),
             AddStage::Syncing => self.handle_syncing(key),
