@@ -874,24 +874,32 @@ impl App {
     /// Create or add every selected repo's worktree, logging one block per
     /// repo into the active screen's Creating log.
     ///
-    /// Residual: this loop is synchronous inside `handle_key`, so the
-    /// pre-create fetch blocks the whole TUI for up to
-    /// `UNATTENDED_FETCH_TIMEOUT` per repo with no repaint and no Esc. The
-    /// limit is per repo and the repos run in sequence, so the cost adds up:
-    /// N unreachable repos freeze the stage for N times the limit, which for
-    /// a selection off VPN is minutes, not one. It is also per attempt, not
-    /// per flow: an add that refuses with "already checked out" bounces to
-    /// `PickBranchStrategy`, and the next strategy the user picks re-runs
-    /// this loop and re-fetches every repo that is not in `fresh_repos`.
-    /// The unattended-run policy
-    /// bounds that hang; it does not make it interruptible. The design doc
-    /// records the same cost for sync (a hung repo costs a silent minute),
-    /// where Esc at least leaves the report; here Esc has nowhere to act.
-    /// Whether this stage should move to the
-    /// background worker pattern, so Esc does have somewhere to act, is left
-    /// open deliberately: the fetch is bounded first, the stage stays
-    /// synchronous, and the worker move is its own change because it
-    /// reshapes this stage's key handling and state.
+    /// Residual, and it is a frozen UI rather than a slow one. This loop runs
+    /// synchronously inside `handle_key`, and `run_loop` draws once per
+    /// iteration and only then polls for a key, so while a pre-create fetch
+    /// is in flight the loop is not running at all: no repaint, no spinner,
+    /// and no key is read. Esc is not ignored, it is never seen. It sits in
+    /// the terminal's buffer until the fetch returns and then replays into
+    /// whatever screen is on show by then, which is the same corruption
+    /// `run_loop`'s startup drain exists to prevent, in a window this change
+    /// makes longer. The app is indistinguishable from hung throughout.
+    ///
+    /// The cost compounds three ways. It is `UNATTENDED_FETCH_TIMEOUT` per
+    /// repo, and repos run in sequence, so N unreachable repos freeze the
+    /// stage for N times the limit: for a selection off VPN that is minutes,
+    /// not one. And it is per attempt, not per flow: an add that refuses
+    /// with "already checked out" bounces to `PickBranchStrategy`, and the
+    /// next strategy the user picks re-runs this loop and re-fetches every
+    /// repo that is not in `fresh_repos`.
+    ///
+    /// So the unattended-run policy bounds the hang without making it
+    /// interruptible, and the glossary's "never waits indefinitely for a
+    /// person" is doing less work here than it does for sync: there the
+    /// fetch is on a worker, the report keeps painting and Esc leaves at
+    /// once, which is what made the same 60s worst case acceptable. Moving
+    /// this stage to that worker pattern is the fix and is left open
+    /// deliberately: bounding the fetch comes first, and the move reshapes
+    /// this stage's key handling and state, so it is its own change.
     fn execute_worktree_flow(&mut self, params: crate::tui::actions::WorktreeParams) {
         use crate::core::workspace::{self, create_worktree_with_fetch, PreCreateFetch};
         use crate::tui::screens::sync_report::creating_fetch_note;
