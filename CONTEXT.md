@@ -29,7 +29,7 @@ The per-repo result inside a sync report: whether the fetch worked, which branch
 _Avoid_: sync result, repo result
 
 **Unattended run**:
-A git subprocess the TUI starts with nobody attending it: its own session with no controlling terminal, stdin closed, so any prompt for a credential, passphrase or host key is refused rather than waited on, and a wall-clock limit after which its process group is stopped. Both the sync and the fetch before a worktree is created run this way, so neither waits indefinitely for a person.
+A git subprocess the app starts with nobody attending it: its own session with no controlling terminal, stdin closed, and a wall-clock limit after which its process group is stopped. With no terminal and no askpass helper configured, a prompt for a credential, passphrase or host key is refused rather than waited on; where the user has an askpass helper, git and ssh call that instead and the run waits on its dialog until the limit. Either way the limit is what guarantees the end. Both the sync and the fetch before a worktree is created run this way, in the TUI and over MCP, so neither waits indefinitely for a person.
 _Avoid_: background job, detached fetch, headless git
 
 **Space filter**:

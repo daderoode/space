@@ -226,15 +226,35 @@ fn first_stderr_line(stderr: &str) -> Option<String> {
 /// news at this stage. The wording mirrors the sync report's status line,
 /// with the promise it made ("branch picker will use local refs") in the
 /// past tense.
+///
+/// Word order carries a constraint, so do not tidy it. The Creating log
+/// truncates rather than wraps (`render_creating_log` builds its paragraph
+/// without `Wrap`), and the dialog is 60 columns wide for every frame from
+/// 60 to 87 columns, which leaves 58 inside the borders. So everything up to
+/// and including "using local refs" is kept under that budget with the log's
+/// two-space indent, and git's own reason is appended after it: truncation
+/// then eats the reason first and the promise always survives. A 120-column
+/// frame shows about 33 columns of reason, a 160-column one about 61.
+///
+/// The reason is worth those columns because this is a second fetch, later
+/// than the sync report's and able to fail differently, and the report is
+/// unreachable from the Creating stage. Without it a create-time failure
+/// would show an exit code whose cause appears nowhere in the app.
 pub fn creating_fetch_note(fetch: &FetchOutcome) -> Option<String> {
     match fetch {
         FetchOutcome::Ok => None,
-        FetchOutcome::Failed { exit_code, stderr } => Some(format!(
-            "fetch failed ({}) \u{b7} using local refs",
-            exit_label(*exit_code, stderr)
-        )),
+        FetchOutcome::Failed { exit_code, stderr } => {
+            let mut note = format!(
+                "fetch failed ({}) \u{b7} using local refs",
+                exit_label(*exit_code, stderr)
+            );
+            if let Some(reason) = first_stderr_line(stderr) {
+                note.push_str(&format!(" \u{b7} {}", reason));
+            }
+            Some(note)
+        }
         FetchOutcome::TimedOut { after, .. } => Some(format!(
-            "fetch timed out after {}s, git was stopped \u{b7} using local refs",
+            "fetch timed out after {}s \u{b7} using local refs",
             after.as_secs()
         )),
     }
@@ -1204,7 +1224,17 @@ mod tests {
                 stderr: "fatal: nope".to_string(),
             })
             .as_deref(),
-            Some("fetch failed (git exit 128) \u{b7} using local refs")
+            Some("fetch failed (git exit 128) \u{b7} using local refs \u{b7} nope"),
+            "git's reason comes after the promise, never before it"
+        );
+        assert_eq!(
+            creating_fetch_note(&FetchOutcome::Failed {
+                exit_code: Some(128),
+                stderr: String::new(),
+            })
+            .as_deref(),
+            Some("fetch failed (git exit 128) \u{b7} using local refs"),
+            "stderr with no reason leaves no dangling separator"
         );
         assert_eq!(
             creating_fetch_note(&FetchOutcome::Failed {
@@ -1212,7 +1242,10 @@ mod tests {
                 stderr: format!("{}: boom", SPAWN_FAILURE_PREFIX),
             })
             .as_deref(),
-            Some("fetch failed (git did not start) \u{b7} using local refs"),
+            Some(
+                "fetch failed (git did not start) \u{b7} using local refs \u{b7} \
+                 failed to spawn git: boom"
+            ),
             "the wording tracks the report's own exit label"
         );
         assert_eq!(
@@ -1221,8 +1254,52 @@ mod tests {
                 stderr: String::new(),
             })
             .as_deref(),
-            Some("fetch timed out after 60s, git was stopped \u{b7} using local refs")
+            Some("fetch timed out after 60s \u{b7} using local refs")
         );
+    }
+
+    /// The Creating log truncates rather than wraps and its narrowest inner
+    /// width is 58 columns, so everything up to and including the promise
+    /// must fit that with the log's two-space indent. Only the part after
+    /// the promise may be cut.
+    #[test]
+    fn creating_fetch_note_keeps_the_promise_inside_the_narrowest_dialog() {
+        const INNER: usize = 58;
+        const INDENT: usize = 2;
+        let promise = "using local refs";
+        let notes = [
+            creating_fetch_note(&FetchOutcome::Failed {
+                exit_code: Some(128),
+                stderr: "fatal: nope".to_string(),
+            }),
+            creating_fetch_note(&FetchOutcome::Failed {
+                exit_code: None,
+                stderr: format!("{}: boom", SPAWN_FAILURE_PREFIX),
+            }),
+            creating_fetch_note(&FetchOutcome::Failed {
+                exit_code: None,
+                stderr: String::new(),
+            }),
+            creating_fetch_note(&FetchOutcome::TimedOut {
+                after: Duration::from_secs(60),
+                stderr: String::new(),
+            }),
+        ];
+        for note in notes.iter().flatten() {
+            let end = note
+                .find(promise)
+                .unwrap_or_else(|| panic!("no promise in {:?}", note))
+                + promise.len();
+            let head: String = note[..end].to_string();
+            assert!(
+                INDENT + UnicodeWidthStr::width(head.as_str()) <= INNER,
+                "{:?} is {} columns with the log's indent; the Creating log \
+                 truncates at {} and the promise would be cut",
+                head,
+                INDENT + UnicodeWidthStr::width(head.as_str()),
+                INNER
+            );
+        }
     }
 
     #[test]

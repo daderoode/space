@@ -435,6 +435,13 @@ fn parse_skip_reason(stderr: &str) -> SkipReason {
 /// would prompt fails as "terminal prompts disabled" rather than
 /// "Device not configured". `GIT_SSH_COMMAND` is deliberately not set so
 /// the user's own ssh configuration applies.
+///
+/// Only stderr is captured: `run_unattended` discards stdout, and
+/// `Unattended` has nowhere to carry it. That suits a command whose useful
+/// output is on stderr, which is why `git fetch --quiet` fits. It does not
+/// suit `git pull`, whose fast-forward summary goes to stdout, or `git log`,
+/// whose output is all stdout: an adopter that needs stdout has to extend
+/// the helper to capture it first, or it will silently log nothing.
 pub fn run_git_unattended(args: &[&str], cwd: &Path, timeout: Duration) -> Unattended {
     let mut cmd = Command::new("git");
     cmd.args(args)

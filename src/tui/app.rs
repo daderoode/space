@@ -879,7 +879,11 @@ impl App {
     /// `UNATTENDED_FETCH_TIMEOUT` per repo with no repaint and no Esc. The
     /// limit is per repo and the repos run in sequence, so the cost adds up:
     /// N unreachable repos freeze the stage for N times the limit, which for
-    /// a selection off VPN is minutes, not one. The unattended-run policy
+    /// a selection off VPN is minutes, not one. It is also per attempt, not
+    /// per flow: an add that refuses with "already checked out" bounces to
+    /// `PickBranchStrategy`, and the next strategy the user picks re-runs
+    /// this loop and re-fetches every repo that is not in `fresh_repos`.
+    /// The unattended-run policy
     /// bounds that hang; it does not make it interruptible. The design doc
     /// records the same cost for sync (a hung repo costs a silent minute),
     /// where Esc at least leaves the report; here Esc has nowhere to act.

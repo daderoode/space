@@ -425,6 +425,12 @@ fn creating_logs_failed_pre_create_fetch_and_skips_it_for_already_fetched_repos(
         log.join("\n")
     );
     assert!(
+        above_tick.contains("using local refs \u{b7} ")
+            && above_tick.ends_with("does not appear to be a git repository"),
+        "git's reason must follow the promise, so truncation eats it first, got {:?}",
+        above_tick
+    );
+    assert!(
         env.workspaces_dir
             .join("ws-a")
             .join("broken-remote")
