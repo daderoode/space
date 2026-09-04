@@ -1117,13 +1117,21 @@ impl App {
         let verb = if job.params.is_new {
             "Stopped creating"
         } else {
-            "Stopped adding to"
+            "Stopped adding"
         };
+        // The space name is deliberately not in here. `render_status_message`
+        // is an unwrapped one-row `Paragraph`, so it clips rather than wraps,
+        // and the dashboard's documented minimum is 80 columns. With a name
+        // interpolated, any name of 16 characters or more pushed the line past
+        // 80 and the part that fell off the end was "Press a to add the rest.",
+        // the only actionable half. Without it the longest this can be is 65
+        // columns at 999 of 999, which fits with room. The name is not lost:
+        // the lines just above select that space and load it, so it is the
+        // highlighted row on the dashboard the moment this message appears.
         self.set_status(
             format!(
-                "{} '{}' after {} of {} repos. Press a to add the rest.",
+                "{} after {} of {} repos. Press a to add the rest.",
                 verb,
-                job.params.workspace_name,
                 job.created,
                 job.params.repos.len()
             ),
@@ -4134,6 +4142,52 @@ mod tests {
         assert_eq!(app.status_kind, StatusKind::Success);
     }
 
+    /// The footer's live counter must advance past zero, and by one per repo.
+    ///
+    /// `started` feeds only `creating_progress`, which feeds only the "N of M"
+    /// footer, and the only footer assertion in the suite is taken before any
+    /// poll, so it reads `Creating 0 of 2` and never sees N non-zero. Mutating
+    /// `job.started = index + 1` to `index` therefore left the whole suite
+    /// green while the footer counted one repo behind for the entire run.
+    #[test]
+    fn started_counts_the_repo_being_worked_on_not_the_one_before_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("spaces");
+        let mut app = make_app(vec![]);
+        app.screen = Screen::CreateWorkspace(crate::tui::screens::create::CreateState::new(
+            vec![],
+            vec![],
+        ));
+        if let Screen::CreateWorkspace(st) = &mut app.screen {
+            st.stage = crate::tui::screens::create::CreateStage::Creating;
+        }
+        let params = create_params(
+            &ws_dir,
+            "ws-a",
+            vec![PathBuf::from("/r/a"), PathBuf::from("/r/b")],
+        );
+        let (tx, _cancel, job) = make_job(params);
+        app.create_job = Some(job);
+
+        assert_eq!(app.creating_progress(), (true, 0, 2), "nothing started yet");
+
+        tx.send(CreateProgress::Started { index: 0 }).unwrap();
+        app.poll_create_result();
+        assert_eq!(
+            app.creating_progress(),
+            (true, 1, 2),
+            "the first repo is the 1st of 2, not the 0th"
+        );
+
+        tx.send(CreateProgress::Started { index: 1 }).unwrap();
+        app.poll_create_result();
+        assert_eq!(
+            app.creating_progress(),
+            (true, 2, 2),
+            "the last repo is the 2nd of 2"
+        );
+    }
+
     #[test]
     fn poll_create_result_done_selects_the_new_space_by_name() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4319,7 +4373,7 @@ mod tests {
         );
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Stopped creating 'ws-a' after 2 of 3 repos. Press a to add the rest.")
+            Some("Stopped creating after 2 of 3 repos. Press a to add the rest.")
         );
         assert_eq!(
             app.status_kind,
@@ -4422,7 +4476,7 @@ mod tests {
 
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Stopped adding to 'ws-a' after 0 of 1 repos. Press a to add the rest.")
+            Some("Stopped adding after 0 of 1 repos. Press a to add the rest.")
         );
     }
 

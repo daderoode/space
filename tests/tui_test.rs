@@ -650,7 +650,85 @@ fn creating_esc_stops_the_run_and_leaves_the_partial_space() {
     );
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Stopped creating 'ws-cancel' after 0 of 2 repos. Press a to add the rest.")
+        Some("Stopped creating after 0 of 2 repos. Press a to add the rest.")
+    );
+}
+
+/// The Add flow's Creating footer says "Adding", not "Creating".
+///
+/// Nothing in the suite rendered the Add flow's Creating log, so changing
+/// `creating_footer_state(app, "Adding")` to `"Creating"` in `ui.rs` left all
+/// tests green. The status message had a test for exactly this
+/// (`poll_create_result_done_says_added_for_the_add_flow`); the footer one
+/// layer up did not.
+///
+/// This asserts the footer's own text, counter included, with a run actually
+/// in flight. A first version of this test asserted only that "Adding"
+/// appeared somewhere in the frame, and passed under the very mutation it was
+/// written to catch, because it was matching the fixture's own log line rather
+/// than the footer.
+#[test]
+fn the_add_flow_creating_footer_says_adding() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("add-footer-repo");
+    let ws_dir = env.workspaces_dir.join("ws-add");
+    std::fs::create_dir_all(&ws_dir).unwrap();
+
+    // The Add flow adds to an existing space, so one has to be selected.
+    let existing = Workspace {
+        name: "ws-add".to_string(),
+        path: ws_dir.clone(),
+        repos: vec![],
+    };
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![existing], vec![repo.clone()]);
+
+    app.handle_key(key(KeyCode::Char('a')));
+    if let Screen::AddRepos(ref mut st) = app.screen {
+        st.selected_repos = vec![repo];
+        st.branch_strategy_idx = 2; // DetachedHead: straight to Creating
+        st.stage = space::tui::screens::add::AddStage::PickBranchStrategy;
+    } else {
+        panic!("expected the AddRepos screen");
+    }
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        app.creating_in_flight(),
+        "Enter must hand the work to the background worker"
+    );
+
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("Adding 0 of 1"),
+        "the Add flow's footer must count in its own verb:\n{}",
+        rendered
+    );
+    assert!(
+        !rendered.contains("Creating 0 of 1"),
+        "and must not borrow the Create flow's:\n{}",
+        rendered
+    );
+}
+
+/// The cancel message must survive rendering at the dashboard's documented
+/// 80-column minimum, not merely be the right `String`.
+///
+/// `render_status_message` is an unwrapped one-row `Paragraph`, so it clips.
+/// Every assertion on this message used to check the `String` and none
+/// rendered it, and the version that interpolated the space name ran to 86
+/// columns for an ordinary name, losing exactly "Press a to add the rest." off
+/// the end: the only actionable half, silently, on the terminal size the app
+/// documents as its floor.
+#[test]
+fn the_cancel_message_is_not_clipped_at_the_minimum_width() {
+    let mut app = test_app(vec![], vec![]);
+    app.status_message =
+        Some("Stopped creating after 999 of 999 repos. Press a to add the rest.".to_string());
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("Press a to add the rest."),
+        "the recovery hint must survive at 80 columns:\n{}",
+        rendered
     );
 }
 
