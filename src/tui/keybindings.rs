@@ -351,13 +351,18 @@ const CREATING_LOG: BindingGroup = BindingGroup {
             key: "Home/End",
             desc: "Top / bottom (End resumes follow)",
         },
+        // A successful run leaves the stage on its own (`finish_create_run`
+        // sets the dashboard), so the only way to still be here with no worker
+        // running is a repo that failed. Both rows say "failure" rather than
+        // "when done" for that reason: "done" would describe a state the
+        // common case never reaches.
         Binding {
             key: "Esc/q",
-            desc: "Stop creating, or leave when done",
+            desc: "Stop creating, or dismiss a failure",
         },
         Binding {
             key: "Enter",
-            desc: "Continue (ignored while creating)",
+            desc: "Dismiss failure (ignored while running)",
         },
     ],
 };

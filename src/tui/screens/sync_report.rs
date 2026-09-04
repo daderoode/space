@@ -309,6 +309,13 @@ pub fn creating_footer(
     } else if let Some(e) = error {
         format!("Error: {}  [ESC to dismiss]", e)
     } else {
+        // Unreachable in the app, and kept only to keep this a total function.
+        // A run that ends with no error leaves the stage on its own
+        // (`finish_create_run` goes to the dashboard), so the Creating log is
+        // never rendered with the worker finished and nothing failed. Kept
+        // rather than deleted because the two live branches are chosen by
+        // conditions, not by an exhaustive match, so something has to be the
+        // final arm; a panic here would trade an invisible string for a crash.
         "Done! [ENTER to continue]".to_string()
     }
 }
@@ -1436,6 +1443,12 @@ mod tests {
 
     /// Same dialog, same budget as `creating_fetch_note`: 58 columns inside
     /// the 60-column dialog's borders, and the footer is not indented.
+    ///
+    /// This covers the two branches the footer itself bounds: the live one at
+    /// its widest (three-digit counts, both verbs, every spinner frame) and
+    /// the finished one. The error branch is deliberately NOT here, because it
+    /// is not bounded at all; see
+    /// `creating_footer_does_not_bound_the_error_branch`.
     #[test]
     fn creating_footer_fits_the_narrowest_dialog() {
         const INNER: usize = 58;
@@ -1453,6 +1466,35 @@ mod tests {
                 INNER
             );
         }
+    }
+
+    /// The error branch carries git's own text and is not truncated, so it can
+    /// and does exceed the 58-column budget: `git worktree add` on an occupied
+    /// path reports an absolute path, which alone can pass it. Pinned as a
+    /// known limit rather than left to look like coverage.
+    ///
+    /// Left as it is on purpose. The wording and the absence of a cap are both
+    /// pre-existing (`render_creating_log` formatted this exact string before
+    /// the footer became a seam), the renderer clips it rather than wrapping or
+    /// panicking, and the same reason is already in the log as that repo's
+    /// `\u{2717}` line, where the full width of the dialog is available to it.
+    /// Capping it here would be a user-visible change to a message this
+    /// change did not otherwise touch.
+    #[test]
+    fn creating_footer_does_not_bound_the_error_branch() {
+        let long = format!("fatal: '{}' already exists", "/a/very/long/path".repeat(4));
+        let footer = creating_footer("Creating", false, 999, 999, Some(&long), 0);
+        assert!(
+            UnicodeWidthStr::width(footer.as_str()) > 58,
+            "if this ever fits, the branch has gained a cap and the comment \
+             above is stale: {:?}",
+            footer
+        );
+        assert!(
+            footer.starts_with("Error: ") && footer.ends_with("  [ESC to dismiss]"),
+            "the pre-existing wording is what is being preserved: {:?}",
+            footer
+        );
     }
 
     fn timed_out_outcome() -> SyncOutcome {

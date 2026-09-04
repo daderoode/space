@@ -87,6 +87,17 @@ pub enum GitOpProgress {
 /// never derived from one another: the footer shows how far the run has got,
 /// the cancel message says how many worktrees exist, and the disconnect path
 /// asks whether every repo was attempted.
+///
+/// No generation counter, unlike `ws_generation` on the workspace loader, and
+/// the asymmetry is deliberate rather than an oversight. That loader reuses one
+/// long-lived channel, so a stale reply can arrive on it and has to be
+/// recognised and dropped. Here every write to `App::create_job` replaces the
+/// whole struct, including a brand-new `sync_channel`, so the previous `rx` is
+/// dropped at that instant: the old worker's next `send` returns `Err` and it
+/// returns, and a message can only ever be received on the channel it was sent
+/// on. Applying one run's message to another run's state is structurally
+/// impossible here, not merely avoided, so there is nothing for an id to
+/// discriminate.
 pub struct CreateJob {
     rx: mpsc::Receiver<CreateProgress>,
     // Relaxed ordering is sufficient: this flag guards no other shared state,
@@ -1014,6 +1025,14 @@ impl App {
     /// failed. The add path is clean because a repo that was never created has
     /// neither the target directory nor the branch.
     ///
+    /// "Leaves at once" has one asterisk, and it is not the network wait this
+    /// change removes. The refresh below calls `load_selected_workspace_detail`
+    /// synchronously, which opens every repo in the partial space with git2 to
+    /// read its status. That is local work bounded by the repos already
+    /// created, the same call every dashboard navigation makes, and it is what
+    /// makes the space appear correctly on the way out; it is not bounded by
+    /// `UNATTENDED_FETCH_TIMEOUT` the way the old freeze was.
+    ///
     /// Nothing is cleaned up. `create_worktree_cancellable` runs
     /// `create_dir_all` before the fetch and `list_workspaces` lists any
     /// directory, so cancelling before any worktree exists still leaves an
@@ -1022,9 +1041,29 @@ impl App {
     /// a cleanup that fired for one and not the other would be the
     /// inconsistency. Cancel means stop, not undo.
     fn cancel_creating(&mut self) {
+        // Drain first. `run_loop` drains, draws, then waits up to 16ms for a
+        // key, so the worker's terminal message can land inside that wait and
+        // still be undrained when Esc is read. The user is pressing Esc
+        // against the screen they were shown, so leaving is right either way,
+        // but a run that had already finished must be reported as finished,
+        // not as a cancellation with a count frozen at the last drain. Without
+        // this a fully successful run says "Stopped creating 'ws' after 4 of 5
+        // repos", which is a success reported as a failure, and an
+        // `AlreadyCheckedOut` stop loses its bounce to the strategy picker.
+        self.poll_create_result();
         let job = match self.create_job.take() {
             Some(job) => job,
-            None => return,
+            None => {
+                // The run ended in this very frame. If the drain left the
+                // Creating stage up it did so because a repo failed, and Esc
+                // still means leave. If it moved the screen itself (the
+                // dashboard on success, the strategy picker on a bounce) this
+                // is a no-op: the key is consumed rather than replayed into a
+                // screen the user has not seen yet, which is the corruption
+                // `run_loop`'s own startup drain exists to prevent.
+                self.leave_failed_creating();
+                return;
+            }
         };
         job.cancel.store(true, Ordering::Relaxed);
 
@@ -1055,6 +1094,37 @@ impl App {
             ),
             StatusKind::Warning,
         );
+    }
+
+    /// Leave a finished-but-failed Creating stage for the dashboard, exactly
+    /// as the stage's own Esc does. A no-op unless that stage is still up.
+    ///
+    /// Only reachable in the frame where the run ended: `Done` with a failed
+    /// repo, or a worker that died, both of which keep the stage up so the log
+    /// can be read.
+    ///
+    /// Residual, deliberately not fixed here: `Enter` in that same window is
+    /// swallowed once, because the stage ignores it while the job still looks
+    /// live. The screen is correct on the next frame and a second press works.
+    /// The asymmetry is intended: Esc's misfire wrote a false message about
+    /// durable state, while Enter's costs one keystroke.
+    fn leave_failed_creating(&mut self) {
+        let (verb, err) = match &self.screen {
+            Screen::CreateWorkspace(st)
+                if st.stage == crate::tui::screens::create::CreateStage::Creating =>
+            {
+                ("Create", st.error.clone())
+            }
+            Screen::AddRepos(st) if st.stage == crate::tui::screens::add::AddStage::Creating => {
+                ("Add", st.error.clone())
+            }
+            _ => return,
+        };
+        self.refresh_if_leaving_creating_stage();
+        self.screen = Screen::Dashboard;
+        if let Some(err) = err {
+            self.set_status(format!("{} failed: {}", verb, err), StatusKind::Error);
+        }
     }
 
     /// Poll the Creating worker channel once per frame. Non-blocking.
@@ -3768,11 +3838,12 @@ mod tests {
     /// worker's send, which precedes the worker's next load. A buffered channel
     /// removes that edge as surely as it removes the scheduling guarantee.
     ///
-    /// This is not hypothetical. While this branch was under review an agent
-    /// changed that 0 to 64 in this tree, the whole suite stayed green, and the
-    /// only thing that caught it was a human-scale "I did not touch that line".
-    /// Nothing else can: not the suite, not clippy, not a reviewer's eye
-    /// sliding over a one-character change to a test's channel capacity.
+    /// This is not hypothetical. While this branch was under review, another
+    /// session changed that 0 to a 64 directly in this working tree. The whole
+    /// suite stayed green throughout, and the only thing that caught it was a
+    /// reviewer noticing a line it had not touched. Nothing else could: not the
+    /// suite, not clippy, and not the strongest gate any one author has, which
+    /// is knowing what they themselves changed.
     #[test]
     fn cancelling_mid_run_creates_no_further_worktrees() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3919,6 +3990,40 @@ mod tests {
             !cancel.load(Ordering::Relaxed),
             "the screen must never be able to cancel the run"
         );
+    }
+
+    /// The add flow's success wording, which the end-to-end add tests exercise
+    /// but never assert. Without this, a typo in the "Added repos to" verb
+    /// would pass the whole suite, since only the create side is pinned.
+    #[test]
+    fn poll_create_result_done_says_added_for_the_add_flow() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("spaces");
+        std::fs::create_dir_all(ws_dir.join("ws-a")).unwrap();
+
+        let mut app = make_app(vec![]);
+        app.config.workspaces.dir = ws_dir.clone();
+        app.screen = Screen::AddRepos(crate::tui::screens::add::AddState::new(
+            "ws-a".to_string(),
+            vec![],
+            vec![],
+        ));
+        if let Screen::AddRepos(st) = &mut app.screen {
+            st.stage = crate::tui::screens::add::AddStage::Creating;
+        }
+        let mut params = create_params(&ws_dir, "ws-a", vec![PathBuf::from("/r/a")]);
+        params.is_new = false;
+        let (tx, _cancel, job) = make_job(params);
+        app.create_job = Some(job);
+
+        tx.send(CreateProgress::Done).unwrap();
+        app.poll_create_result();
+
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Added repos to workspace 'ws-a'")
+        );
+        assert_eq!(app.status_kind, StatusKind::Success);
     }
 
     #[test]
@@ -4114,6 +4219,84 @@ mod tests {
             "a partial space needs attention, but stopping is not a failure"
         );
         assert!(app.create_job.is_none(), "the cancelled job is dropped");
+    }
+
+    /// A key can arrive in the same frame as the worker's terminal message.
+    /// `run_loop` drains, draws, then waits up to 16ms for a key, so `Done`
+    /// can land inside that wait and still be undrained when Esc is read.
+    /// The user is pressing Esc against the screen they were shown, so
+    /// leaving is right; calling it a cancellation is not. The run had
+    /// finished, and reporting a finished run as "Stopped ... after 0 of 0
+    /// repos" is a success reported as a failure, the same class of defect
+    /// as retrying a partial space.
+    #[test]
+    fn esc_in_the_frame_the_run_finished_reports_the_run_not_a_cancellation() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("spaces");
+        std::fs::create_dir_all(ws_dir.join("ws-a")).unwrap();
+
+        let mut app = make_app(vec![]);
+        app.config.workspaces.dir = ws_dir.clone();
+        app.screen = creating_screen();
+        let params = create_params(&ws_dir, "ws-a", vec![]);
+        let (tx, _cancel, job) = make_job(params);
+        app.create_job = Some(job);
+        // Queued but not yet drained: exactly the window run_loop leaves.
+        tx.send(CreateProgress::Done).unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(matches!(app.screen, Screen::Dashboard));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Created workspace 'ws-a'"),
+            "a run that finished must be reported as finished, not as a stop"
+        );
+        assert_eq!(app.status_kind, StatusKind::Success);
+        assert!(app.create_job.is_none());
+    }
+
+    /// The worse half of the same race. An `AlreadyCheckedOut` stop exists to
+    /// put the user back on the strategy picker with a reason they can act on.
+    /// Treating that frame's Esc as a cancellation would drop them on the
+    /// dashboard with a generic message and silently lose the recovery path
+    /// the `Stopped` variant was added to provide.
+    #[test]
+    fn esc_in_the_frame_a_stop_arrived_still_bounces_to_the_picker() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("spaces");
+
+        let mut app = make_app(vec![]);
+        app.config.workspaces.dir = ws_dir.clone();
+        app.screen = creating_screen();
+        let params = create_params(&ws_dir, "ws-a", vec![PathBuf::from("/r/repo-a")]);
+        let (tx, _cancel, job) = make_job(params);
+        app.create_job = Some(job);
+        tx.send(CreateProgress::Stopped(CreateStop::AlreadyCheckedOut {
+            index: 0,
+        }))
+        .unwrap();
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(
+                    st.stage,
+                    crate::tui::screens::create::CreateStage::PickBranchStrategy,
+                    "the bounce must survive an Esc in the same frame"
+                );
+                assert_eq!(
+                    st.error.as_deref(),
+                    Some("'repo-a' is already checked out — pick a different strategy"),
+                    "the actionable reason must not be replaced by a generic stop"
+                );
+            }
+            _ => panic!("expected the strategy picker, not the dashboard"),
+        }
+        assert!(app.create_job.is_none());
     }
 
     #[test]

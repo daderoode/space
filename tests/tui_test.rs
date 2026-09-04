@@ -8454,8 +8454,16 @@ mod help_overlay_tests {
                 "Home/End",
                 "Top / bottom (End resumes follow)",
             ),
-            ("Creating Log", "Esc/q", "Stop creating, or leave when done"),
-            ("Creating Log", "Enter", "Continue (ignored while creating)"),
+            (
+                "Creating Log",
+                "Esc/q",
+                "Stop creating, or dismiss a failure",
+            ),
+            (
+                "Creating Log",
+                "Enter",
+                "Dismiss failure (ignored while running)",
+            ),
             ("Delete Confirm", "y", "Delete the space"),
             ("Delete Confirm", "n/Esc/Enter", "Cancel (the default)"),
             ("Delete Confirm", "q", "Cancel"),

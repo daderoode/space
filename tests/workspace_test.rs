@@ -585,3 +585,128 @@ fn refuses_because_checked_out_matches_only_the_pre_2_42_wording() {
         "an unrelated refusal must not bounce to the strategy picker"
     );
 }
+
+/// The two checkpoints are two reads, not one read cached at entry, and this is
+/// the only test that can tell those apart. It sets the flag DURING the fetch,
+/// after checkpoint 1 has already passed with the flag clear.
+///
+/// That matters because the fetch is the window this design exists for: up to
+/// `UNATTENDED_FETCH_TIMEOUT` in which the user can press Esc. A single read at
+/// entry would still stop a run cancelled before it started, and would sail
+/// straight through a cancel arriving during the fetch, creating the very
+/// worktree the user pressed Esc to avoid.
+///
+/// The ordering is enforced by files, not by sleeps. `remote.origin.uploadpack`
+/// points at a script that touches STARTED and then blocks until RELEASE
+/// appears, so the fetch cannot finish until this test lets it. The test waits
+/// for STARTED, at which point the fetch is provably running and checkpoint 1
+/// has provably passed with the flag clear, sets the flag, and only then
+/// touches RELEASE. Checkpoint 2 therefore always reads a flag that was false
+/// at entry and true by the time the fetch returned, with no timing assumption
+/// anywhere.
+///
+/// Collapsing both reads into one at entry, which `create_worktree_cancellable`
+/// explicitly forbids in its own doc comment, passes every other test in this
+/// repository and fails this one.
+#[test]
+fn create_worktree_cancellable_reads_the_flag_again_after_the_fetch() {
+    use space::core::workspace::{create_worktree_cancellable, PreCreateFetch};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let tmp = TempDir::new().unwrap();
+    let origin = tmp.path().join("origin.git");
+    assert!(Command::new("git")
+        .args(["init", "-q", "--bare"])
+        .arg(&origin)
+        .status()
+        .unwrap()
+        .success());
+
+    let repo_dir = TempDir::new().unwrap();
+    common::init_repo(repo_dir.path());
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo_dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let url = format!("file://{}", origin.display());
+    git(&["remote", "add", "origin", &url]);
+    git(&["push", "-q", "origin", "HEAD:refs/heads/main"]);
+
+    // The gate. `sh` is fine here: the app documents macOS and Linux only.
+    let started = tmp.path().join("STARTED");
+    let release = tmp.path().join("RELEASE");
+    let gate = tmp.path().join("gate.sh");
+    std::fs::write(
+        &gate,
+        format!(
+            "#!/bin/sh\ntouch \"{}\"\nwhile [ ! -f \"{}\" ]; do sleep 0.01; done\nexec git upload-pack \"$@\"\n",
+            started.display(),
+            release.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gate, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let gate_path = gate.display().to_string();
+    git(&["config", "remote.origin.uploadpack", &gate_path]);
+
+    let ws_dir = TempDir::new().unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    let flipper = {
+        let cancel = Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !started.exists() {
+                assert!(Instant::now() < deadline, "the gated fetch never started");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            // Strictly ordered: the flag is set before the fetch is released,
+            // so checkpoint 1 cannot have seen it and checkpoint 2 must.
+            cancel.store(true, Ordering::Relaxed);
+            std::fs::write(&release, b"go").unwrap();
+        })
+    };
+
+    let attempt = create_worktree_cancellable(
+        repo_dir.path(),
+        ws_dir.path(),
+        "test-ws",
+        &BranchStrategy::DetachedHead,
+        PreCreateFetch::Run(Duration::from_secs(60)),
+        &cancel,
+    );
+    flipper.join().unwrap();
+
+    assert!(
+        attempt.fetch.is_some(),
+        "checkpoint 1 saw a clear flag, so the fetch must have run: that is \
+         what makes this a test of the SECOND read"
+    );
+    assert!(
+        attempt.created.is_err(),
+        "a cancel observed after the fetch must stop the attempt"
+    );
+    let wt = ws_dir
+        .path()
+        .join("test-ws")
+        .join(repo_dir.path().file_name().unwrap());
+    assert!(
+        !wt.exists(),
+        "no worktree may be created for a repo cancelled during its fetch"
+    );
+}
