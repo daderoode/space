@@ -1142,8 +1142,12 @@ fn git_index_mtime_works_for_worktree() {
         .output()
         .unwrap();
 
-    // Create a worktree
-    let wt_path = tmp.path().parent().unwrap().join("wt-test");
+    // Create a worktree in its own TempDir. The parent of `tmp` is `$TMPDIR`
+    // itself, so a fixed name there was shared by every run of this test on
+    // the machine, and two overlapping `cargo test` runs collided with
+    // `fatal: '.../wt-test' already exists` (ticket 11).
+    let wt_tmp = TempDir::new().unwrap();
+    let wt_path = wt_tmp.path().join("wt-test");
     let output = Command::new("git")
         .args([
             "worktree",
