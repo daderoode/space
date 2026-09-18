@@ -1383,10 +1383,22 @@ pub fn worktree_path(ws_dir: &Path, ws_name: &str, repo_path: &Path) -> PathBuf 
 /// `<source>/.git/worktrees/<id>/`, so its grandparent is the source repo's
 /// git dir, and comparing that is what ties the directory to THIS repo.
 ///
+/// The `is_worktree()` guard is not an early exit for what the comparison
+/// would catch anyway: it is the only thing that rejects a SUBMODULE. A
+/// submodule's gitdir is `<source>/.git/modules/<name>/`, whose grandparent
+/// is that same `<source>/.git`, so on the path comparison alone a submodule
+/// checkout sitting where the space wants one would be reported as already
+/// created and never attempted. Pinned by
+/// `is_worktree_of_rejects_a_submodule_whose_gitdir_lives_under_the_source`.
+///
 /// Both sides are canonicalised because git resolves symlinks and the app
 /// does not: on macOS a space under `$TMPDIR` comes back from git as
 /// `/private/var/...` while the config holds `/var/...`, and a byte
-/// comparison would call every such worktree foreign.
+/// comparison would call every such worktree foreign. Only the `repo_path`
+/// side can differ today, because libgit2 hands back a path it has already
+/// resolved; the git-dir side is canonicalised so that both are compared
+/// under one rule rather than on a reader's memory of which library resolves
+/// what.
 ///
 /// Branch and strategy are deliberately not checked. The retry this serves
 /// exists BECAUSE the strategy changed, so the repos already in the space are
@@ -1401,8 +1413,14 @@ pub fn worktree_path(ws_dir: &Path, ws_name: &str, repo_path: &Path) -> PathBuf 
 /// One case falls the same way for a different reason, and falls safe: a
 /// SOURCE repo that is itself a linked worktree has a gitlink file rather
 /// than a directory at `.git`, so the comparison cannot match and its repos
-/// are attempted as they were before the skip existed. The repo scanner does
-/// accept such a repo (`.git` merely has to exist), so this is reachable.
+/// are attempted as they were before the skip existed. No ordinary route
+/// reaches it: `find_repos_in` requires `.git` to be a DIRECTORY
+/// (`entry.file_type().is_dir()`), so the scanner never returns such a repo,
+/// and every list of repo paths in the app is the scanner's output (the TUI
+/// picker and the CLI's `create`/`add` take `App::repos_cache`, MCP
+/// `resolve_repos` matches names against the same cache). The one way in is
+/// a hand-edited cache file, which `load_cache` reads back as paths without
+/// revalidating them.
 pub fn is_worktree_of(wt_path: &Path, repo_path: &Path) -> bool {
     let wt = match git2::Repository::open(wt_path) {
         Ok(wt) => wt,
@@ -1664,6 +1682,20 @@ mod tests {
         git(&["config", "user.email", "t@local"], dir);
         git(&["config", "user.name", "T"], dir);
         git(&["config", "commit.gpgsign", "false"], dir);
+    }
+
+    /// A one-commit repo on `main` at `<parent>/<name>`.
+    fn plain_repo(parent: &Path, name: &str) -> PathBuf {
+        let path = parent.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        Cmd::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        git_setup(&path);
+        git(&["commit", "--allow-empty", "-m", "init"], &path);
+        path
     }
 
     fn get_sha(dir: &Path, refname: &str) -> String {
@@ -2517,15 +2549,7 @@ mod tests {
     #[test]
     fn create_worktree_skip_runs_no_fetch() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(&repo).unwrap();
-        Cmd::new("git")
-            .args(["init", "-b", "main"])
-            .current_dir(&repo)
-            .output()
-            .unwrap();
-        git_setup(&repo);
-        git(&["commit", "--allow-empty", "-m", "init"], &repo);
+        let repo = plain_repo(tmp.path(), "repo");
         let dead_url = format!("file://{}", tmp.path().join("no-such-origin.git").display());
         git(&["remote", "add", "origin", &dead_url], &repo);
 
@@ -2618,20 +2642,6 @@ mod tests {
         );
     }
 
-    /// A one-commit repo on `main` at `<parent>/<name>`.
-    fn plain_repo(parent: &Path, name: &str) -> PathBuf {
-        let path = parent.join(name);
-        std::fs::create_dir_all(&path).unwrap();
-        Cmd::new("git")
-            .args(["init", "-b", "main"])
-            .current_dir(&path)
-            .output()
-            .unwrap();
-        git_setup(&path);
-        git(&["commit", "--allow-empty", "-m", "init"], &path);
-        path
-    }
-
     /// The predicate the Creating worker skips on. A worktree made by the
     /// production path counts whatever branch it carries, which is the case
     /// the retry after a checked-out bounce turns on: the repos already in
@@ -2713,6 +2723,51 @@ mod tests {
         assert!(
             !is_worktree_of(&foreign, &repo),
             "a worktree of a different repo must not count as this repo's"
+        );
+    }
+
+    /// The one shape the `is_worktree()` guard, and nothing else, keeps out.
+    /// A submodule's gitdir is `<source>/.git/modules/<name>/`, whose
+    /// grandparent is `<source>/.git`: exactly what the path comparison
+    /// accepts. It is not a worktree (no `gitdir`/`commondir` in that
+    /// directory), so only the guard separates it from a real one, and
+    /// without the guard a submodule checkout would be reported as already
+    /// created and silently skipped.
+    ///
+    /// `protocol.file.allow=always` is needed from git 2.38.1: the file
+    /// transport is refused for submodules by default (CVE-2022-39253).
+    #[test]
+    fn is_worktree_of_rejects_a_submodule_whose_gitdir_lives_under_the_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = plain_repo(tmp.path(), "source");
+        let other = plain_repo(tmp.path(), "other");
+
+        git(
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                other.to_str().unwrap(),
+                "sub",
+            ],
+            &source,
+        );
+
+        let sub = source.join("sub");
+        assert!(
+            sub.join(".git").is_file(),
+            "the fixture must be a gitlink FILE, which is what points at the \
+             gitdir under the source"
+        );
+        assert!(
+            source.join(".git").join("modules").join("sub").is_dir(),
+            "the fixture's gitdir must live under the source repo's .git"
+        );
+        assert!(
+            !is_worktree_of(&sub, &source),
+            "a submodule is not a worktree of its superproject: its place in \
+             a space must still be attempted, not skipped"
         );
     }
 
