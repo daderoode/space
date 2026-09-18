@@ -278,6 +278,48 @@ pub fn creating_fetch_note(fetch: &FetchOutcome) -> Option<String> {
     }
 }
 
+/// The Creating log's footer line: live progress and the cancel key while the
+/// worker runs, then the error or the finish once it has stopped.
+///
+/// In flight wins over an error deliberately. While the run continues, the
+/// progress and the key that stops it are what the user needs; the failed
+/// repo's reason is already in the log above, on its `\u{2717}` line.
+///
+/// Rendered in the same dialog as `creating_fetch_note`, so it is under the
+/// same 58-column budget: the dialog is 60 columns wide for every frame from
+/// 60 to 87 columns and `block.inner` takes two of them. The log truncates
+/// rather than wraps, so anything longer is simply cut.
+pub fn creating_footer(
+    verb: &str,
+    in_flight: bool,
+    started: usize,
+    total: usize,
+    error: Option<&str>,
+    spinner_tick: u64,
+) -> String {
+    if in_flight {
+        // Animated ellipsis, the cadence the gitops Running header and the
+        // dashboard spinner already use.
+        let frames = ["\u{b7}  ", "\u{b7}\u{b7} ", "\u{b7}\u{b7}\u{b7}"];
+        let dots = frames[(spinner_tick as usize / 30) % 3];
+        format!(
+            "{} {} of {} {} \u{b7} ESC cancel",
+            verb, started, total, dots
+        )
+    } else if let Some(e) = error {
+        format!("Error: {}  [ESC to dismiss]", e)
+    } else {
+        // Unreachable in the app, and kept only to keep this a total function.
+        // A run that ends with no error leaves the stage on its own
+        // (`finish_create_run` goes to the dashboard), so the Creating log is
+        // never rendered with the worker finished and nothing failed. Kept
+        // rather than deleted because the two live branches are chosen by
+        // conditions, not by an exhaustive match, so something has to be the
+        // final arm; a panic here would trade an invisible string for a crash.
+        "Done! [ENTER to continue]".to_string()
+    }
+}
+
 /// A path for display, with the home directory shortened to `~`.
 pub fn display_path(path: &Path) -> String {
     if let Some(home) = dirs::home_dir() {
@@ -548,7 +590,9 @@ impl SyncReport {
     /// answering. The pre-create fetch is skipped for these too, but for the
     /// opposite reason: not because the refs are fresh but because they are
     /// of unknown age and another attempt would very likely spend the limit
-    /// again, on the UI thread, to learn the same nothing. That difference is
+    /// again to learn the same nothing, now on the worker rather than the UI
+    /// thread, so it delays every repo behind it instead of freezing the app.
+    /// That difference is
     /// why this is a separate list rather than merged with
     /// `fetched_ok_paths`: the skip is silent for a fresh repo and reported
     /// for this one.
@@ -1349,6 +1393,108 @@ mod tests {
                 INNER
             );
         }
+    }
+
+    #[test]
+    fn creating_footer_shows_progress_while_the_run_is_live() {
+        assert_eq!(
+            creating_footer("Creating", true, 2, 5, None, 0),
+            "Creating 2 of 5 \u{b7}   \u{b7} ESC cancel",
+            "a live run shows how far it has got and the key that stops it"
+        );
+        assert_eq!(
+            creating_footer("Adding", true, 1, 3, None, 30),
+            "Adding 1 of 3 \u{b7}\u{b7}  \u{b7} ESC cancel",
+            "the ellipsis animates on the dashboard spinner's cadence"
+        );
+        assert_eq!(
+            creating_footer("Creating", true, 1, 3, None, 60),
+            "Creating 1 of 3 \u{b7}\u{b7}\u{b7} \u{b7} ESC cancel"
+        );
+        assert_eq!(
+            creating_footer("Creating", true, 1, 3, None, 90),
+            "Creating 1 of 3 \u{b7}   \u{b7} ESC cancel",
+            "the three ellipsis frames cycle"
+        );
+    }
+
+    #[test]
+    fn creating_footer_reports_the_error_and_the_finish_only_when_the_run_is_over() {
+        assert_eq!(
+            creating_footer("Creating", false, 3, 3, Some("boom"), 0),
+            "Error: boom  [ESC to dismiss]"
+        );
+        assert_eq!(
+            creating_footer("Creating", false, 3, 3, None, 0),
+            "Done! [ENTER to continue]"
+        );
+    }
+
+    /// In flight wins over an error: while the run continues, the progress and
+    /// the cancel key are what the user needs, and the failed repo's reason is
+    /// already in the log as its \u{2717} line.
+    #[test]
+    fn creating_footer_prefers_live_progress_over_an_earlier_failure() {
+        assert_eq!(
+            creating_footer("Creating", true, 2, 5, Some("boom"), 0),
+            "Creating 2 of 5 \u{b7}   \u{b7} ESC cancel"
+        );
+    }
+
+    /// Same dialog, same budget as `creating_fetch_note`: 58 columns inside
+    /// the 60-column dialog's borders, and the footer is not indented.
+    ///
+    /// This covers the two branches the footer itself bounds: the live one at
+    /// its widest (three-digit counts, both verbs, every spinner frame) and
+    /// the finished one. The error branch is deliberately NOT here, because it
+    /// is not bounded at all; see
+    /// `creating_footer_does_not_bound_the_error_branch`.
+    #[test]
+    fn creating_footer_fits_the_narrowest_dialog() {
+        const INNER: usize = 58;
+        let footers = [
+            creating_footer("Creating", true, 999, 999, None, 0),
+            creating_footer("Adding", true, 999, 999, None, 30),
+            creating_footer("Creating", false, 0, 0, None, 0),
+        ];
+        for footer in &footers {
+            assert!(
+                UnicodeWidthStr::width(footer.as_str()) <= INNER,
+                "{:?} is {} columns; the Creating log truncates at {}",
+                footer,
+                UnicodeWidthStr::width(footer.as_str()),
+                INNER
+            );
+        }
+    }
+
+    /// The error branch carries git's own text and is not truncated, so it can
+    /// and does exceed the 58-column budget: `git worktree add` on an occupied
+    /// path reports an absolute path, which alone can pass it. Pinned as a
+    /// known limit rather than left to look like coverage.
+    ///
+    /// Left as it is on purpose. The wording and the absence of a cap are both
+    /// pre-existing (`render_creating_log` formatted this exact string before
+    /// the footer became a seam), the renderer clips it rather than wrapping or
+    /// panicking, and the same reason is already in the log as that repo's
+    /// `\u{2717}` line, where the full width of the dialog is available to it.
+    /// Capping it here would be a user-visible change to a message this
+    /// change did not otherwise touch.
+    #[test]
+    fn creating_footer_does_not_bound_the_error_branch() {
+        let long = format!("fatal: '{}' already exists", "/a/very/long/path".repeat(4));
+        let footer = creating_footer("Creating", false, 999, 999, Some(&long), 0);
+        assert!(
+            UnicodeWidthStr::width(footer.as_str()) > 58,
+            "if this ever fits, the branch has gained a cap and the comment \
+             above is stale: {:?}",
+            footer
+        );
+        assert!(
+            footer.starts_with("Error: ") && footer.ends_with("  [ESC to dismiss]"),
+            "the pre-existing wording is what is being preserved: {:?}",
+            footer
+        );
     }
 
     fn timed_out_outcome() -> SyncOutcome {

@@ -103,7 +103,7 @@ impl CreateState {
             CreateStage::PickBranchStrategy => self.handle_branch_strategy(key, ctx),
             CreateStage::EnterBranchName => self.handle_enter_branch_name(key, ctx),
             CreateStage::PickBranch => self.handle_pick_branch(key, ctx),
-            CreateStage::Creating => self.handle_creating(key),
+            CreateStage::Creating => self.handle_creating(key, ctx),
         }
     }
 
@@ -426,11 +426,19 @@ impl CreateState {
     fn handle_creating(
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
+        ctx: &crate::tui::actions::ScreenContext,
     ) -> crate::tui::actions::ScreenAction {
         use crate::tui::actions::ScreenAction;
         use ratatui::crossterm::event::KeyCode;
 
         match key.code {
+            // Stopping a run in flight and leaving a finished one are different
+            // acts, so the same keys mean different things either side of it.
+            KeyCode::Esc | KeyCode::Char('q') if ctx.creating_in_flight => {
+                ScreenAction::CancelCreating
+            }
+            // Ignored while the worker runs, the sync report's rule for Enter.
+            KeyCode::Enter if ctx.creating_in_flight => ScreenAction::Continue,
             KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') => {
                 let error_msg = self.error.clone();
                 if let Some(err) = error_msg {
@@ -469,6 +477,94 @@ impl CreateState {
                     name
                 })
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::SpaceConfig;
+    use crate::tui::actions::{ScreenAction, ScreenContext};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn ctx(creating_in_flight: bool) -> ScreenContext<'static> {
+        static CFG: std::sync::OnceLock<SpaceConfig> = std::sync::OnceLock::new();
+        ScreenContext {
+            config: CFG.get_or_init(SpaceConfig::default),
+            creating_in_flight,
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn creating_state() -> CreateState {
+        let mut st = CreateState::new(vec![], vec![]);
+        st.stage = CreateStage::Creating;
+        st.progress = (1..=30).map(|i| format!("step {:02}", i)).collect();
+        st
+    }
+
+    #[test]
+    fn enter_is_ignored_while_the_worker_runs() {
+        let mut st = creating_state();
+        let action = st.handle_key(key(KeyCode::Enter), &ctx(true));
+        assert!(
+            matches!(action, ScreenAction::Continue),
+            "Enter must not leave a run that is still creating worktrees"
+        );
+        assert_eq!(st.stage, CreateStage::Creating, "the stage is unchanged");
+    }
+
+    #[test]
+    fn esc_and_q_cancel_while_the_worker_runs() {
+        for code in [KeyCode::Esc, KeyCode::Char('q')] {
+            let mut st = creating_state();
+            let action = st.handle_key(key(code), &ctx(true));
+            assert!(
+                matches!(action, ScreenAction::CancelCreating),
+                "{:?} must stop the run rather than just leaving",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn scroll_keys_still_reach_the_log_while_the_worker_runs() {
+        let mut st = creating_state();
+        let action = st.handle_key(key(KeyCode::Up), &ctx(true));
+        assert!(matches!(action, ScreenAction::Continue));
+        assert!(
+            !st.log_view.follow,
+            "Up must detach the log from the tail while the worker runs"
+        );
+    }
+
+    #[test]
+    fn enter_esc_and_q_leave_once_the_run_is_over() {
+        for code in [KeyCode::Enter, KeyCode::Esc, KeyCode::Char('q')] {
+            let mut st = creating_state();
+            let action = st.handle_key(key(code), &ctx(false));
+            assert!(
+                matches!(action, ScreenAction::Back),
+                "{:?} leaves a finished run for the dashboard",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn a_finished_run_that_failed_leaves_with_the_error() {
+        let mut st = creating_state();
+        st.error = Some("boom".to_string());
+        match st.handle_key(key(KeyCode::Esc), &ctx(false)) {
+            ScreenAction::BackWithStatus(msg, kind) => {
+                assert_eq!(msg, "Create failed: boom");
+                assert_eq!(kind, crate::tui::actions::StatusKind::Error);
+            }
+            _ => panic!("a failed run must report why on the way out"),
         }
     }
 }
