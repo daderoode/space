@@ -130,7 +130,32 @@ pub struct CreateJob {
     finished: usize,
     /// Repos whose worktree was confirmed created; what the cancel message counts.
     created: usize,
+    /// Repos reported `AlreadyCreated`: in place before this run touched them.
+    /// A subset of `created`, which counts repos in place however they got
+    /// there; the difference is what the completion message reports.
+    skipped: usize,
 }
+
+/// Display columns the bounce message gives the refused repo's name.
+///
+/// The arithmetic it comes out of. Everything in that message except the name
+/// is 72 columns (74 at a three-digit count). The picker draws it as a
+/// `Paragraph` with `Wrap { trim: false }` into a two-row section of the
+/// dialog's inner width, which at the documented 80-column minimum is 60 (the
+/// dialog is `max(80 * 70 / 100, 62)` wide, less two borders), and the first
+/// row also carries the three-column warning prefix. Two rows of 60 is not the
+/// budget, though: the wrap is greedy by word, so a word that will not fit
+/// moves whole to the next row and the columns it left are lost. What decides
+/// the bound is where the break lands. Up to a 44-column name the first row
+/// still holds `\u{26a0}  '<name>' is already` and the second carries
+/// `checked out; ...` at 58 to 60 columns, exactly full at 999; one column
+/// more and the break moves back a word, the second row has to carry
+/// `already checked out; ...` at 66, and the tail lands on a third row that
+/// is never drawn. 32 keeps the break a word or two earlier still, leaving the
+/// second row at 50 to 52 columns: around 8 columns of slack rather than none,
+/// which is what a bound that is not re-derived on every message change wants.
+/// Pinned by `the_bounce_message_reads_in_full_at_eighty_columns`.
+const BOUNCE_LABEL_WIDTH: usize = 32;
 
 const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(5);
 const SCROLL_STEP: u16 = 5;
@@ -998,7 +1023,23 @@ impl App {
 
     /// The Creating stage's success path: refresh the space list, select the
     /// space this run built BY NAME, and return to the dashboard.
-    fn finish_create_run(&mut self, params: &crate::tui::actions::WorktreeParams) {
+    ///
+    /// `skipped` is how many of `params.repos` were already in the space
+    /// (`CreateJob::skipped`), and it decides what the run is reported as. A
+    /// run where every repo was already there created nothing, so it is a
+    /// warning rather than the success the plain "Created" line claims, and a
+    /// partly skipped run says how much of the space it found rather than
+    /// built. Only the untouched case, no skips at all, keeps the original
+    /// wording.
+    ///
+    /// None of the three carries the space name, for the reason the cancel
+    /// message does not: `render_status_message` is an unwrapped one-row
+    /// `Paragraph` at a documented 80-column minimum, and the PR #31 defect
+    /// was an interpolated name pushing the tail of the line off the row. The
+    /// longest any of these can be is 57 columns at 999 of 999. The name is
+    /// not lost: the lines above select that space, so it is the highlighted
+    /// row on the dashboard the moment this message appears.
+    fn finish_create_run(&mut self, params: &crate::tui::actions::WorktreeParams, skipped: usize) {
         if let Ok(ws_list) = crate::core::workspace::list_workspaces(&params.workspace_dir) {
             self.workspaces = ws_list;
             if let Some(idx) = self
@@ -1013,22 +1054,52 @@ impl App {
             // the user expects the new workspace to appear fully loaded.
             self.load_selected_workspace_detail();
         }
-        let verb = if params.is_new {
-            "Created"
-        } else {
-            "Added repos to"
-        };
         self.screen = Screen::Dashboard;
-        self.set_status(
-            format!("{} workspace '{}'", verb, params.workspace_name),
-            StatusKind::Success,
-        );
+        let total = params.repos.len();
+        // `skipped == 0` first, so a run of no repos at all (an Esc-cancelled
+        // list, or an add of nothing) keeps the plain wording instead of
+        // reporting that all zero of them were already here.
+        let (msg, kind) = if skipped == 0 {
+            let verb = if params.is_new {
+                "Created"
+            } else {
+                "Added repos to"
+            };
+            (
+                format!("{} workspace '{}'", verb, params.workspace_name),
+                StatusKind::Success,
+            )
+        } else if skipped < total {
+            let msg = if params.is_new {
+                format!(
+                    "Created space; {} of {} repos were already in place",
+                    skipped, total
+                )
+            } else {
+                format!(
+                    "Added repos to space; {} of {} were already in place",
+                    skipped, total
+                )
+            };
+            (msg, StatusKind::Success)
+        } else {
+            let verb = if params.is_new { "created" } else { "added" };
+            (
+                format!(
+                    "Nothing {}: all {} repos were already in this space",
+                    verb, total
+                ),
+                StatusKind::Warning,
+            )
+        };
+        self.set_status(msg, kind);
     }
 
     /// Stop the Creating run at the worker's next boundary and leave for the
     /// dashboard, with the partially created space selected and named.
     ///
-    /// The count is creations the UI confirmed, and it can undercount by one.
+    /// The count is repos the UI confirmed are in place, whether this run
+    /// created them or found them already there, and it can undercount by one.
     /// Cancellation is boundary-only, so an in-flight `git worktree add`
     /// finishes AFTER this message is written and that repo can appear on the
     /// next refresh. Making the count exact would mean waiting for the child,
@@ -1299,6 +1370,9 @@ impl App {
                                 // count, and only the suffix separates them.
                                 CreateOutcome::Created | CreateOutcome::AlreadyCreated => {
                                     job.created += 1;
+                                    if already_created {
+                                        job.skipped += 1;
+                                    }
                                     let suffix = if already_created {
                                         " (already created)"
                                     } else {
@@ -1334,11 +1408,16 @@ impl App {
                     // its inner width. The rows themselves are not preserved
                     // (the picker does not render `progress`, and re-entering
                     // the flow clears it); they come back on the retry as
-                    // `(already created)`, where they are worth reading.
+                    // `(already created)`, where they are worth reading. The
+                    // one repo name in here is the only unbounded part, so it
+                    // is cut to `BOUNCE_LABEL_WIDTH`.
                     let msg = format!(
                         "'{}' is already checked out; {} created. \
                          Pick another strategy for the rest",
-                        repo_label(&job.params, index),
+                        crate::tui::ui::truncate_for_width(
+                            &repo_label(&job.params, index),
+                            BOUNCE_LABEL_WIDTH
+                        ),
                         job.created
                     );
                     match &mut self.screen {
@@ -1361,7 +1440,7 @@ impl App {
                         Some(job) => job,
                         None => return,
                     };
-                    self.finish_create_run_unless_failed(&job.params);
+                    self.finish_create_run_unless_failed(&job.params, job.skipped);
                     return;
                 }
                 Err(mpsc::TryRecvError::Empty) => return,
@@ -1380,7 +1459,7 @@ impl App {
                             *error = Some("the worktree worker stopped unexpectedly".to_string());
                         }
                     } else {
-                        self.finish_create_run_unless_failed(&job.params);
+                        self.finish_create_run_unless_failed(&job.params, job.skipped);
                     }
                     return;
                 }
@@ -1390,13 +1469,17 @@ impl App {
 
     /// Leave for the dashboard, unless a repo failed: then the Creating stage
     /// stays up so the log can be read (Esc/Enter leaves with the error).
-    fn finish_create_run_unless_failed(&mut self, params: &crate::tui::actions::WorktreeParams) {
+    fn finish_create_run_unless_failed(
+        &mut self,
+        params: &crate::tui::actions::WorktreeParams,
+        skipped: usize,
+    ) {
         let failed = self
             .creating_mut()
             .map(|(_, error, _)| error.is_some())
             .unwrap_or(false);
         if !failed {
-            self.finish_create_run(params);
+            self.finish_create_run(params, skipped);
         }
     }
 
@@ -1671,6 +1754,7 @@ impl App {
                     started: 0,
                     finished: 0,
                     created: 0,
+                    skipped: 0,
                 });
                 std::thread::spawn(move || run_create_worker(params, tx, cancel));
             }
@@ -3929,6 +4013,7 @@ mod tests {
             started: 0,
             finished: 0,
             created: 0,
+            skipped: 0,
         };
         (tx, cancel, job)
     }
@@ -4383,9 +4468,108 @@ mod tests {
         );
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Created workspace 'ws-a'")
+            Some("Nothing created: all 1 repos were already in this space"),
+            "a complete run that created nothing must not say it created the space"
         );
-        assert_eq!(app.status_kind, StatusKind::Success);
+        assert_eq!(
+            app.status_kind,
+            StatusKind::Warning,
+            "nothing happened, which is not the success the user asked for"
+        );
+    }
+
+    /// The same nothing-happened run on the add flow, whose wording is its
+    /// own. The create side is covered above; without this, a typo in the add
+    /// verb would pass the whole suite, the same gap
+    /// `poll_create_result_done_says_added_for_the_add_flow` exists to close
+    /// for the ordinary success line.
+    #[test]
+    fn an_all_skip_add_run_says_nothing_was_added() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("spaces");
+        std::fs::create_dir_all(ws_dir.join("ws-a")).unwrap();
+
+        let mut app = make_app(vec![]);
+        app.config.workspaces.dir = ws_dir.clone();
+        app.screen = Screen::AddRepos(crate::tui::screens::add::AddState::new(
+            "ws-a".to_string(),
+            vec![],
+            vec![],
+        ));
+        if let Screen::AddRepos(st) = &mut app.screen {
+            st.stage = crate::tui::screens::add::AddStage::Creating;
+        }
+        let mut params = create_params(&ws_dir, "ws-a", vec![PathBuf::from("/r/repo-a")]);
+        params.is_new = false;
+        let (tx, _cancel, job) = make_job(params);
+        app.create_job = Some(job);
+
+        tx.send(CreateProgress::Finished {
+            index: 0,
+            fetch: None,
+            created: CreateOutcome::AlreadyCreated,
+        })
+        .unwrap();
+        tx.send(CreateProgress::Done).unwrap();
+        app.poll_create_result();
+
+        assert!(matches!(app.screen, Screen::Dashboard));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Nothing added: all 1 repos were already in this space")
+        );
+        assert_eq!(app.status_kind, StatusKind::Warning);
+    }
+
+    /// The middle case, and the one a user actually meets after a bounce: some
+    /// repos were already in the space, some were created. The run is a
+    /// success, and the count is what stops it reading as a full creation.
+    #[test]
+    fn a_partly_skipped_run_says_how_many_were_already_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("spaces");
+        std::fs::create_dir_all(ws_dir.join("ws-a")).unwrap();
+
+        for (is_new, expected) in [
+            (true, "Created space; 1 of 2 repos were already in place"),
+            (false, "Added repos to space; 1 of 2 were already in place"),
+        ] {
+            let mut app = make_app(vec![]);
+            app.config.workspaces.dir = ws_dir.clone();
+            app.screen = creating_screen();
+            let mut params = create_params(
+                &ws_dir,
+                "ws-a",
+                vec![PathBuf::from("/r/repo-a"), PathBuf::from("/r/repo-b")],
+            );
+            params.is_new = is_new;
+            let (tx, _cancel, job) = make_job(params);
+            app.create_job = Some(job);
+
+            tx.send(CreateProgress::Finished {
+                index: 0,
+                fetch: None,
+                created: CreateOutcome::Created,
+            })
+            .unwrap();
+            tx.send(CreateProgress::Finished {
+                index: 1,
+                fetch: None,
+                created: CreateOutcome::AlreadyCreated,
+            })
+            .unwrap();
+            tx.send(CreateProgress::Done).unwrap();
+            app.poll_create_result();
+
+            assert!(matches!(app.screen, Screen::Dashboard));
+            assert_eq!(app.status_message.as_deref(), Some(expected));
+            assert_eq!(
+                app.status_kind,
+                StatusKind::Success,
+                "{}: a run that created a repo is a success",
+                expected
+            );
+        }
     }
 
     /// Params whose only slow-fetch repo is the single repo of the run, so
@@ -4848,7 +5032,8 @@ mod tests {
         );
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Created workspace 'ws-a'")
+            Some("Created space; 1 of 2 repos were already in place"),
+            "repo-a was adopted rather than created, and the report says so"
         );
         assert_eq!(app.status_kind, StatusKind::Success);
         assert!(app.create_job.is_none(), "the finished job is dropped");
@@ -4864,29 +5049,78 @@ mod tests {
         );
     }
 
-    /// The bounce message at the width it is read at. The picker draws its
-    /// error as a `Paragraph` with `Wrap { trim: false }` over two rows of
-    /// the dialog's inner width (60 at 80 columns), so the sentence wraps and
-    /// the half that says what to do lands on the second row. A repo name at
-    /// the long end must not push it off the dialog.
+    /// The retry's first half through the real dispatch, which is where the
+    /// bounce's error is cleared.
+    ///
+    /// `bounce_then_retry_with_another_strategy_completes_the_space` stands in
+    /// for `ExecuteWorktreeFlow` so it can step the worker's messages, and
+    /// `enter_on_the_picker_after_a_bounce_runs_the_whole_list_again` reads
+    /// the picker's action without dispatching it. Between them nothing fed a
+    /// real picker action into `process_action` after a bounce, so the line in
+    /// that handler that clears `st.error` was unpinned on the only path that
+    /// reaches it with an error set. It is load-bearing: the bounce leaves the
+    /// error on the screen, `finish_create_run_unless_failed` reads that same
+    /// field, and an error left behind would hold a complete run on the
+    /// Creating stage as a failure, which is the defect this ticket exists to
+    /// remove.
+    ///
+    /// Both repos are already in the space, so the retry is decided by disk
+    /// state alone: no git refusal has to be arranged, nothing is created, and
+    /// the run is over as fast as two `is_worktree_of` checks.
+    ///
+    /// Enter is pressed on the row the picker came back on, with no arrow key
+    /// before it, and that is the whole point rather than a shortcut. `Up`,
+    /// `Down`, `j`, `k` and `Esc` all clear `self.error` in the picker\'s own
+    /// handler, and so does Enter on "New branch" and on "Show more...", so
+    /// every one of those reaches the dispatch with nothing left to clear: a
+    /// test that pressed one first would pass with the handler\'s clear
+    /// deleted. Enter on the highlighted strategy does not clear it, and it is
+    /// the retry a user makes after reading the reason. The highlight is the
+    /// strategy the bounced run used, because nothing resets
+    /// `branch_strategy_idx` on the way to the picker, and index 1 is where an
+    /// `already checked out` refusal comes from: an existing branch. Which
+    /// strategy the retry carries changes nothing here, since every repo is
+    /// skipped before a strategy is applied.
     #[test]
-    fn the_bounce_message_reads_in_full_at_eighty_columns() {
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
+    fn re_entering_the_flow_after_a_bounce_clears_the_bounce_error() {
+        use crate::tui::actions::ScreenAction;
+        use crate::tui::screens::create::CreateStage;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-        let long_name = "a-repository-with-a-long-name-";
-        assert_eq!(long_name.len(), 30, "the width being tested");
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_a = make_repo(tmp.path(), "repo-a");
+        let repo_b = make_repo(tmp.path(), "repo-b");
+        let ws_dir = tmp.path().join("spaces");
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+        // Put both repos in the space for real first: the retry below has to
+        // meet worktrees, not a directory a test made.
+        let mut seed = create_params(&ws_dir, "ws-a", vec![repo_a.clone(), repo_b.clone()]);
+        seed.branch_strategy = crate::core::workspace::BranchStrategy::DetachedHead;
+        let (seed_tx, _seed_rx) = mpsc::sync_channel::<CreateProgress>(64);
+        run_create_worker(seed, seed_tx, Arc::new(AtomicBool::new(false)));
+        for name in ["repo-a", "repo-b"] {
+            assert!(
+                ws_dir.join("ws-a").join(name).join(".git").exists(),
+                "{} must be in the space before the retry runs",
+                name
+            );
+        }
 
         let mut app = make_app(vec![]);
+        app.config.workspaces.dir = ws_dir.clone();
         app.screen = creating_screen();
-        let params = create_params(
-            std::path::Path::new("/ws"),
-            "ws-a",
-            vec![
-                PathBuf::from("/r/repo-a"),
-                PathBuf::from(format!("/r/{}", long_name)),
-            ],
-        );
+        if let Screen::CreateWorkspace(st) = &mut app.screen {
+            st.ws_name = st.ws_name.clone().with_value("ws-a".to_string());
+            st.selected_repos = vec![repo_a.clone(), repo_b.clone()];
+            // Where the run below was started from, and so where the picker
+            // comes back: "Existing branch", the strategy an `already checked
+            // out` refusal comes from.
+            st.branch_strategy_idx = 1;
+        }
+        let mut params = create_params(&ws_dir, "ws-a", vec![repo_a.clone(), repo_b.clone()]);
+        params.branch_strategy =
+            crate::core::workspace::BranchStrategy::ExistingBranch("ws-a".to_string());
         let (tx, _cancel, job) = make_job(params);
         app.create_job = Some(job);
         tx.send(CreateProgress::Finished {
@@ -4901,58 +5135,203 @@ mod tests {
         .unwrap();
         app.poll_create_result();
 
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        terminal
-            .draw(|frame| crate::tui::ui::view(&app, frame))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let rows: Vec<String> = (0..buffer.area.height)
-            .map(|y| {
-                (0..buffer.area.width)
-                    .map(|x| buffer[(x, y)].symbol())
-                    .collect::<String>()
-            })
-            .collect();
-
-        let warn = rows
-            .iter()
-            .position(|r| r.contains('\u{26a0}'))
-            .expect("the picker must draw the error row");
-        // Both rows cross the same vertical borders, the dialog's and the
-        // dashboard's behind it, so the dialog's text is the same
-        // border-delimited column in each. Reading it this way also means a
-        // sentence that overran the dialog would take a border with it and
-        // fail here rather than quietly widening the column.
-        let column = |row: &str| {
-            row.split('\u{2502}')
-                .map(|s| s.to_string())
-                .collect::<Vec<_>>()
+        let creating_in_flight = app.creating_in_flight();
+        let ctx = crate::tui::actions::ScreenContext {
+            config: &app.config,
+            creating_in_flight,
         };
-        let top = column(&rows[warn]);
-        let idx = top
-            .iter()
-            .position(|s| s.contains('\u{26a0}'))
-            .expect("the error row sits inside the dialog");
-        let bottom = column(&rows[warn + 1]);
-        // The wrap breaks the sentence between the rows and eats the space it
-        // broke on, so they are rejoined before they are read.
-        let message: String = format!("{} {}", top[idx], bottom[idx])
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let action = match &mut app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(st.stage, CreateStage::PickBranchStrategy);
+                assert!(
+                    st.error.is_some(),
+                    "the bounce must leave its reason on the picker"
+                );
+                let action = st.handle_key(key(KeyCode::Enter), &ctx);
+                assert!(
+                    st.error.is_some(),
+                    "the picker itself does not clear the reason on this key, \
+                     which is what leaves the clearing to the dispatch"
+                );
+                assert_eq!(
+                    st.stage,
+                    CreateStage::Creating,
+                    "Enter on a strategy returns to the Creating stage"
+                );
+                action
+            }
+            _ => panic!("expected the strategy picker"),
+        };
         assert!(
-            message.contains("Pick another strategy for the rest"),
-            "the recovery must survive the wrap, got {:?}",
-            message
+            matches!(action, ScreenAction::ExecuteWorktreeFlow(_)),
+            "Enter on a strategy must start a run"
         );
+        app.process_action(action);
+
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(
+                    st.error, None,
+                    "the bounce's reason belongs to the attempt the user replaced"
+                );
+                assert!(st.progress.is_empty(), "the retry starts with a clean log");
+                assert_eq!(st.stage, CreateStage::Creating);
+            }
+            _ => panic!("expected the create screen"),
+        }
+        assert!(app.create_job.is_some(), "the dispatch started a worker");
+
+        // The worker runs on its own thread, so the end of the run is waited
+        // for rather than stepped. Five seconds at the outside, which is two
+        // `is_worktree_of` checks' worth many times over.
+        for _ in 0..500 {
+            app.poll_create_result();
+            if app.create_job.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(app.create_job.is_none(), "the run must end");
         assert!(
-            message.contains(&format!(
-                "'{}' is already checked out; 1 created. Pick another strategy for the rest",
-                long_name
-            )),
-            "the whole sentence must be on the dialog, got {:?}",
-            message
+            matches!(app.screen, Screen::Dashboard),
+            "a run with no failure returns to the dashboard, and the error the \
+             bounce left would have held it on the Creating stage"
         );
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Nothing created: all 2 repos were already in this space")
+        );
+        assert_eq!(app.status_kind, StatusKind::Warning);
+    }
+
+    /// The bounce message at the width it is read at. The picker draws its
+    /// error as a `Paragraph` with `Wrap { trim: false }` over two rows of
+    /// the dialog's inner width (60 at 80 columns), so the sentence wraps and
+    /// the half that says what to do lands on the second row. A repo name at
+    /// the long end must not push it off the dialog.
+    ///
+    /// The lengths are the ones the arithmetic turns on. 30 is an ordinary
+    /// long name; 44 is the longest name that still fits untruncated, because
+    /// `\u{26a0}  '<name>' is already` is exactly 60 columns there; 45 is the
+    /// first that does not, leaving row two to carry `already checked out;
+    /// ...` at 66 columns, which is never drawn; 80 is a name longer than the
+    /// terminal itself. Every one of them must read in full, which is what
+    /// `BOUNCE_LABEL_WIDTH` buys.
+    #[test]
+    fn the_bounce_message_reads_in_full_at_eighty_columns() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        for len in [30usize, 44, 45, 80] {
+            let name = format!("a-repository-with-a-long-name-{}", "x".repeat(len - 30));
+            assert_eq!(name.len(), len, "the width being tested");
+
+            let mut app = make_app(vec![]);
+            app.screen = creating_screen();
+            let params = create_params(
+                std::path::Path::new("/ws"),
+                "ws-a",
+                vec![
+                    PathBuf::from("/r/repo-a"),
+                    PathBuf::from(format!("/r/{}", name)),
+                ],
+            );
+            let (tx, _cancel, job) = make_job(params);
+            app.create_job = Some(job);
+            tx.send(CreateProgress::Finished {
+                index: 0,
+                fetch: None,
+                created: CreateOutcome::Created,
+            })
+            .unwrap();
+            tx.send(CreateProgress::Stopped(CreateStop::AlreadyCheckedOut {
+                index: 1,
+            }))
+            .unwrap();
+            app.poll_create_result();
+
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|frame| crate::tui::ui::view(&app, frame))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let rows: Vec<String> = (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect();
+
+            let warn = rows
+                .iter()
+                .position(|r| r.contains('\u{26a0}'))
+                .expect("the picker must draw the error row");
+            // Both rows cross the same vertical borders, the dialog's and the
+            // dashboard's behind it, so the dialog's text is the same
+            // border-delimited column in each. Reading it this way also means
+            // a sentence that overran the dialog would take a border with it
+            // and fail here rather than quietly widening the column.
+            let column = |row: &str| {
+                row.split('\u{2502}')
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            };
+            let top = column(&rows[warn]);
+            let idx = top
+                .iter()
+                .position(|s| s.contains('\u{26a0}'))
+                .expect("the error row sits inside the dialog");
+            let bottom = column(&rows[warn + 1]);
+            // The wrap breaks the sentence between the rows and eats the space
+            // it broke on, so they are rejoined before they are read. A third
+            // row is never drawn (the error section is two rows long), so
+            // anything pushed onto one is simply missing here.
+            let message: String = format!("{} {}", top[idx], bottom[idx])
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let message = message
+                .trim_start_matches('\u{26a0}')
+                .trim_start()
+                .to_string();
+            assert!(
+                message.contains("Pick another strategy for the rest"),
+                "{}: the recovery must survive the wrap, got {:?}",
+                len,
+                message
+            );
+            // What the row shows for the repo: everything between the first
+            // two quotes. Read back rather than recomputed, so the test does
+            // not restate the truncation it is checking.
+            let shown = message
+                .split('\'')
+                .nth(1)
+                .expect("the repo name is quoted, got {message:?}");
+            assert!(
+                name.starts_with(shown.trim_end_matches("...")),
+                "{}: the row must name the repo that refused, got {:?}",
+                len,
+                shown
+            );
+            assert_eq!(
+                shown == name,
+                len <= 32,
+                "{}: a name past the bound is cut and only then, got {:?}",
+                len,
+                shown
+            );
+            assert_eq!(
+                message,
+                format!(
+                    "'{}' is already checked out; 1 created. \
+                     Pick another strategy for the rest",
+                    shown
+                ),
+                "{}: the whole sentence must be on the dialog",
+                len
+            );
+        }
     }
 
     #[test]

@@ -770,6 +770,37 @@ fn the_cancel_message_is_not_clipped_at_the_minimum_width() {
     );
 }
 
+/// The skip-aware completion messages at the same 80-column floor, at the
+/// widest counts they can carry (999 of 999). They are the only status lines
+/// that grow with the repo count, so they are the ones that can walk off the
+/// row as a space gets bigger; the space name is deliberately not in them for
+/// the same reason the cancel message dropped it.
+///
+/// The wording itself is pinned against what the App sets by the unit tests
+/// over `finish_create_run` (`poll_create_result_already_created_counts_as_ok_and_says_so`,
+/// `an_all_skip_add_run_says_nothing_was_added`,
+/// `a_partly_skipped_run_says_how_many_were_already_in_place`); this one pins
+/// that those four sentences fit the row they are read on.
+#[test]
+fn skip_aware_create_status_reads_in_full_at_eighty_columns() {
+    for msg in [
+        "Created space; 999 of 999 repos were already in place",
+        "Added repos to space; 999 of 999 were already in place",
+        "Nothing created: all 999 repos were already in this space",
+        "Nothing added: all 999 repos were already in this space",
+    ] {
+        let mut app = test_app(vec![], vec![]);
+        app.status_message = Some(msg.to_string());
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains(msg),
+            "{:?} must survive at 80 columns:\n{}",
+            msg,
+            rendered
+        );
+    }
+}
+
 #[test]
 fn create_esc_from_enter_name_exits_to_dashboard() {
     let mut app = test_app(vec![], vec![]);
