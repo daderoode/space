@@ -1229,11 +1229,11 @@ impl App {
                                 .params
                                 .repos
                                 .get(index)
-                                .is_some_and(|p| job.params.skipped_after_timeout(p))
+                                .is_some_and(|p| job.params.skipped_as_slow(p))
                             {
                                 lines.push(format!(
                                     "  {}",
-                                    crate::tui::screens::sync_report::SKIPPED_AFTER_TIMEOUT_NOTE
+                                    crate::tui::screens::sync_report::SKIPPED_AS_SLOW_NOTE
                                 ));
                             }
                             lines
@@ -3820,7 +3820,7 @@ mod tests {
             branch_strategy: crate::core::workspace::BranchStrategy::DetachedHead,
             is_new: true,
             fresh_repos: repos,
-            unreachable_repos: vec![],
+            slow_fetch_repos: vec![],
         }
     }
 

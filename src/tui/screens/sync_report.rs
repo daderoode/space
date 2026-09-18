@@ -77,14 +77,12 @@ impl SyncRow {
         matches!(&self.phase, RowPhase::Done(o) if o.fetch_ok())
     }
 
-    /// The fetch ran the whole limit without the remote answering. A subset
-    /// of `is_failed`, kept apart because it is the one failure that says
-    /// something about how long a retry would take.
-    pub fn timed_out(&self) -> bool {
-        matches!(
-            &self.phase,
-            RowPhase::Done(o) if matches!(o.fetch, FetchOutcome::TimedOut { .. })
-        )
+    /// The fetch took long enough that a retry would very likely cost the
+    /// same again: it ran the whole limit, or it failed at or above
+    /// `SLOW_FETCH_THRESHOLD`. A subset of `is_failed`, kept apart because
+    /// it is the part of a failure that says what a retry would cost.
+    pub fn is_slow(&self) -> bool {
+        matches!(&self.phase, RowPhase::Done(o) if o.fetch.is_slow())
     }
 
     /// Every finished row that is not ok: fetch failed, timed out, not synced.
@@ -132,7 +130,9 @@ impl SyncRow {
                     };
                     (plain, dim)
                 }
-                FetchOutcome::Failed { exit_code, stderr } => (
+                FetchOutcome::Failed {
+                    exit_code, stderr, ..
+                } => (
                     first_stderr_line(stderr).unwrap_or_else(|| exit_label(*exit_code, stderr)),
                     String::new(),
                 ),
@@ -179,7 +179,9 @@ impl SyncRow {
                         }));
                     }
                 }
-                FetchOutcome::Failed { exit_code, stderr } => {
+                FetchOutcome::Failed {
+                    exit_code, stderr, ..
+                } => {
                     lines.push(PaneLine::plain(format!(
                         "fetch failed ({}) \u{b7} branch picker will use local refs",
                         exit_label(*exit_code, stderr)
@@ -231,6 +233,14 @@ fn first_stderr_line(stderr: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The Creating log's line for a fetch that was skipped because the sync's
+/// own fetch of that remote was slow (`FetchOutcome::is_slow`). Unlike a skip
+/// for freshness, this one is worth saying: the worktree is about to be
+/// created from refs of unknown age, and the alternative was spending that
+/// time again to find out. Same column budget as `creating_fetch_note`,
+/// promise last.
+pub const SKIPPED_AS_SLOW_NOTE: &str = "fetch skipped, sync fetch was slow \u{b7} using local refs";
+
 /// The one line the Creating log shows when the pre-create fetch did not
 /// succeed. `None` for a fetch that succeeded: a successful fetch is not
 /// news at this stage. The wording mirrors the sync report's status line,
@@ -250,18 +260,12 @@ fn first_stderr_line(stderr: &str) -> Option<String> {
 /// than the sync report's and able to fail differently, and the report is
 /// unreachable from the Creating stage. Without it a create-time failure
 /// would show an exit code whose cause appears nowhere in the app.
-/// The Creating log's line for a fetch that was skipped because the sync's
-/// own fetch of that remote timed out. Unlike a skip for freshness, this one
-/// is worth saying: the worktree is about to be created from refs of unknown
-/// age, and the alternative was spending the limit again to find out. Same
-/// column budget as `creating_fetch_note`, promise last.
-pub const SKIPPED_AFTER_TIMEOUT_NOTE: &str =
-    "fetch skipped after sync timed out \u{b7} using local refs";
-
 pub fn creating_fetch_note(fetch: &FetchOutcome) -> Option<String> {
     match fetch {
         FetchOutcome::Ok => None,
-        FetchOutcome::Failed { exit_code, stderr } => {
+        FetchOutcome::Failed {
+            exit_code, stderr, ..
+        } => {
             let mut note = format!(
                 "fetch failed ({}) \u{b7} using local refs",
                 exit_label(*exit_code, stderr)
@@ -586,27 +590,22 @@ impl SyncReport {
             .collect()
     }
 
-    /// Paths of the repos whose fetch ran the whole limit without the remote
-    /// answering. The pre-create fetch is skipped for these too, but for the
-    /// opposite reason: not because the refs are fresh but because they are
-    /// of unknown age and another attempt would very likely spend the limit
-    /// again to learn the same nothing, now on the worker rather than the UI
-    /// thread, so it delays every repo behind it instead of freezing the app.
-    /// That difference is
-    /// why this is a separate list rather than merged with
-    /// `fetched_ok_paths`: the skip is silent for a fresh repo and reported
-    /// for this one.
+    /// Paths of the repos whose fetch was slow: it ran the whole limit, or it
+    /// failed at or above `SLOW_FETCH_THRESHOLD` (an ssh `ConnectTimeout`, a
+    /// proxy 504). The pre-create fetch is skipped for these too, but for the
+    /// opposite reason to `fetched_ok_paths`: not because the refs are fresh
+    /// but because they are of unknown age and another attempt would very
+    /// likely cost what the first one cost, on the worker, delaying every
+    /// repo behind it. That difference is why this is a separate list rather
+    /// than merged with `fetched_ok_paths`: the skip is silent for a fresh
+    /// repo and reported for this one.
     ///
-    /// Known limit: `TimedOut` is the only outcome that is certainly slow,
-    /// not the only slow outcome. A `Failed` carries no elapsed time (see
-    /// `FetchOutcome`), so a fetch that failed after 30 seconds, say an ssh
-    /// `ConnectTimeout`, is indistinguishable here from one that failed in
-    /// 200ms and is fetched again. Catching those needs an elapsed time on
-    /// every outcome, which the worker does not record yet.
-    pub fn timed_out_paths(&self) -> Vec<PathBuf> {
+    /// A fetch that failed fast is not here: repeating it is cheap and puts
+    /// git's fresh refusal into the Creating log.
+    pub fn slow_fetch_paths(&self) -> Vec<PathBuf> {
         self.rows
             .iter()
-            .filter(|r| r.timed_out())
+            .filter(|r| r.is_slow())
             .map(|r| r.path.clone())
             .collect()
     }
@@ -802,6 +801,7 @@ mod tests {
             fetch: FetchOutcome::Failed {
                 exit_code: Some(128),
                 stderr: stderr.to_string(),
+                elapsed: Duration::ZERO,
             },
             forwarded: vec![],
             skipped: vec![],
@@ -1105,6 +1105,7 @@ mod tests {
                     fetch: FetchOutcome::Failed {
                         exit_code,
                         stderr: stderr.to_string(),
+                        elapsed: Duration::ZERO,
                     },
                     forwarded: vec![],
                     skipped: vec![],
@@ -1140,6 +1141,7 @@ mod tests {
                 fetch: FetchOutcome::Failed {
                     exit_code: None,
                     stderr: String::new(),
+                    elapsed: Duration::ZERO,
                 },
                 forwarded: vec![],
                 skipped: vec![],
@@ -1308,6 +1310,7 @@ mod tests {
             creating_fetch_note(&FetchOutcome::Failed {
                 exit_code: Some(128),
                 stderr: "fatal: nope".to_string(),
+                elapsed: Duration::ZERO,
             })
             .as_deref(),
             Some("fetch failed (git exit 128) \u{b7} using local refs \u{b7} nope"),
@@ -1317,6 +1320,7 @@ mod tests {
             creating_fetch_note(&FetchOutcome::Failed {
                 exit_code: Some(128),
                 stderr: String::new(),
+                elapsed: Duration::ZERO,
             })
             .as_deref(),
             Some("fetch failed (git exit 128) \u{b7} using local refs"),
@@ -1326,6 +1330,7 @@ mod tests {
             creating_fetch_note(&FetchOutcome::Failed {
                 exit_code: None,
                 stderr: format!("{}: boom", SPAWN_FAILURE_PREFIX),
+                elapsed: Duration::ZERO,
             })
             .as_deref(),
             Some(
@@ -1357,14 +1362,17 @@ mod tests {
             creating_fetch_note(&FetchOutcome::Failed {
                 exit_code: Some(128),
                 stderr: "fatal: nope".to_string(),
+                elapsed: Duration::ZERO,
             }),
             creating_fetch_note(&FetchOutcome::Failed {
                 exit_code: None,
                 stderr: format!("{}: boom", SPAWN_FAILURE_PREFIX),
+                elapsed: Duration::ZERO,
             }),
             creating_fetch_note(&FetchOutcome::Failed {
                 exit_code: None,
                 stderr: String::new(),
+                elapsed: Duration::ZERO,
             }),
             creating_fetch_note(&FetchOutcome::TimedOut {
                 after: Duration::from_secs(60),
@@ -1372,10 +1380,10 @@ mod tests {
             }),
         ];
         assert!(
-            INDENT + UnicodeWidthStr::width(SKIPPED_AFTER_TIMEOUT_NOTE) <= INNER,
-            "SKIPPED_AFTER_TIMEOUT_NOTE is {} columns with the log's indent; \
+            INDENT + UnicodeWidthStr::width(SKIPPED_AS_SLOW_NOTE) <= INNER,
+            "SKIPPED_AS_SLOW_NOTE is {} columns with the log's indent; \
              the Creating log truncates at {}",
-            INDENT + UnicodeWidthStr::width(SKIPPED_AFTER_TIMEOUT_NOTE),
+            INDENT + UnicodeWidthStr::width(SKIPPED_AS_SLOW_NOTE),
             INNER
         );
         for note in notes.iter().flatten() {
@@ -1508,31 +1516,54 @@ mod tests {
         }
     }
 
+    /// A fetch that failed after `elapsed`, the shape an ssh
+    /// `ConnectTimeout` or a proxy 504 arrives in: a plain failure that
+    /// nonetheless cost real time.
+    fn failed_after(elapsed: Duration) -> SyncOutcome {
+        SyncOutcome {
+            fetch: FetchOutcome::Failed {
+                exit_code: Some(128),
+                stderr: "ssh: connect to host 10.255.255.1 port 22: Operation timed out"
+                    .to_string(),
+                elapsed,
+            },
+            forwarded: vec![],
+            skipped: vec![],
+        }
+    }
+
     #[test]
-    fn fetched_ok_and_timed_out_paths_are_separate_lists() {
-        let mut r = report(4);
+    fn fetched_ok_and_slow_fetch_paths_are_separate_lists() {
+        let mut r = report(6);
         r.finished(0, ok(&["main"], &[]));
         r.finished(1, failed("fatal: nope"));
         r.finished(2, timed_out_outcome());
         r.finished(3, ok(&[], &["dev"]));
+        r.finished(4, failed_after(Duration::from_secs(30)));
+        r.finished(5, failed_after(Duration::from_millis(200)));
         assert_eq!(
             r.fetched_ok_paths(),
             vec![PathBuf::from("/r/repo0"), PathBuf::from("/r/repo3")],
             "only rows whose fetch succeeded, in row order"
         );
         assert_eq!(
-            r.timed_out_paths(),
-            vec![PathBuf::from("/r/repo2")],
-            "only rows whose fetch ran out the limit"
+            r.slow_fetch_paths(),
+            vec![PathBuf::from("/r/repo2"), PathBuf::from("/r/repo4")],
+            "the row that ran out the limit and the one that failed after 30s"
         );
         assert!(
-            !r.timed_out_paths().contains(&PathBuf::from("/r/repo1")),
-            "a fetch that failed is retried, so it is not in either list"
+            !r.slow_fetch_paths().contains(&PathBuf::from("/r/repo5")),
+            "a fetch that failed in 200ms is cheap to repeat, so it is retried"
+        );
+        assert!(
+            !r.slow_fetch_paths().contains(&PathBuf::from("/r/repo1")),
+            "a fetch that failed fast is retried, so it is not in either list"
         );
 
-        // A cancelled sync returns `Failed { exit_code: None }` (see
-        // `sync_repo_cancellable`). It must not be read as a timeout and
-        // silently skipped: nothing was fetched, so the create must fetch.
+        // A cancelled sync returns `Failed { exit_code: None }` with no
+        // elapsed time (see `sync_repo_cancellable`). It must not be read as
+        // slow and silently skipped: nothing was fetched, so the create must
+        // fetch.
         let mut cancelled = report(1);
         cancelled.finished(
             0,
@@ -1540,14 +1571,15 @@ mod tests {
                 fetch: FetchOutcome::Failed {
                     exit_code: None,
                     stderr: "sync cancelled".to_string(),
+                    elapsed: Duration::ZERO,
                 },
                 forwarded: vec![],
                 skipped: vec![],
             },
         );
         assert!(
-            cancelled.timed_out_paths().is_empty() && cancelled.fetched_ok_paths().is_empty(),
-            "a cancelled sync fetched nothing and did not time out"
+            cancelled.slow_fetch_paths().is_empty() && cancelled.fetched_ok_paths().is_empty(),
+            "a cancelled sync fetched nothing and spent no time doing it"
         );
 
         let mut waiting = report(2);
@@ -1558,26 +1590,40 @@ mod tests {
             vec![PathBuf::from("/r/repo1")],
             "a not-synced row was never fetched"
         );
-        assert!(waiting.timed_out_paths().is_empty());
+        assert!(waiting.slow_fetch_paths().is_empty());
         assert!(SyncReport::empty().fetched_ok_paths().is_empty());
-        assert!(SyncReport::empty().timed_out_paths().is_empty());
+        assert!(SyncReport::empty().slow_fetch_paths().is_empty());
     }
 
     #[test]
-    fn timed_out_is_the_only_failure_that_skips() {
-        let mut r = report(3);
+    fn slow_failures_skip_and_fast_ones_do_not() {
+        let mut r = report(4);
         r.finished(0, timed_out_outcome());
-        r.finished(1, failed("fatal: nope"));
-        r.finished(2, ok(&[], &[]));
-        assert!(r.rows[0].timed_out() && r.rows[0].is_failed());
-        assert!(!r.rows[1].timed_out() && r.rows[1].is_failed());
-        assert!(!r.rows[2].timed_out() && !r.rows[2].is_failed());
+        r.finished(1, failed_after(Duration::from_secs(30)));
+        r.finished(2, failed_after(Duration::from_millis(200)));
+        r.finished(3, ok(&[], &[]));
+        assert!(
+            r.rows[0].is_slow() && r.rows[0].is_failed(),
+            "a fetch that ran the whole limit is slow"
+        );
+        assert!(
+            r.rows[1].is_slow() && r.rows[1].is_failed(),
+            "a fetch that failed after 30s is slow, whatever it failed on"
+        );
+        assert!(
+            !r.rows[2].is_slow() && r.rows[2].is_failed(),
+            "a fetch that failed in 200ms is a failure but not a slow one"
+        );
+        assert!(
+            !r.rows[3].is_slow() && !r.rows[3].is_failed(),
+            "a fetch that worked is neither"
+        );
 
         let mut not_synced = report(1);
         not_synced.finish();
         assert!(
-            !not_synced.rows[0].timed_out(),
-            "a row the worker never reached did not time out"
+            !not_synced.rows[0].is_slow(),
+            "a row the worker never reached spent no time fetching"
         );
     }
 

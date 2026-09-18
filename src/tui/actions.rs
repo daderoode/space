@@ -27,29 +27,28 @@ pub struct WorktreeParams {
     /// are the remote's, so the worktree creation skips its own fetch and
     /// says nothing about it.
     pub fresh_repos: Vec<PathBuf>,
-    /// Repos whose sync fetch ran the whole limit without the remote
-    /// answering. The creation skips its fetch for these too, because
-    /// another attempt would very likely spend that limit again to learn the
-    /// same nothing, but it says so in the log: unlike `fresh_repos` these
-    /// refs are of unknown age. See `SyncReport::timed_out_paths` for what
-    /// this does and does not catch.
+    /// Repos whose sync fetch was slow: it ran the whole limit, or it failed
+    /// at or above `SLOW_FETCH_THRESHOLD`. The creation skips its fetch for
+    /// these too, because another attempt would very likely cost what the
+    /// first one cost, but it says so in the log: unlike `fresh_repos` these
+    /// refs are of unknown age. See `SyncReport::slow_fetch_paths`.
     ///
     /// A repo in neither list is fetched: two empty lists (no sync ran) are
     /// the safe default.
-    pub unreachable_repos: Vec<PathBuf>,
+    pub slow_fetch_repos: Vec<PathBuf>,
 }
 
 impl WorktreeParams {
     /// The pre-create fetch for `repo`: skipped when the sync already
     /// fetched it (refs are the remote's) or when the sync's own fetch of
-    /// that remote timed out (another attempt would very likely spend the
-    /// whole limit again to learn the same nothing).
+    /// that remote was slow (another attempt would very likely cost what the
+    /// first one cost, delaying every repo behind it).
     ///
     /// A method rather than a rule the caller re-derives, so the Creating
     /// worker and the App cannot drift on the two skips that shipped in
     /// PR #28.
     pub fn pre_create_fetch(&self, repo: &Path) -> PreCreateFetch {
-        if self.skipped_after_timeout(repo) || self.fresh_repos.iter().any(|p| p == repo) {
+        if self.skipped_as_slow(repo) || self.fresh_repos.iter().any(|p| p == repo) {
             PreCreateFetch::Skip
         } else {
             PreCreateFetch::Run(UNATTENDED_FETCH_TIMEOUT)
@@ -58,8 +57,8 @@ impl WorktreeParams {
 
     /// True when this repo's skip is the kind the log must mention: unlike
     /// a skip for freshness, these refs are of unknown age.
-    pub fn skipped_after_timeout(&self, repo: &Path) -> bool {
-        self.unreachable_repos.iter().any(|p| p == repo)
+    pub fn skipped_as_slow(&self, repo: &Path) -> bool {
+        self.slow_fetch_repos.iter().any(|p| p == repo)
     }
 }
 
@@ -176,7 +175,7 @@ pub enum ScreenAction {
 mod tests {
     use super::*;
 
-    fn params(fresh: Vec<PathBuf>, unreachable: Vec<PathBuf>) -> WorktreeParams {
+    fn params(fresh: Vec<PathBuf>, slow: Vec<PathBuf>) -> WorktreeParams {
         WorktreeParams {
             workspace_name: "ws".to_string(),
             workspace_dir: PathBuf::from("/ws"),
@@ -184,12 +183,12 @@ mod tests {
             branch_strategy: BranchStrategy::DetachedHead,
             is_new: true,
             fresh_repos: fresh,
-            unreachable_repos: unreachable,
+            slow_fetch_repos: slow,
         }
     }
 
     #[test]
-    fn pre_create_fetch_skips_only_fetched_and_timed_out_repos() {
+    fn pre_create_fetch_skips_only_fetched_and_slow_repos() {
         let fresh = PathBuf::from("/r/fresh");
         let slow = PathBuf::from("/r/slow");
         let p = params(vec![fresh.clone()], vec![slow.clone()]);
@@ -202,7 +201,7 @@ mod tests {
         assert_eq!(
             p.pre_create_fetch(&slow),
             PreCreateFetch::Skip,
-            "a remote that took the whole limit is not asked again here"
+            "a remote whose fetch was slow is not asked again here"
         );
         assert_eq!(
             p.pre_create_fetch(Path::new("/r/other")),
@@ -217,19 +216,19 @@ mod tests {
     }
 
     #[test]
-    fn only_a_timed_out_skip_is_worth_a_log_line() {
+    fn only_a_slow_fetch_skip_is_worth_a_log_line() {
         let fresh = PathBuf::from("/r/fresh");
         let slow = PathBuf::from("/r/slow");
         let p = params(vec![fresh.clone()], vec![slow.clone()]);
 
         assert!(
-            p.skipped_after_timeout(&slow),
+            p.skipped_as_slow(&slow),
             "these refs are of unknown age, so the log must say so"
         );
         assert!(
-            !p.skipped_after_timeout(&fresh),
+            !p.skipped_as_slow(&fresh),
             "a skip for freshness is silent: the refs are the remote's"
         );
-        assert!(!p.skipped_after_timeout(Path::new("/r/other")));
+        assert!(!p.skipped_as_slow(Path::new("/r/other")));
     }
 }
