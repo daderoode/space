@@ -165,6 +165,27 @@ pub fn build_strategy(
     }
 }
 
+/// A space name the caller sent that is not one plain path component, as the
+/// caller's error. The core refuses the same name a step later anyway; this
+/// runs first so the refusal is `invalid_params` rather than an internal
+/// error, and so no repo cache is read and no directory is created for a
+/// call that cannot succeed. `{:?}` so a control character prints escaped.
+fn bad_space_name(name: &str, e: anyhow::Error) -> McpError {
+    McpError::invalid_params(format!("invalid space name {:?}: {}", name, e), None)
+}
+
+/// Ask git whether the branch a strategy will create or check out is a
+/// valid branch name (`workspace::check_branch_name`). `detached` has no
+/// branch. The message is git's sentence, e.g. `'-x' is not a valid branch
+/// name`, as `invalid_params`.
+fn checked_branch(strategy: &BranchStrategy) -> std::result::Result<(), McpError> {
+    if let BranchStrategy::NewBranch(branch) | BranchStrategy::ExistingBranch(branch) = strategy {
+        workspace::check_branch_name(branch)
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+    }
+    Ok(())
+}
+
 fn load_repo_cache(cfg: &SpaceConfig, refresh: bool) -> Vec<PathBuf> {
     if !refresh {
         if let Some(cached) = repo::load_cache(&SpaceConfig::cache_path(), cfg.repos.cache_age_secs)
@@ -225,6 +246,8 @@ impl SpaceServer {
         Parameters(params): Parameters<WorkspaceStatusParams>,
     ) -> Result<CallToolResult, McpError> {
         let cfg = SpaceConfig::load().map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        workspace::require_plain_component(&params.name)
+            .map_err(|e| bad_space_name(&params.name, e))?;
         let detail = workspace::workspace_detail(&cfg.workspaces.dir, &params.name)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&detail)
@@ -266,11 +289,17 @@ impl SpaceServer {
         Parameters(params): Parameters<CreateWorkspaceParams>,
     ) -> Result<CallToolResult, McpError> {
         let cfg = SpaceConfig::load().map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        // The creation rule, before the repo cache is loaded and before any
+        // directory is created: the name becomes a directory under
+        // `workspaces.dir` and the default branch name.
+        workspace::validate_space_name(&params.name)
+            .map_err(|e| bad_space_name(&params.name, e))?;
         let cache = load_repo_cache(&cfg, false);
         let repo_paths =
             resolve_repos(&params.repos, &cache).map_err(|e| McpError::invalid_params(e, None))?;
         let strategy = build_strategy(&params.strategy, params.branch.as_deref(), &params.name)
             .map_err(|e| McpError::invalid_params(e, None))?;
+        checked_branch(&strategy)?;
 
         let ws_dir = &cfg.workspaces.dir;
         let mut created = Vec::new();
@@ -313,6 +342,12 @@ impl SpaceServer {
         let cfg = SpaceConfig::load().map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let ws_dir = &cfg.workspaces.dir;
 
+        // The lookup guard, before the exists check: `ws_dir/..` exists, so
+        // without it a traversal name passed the check and the worktrees were
+        // added outside `ws_dir`.
+        workspace::require_plain_component(&params.workspace)
+            .map_err(|e| bad_space_name(&params.workspace, e))?;
+
         // Verify workspace exists
         let ws_path = ws_dir.join(&params.workspace);
         if !ws_path.exists() {
@@ -330,6 +365,7 @@ impl SpaceServer {
         let branch_name = params.branch.unwrap_or_else(|| params.workspace.clone());
         let strategy = build_strategy(&params.strategy, Some(&branch_name), &params.workspace)
             .map_err(|e| McpError::invalid_params(e, None))?;
+        checked_branch(&strategy)?;
 
         let mut added = Vec::new();
         for repo_path in &repo_paths {
@@ -364,6 +400,8 @@ impl SpaceServer {
         Parameters(params): Parameters<RemoveWorkspaceParams>,
     ) -> Result<CallToolResult, McpError> {
         let cfg = SpaceConfig::load().map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        workspace::require_plain_component(&params.name)
+            .map_err(|e| bad_space_name(&params.name, e))?;
         workspace::remove_workspace(&cfg.workspaces.dir, &params.name, true)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let result = RemoveResult {

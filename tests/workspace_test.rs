@@ -743,3 +743,135 @@ fn create_worktree_cancellable_reads_the_flag_again_after_the_fetch() {
         "no worktree may be created for a repo cancelled during its fetch"
     );
 }
+
+/// Ticket 13. A name that is not one plain path component would resolve
+/// outside `ws_dir` when joined; the core refuses it before any directory is
+/// created, so the escape path never appears.
+#[test]
+fn create_worktree_refuses_a_name_that_leaves_ws_dir() {
+    let env = common::TestEnv::new();
+    let repo_path = env.create_repo("alpha");
+
+    let err = create_worktree(
+        &repo_path,
+        &env.workspaces_dir,
+        "../escape",
+        &BranchStrategy::NewBranch("topic".to_string()),
+    )
+    .expect_err("a name containing '/' must be refused");
+    let text = format!("{}", err);
+
+    assert!(
+        text.contains("invalid space name \"../escape\""),
+        "the error must name the offending name, got {:?}",
+        text
+    );
+    assert!(
+        text.contains("Space name cannot contain '/' or '\\'"),
+        "the error must name the rule that was broken, got {:?}",
+        text
+    );
+    assert!(
+        !env.dir.path().join("escape").exists(),
+        "nothing may be created outside ws_dir"
+    );
+    assert!(
+        std::fs::read_dir(&env.workspaces_dir)
+            .unwrap()
+            .next()
+            .is_none(),
+        "ws_dir must gain no entry either"
+    );
+}
+
+/// Ticket 13. A branch name beginning with '-' would land in git's `-b` slot,
+/// which takes the next argv verbatim and re-parses it as options in the
+/// child `git branch`. The core refuses it before `create_dir_all`, so a
+/// rejected call leaves no space directory behind.
+#[test]
+fn create_worktree_refuses_a_dash_branch_before_touching_disk() {
+    let env = common::TestEnv::new();
+    let repo_path = env.create_repo("alpha");
+
+    for strategy in [
+        BranchStrategy::NewBranch("-x".to_string()),
+        BranchStrategy::ExistingBranch("-x".to_string()),
+    ] {
+        let err = create_worktree(&repo_path, &env.workspaces_dir, "dashed", &strategy)
+            .expect_err("a branch beginning with '-' must be refused");
+        let text = format!("{}", err);
+        assert_eq!(
+            text, "'-x' is not a valid branch name",
+            "the refusal uses git's own sentence for {:?}",
+            strategy
+        );
+        assert!(
+            !env.workspaces_dir.join("dashed").exists(),
+            "the space directory must not exist after a refusal for {:?}",
+            strategy
+        );
+    }
+}
+
+/// Ticket 13, finding beyond the ticket: `remove_workspace` joined the name
+/// unchecked, so `..` named the parent of `ws_dir`, and `.` or an empty name
+/// named `ws_dir` itself, each then handed to `remove_dir_all`. Positive
+/// evidence: a real space and `ws_dir` both survive every refused call.
+#[test]
+fn remove_workspace_refuses_dot_dot_and_dot() {
+    let env = common::TestEnv::new();
+    let repo_path = env.create_repo("alpha");
+    create_worktree(
+        &repo_path,
+        &env.workspaces_dir,
+        "keep",
+        &BranchStrategy::NewBranch("keep".to_string()),
+    )
+    .unwrap();
+    let kept = env.workspaces_dir.join("keep").join("alpha");
+    assert!(kept.join(".git").exists(), "fixture: the space exists");
+
+    for (name, rule) in [
+        ("..", "Space name cannot be '.' or '..'"),
+        (".", "Space name cannot be '.' or '..'"),
+        ("", "Space name cannot be empty"),
+    ] {
+        let err = space::core::workspace::remove_workspace(&env.workspaces_dir, name, true)
+            .expect_err("a name that is not one plain component must be refused");
+        let text = format!("{}", err);
+        assert!(
+            text.contains(rule),
+            "{:?} must be refused by its rule, got {:?}",
+            name,
+            text
+        );
+        assert!(
+            kept.join(".git").exists(),
+            "the real space must survive a refused remove of {:?}",
+            name
+        );
+        assert!(
+            env.workspaces_dir.exists() && env.repos_dir.exists(),
+            "ws_dir and its parent's other children must survive a refused remove of {:?}",
+            name
+        );
+    }
+}
+
+/// Ticket 13, finding beyond the ticket: `workspace_detail` listed whatever
+/// directory the joined name resolved to and ran git status inside its repo
+/// subdirectories, so over MCP `../repos` disclosed the repo roots.
+#[test]
+fn workspace_detail_refuses_a_slash_name() {
+    let env = common::TestEnv::new();
+    env.create_repo("alpha");
+
+    let err = space::core::workspace::workspace_detail(&env.workspaces_dir, "../repos")
+        .expect_err("a name containing '/' must be refused");
+    let text = format!("{}", err);
+    assert!(
+        text.contains("Space name cannot contain '/' or '\\'"),
+        "got {:?}",
+        text
+    );
+}

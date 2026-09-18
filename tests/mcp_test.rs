@@ -402,3 +402,211 @@ fn remove_workspace_success() {
         assert!(!ws_path.exists(), "workspace dir should be deleted");
     });
 }
+
+// ---------------------------------------------------------------------------
+// Ticket 13: hostile names over MCP. The client is another program, so every
+// tool that takes a name must refuse one that is not a plain component with
+// `invalid_params` before it touches the filesystem, and the assertions are
+// about what is (still) on disk, not only about the error.
+// ---------------------------------------------------------------------------
+
+fn invalid_params(err: &rmcp::ErrorData) -> String {
+    assert_eq!(
+        err.code,
+        rmcp::model::ErrorCode::INVALID_PARAMS,
+        "a bad name is the caller's error, got {:?}: {}",
+        err.code,
+        err.message
+    );
+    err.message.to_string()
+}
+
+fn entries(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir).unwrap().count()
+}
+
+#[test]
+fn create_workspace_rejects_a_traversal_name() {
+    with_test_env(|env, server| {
+        let repo_path = env.create_repo("delta");
+        env.write_cache(&[repo_path]);
+        let before = entries(&env.workspaces_dir);
+
+        let err = server
+            .create_workspace(Parameters(CreateWorkspaceParams {
+                name: "../escape".to_string(),
+                repos: vec!["delta".to_string()],
+                strategy: "new".to_string(),
+                branch: None,
+            }))
+            .expect_err("a name containing '/' must be refused");
+        let msg = invalid_params(&err);
+        assert_eq!(
+            msg,
+            "invalid space name \"../escape\": Space name cannot contain '/' or '\\'"
+        );
+        assert!(
+            !env.dir.path().join("escape").exists(),
+            "nothing may be created outside ws_dir"
+        );
+        assert_eq!(
+            entries(&env.workspaces_dir),
+            before,
+            "ws_dir gained no entry"
+        );
+    });
+}
+
+#[test]
+fn create_workspace_rejects_an_absolute_name() {
+    with_test_env(|env, server| {
+        let repo_path = env.create_repo("delta");
+        env.write_cache(&[repo_path]);
+        let outside = env.dir.path().join("abs");
+        let name = outside.to_string_lossy().to_string();
+
+        let err = server
+            .create_workspace(Parameters(CreateWorkspaceParams {
+                name,
+                repos: vec!["delta".to_string()],
+                strategy: "new".to_string(),
+                branch: None,
+            }))
+            .expect_err("an absolute name replaces ws_dir entirely and must be refused");
+        let msg = invalid_params(&err);
+        assert!(
+            msg.contains("Space name cannot contain '/' or '\\'"),
+            "got {msg}"
+        );
+        assert!(!outside.exists(), "the absolute path must not be created");
+    });
+}
+
+#[test]
+fn create_workspace_rejects_an_empty_name() {
+    with_test_env(|env, server| {
+        let repo_path = env.create_repo("delta");
+        env.write_cache(&[repo_path]);
+
+        let err = server
+            .create_workspace(Parameters(CreateWorkspaceParams {
+                name: String::new(),
+                repos: vec!["delta".to_string()],
+                strategy: "new".to_string(),
+                branch: None,
+            }))
+            .expect_err("an empty name is ws_dir itself and must be refused");
+        let msg = invalid_params(&err);
+        assert_eq!(msg, "invalid space name \"\": Space name cannot be empty");
+        assert!(
+            !env.workspaces_dir.join("delta").exists(),
+            "the worktree must not land directly in ws_dir"
+        );
+    });
+}
+
+#[test]
+fn create_workspace_rejects_a_dash_branch() {
+    with_test_env(|env, server| {
+        let repo_path = env.create_repo("delta");
+        env.write_cache(&[repo_path]);
+
+        for (strategy, branch) in [("new", Some("-x")), ("existing", Some("-x"))] {
+            let err = server
+                .create_workspace(Parameters(CreateWorkspaceParams {
+                    name: "dashed".to_string(),
+                    repos: vec!["delta".to_string()],
+                    strategy: strategy.to_string(),
+                    branch: branch.map(str::to_string),
+                }))
+                .expect_err("a branch beginning with '-' must be refused");
+            let msg = invalid_params(&err);
+            assert_eq!(
+                msg, "'-x' is not a valid branch name",
+                "strategy {strategy}"
+            );
+            assert!(
+                !env.workspaces_dir.join("dashed").exists(),
+                "nothing is created for strategy {strategy}"
+            );
+        }
+    });
+}
+
+#[test]
+fn add_repos_rejects_a_traversal_workspace() {
+    with_test_env(|env, server| {
+        let repo_path = env.create_repo("delta");
+        env.write_cache(&[repo_path]);
+        // `ws_dir/..` exists, so the plain exists check on master passed and
+        // the worktree was added to the parent of ws_dir.
+        let err = server
+            .add_repos(Parameters(AddReposParams {
+                workspace: "..".to_string(),
+                repos: vec!["delta".to_string()],
+                strategy: "new".to_string(),
+                branch: Some("topic".to_string()),
+            }))
+            .expect_err("'..' must be refused before the exists check");
+        let msg = invalid_params(&err);
+        assert_eq!(
+            msg,
+            "invalid space name \"..\": Space name cannot be '.' or '..'"
+        );
+        assert!(
+            !env.dir.path().join("delta").exists(),
+            "no worktree may be added to the parent of ws_dir"
+        );
+    });
+}
+
+#[test]
+fn remove_workspace_refuses_dot_dot_and_dot() {
+    with_test_env(|env, server| {
+        let repo_path = env.create_repo("delta");
+        create_worktree(
+            &repo_path,
+            &env.workspaces_dir,
+            "keep",
+            &BranchStrategy::NewBranch("keep".to_string()),
+        )
+        .unwrap();
+        let kept = env.workspaces_dir.join("keep").join("delta");
+
+        for name in ["..", ".", ""] {
+            let err = server
+                .remove_workspace(Parameters(RemoveWorkspaceParams {
+                    name: name.to_string(),
+                }))
+                .expect_err("a name that is not one plain component must be refused");
+            let msg = invalid_params(&err);
+            assert!(msg.starts_with("invalid space name"), "got {msg}");
+            assert!(
+                kept.join(".git").exists(),
+                "the real space must survive a refused remove of {name:?}"
+            );
+            assert!(
+                env.config_dir.join("config.toml").exists(),
+                "the parent of ws_dir must survive a refused remove of {name:?}"
+            );
+        }
+    });
+}
+
+#[test]
+fn workspace_status_rejects_a_slash_name() {
+    with_test_env(|env, server| {
+        env.create_repo("delta");
+
+        let err = server
+            .workspace_status(Parameters(WorkspaceStatusParams {
+                name: "../repos".to_string(),
+            }))
+            .expect_err("a name containing '/' must be refused, not listed");
+        let msg = invalid_params(&err);
+        assert!(
+            msg.contains("Space name cannot contain '/' or '\\'"),
+            "got {msg}"
+        );
+    });
+}
