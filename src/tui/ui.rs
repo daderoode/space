@@ -112,7 +112,10 @@ fn line_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
-fn truncate_for_width(text: &str, max_width: usize) -> String {
+/// Cut `text` to `max_width` display columns, marking the cut with `...`.
+/// Shared with `tui::app`, which bounds a repo name inside a message that has
+/// to fit a fixed dialog row.
+pub(crate) fn truncate_for_width(text: &str, max_width: usize) -> String {
     if line_width(text) <= max_width {
         return text.to_string();
     }
