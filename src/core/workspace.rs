@@ -146,10 +146,17 @@ pub fn workspace_detail(ws_dir: &Path, name: &str) -> Result<Workspace> {
 /// Create a git worktree for `repo_path` inside `ws_dir/<ws_name>/<repo_name>`.
 /// Run a git command, capturing stdout+stderr. On non-zero exit, returns an
 /// error that includes the first non-empty line of stderr so the TUI can show
-/// the real git message (e.g. "branch already checked out at …").
+/// the real git message (e.g. "'main' is already used by worktree at ...").
+///
+/// `LC_ALL=C` pins git's output language, as the `branch -f` runner in
+/// `sync_repo_cancellable` does, because `refuses_because_checked_out` reads
+/// this message: a localized git would turn every checked-out refusal into
+/// the generic failure and the strategy-picker bounce would be dead again.
+/// The cost is that every `worktree add` refusal reaches the log in English.
 fn git_worktree_add(args: &[&str], cwd: &Path) -> Result<()> {
     let out = Command::new("git")
         .args(args)
+        .env("LC_ALL", "C")
         .current_dir(cwd)
         .output()
         .with_context(|| "failed to spawn git")?;
@@ -407,6 +414,14 @@ pub fn sync_repo_cancellable(
     }
 }
 
+/// The two spellings of git's "that branch is held by another worktree"
+/// refusal: `used by worktree at '<path>'` (git 2.42 and later) and
+/// `checked out at '<path>'` (git 2.38 to 2.41). Both `branch -f` and
+/// `worktree add` refuse through git's `die_if_checked_out`, so they changed
+/// wording together, and the two predicates that read them share this list
+/// rather than each keeping a copy that can go stale on its own.
+const WORKTREE_HOLDS_BRANCH_MARKERS: [&str; 2] = ["used by worktree at '", "checked out at '"];
+
 /// Best-effort parse of git's refusal to `branch -f`. Recognises
 /// `fatal: cannot force update the branch '<b>' used by worktree at '<path>'`
 /// (git 2.42 and later) and the `checked out at '<path>'` wording of git 2.38
@@ -420,7 +435,7 @@ fn parse_skip_reason(stderr: &str) -> SkipReason {
         .find(|l| l.starts_with("fatal:") || l.starts_with("error:"))
         .or_else(|| stderr.lines().map(str::trim).find(|l| !l.is_empty()))
         .unwrap_or("git branch -f failed");
-    for marker in ["used by worktree at '", "checked out at '"] {
+    for marker in WORKTREE_HOLDS_BRANCH_MARKERS {
         if let Some((_, rest)) = line.split_once(marker) {
             if let Some(path) = rest.strip_suffix('\'') {
                 return SkipReason::CheckedOutAt(PathBuf::from(path));
@@ -1277,17 +1292,16 @@ pub fn create_worktree_with_fetch(
 /// Creating worker ends its run on it, and the App bounces the flow back to
 /// the branch-strategy picker.
 ///
-/// It matches git BEFORE 2.42 only. Verified on git 2.50.1 (Apple Git-155):
-/// `git worktree add` refuses with
-/// `fatal: '<branch>' is already used by worktree at '<path>'`, which this
-/// does not match, so on a modern git the bounce is dormant and the user
-/// gets the generic failure path instead. That is the same wording change
-/// `parse_skip_reason` already handles for `branch -f`, where both spellings
-/// are recognised. It is ported here unchanged on purpose, so moving the
-/// stage onto a worker stays behaviour-neutral; widening it is ticket 09
-/// follow-up 6.
+/// Both of git's wordings count: `fatal: '<branch>' is already used by
+/// worktree at '<path>'` (git 2.42 and later, verified on git 2.50.1, Apple
+/// Git-155) and `fatal: '<branch>' is already checked out at '<path>'` (git
+/// 2.38 to 2.41). The markers are the ones `parse_skip_reason` uses for
+/// `branch -f`, shared rather than repeated because both refusals come from
+/// the same git function, `die_if_checked_out`.
 pub fn refuses_because_checked_out(err: &str) -> bool {
-    err.contains("already checked out")
+    WORKTREE_HOLDS_BRANCH_MARKERS
+        .iter()
+        .any(|marker| err.contains(marker))
 }
 
 /// `create_worktree_with_fetch` that can be stopped at a boundary, for the
