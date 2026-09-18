@@ -285,17 +285,50 @@ pub enum FetchOutcome {
     /// `None` when git did not start (`stderr` begins with
     /// `SPAWN_FAILURE_PREFIX`), when the wait itself failed, when the run was
     /// cancelled before the fetch, or when git was stopped by a signal;
-    /// otherwise `stderr` is everything git wrote.
+    /// otherwise `stderr` is everything git wrote. `elapsed` is the wall
+    /// clock of the whole unattended run: the child's own time plus the
+    /// bounded wait (at most `UNATTENDED_READER_GRACE`) for its stderr to
+    /// drain, which normally ends at once because the pipe closes with the
+    /// child. It is what `is_slow` reads: a failure says nothing about
+    /// whether repeating it is cheap, and the duration does. It is
+    /// `Duration::ZERO` when nothing ran.
     Failed {
         exit_code: Option<i32>,
         stderr: String,
+        elapsed: Duration,
     },
     /// The wall-clock limit expired and git's whole process group was stopped.
-    /// `stderr` is whatever arrived before the kill, usually nothing.
+    /// `stderr` is whatever arrived before the kill, usually nothing. There is
+    /// no `elapsed`: `after` already says the run spent the whole limit.
     TimedOut {
         after: Duration,
         stderr: String,
     },
+}
+
+impl FetchOutcome {
+    /// Whether repeating this fetch would very likely cost what it cost the
+    /// first time, which is what the pre-create skip rule turns on. See
+    /// `is_slow_with` for the rule; the threshold is `SLOW_FETCH_THRESHOLD`.
+    pub fn is_slow(&self) -> bool {
+        self.is_slow_with(SLOW_FETCH_THRESHOLD)
+    }
+
+    /// `is_slow` against an explicit threshold, so the comparison can be
+    /// tested without a five-second fetch.
+    ///
+    /// `TimedOut` is slow whatever the threshold: it spent the whole limit by
+    /// definition, and tests run limits of a few hundred milliseconds that
+    /// must still count. `Failed` is slow when it took at or above the
+    /// threshold. `Ok` is never slow: a fetch that worked is not repeated
+    /// at all.
+    pub fn is_slow_with(&self, threshold: Duration) -> bool {
+        match self {
+            FetchOutcome::Ok => false,
+            FetchOutcome::Failed { elapsed, .. } => *elapsed >= threshold,
+            FetchOutcome::TimedOut { .. } => true,
+        }
+    }
 }
 
 /// The per-repo result inside a sync report (glossary: sync outcome).
@@ -325,6 +358,22 @@ impl SyncOutcome {
 /// Wall-clock limit on a fetch run under the unattended-run policy. Fixed in
 /// Wave 1; a sync's fast-forward calls are local and run without a limit.
 pub const UNATTENDED_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
+/// A fetch that failed at or above this is not run again before the worktree
+/// is created: repeating it would very likely cost the same again, and every
+/// repo behind it waits.
+///
+/// Why 5s. Every fast refusal measured on this machine lands between 0.45s
+/// and 1.6s (prompts disabled, host key refused, passphrase key under
+/// `BatchMode`), and the slow cases at about 62s (an ssh agent that never
+/// answers) and 75s (git's connect timeout on a black-hole https host), with
+/// an explicit ssh `ConnectTimeout=5` at 5.06s. 5s sits in the empty band
+/// between the two groups with margin either side. The retry this still
+/// accepts is bounded by the threshold itself: a fetch that failed in 4s will
+/// likely fail in about 4s again, now on the worker with a live footer, and
+/// it is worth that because it puts git's fresh refusal into the Creating
+/// log. Must stay well below `UNATTENDED_FETCH_TIMEOUT`, or a timeout would
+/// again be the only thing the rule catches.
+pub const SLOW_FETCH_THRESHOLD: Duration = Duration::from_secs(5);
 /// How long a timed-out child gets to clean up after SIGTERM before SIGKILL.
 const UNATTENDED_KILL_GRACE: Duration = Duration::from_secs(2);
 const UNATTENDED_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -368,6 +417,9 @@ pub fn sync_repo_cancellable(
         return SyncOutcome::without_branch_work(FetchOutcome::Failed {
             exit_code: None,
             stderr: "sync cancelled".to_string(),
+            // Nothing ran, so nothing is skipped downstream: the creation
+            // still fetches this repo.
+            elapsed: Duration::ZERO,
         });
     }
     let fetch = fetch_origin_unattended(repo_path, timeout);
@@ -468,6 +520,9 @@ pub fn run_git_unattended(args: &[&str], cwd: &Path, timeout: Duration) -> Unatt
 /// Run `git fetch --quiet origin` under the unattended-run policy and report
 /// it as a `FetchOutcome`.
 fn fetch_origin_unattended(repo_path: &Path, timeout: Duration) -> FetchOutcome {
+    // Brackets the fetch and nothing else: the caller's branch work runs
+    // after this returns, so it cannot inflate a failure's elapsed time.
+    let started = Instant::now();
     match run_git_unattended(&["fetch", "--quiet", "origin"], repo_path, timeout) {
         Unattended::Exited { status, stderr } => {
             if status.success() {
@@ -476,6 +531,7 @@ fn fetch_origin_unattended(repo_path: &Path, timeout: Duration) -> FetchOutcome 
                 FetchOutcome::Failed {
                     exit_code: status.code(),
                     stderr,
+                    elapsed: started.elapsed(),
                 }
             }
         }
@@ -486,10 +542,12 @@ fn fetch_origin_unattended(repo_path: &Path, timeout: Duration) -> FetchOutcome 
         Unattended::SpawnFailed(e) => FetchOutcome::Failed {
             exit_code: None,
             stderr: format!("{}: {}", SPAWN_FAILURE_PREFIX, e),
+            elapsed: started.elapsed(),
         },
         Unattended::WaitFailed { stderr } => FetchOutcome::Failed {
             exit_code: None,
             stderr: format!("could not wait for git\n{}", stderr),
+            elapsed: started.elapsed(),
         },
     }
 }
@@ -1217,9 +1275,9 @@ fn current_branch_name(repo_path: &Path) -> Option<String> {
 pub enum PreCreateFetch {
     /// No fetch is run. The caller has decided this repo does not need
     /// one: either the sync already fetched it, or the sync's own fetch of
-    /// that remote timed out and repeating it here would very likely cost
-    /// the whole limit again. `create_worktree` does not distinguish the
-    /// two; the caller does, and reports them differently.
+    /// that remote was slow (`FetchOutcome::is_slow`) and repeating it here
+    /// would very likely cost the same again. `create_worktree` does not
+    /// distinguish the two; the caller does, and reports them differently.
     Skip,
     /// Fetch `origin` under the unattended-run policy with this wall-clock
     /// limit. The user-facing value is `UNATTENDED_FETCH_TIMEOUT`; tests
@@ -1659,7 +1717,9 @@ mod tests {
         let result = sync_repo(tmp.path());
         assert!(!result.fetch_ok(), "fetch must fail when no remote");
         match &result.fetch {
-            FetchOutcome::Failed { exit_code, stderr } => {
+            FetchOutcome::Failed {
+                exit_code, stderr, ..
+            } => {
                 assert_eq!(*exit_code, Some(128), "git reports a missing remote as 128");
                 assert!(
                     stderr.contains("'origin' does not appear to be a git repository"),
@@ -1897,7 +1957,9 @@ mod tests {
         let result = sync_repo(&missing);
 
         match &result.fetch {
-            FetchOutcome::Failed { exit_code, stderr } => {
+            FetchOutcome::Failed {
+                exit_code, stderr, ..
+            } => {
                 assert_eq!(*exit_code, None, "a git that never ran has no exit code");
                 assert!(
                     stderr.starts_with(SPAWN_FAILURE_PREFIX),
@@ -1909,9 +1971,201 @@ mod tests {
             other => panic!("expected FetchOutcome::Failed, got {:?}", other),
         }
         assert!(
+            !result.fetch.is_slow(),
+            "a git that never started cost nothing, so the creation fetches \
+             this repo itself: {:?}",
+            result.fetch
+        );
+        assert!(
             result.forwarded.is_empty() && result.skipped.is_empty(),
             "no branch work happens when git did not start"
         );
+    }
+
+    /// A fetch that failed carries how long it took, which is what the
+    /// pre-create skip rule reads. The remote is a `file://` origin whose
+    /// upload-pack sleeps and then exits non-zero, so the failure is slow
+    /// without touching the network and without running out the limit. The
+    /// two `is_slow_with` calls pin the comparison rather than
+    /// `SLOW_FETCH_THRESHOLD` itself: a test that waited five seconds to
+    /// check the constant would cost more than the delay this rule removes.
+    #[test]
+    fn a_failed_fetch_records_how_long_it_took() {
+        let (tmp, local) = make_behind_repo();
+        let script = tmp.path().join("slow-failing-upload-pack.sh");
+        std::fs::write(&script, "sleep 0.2\nexit 1\n").unwrap();
+        let origin_url = format!("file://{}", tmp.path().join("origin.git").display());
+        git(&["remote", "set-url", "origin", &origin_url], &local);
+        git(
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                &format!("/bin/sh {}", script.display()),
+            ],
+            &local,
+        );
+
+        let slow = sync_repo_with_timeout(&local, Duration::from_secs(20)).fetch;
+
+        let slow_elapsed = match &slow {
+            FetchOutcome::Failed { elapsed, .. } => *elapsed,
+            other => panic!("expected FetchOutcome::Failed, got {:?}", other),
+        };
+        assert!(
+            slow_elapsed >= Duration::from_millis(200),
+            "the outcome must carry the time the fetch spent, got {:?}",
+            slow_elapsed
+        );
+        assert!(
+            slow.is_slow_with(Duration::from_millis(100)),
+            "a fetch that spent 200ms is slow against a 100ms threshold: {:?}",
+            slow
+        );
+        assert!(
+            !slow.is_slow_with(Duration::from_secs(1)),
+            "the same outcome is not slow against a 1s threshold: {:?}",
+            slow
+        );
+
+        // A repo with no remote at all fails at once, so the creation still
+        // fetches it: the rule is how long it took, not that it failed.
+        let fast_tmp = tempfile::tempdir().unwrap();
+        Cmd::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(fast_tmp.path())
+            .output()
+            .unwrap();
+        git_setup(fast_tmp.path());
+        git(&["commit", "--allow-empty", "-m", "init"], fast_tmp.path());
+
+        let fast = sync_repo_with_timeout(fast_tmp.path(), Duration::from_secs(20)).fetch;
+
+        let fast_elapsed = match &fast {
+            FetchOutcome::Failed { elapsed, .. } => *elapsed,
+            other => panic!("expected FetchOutcome::Failed, got {:?}", other),
+        };
+        assert!(
+            fast_elapsed < Duration::from_secs(1),
+            "a missing remote fails at once, took {:?}",
+            fast_elapsed
+        );
+        // Measured, not stamped: a constant would satisfy every bound above
+        // on its own, but it cannot be both below and at or above itself.
+        assert!(
+            fast_elapsed < slow_elapsed,
+            "a fetch that failed at once ({:?}) must record less than one \
+             that slept 200ms ({:?})",
+            fast_elapsed,
+            slow_elapsed
+        );
+        assert!(
+            !fast.is_slow(),
+            "a fast failure is fetched again before the worktree is created: {:?}",
+            fast
+        );
+    }
+
+    /// A timeout is slow whatever its limit was: it spent the whole limit by
+    /// definition. The tests that produce one use limits of a few hundred
+    /// milliseconds, well under `SLOW_FETCH_THRESHOLD`, and they must still
+    /// be skipped.
+    #[test]
+    fn timed_out_is_slow_at_any_limit() {
+        let timed_out = FetchOutcome::TimedOut {
+            after: Duration::from_millis(200),
+            stderr: String::new(),
+        };
+
+        assert!(timed_out.is_slow(), "a timeout is slow: {:?}", timed_out);
+        assert!(
+            timed_out.is_slow_with(Duration::from_secs(3600)),
+            "a timeout is slow against any threshold, not only a small one"
+        );
+        assert!(
+            !FetchOutcome::Ok.is_slow(),
+            "a fetch that worked is never slow"
+        );
+    }
+
+    /// The threshold has to leave room on both sides. Below the fetch limit,
+    /// or a timeout would be the only thing it caught, which is the defect it
+    /// exists to remove. Above every fast refusal measured on this machine
+    /// (0.45s for a refused https prompt, 0.77s for a host key, 1.6s for a
+    /// passphrase key), so those are still fetched again on the worker, where
+    /// git's fresh refusal reaches the Creating log.
+    #[test]
+    fn slow_threshold_sits_inside_the_fetch_limit() {
+        assert!(
+            SLOW_FETCH_THRESHOLD < UNATTENDED_FETCH_TIMEOUT,
+            "a threshold at or above the limit catches only timeouts"
+        );
+        assert!(
+            SLOW_FETCH_THRESHOLD >= Duration::from_secs(2),
+            "every fast refusal measured is under 2s and must still be retried"
+        );
+    }
+
+    /// The rule is "at or above": a failure that took exactly the threshold
+    /// is slow, one a nanosecond under it is not. No real fetch lands on the
+    /// boundary, but the comparison is the rule and a `>` would pass every
+    /// other test here.
+    #[test]
+    fn a_failure_at_exactly_the_threshold_is_slow() {
+        let threshold = Duration::from_millis(500);
+        let at = FetchOutcome::Failed {
+            exit_code: Some(128),
+            stderr: String::new(),
+            elapsed: threshold,
+        };
+        let under = FetchOutcome::Failed {
+            exit_code: Some(128),
+            stderr: String::new(),
+            elapsed: threshold - Duration::from_nanos(1),
+        };
+        assert!(
+            at.is_slow_with(threshold),
+            "a failure that took exactly the threshold is slow"
+        );
+        assert!(
+            !under.is_slow_with(threshold),
+            "a failure a nanosecond under the threshold is not"
+        );
+    }
+
+    /// The cancelled outcome through its real path, not a literal written in
+    /// a test. `sync_repo_cancellable` returns before any git call when the
+    /// flag is already set, and what it returns must read as "nothing ran":
+    /// zero elapsed and not slow, so the creation still fetches the repo. A
+    /// non-zero value here would make a cancelled sync look like a slow
+    /// remote and skip the fetch, building from refs of unknown age, the
+    /// misclassification an earlier round of this ticket found once already.
+    #[test]
+    fn a_cancelled_sync_costs_nothing_and_is_not_slow() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outcome =
+            sync_repo_cancellable(tmp.path(), Duration::from_secs(20), &AtomicBool::new(true));
+        match &outcome.fetch {
+            FetchOutcome::Failed {
+                exit_code,
+                stderr,
+                elapsed,
+            } => {
+                assert_eq!(*exit_code, None);
+                assert_eq!(stderr, "sync cancelled");
+                assert_eq!(
+                    *elapsed,
+                    Duration::ZERO,
+                    "nothing ran, so the outcome must cost nothing"
+                );
+            }
+            other => panic!("expected FetchOutcome::Failed, got {:?}", other),
+        }
+        assert!(
+            !outcome.fetch.is_slow(),
+            "a cancelled sync must not be skipped as slow: {:?}",
+            outcome.fetch
+        );
+        assert!(outcome.forwarded.is_empty() && outcome.skipped.is_empty());
     }
 
     /// The fetch must give up after the limit and leave no child behind. The
@@ -2037,7 +2291,9 @@ mod tests {
         let result = sync_repo_with_timeout(tmp.path(), Duration::from_secs(20));
 
         match &result.fetch {
-            FetchOutcome::Failed { exit_code, stderr } => {
+            FetchOutcome::Failed {
+                exit_code, stderr, ..
+            } => {
                 assert_eq!(*exit_code, Some(128));
                 assert!(
                     stderr.contains("terminal prompts disabled"),
@@ -2116,7 +2372,9 @@ mod tests {
         );
 
         match &attempt.fetch {
-            Some(FetchOutcome::Failed { exit_code, stderr }) => {
+            Some(FetchOutcome::Failed {
+                exit_code, stderr, ..
+            }) => {
                 assert_eq!(*exit_code, Some(128));
                 assert!(
                     stderr.contains("terminal prompts disabled"),

@@ -500,9 +500,9 @@ fn creating_logs_failed_pre_create_fetch_and_skips_it_for_already_fetched_repos(
 
     // Half C: the repo's sync fetch timed out, so it is not fetched again.
     // A timed-out remote did not answer inside the whole limit minutes ago,
-    // and this call blocks the loop, so retrying would very likely spend the
-    // limit again for nothing. Same observable shape as half B, reached from
-    // the opposite outcome.
+    // and this fetch runs on the worker ahead of every repo behind it, so
+    // retrying would very likely spend the limit again for nothing. Same
+    // observable shape as half B, reached from the opposite outcome.
     let mut report = SyncReport::new(std::slice::from_ref(&repo));
     report.finished(
         0,
@@ -521,7 +521,7 @@ fn creating_logs_failed_pre_create_fetch_and_skips_it_for_already_fetched_repos(
         line_above(&log, "  \u{2713} broken-remote"),
         format!(
             "  {}",
-            space::tui::screens::sync_report::SKIPPED_AFTER_TIMEOUT_NOTE
+            space::tui::screens::sync_report::SKIPPED_AS_SLOW_NOTE
         ),
         "a timed-out repo is not fetched again, and unlike a fresh one it \
          says so: these refs are of unknown age:\n{}",
@@ -547,7 +547,44 @@ fn creating_logs_failed_pre_create_fetch_and_skips_it_for_already_fetched_repos(
         "skipping a timed-out repo's fetch must not stop the worktree"
     );
 
-    // Half D: a fetch that merely FAILED is cheap to retry, so it still runs.
+    // Half D: the sync fetch FAILED, but only after 30s (an ssh
+    // `ConnectTimeout` on a host that never answers). It never reached the
+    // limit, so it is not a `TimedOut`, and repeating it would very likely
+    // cost those 30s again: same skip as half C, same note.
+    let mut report = SyncReport::new(std::slice::from_ref(&repo));
+    report.finished(
+        0,
+        SyncOutcome {
+            fetch: FetchOutcome::Failed {
+                exit_code: Some(128),
+                stderr: "ssh: connect to host 10.255.255.1 port 22: Operation timed out"
+                    .to_string(),
+                elapsed: std::time::Duration::from_secs(30),
+            },
+            forwarded: vec![],
+            skipped: vec![],
+        },
+    );
+    report.finish();
+    let log = run_flow(&env, vec![repo.clone(), pin.clone()], "ws-d", report);
+    assert_eq!(
+        line_above(&log, "  \u{2713} broken-remote"),
+        format!(
+            "  {}",
+            space::tui::screens::sync_report::SKIPPED_AS_SLOW_NOTE
+        ),
+        "a fetch that failed slowly is not repeated, and says so: these refs \
+         are of unknown age:\n{}",
+        log.join("\n")
+    );
+    assert!(
+        !log.iter()
+            .any(|l| is_note(l) && l.contains("broken-remote")),
+        "the skip must not also emit a fetch-failed note:\n{}",
+        log.join("\n")
+    );
+
+    // Half E: a fetch that failed FAST is cheap to retry, so it still runs.
     // This is the line between the two: pointless, versus pointless and slow.
     let mut report = SyncReport::new(std::slice::from_ref(&repo));
     report.finished(
@@ -556,13 +593,14 @@ fn creating_logs_failed_pre_create_fetch_and_skips_it_for_already_fetched_repos(
             fetch: FetchOutcome::Failed {
                 exit_code: Some(128),
                 stderr: "fatal: could not read Username".to_string(),
+                elapsed: std::time::Duration::from_millis(200),
             },
             forwarded: vec![],
             skipped: vec![],
         },
     );
     report.finish();
-    let log = run_flow(&env, vec![repo, pin], "ws-d", report);
+    let log = run_flow(&env, vec![repo, pin], "ws-e", report);
     assert!(
         is_note(&line_above(&log, "  \u{2713} broken-remote")),
         "a fetch that failed fast is retried here, so its note is back:\n{}",
@@ -5746,6 +5784,7 @@ mod sync_report_tests {
             fetch: FetchOutcome::Failed {
                 exit_code: Some(128),
                 stderr: stderr.to_string(),
+                elapsed: std::time::Duration::ZERO,
             },
             forwarded: vec![],
             skipped: vec![],

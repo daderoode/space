@@ -244,7 +244,7 @@ impl AddState {
                         branch_strategy: BranchStrategy::ExistingBranch(branch_name),
                         is_new: false,
                         fresh_repos: self.report.fetched_ok_paths(),
-                        unreachable_repos: self.report.timed_out_paths(),
+                        slow_fetch_repos: self.report.slow_fetch_paths(),
                     })
                 } else if self.branch_strategy_idx == 0 {
                     // New branch — open branch name editing stage.
@@ -267,7 +267,7 @@ impl AddState {
                         branch_strategy: self.branch_strategy(),
                         is_new: false,
                         fresh_repos: self.report.fetched_ok_paths(),
-                        unreachable_repos: self.report.timed_out_paths(),
+                        slow_fetch_repos: self.report.slow_fetch_paths(),
                     })
                 }
             }
@@ -297,7 +297,7 @@ impl AddState {
                     branch_strategy: BranchStrategy::NewBranch(name),
                     is_new: false,
                     fresh_repos: self.report.fetched_ok_paths(),
-                    unreachable_repos: self.report.timed_out_paths(),
+                    slow_fetch_repos: self.report.slow_fetch_paths(),
                 })
             }
             _ => {
@@ -348,7 +348,7 @@ impl AddState {
                     branch_strategy: BranchStrategy::ExistingBranch(branch),
                     is_new: false,
                     fresh_repos: self.report.fetched_ok_paths(),
-                    unreachable_repos: self.report.timed_out_paths(),
+                    slow_fetch_repos: self.report.slow_fetch_paths(),
                 })
             }
             _ => {
