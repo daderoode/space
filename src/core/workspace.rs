@@ -143,7 +143,6 @@ pub fn workspace_detail(ws_dir: &Path, name: &str) -> Result<Workspace> {
     })
 }
 
-/// Create a git worktree for `repo_path` inside `ws_dir/<ws_name>/<repo_name>`.
 /// Run a git command, capturing stdout+stderr. On non-zero exit, returns an
 /// error that includes the first non-empty line of stderr so the TUI can show
 /// the real git message (e.g. "'main' is already used by worktree at ...").
@@ -1362,6 +1361,69 @@ pub fn refuses_because_checked_out(err: &str) -> bool {
         .any(|marker| err.contains(marker))
 }
 
+/// The path `create_worktree*` adds for `repo_path` in this space:
+/// `<ws_dir>/<ws_name>/<the repo directory's name>`.
+///
+/// Shared rather than derived twice because the Creating worker asks
+/// `is_worktree_of` about this exact path before attempting the add. Two
+/// copies of the rule would let the predicate check one path while the add
+/// created another, and the skip would quietly stop matching.
+pub fn worktree_path(ws_dir: &Path, ws_name: &str, repo_path: &Path) -> PathBuf {
+    let repo_name = repo_path.file_name().unwrap_or_default().to_string_lossy();
+    ws_dir.join(ws_name).join(repo_name.as_ref())
+}
+
+/// Whether `wt_path` is a git worktree of the repo at `repo_path`: the
+/// Creating worker's definition of "already created in this space".
+///
+/// One notch stricter than the codebase's usual test for a repo in a space,
+/// `<path>/.git` exists (`workspace_repo_skeletons`, `workspace_detail`,
+/// `remove_workspace`), which a plain clone dropped in the directory also
+/// satisfies. A linked worktree's `Repository::path()` is
+/// `<source>/.git/worktrees/<id>/`, so its grandparent is the source repo's
+/// git dir, and comparing that is what ties the directory to THIS repo.
+///
+/// Both sides are canonicalised because git resolves symlinks and the app
+/// does not: on macOS a space under `$TMPDIR` comes back from git as
+/// `/private/var/...` while the config holds `/var/...`, and a byte
+/// comparison would call every such worktree foreign.
+///
+/// Branch and strategy are deliberately not checked. The retry this serves
+/// exists BECAUSE the strategy changed, so the repos already in the space are
+/// on the old one by design; demanding a match would re-attempt every one of
+/// them and fail on `already exists`, which is the defect the skip removes.
+///
+/// False on any error, on a directory that is not a repository, on a clone,
+/// and on a worktree of a different repo. Each of those still reaches
+/// `git worktree add` and fails exactly as before, which is the truthful row
+/// for a path this space does not own.
+///
+/// One case falls the same way for a different reason, and falls safe: a
+/// SOURCE repo that is itself a linked worktree has a gitlink file rather
+/// than a directory at `.git`, so the comparison cannot match and its repos
+/// are attempted as they were before the skip existed. The repo scanner does
+/// accept such a repo (`.git` merely has to exist), so this is reachable.
+pub fn is_worktree_of(wt_path: &Path, repo_path: &Path) -> bool {
+    let wt = match git2::Repository::open(wt_path) {
+        Ok(wt) => wt,
+        Err(_) => return false,
+    };
+    if !wt.is_worktree() {
+        return false;
+    }
+    let git_dir = match wt.path().parent().and_then(|p| p.parent()) {
+        Some(dir) => dir,
+        None => return false,
+    };
+    match (
+        git_dir.canonicalize(),
+        repo_path.join(".git").canonicalize(),
+    ) {
+        (Ok(linked), Ok(source)) => linked == source,
+        _ => false,
+    }
+}
+
 /// `create_worktree_with_fetch` that can be stopped at a boundary, for the
 /// Creating stage's background worker.
 ///
@@ -1395,8 +1457,7 @@ pub fn create_worktree_cancellable(
     fetch: PreCreateFetch,
     cancel: &AtomicBool,
 ) -> WorktreeAttempt {
-    let repo_name = repo_path.file_name().unwrap_or_default().to_string_lossy();
-    let wt_path = ws_dir.join(ws_name).join(repo_name.as_ref());
+    let wt_path = worktree_path(ws_dir, ws_name, repo_path);
 
     if let Err(e) = std::fs::create_dir_all(wt_path.parent().unwrap()) {
         return WorktreeAttempt {
@@ -2554,6 +2615,104 @@ mod tests {
             matches!(second.fetch, Some(FetchOutcome::Failed { .. })),
             "the fetch outcome must survive a refused add, got {:?}",
             second.fetch
+        );
+    }
+
+    /// A one-commit repo on `main` at `<parent>/<name>`.
+    fn plain_repo(parent: &Path, name: &str) -> PathBuf {
+        let path = parent.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        Cmd::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&path)
+            .output()
+            .unwrap();
+        git_setup(&path);
+        git(&["commit", "--allow-empty", "-m", "init"], &path);
+        path
+    }
+
+    /// The predicate the Creating worker skips on. A worktree made by the
+    /// production path counts whatever branch it carries, which is the case
+    /// the retry after a checked-out bounce turns on: the repos already in
+    /// the space were created under the strategy the user has just replaced.
+    #[test]
+    fn is_worktree_of_accepts_a_worktree_of_the_source_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = plain_repo(tmp.path(), "repo");
+
+        let wt = create_worktree_with_fetch(
+            &repo,
+            &tmp.path().join("spaces"),
+            "ws-a",
+            &BranchStrategy::NewBranch("topic".to_string()),
+            PreCreateFetch::Skip,
+        )
+        .created
+        .expect("the fixture's worktree must be created");
+
+        assert_eq!(
+            git::current_branch(&wt).unwrap(),
+            "topic",
+            "the fixture is on a branch the source repo is not on, so a \
+             branch-blind predicate is what is being asserted"
+        );
+        assert!(
+            is_worktree_of(&wt, &repo),
+            "a worktree of the source repo is already created in this space"
+        );
+    }
+
+    /// The three shapes that must NOT be skipped. Each one still reaches
+    /// `git worktree add` and fails with `already exists`, which is the
+    /// truthful row for a path the space does not own.
+    ///
+    /// The clone is the case that decides the definition: `<path>/.git
+    /// exists`, which `workspace_detail` and `remove_workspace` use for "a
+    /// repo in a space", accepts it.
+    #[test]
+    fn is_worktree_of_rejects_a_plain_directory_a_clone_and_another_repos_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = plain_repo(tmp.path(), "repo");
+        let other = plain_repo(tmp.path(), "other");
+        let spaces = tmp.path().join("spaces");
+
+        let plain = spaces.join("ws-a").join("repo");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("README.md"), "not a repo\n").unwrap();
+        assert!(
+            !is_worktree_of(&plain, &repo),
+            "a plain directory is not a worktree of anything"
+        );
+
+        let clone = spaces.join("ws-b").join("repo");
+        std::fs::create_dir_all(clone.parent().unwrap()).unwrap();
+        git(
+            &["clone", repo.to_str().unwrap(), clone.to_str().unwrap()],
+            tmp.path(),
+        );
+        assert!(
+            clone.join(".git").is_dir(),
+            "the fixture must be a real clone, which `.git exists` would accept"
+        );
+        assert!(
+            !is_worktree_of(&clone, &repo),
+            "a clone of the source repo is not a worktree of it"
+        );
+
+        let foreign = spaces.join("ws-c").join("repo");
+        std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+        git(
+            &["worktree", "add", "-b", "topic", foreign.to_str().unwrap()],
+            &other,
+        );
+        assert!(
+            is_worktree_of(&foreign, &other),
+            "the fixture must be a worktree of the OTHER repo"
+        );
+        assert!(
+            !is_worktree_of(&foreign, &repo),
+            "a worktree of a different repo must not count as this repo's"
         );
     }
 
