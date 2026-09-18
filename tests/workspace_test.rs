@@ -90,21 +90,37 @@ fn create_worktree_reuses_existing_local_branch() {
     );
 }
 
+/// `is_err()` alone was not a test of what its name claimed. `create_worktree`
+/// returns an error for every reason git can refuse an add, so the assertion
+/// held whether the refusal was recognised as "the branch is checked out
+/// elsewhere" or fell through to the generic failure path, and those are the
+/// two outcomes the Creating stage acts on differently: only the first bounces
+/// the user back to the branch-strategy picker. This pins the refusal against
+/// the predicate that gates that bounce, on whatever wording the local git uses.
 #[test]
-fn create_worktree_errors_when_branch_already_checked_out() {
+fn create_worktree_refuses_a_checked_out_branch_as_pick_another_strategy() {
     let repo_dir = TempDir::new().unwrap();
     common::init_repo(repo_dir.path());
-    // "main" is already checked out in repo_dir — try to create worktree on it
+    // "main" is already checked out in repo_dir, so the add must be refused.
     let ws_dir = TempDir::new().unwrap();
-    let result = create_worktree(
+    let err = create_worktree(
         repo_dir.path(),
         ws_dir.path(),
         "test-ws",
         &BranchStrategy::ExistingBranch("main".to_string()),
+    )
+    .expect_err("a branch checked out in the source repo cannot be added again");
+    let text = format!("{}", err);
+
+    assert!(
+        space::core::workspace::refuses_because_checked_out(&text),
+        "the refusal must be recognised as 'pick another strategy', got {:?}",
+        text
     );
     assert!(
-        result.is_err(),
-        "should error when branch is already checked out"
+        text.contains("main"),
+        "the refusal must name the checked-out branch, got {:?}",
+        text
     );
 }
 
@@ -563,22 +579,23 @@ fn create_worktree_cancellable_creates_when_the_flag_is_unset() {
     );
 }
 
-/// `refuses_because_checked_out` documents a limit rather than asserting a
-/// desirable one: it matches git's pre-2.42 wording only. On git 2.50.1
-/// (Apple Git-155) `git worktree add` refuses with "is already used by
-/// worktree at", which this does not match, so the strategy-picker bounce it
-/// gates is dormant there and the generic failure path runs instead.
+/// Git renamed this refusal mid-flight and both spellings are still in the
+/// wild, so the predicate has to know both: "is already used by worktree at"
+/// (git 2.42 and later, including the 2.50.1 this is developed on) and "is
+/// already checked out at" (git 2.38 to 2.41). A wording it misses is a user
+/// shown a generic failure instead of the branch-strategy picker the stage
+/// bounces to, which is what a wording drift cost once already.
 #[test]
-fn refuses_because_checked_out_matches_only_the_pre_2_42_wording() {
+fn refuses_because_checked_out_matches_both_git_wordings() {
     use space::core::workspace::refuses_because_checked_out;
 
     assert!(
         refuses_because_checked_out("fatal: 'main' is already checked out at '/x'"),
-        "the pre-2.42 wording is the one this predicate was written for"
+        "git 2.38 to 2.41 wording must bounce to the strategy picker"
     );
     assert!(
-        !refuses_because_checked_out("fatal: 'main' is already used by worktree at '/x'"),
-        "git 2.50.1's wording is NOT matched: the bounce is dormant on modern git"
+        refuses_because_checked_out("fatal: 'main' is already used by worktree at '/x'"),
+        "git 2.42 and later wording must bounce to the strategy picker"
     );
     assert!(
         !refuses_because_checked_out("fatal: not a git repository"),

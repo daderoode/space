@@ -1064,18 +1064,17 @@ impl App {
             // bound on the worker's progress and can never name its next
             // statement. See the comment at the worker's terminal region.
             //
-            // Blind spot, deliberate and currently unreachable. `finished`
-            // reaches the total one statement before the worker decides which
-            // terminal message to send: it sends `Finished` for the last repo,
-            // then evaluates whether to send `Stopped(AlreadyCheckedOut)`. An
-            // Esc in that window is swallowed here and the next drain bounces
-            // to the strategy picker, so the user pressed Esc to leave and
+            // Blind spot, deliberate and reachable. `finished` reaches the
+            // total one statement before the worker decides which terminal
+            // message to send: it sends `Finished` for the last repo, then
+            // evaluates whether to send `Stopped(AlreadyCheckedOut)`. An Esc
+            // in that window is swallowed here and the next drain bounces to
+            // the strategy picker, so the user pressed Esc to leave and
             // arrives at the picker instead, with the key gone rather than
             // delayed. Accepted: it beats reporting a finished run as a stop,
-            // and it does not replay a key into a screen the user has not seen.
-            // It cannot fire today because the predicate behind `stop` is dead
-            // on git 2.42 and later; ticket 09's follow-up 6 owns fixing that
-            // and says to pin this interaction in the same change.
+            // and it does not replay a key into a screen the user has not
+            // seen. Pinned by
+            // `esc_between_the_last_finished_and_the_stop_is_swallowed_and_the_bounce_arrives`.
             if job.finished >= job.params.repos.len() {
                 // Left for the next drain, which finishes the run through the
                 // one completion path. Esc costs a frame nobody perceives.
@@ -1292,7 +1291,7 @@ impl App {
                     };
                     job.cancel.store(true, Ordering::Relaxed);
                     let msg = format!(
-                        "'{}' is already checked out — pick a different strategy",
+                        "'{}' is already checked out: pick a different strategy",
                         repo_label(&job.params, index)
                     );
                     match &mut self.screen {
@@ -4005,6 +4004,57 @@ mod tests {
         );
     }
 
+    /// End to end on the installed git, because the wording is the whole
+    /// point. A `worktree add` refused because the branch is checked out in
+    /// the source repo must end the run with `Stopped(AlreadyCheckedOut)` and
+    /// no `Done`, which is what puts the user back on the strategy picker with
+    /// a reason instead of on a generic failure. Every other test in this file
+    /// feeds the refusal in as a literal, so this is the only one that notices
+    /// when the local git's phrasing stops matching the predicate: 2.42 and
+    /// later say "used by worktree at", 2.38 to 2.41 "checked out at", and a
+    /// predicate that knew only the older one made this path dead code.
+    #[test]
+    fn run_create_worker_stops_on_a_branch_checked_out_in_the_source_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_a = make_repo(tmp.path(), "repo-a");
+        let ws_dir = tmp.path().join("spaces");
+        let mut params = create_params(&ws_dir, "ws-a", vec![repo_a]);
+        // `main` is checked out in the source repo, so git refuses the add.
+        params.branch_strategy =
+            crate::core::workspace::BranchStrategy::ExistingBranch("main".to_string());
+
+        let (tx, rx) = mpsc::sync_channel::<CreateProgress>(64);
+        run_create_worker(params, tx, Arc::new(AtomicBool::new(false)));
+
+        assert!(matches!(
+            rx.recv().unwrap(),
+            CreateProgress::Started { index: 0 }
+        ));
+        match rx.recv().unwrap() {
+            CreateProgress::Finished { index, created, .. } => {
+                assert_eq!(index, 0);
+                let err = created.expect_err("a branch checked out elsewhere cannot be added");
+                assert!(
+                    crate::core::workspace::refuses_because_checked_out(&err),
+                    "this git's refusal must be recognised as 'pick another strategy', got {:?}",
+                    err
+                );
+            }
+            _ => panic!("expected Finished for the refused repo"),
+        }
+        assert!(
+            matches!(
+                rx.recv().unwrap(),
+                CreateProgress::Stopped(CreateStop::AlreadyCheckedOut { index: 0 })
+            ),
+            "the refusal must end the run with the bounce, not carry on"
+        );
+        assert!(
+            rx.recv().is_err(),
+            "the run ends at the stop: no Done follows it, and the worker is gone"
+        );
+    }
+
     #[test]
     fn run_create_worker_honors_preset_cancel_flag() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4252,7 +4302,7 @@ mod tests {
                 assert!(st.progress.is_empty(), "the log is cleared on the bounce");
                 assert_eq!(
                     st.error.as_deref(),
-                    Some("'repo-a' is already checked out — pick a different strategy")
+                    Some("'repo-a' is already checked out: pick a different strategy")
                 );
             }
             _ => panic!("expected the create screen"),
@@ -4452,13 +4502,123 @@ mod tests {
                 );
                 assert_eq!(
                     st.error.as_deref(),
-                    Some("'repo-a' is already checked out — pick a different strategy"),
+                    Some("'repo-a' is already checked out: pick a different strategy"),
                     "the actionable reason must not be replaced by a generic stop"
                 );
             }
             _ => panic!("expected the strategy picker, not the dashboard"),
         }
         assert!(app.create_job.is_none());
+    }
+
+    /// The window `cancel_creating`'s guard is documented to swallow, pinned
+    /// here because the predicate fix makes it reachable. On the LAST repo the
+    /// worker sends `Finished` (so `finished` reaches `repos.len()`) and only
+    /// THEN decides to send `Stopped(AlreadyCheckedOut)`, so there is an
+    /// interval where the counters say the run is over, the channel is empty,
+    /// and the bounce is still coming.
+    ///
+    /// An Esc landing there is swallowed: the job is left in place, the cancel
+    /// flag stays clear, the screen does not move, and the next drain delivers
+    /// the bounce. That is the accepted behaviour rather than a defect to fix,
+    /// because both alternatives are worse: reporting a finished run as a stop
+    /// is a success reported as a failure, and replaying the key would push it
+    /// into a screen the user has not been shown yet. The user loses the key,
+    /// not the recovery path.
+    #[test]
+    fn esc_between_the_last_finished_and_the_stop_is_swallowed_and_the_bounce_arrives() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("spaces");
+
+        let mut app = make_app(vec![]);
+        app.config.workspaces.dir = ws_dir.clone();
+        app.screen = creating_screen();
+        let params = create_params(&ws_dir, "ws-a", vec![PathBuf::from("/r/repo-a")]);
+        let (tx, cancel, job) = make_job(params);
+        app.create_job = Some(job);
+
+        tx.send(CreateProgress::Started { index: 0 }).unwrap();
+        tx.send(CreateProgress::Finished {
+            index: 0,
+            fetch: None,
+            created: Err("fatal: 'main' is already used by worktree at '/x'".to_string()),
+        })
+        .unwrap();
+        // Drained, so `finished` has reached the total and the channel is
+        // empty: the worker has not sent `Stopped` yet. That is the window.
+        app.poll_create_result();
+
+        // The routing is proven here rather than assumed. Every first-half
+        // assertion below is also true when Esc is a no-op on this stage, so
+        // without this the test could not tell "the guard swallowed the key"
+        // from "the key never reached the guard".
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let creating_in_flight = app.creating_in_flight();
+        let ctx = crate::tui::actions::ScreenContext {
+            config: &app.config,
+            creating_in_flight,
+        };
+        match &mut app.screen {
+            Screen::CreateWorkspace(st) => assert!(
+                matches!(
+                    st.handle_key(esc, &ctx),
+                    crate::tui::actions::ScreenAction::CancelCreating
+                ),
+                "Esc on the Creating stage with a worker live must route to CancelCreating"
+            ),
+            _ => panic!("expected the create screen"),
+        }
+
+        app.handle_key(esc);
+
+        assert!(
+            app.create_job.is_some(),
+            "the guard must leave the job for the drain that ends the run"
+        );
+        assert!(
+            !cancel.load(Ordering::Relaxed),
+            "a swallowed Esc must not cancel a worker that is about to stop itself"
+        );
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(
+                st.stage,
+                crate::tui::screens::create::CreateStage::Creating,
+                "the swallowed key must not move the screen"
+            ),
+            _ => panic!("expected the create screen, still creating"),
+        }
+        assert_eq!(
+            app.status_message, None,
+            "the run is neither finished nor cancelled yet, so nothing is reported"
+        );
+
+        tx.send(CreateProgress::Stopped(CreateStop::AlreadyCheckedOut {
+            index: 0,
+        }))
+        .unwrap();
+        app.poll_create_result();
+
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(
+                    st.stage,
+                    crate::tui::screens::create::CreateStage::PickBranchStrategy,
+                    "the next drain must deliver the bounce the Esc did not take"
+                );
+                assert_eq!(
+                    st.error.as_deref(),
+                    Some("'repo-a' is already checked out: pick a different strategy"),
+                    "the actionable reason survives the swallowed key"
+                );
+            }
+            _ => panic!("expected the strategy picker"),
+        }
+        assert!(app.create_job.is_none(), "the stopped job is dropped");
+        assert!(
+            cancel.load(Ordering::Relaxed),
+            "the bounce stops the worker before the user picks again"
+        );
     }
 
     #[test]
