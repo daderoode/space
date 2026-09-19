@@ -534,11 +534,27 @@ pub const UNATTENDED_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 pub const SLOW_FETCH_THRESHOLD: Duration = Duration::from_secs(5);
 /// How long a timed-out child gets to clean up after SIGTERM before SIGKILL.
 const UNATTENDED_KILL_GRACE: Duration = Duration::from_secs(2);
+/// How often an unattended run checks whether its child has exited, whether
+/// the stderr reader has finished and, after SIGTERM, whether the group leader
+/// is gone. Each check can notice a change up to one interval late, so up to
+/// two intervals land in every recorded `elapsed`: one for the child's exit,
+/// one for its reader. The reader grace and the kill grace can each run over
+/// by up to one interval. Hence the relation asserted below: the interval is
+/// at most a tenth of `UNATTENDED_READER_GRACE`, the shortest bound it cuts
+/// up, and at most a tenth of `SLOW_FETCH_THRESHOLD`, which every recorded
+/// `elapsed` is compared with. Until ticket 18, a 1s ceiling in a fetch test
+/// was the only thing that caught a slow interval, and only by accident.
 const UNATTENDED_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// How long to wait for git's stderr pipe to close after git itself exited.
 /// A helper that outlived git and still holds the pipe must not stall the
 /// caller: after this the captured text is used as is.
 const UNATTENDED_READER_GRACE: Duration = Duration::from_secs(1);
+const _: () = assert!(
+    UNATTENDED_POLL_INTERVAL.as_nanos() * 10 <= UNATTENDED_READER_GRACE.as_nanos()
+        && UNATTENDED_POLL_INTERVAL.as_nanos() * 10 <= SLOW_FETCH_THRESHOLD.as_nanos(),
+    "UNATTENDED_POLL_INTERVAL must be at most a tenth of UNATTENDED_READER_GRACE and of \
+     SLOW_FETCH_THRESHOLD"
+);
 
 /// Fetch from `origin` and fast-forward all local branches that are strictly
 /// behind their `origin/<branch>` ref (0 ahead, N behind); this assumes a single
