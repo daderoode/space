@@ -186,6 +186,46 @@ pub(crate) mod tests {
         assert!(!held, "a child started through `status` kept the pipe open");
     }
 
+    /// `output` gives the child a null stdin and captures stdout and stderr,
+    /// whatever the caller set, as its doc says. A git child that kept the
+    /// TUI's stdin would read the user's keys.
+    #[test]
+    fn output_sets_every_stream_whatever_the_caller_set() {
+        let out = output(
+            Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "[ /dev/stdin -ef /dev/null ] && echo null || echo other; echo err >&2",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "null\n");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "err\n");
+    }
+
+    /// std's fork path can panic inside `Command::spawn` while the gate is
+    /// held, which poisons it. The gate guards no data, so later spawns must
+    /// still get through.
+    #[test]
+    fn a_panic_while_the_gate_is_held_does_not_stop_later_spawns() {
+        let poisoner = std::thread::spawn(|| {
+            let _gate = hold();
+            std::panic::resume_unwind(Box::new("poison the spawn gate"));
+        });
+        assert!(poisoner.join().is_err());
+        assert!(GATE.is_poisoned(), "the panic must have poisoned the gate");
+
+        let spawned = output(&mut Command::new("/usr/bin/true"));
+        GATE.clear_poison();
+        assert!(
+            spawned.is_ok_and(|out| out.status.success()),
+            "a spawn after the gate was poisoned must still run"
+        );
+    }
+
     /// The gate covers the spawn and nothing after it: a child that has not
     /// exited must not stop another thread from starting one. The first child
     /// waits for a file that is written only once the second `output` has
