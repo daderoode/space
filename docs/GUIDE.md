@@ -655,7 +655,7 @@ Create a new workspace with git worktrees for selected repos.
 }
 ```
 
-`repos_created` lists the repos this call added a worktree for. `repos_already_created` lists the repos whose place in the workspace already held a worktree of that repo: the call left them as they were and ran no fetch and no git for them, whatever the strategy. The key is always present and empty on a clean run. A directory there that is not a worktree of that repo (a clone, or a worktree of another repo) is not adopted; it fails with `already exists`.
+`repos_created` lists the repos this call added a worktree for. `repos_already_created` lists the repos whose place in the workspace already held a worktree of that repo: the call left them as they were and ran no fetch and no git for them. Their branch is not compared with this call's `strategy` or `branch`, so they keep the one they have, and `workspace_status` shows which. The key is always present and empty on a clean run. A repo named twice in `repos` is placed once. Only a worktree of that same repo is adopted: a clone or a worktree of another repo in its place fails with `already exists`, and an empty directory is not refused (git adds the worktree into it).
 
 **Errors:**
 - Invalid workspace name -> `invalid_params` naming the clause, e.g. `invalid space name "../x": Space name cannot contain '/' or '\'`; nothing is created

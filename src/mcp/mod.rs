@@ -8,6 +8,7 @@ use rmcp::{
     ServerHandler, ServiceExt,
 };
 use serde::Serialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -214,6 +215,12 @@ struct Placed {
 /// earlier call made. Branch and strategy are not compared, as in the
 /// worker: a retry after a checked-out refusal changes them by design.
 ///
+/// A repo named more than once (`resolve_repos` matches case-insensitively,
+/// so `alpha` and `ALPHA` are one repo) is placed once, at its first
+/// position. Otherwise its second mention would find the worktree its first
+/// had just made and report it as already in place, which it was not when
+/// the call began.
+///
 /// The first failure still ends the call: repos before it stay in place,
 /// repos after it are not attempted, and the error is `failed to <verb>
 /// worktree for <repo path>: <git's line>`.
@@ -233,7 +240,11 @@ fn place_repos(
         created: Vec::new(),
         already_created: Vec::new(),
     };
+    let mut seen = HashSet::new();
     for repo_path in repo_paths {
+        if !seen.insert(repo_path) {
+            continue;
+        }
         let name = repo_path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())

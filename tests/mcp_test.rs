@@ -695,34 +695,21 @@ fn create_workspace_accepts_an_interior_space() {
 /// the repo's `main` to before the gate goes in; that push is what writes
 /// `refs/remotes/origin/main`, so `origin/main` is known without a fetch.
 fn gate_origin(env: &TestEnv, repo: &std::path::Path, name: &str) -> PathBuf {
-    let run = |args: &[&str], dir: &std::path::Path| {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&out.stderr)
-        );
-    };
     let origin = env.dir.path().join(format!("{}-origin.git", name));
-    run(
-        &["init", "-q", "--bare", origin.to_str().unwrap()],
+    git(
         env.dir.path(),
+        &["init", "-q", "--bare", origin.to_str().unwrap()],
     );
-    run(
+    git(
+        repo,
         &[
             "remote",
             "add",
             "origin",
             &format!("file://{}", origin.display()),
         ],
-        repo,
     );
-    run(&["push", "-q", "origin", "main"], repo);
+    git(repo, &["push", "-q", "origin", "main"]);
     let marker = env.dir.path().join(format!("FETCHED-{}", name));
     let script = env.dir.path().join(format!("gate-{}.sh", name));
     std::fs::write(
@@ -733,13 +720,13 @@ fn gate_origin(env: &TestEnv, repo: &std::path::Path, name: &str) -> PathBuf {
         ),
     )
     .unwrap();
-    run(
+    git(
+        repo,
         &[
             "config",
             "remote.origin.uploadpack",
             &format!("/bin/sh {}", script.display()),
         ],
-        repo,
     );
     marker
 }
@@ -1178,5 +1165,42 @@ fn an_invalid_branch_is_refused_even_when_repos_are_in_place() {
             );
         }
         assert!(!space.join("bravo").exists(), "nothing was created");
+    });
+}
+
+/// A repo named twice in one request (`resolve_repos` matches case-
+/// insensitively, so `alpha` and `ALPHA` are one repo) is placed once. It
+/// is not reported as already in place on its second mention, because it
+/// was not in place when the call began.
+#[test]
+fn a_repo_named_twice_is_placed_once() {
+    with_test_env(|env, server| {
+        let alpha = env.create_repo("alpha");
+        let bravo = env.create_repo("bravo");
+        env.write_cache(&[alpha.clone(), bravo.clone()]);
+        let space = env.workspaces_dir.join("ws");
+
+        let created = parsed(&create_ws(server, "ws", &["alpha", "ALPHA"], "new", None).unwrap());
+        assert_eq!(names(&created, "repos_created"), ["alpha"]);
+        assert!(
+            names(&created, "repos_already_created").is_empty(),
+            "alpha was not in place when the call began: {}",
+            created
+        );
+        assert!(git_lists_worktree(&alpha, &space.join("alpha")));
+
+        // Named twice when it is already in place: listed once.
+        let again = parsed(&create_ws(server, "ws", &["alpha", "alpha"], "new", None).unwrap());
+        assert!(names(&again, "repos_created").is_empty(), "{}", again);
+        assert_eq!(names(&again, "repos_already_created"), ["alpha"]);
+
+        let added = parsed(&add_to_ws(server, "ws", &["bravo", "bravo"], "new", None).unwrap());
+        assert_eq!(names(&added, "added"), ["bravo"]);
+        assert!(
+            names(&added, "already_added").is_empty(),
+            "bravo was not in place when the call began: {}",
+            added
+        );
+        assert!(git_lists_worktree(&bravo, &space.join("bravo")));
     });
 }
