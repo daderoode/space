@@ -43,6 +43,18 @@ site that skips the gate shows up as one more clippy warning.
     the whole limit. With `setsid`, the open fails at once with `Device not
     configured`. Without a terminal, as in most test harnesses, both kinds
     fail at once, so only a pty shows the difference.
+- **Call `libc::posix_spawn` directly, with `POSIX_SPAWN_CLOEXEC_DEFAULT` and
+  `POSIX_SPAWN_SETSID`.** A child started that way inherits only the
+  descriptors it is handed, whoever made the rest, and still gets a new
+  session. So it would also cover spawns the lint cannot see. It was not taken
+  for three reasons:
+  - std cannot build a `std::process::Child` from a pid it did not start. The
+    waiting, polling, killing and stderr capture in `run_unattended`, and in
+    every `output` caller, would all have to be rebuilt over raw pids.
+  - The argv, environment, working directory and file actions would need
+    unsafe FFI.
+  - It would only work on macOS, because `POSIX_SPAWN_CLOEXEC_DEFAULT` is an
+    Apple extension, and Linux has no gap to close.
 - **Start the limit before `spawn`.** A blocked `Command::spawn` cannot be
   interrupted, so the limit would still be enforced only once `spawn`
   returned, and `output` has no limit to move.
@@ -65,16 +77,25 @@ site that skips the gate shows up as one more clippy warning.
 - **`output` sets its own stdio.** It sets stdin null and stdout and stderr
   piped whatever the caller set, because a `Command` cannot report what was
   set. Callers set no stdio of their own.
-- **There is one gate per compiled copy of the module.** `main.rs` compiles its
-  own `core` rather than using the library's, so a process has a single gate
-  only while the binary reaches the library through nothing but
-  `space::logging`, which never spawns.
-  `the_binary_reaches_the_library_only_through_logging` fails if the binary's
-  own modules name the library any other way.
+- **There is one gate per process by construction.** The gate is
+  `space::SPAWN_GATE`, a static in `lib.rs`. `main.rs` compiles its own copy of
+  `core` rather than using the library's, so one process can hold two copies
+  of `spawn.rs`.
+  - Both copies lock the gate through the crate name. The library aliases
+    itself to that name (`extern crate self as space`), so the name resolves
+    to the library from either copy, and both lock the same static.
+  - The model tests hold the gate by that name, so an entry point that locked
+    anything else would fail them.
 - **Test fixtures start git directly.** They allow the lint at their module or
-  crate root. Every long-lived child in the suite starts through
-  `run_unattended`, so an ungated fixture can add only its own few
-  milliseconds to a gated run.
+  crate root, so the gate does not order them against anything. The effect
+  runs both ways:
+  - A fixture's child can inherit a gated spawn's pipe. Every long-lived child
+    in the suite is started through the gate, so a fixture's child lives only
+    milliseconds, and that is all it can add to a gated run.
+  - A gated child started while a fixture's own pipe is in its gap keeps that
+    pipe. The fixture then waits for that child's life, which can be seconds:
+    up to its test's limit plus the kill grace, or until its test releases
+    it. This slows the fixture, not the gated call; no test times a fixture.
 - **The lint cannot see spawns made in a dependency**, or through `libc`
   directly. There are none today: git2 is built without ssh or https, and rmcp
   without its child-process transport.

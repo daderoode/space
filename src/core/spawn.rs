@@ -20,22 +20,22 @@
 //! is a clippy warning. ADR 0002 records the decision and the alternatives it
 //! rejected.
 //!
-//! The gate is a static, so there is one per compiled copy of this module, and
-//! `main.rs` compiles its own copy of `core` rather than using the library's.
-//! A process therefore has a single gate only while the binary reaches the
-//! library through nothing but `space::logging`, which never spawns;
-//! `the_binary_reaches_the_library_only_through_logging` holds it to that.
+//! The gate is `space::SPAWN_GATE`, a static in `lib.rs`. `main.rs` compiles its
+//! own copy of `core` rather than using the library's, so one process can hold
+//! two copies of this module. Both lock the gate through the crate name, which
+//! resolves to the library from either one, so there is one gate per process
+//! however this module is reached.
 
 use std::io;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::{Mutex, MutexGuard};
-
-static GATE: Mutex<()> = Mutex::new(());
+use std::sync::MutexGuard;
 
 fn enter() -> MutexGuard<'static, ()> {
     // std's fork path panics inside `spawn` when its exec-error pipe fails,
     // which poisons the gate. The gate guards no data, so later spawns go on.
-    GATE.lock().unwrap_or_else(|e| e.into_inner())
+    ::space::SPAWN_GATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 /// `Command::spawn` behind the gate.
@@ -66,9 +66,13 @@ pub fn status(cmd: &mut Command) -> io::Result<ExitStatus> {
 
 /// Hold the gate for as long as the guard lives, so a test can make a pipe the
 /// way std does and show that nothing started through this module inherits it.
+/// It locks the gate by its own name rather than through `enter`, so an entry
+/// point that locked anything else would be caught.
 #[cfg(test)]
 pub(crate) fn hold() -> MutexGuard<'static, ()> {
-    enter()
+    ::space::SPAWN_GATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 #[cfg(test)]
@@ -83,8 +87,12 @@ pub(crate) mod tests {
     /// How long the pipe is left without close-on-exec while `start` runs. An
     /// ungated start creates its child well inside it (under a millisecond
     /// here), and a gated one cannot create it at all until the gap has
-    /// closed. Every gated spawn in the test binary waits out this gap, so it
-    /// stays short.
+    /// closed, so a gated test always runs the whole gap. Every other gated
+    /// spawn in the test binary waits it out, so the four gated model tests
+    /// cost up to 800ms of gate time per test binary. Timing bounds elsewhere
+    /// in the suite leave room for that, and tightening one of them should
+    /// account for it. A machine too loaded to start a child within the gap
+    /// lets an ungated entry point pass one run, but never fails a gated one.
     const GAP: Duration = Duration::from_millis(200);
     /// A backstop, not a measurement: with nothing holding the pipe,
     /// end-of-file arrives as soon as the test closes its own write end.
@@ -117,6 +125,14 @@ pub(crate) mod tests {
     pub(crate) fn a_child_started_in_the_gap_holds_the_pipe(
         start: impl FnOnce(Command) + Send + 'static,
     ) -> bool {
+        holds_the_pipe_after(GAP, HOLD_LIMIT, start)
+    }
+
+    fn holds_the_pipe_after(
+        gap: Duration,
+        eof_within: Duration,
+        start: impl FnOnce(Command) + Send + 'static,
+    ) -> bool {
         let tmp = tempfile::tempdir().unwrap();
         let started = tmp.path().join("started");
         let release = tmp.path().join("release");
@@ -133,7 +149,7 @@ pub(crate) mod tests {
             unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
 
         let starter = std::thread::spawn(move || start(child));
-        let gap_ends = Instant::now() + GAP;
+        let gap_ends = Instant::now() + gap;
         while !started.exists() && Instant::now() < gap_ends {
             std::thread::sleep(Duration::from_millis(2));
         }
@@ -151,7 +167,7 @@ pub(crate) mod tests {
             revents: 0,
         };
         // SAFETY: one valid pollfd for a descriptor this function owns.
-        let polled = unsafe { libc::poll(&mut ready, 1, HOLD_LIMIT.as_millis() as libc::c_int) };
+        let polled = unsafe { libc::poll(&mut ready, 1, eof_within.as_millis() as libc::c_int) };
         assert!(polled >= 0, "poll: {}", io::Error::last_os_error());
         let held = polled == 0;
 
@@ -186,6 +202,21 @@ pub(crate) mod tests {
         assert!(!held, "a child started through `status` kept the pipe open");
     }
 
+    /// The control for the four tests above: with no gate at all, a child
+    /// started in the gap keeps the pipe, so the harness can see what they
+    /// assert is absent. The gap may run to `HOLD_LIMIT` here because an
+    /// ungated child starts, and closes the gap, within milliseconds. The
+    /// child keeps the pipe until the test releases it, so half a second
+    /// without end-of-file is enough to call it held.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // the ungated spawn is the point
+    fn a_child_started_without_the_gate_holds_the_pipe() {
+        let held = holds_the_pipe_after(HOLD_LIMIT, Duration::from_millis(500), |mut child| {
+            child.spawn().unwrap().wait().unwrap();
+        });
+        assert!(held, "a child started with no gate did not keep the pipe");
+    }
+
     /// `output` gives the child a null stdin and captures stdout and stderr,
     /// whatever the caller set, as its doc says. A git child that kept the
     /// TUI's stdin would read the user's keys.
@@ -216,10 +247,13 @@ pub(crate) mod tests {
             std::panic::resume_unwind(Box::new("poison the spawn gate"));
         });
         assert!(poisoner.join().is_err());
-        assert!(GATE.is_poisoned(), "the panic must have poisoned the gate");
+        assert!(
+            ::space::SPAWN_GATE.is_poisoned(),
+            "the panic must have poisoned the gate"
+        );
 
         let spawned = output(&mut Command::new("/usr/bin/true"));
-        GATE.clear_poison();
+        ::space::SPAWN_GATE.clear_poison();
         assert!(
             spawned.is_ok_and(|out| out.status.success()),
             "a spawn after the gate was poisoned must still run"
@@ -238,10 +272,15 @@ pub(crate) mod tests {
         let release = tmp.path().join("release");
         let mut first = waiting_child(tmp.path(), &started, &release);
         let first = std::thread::spawn(move || output(&mut first).unwrap());
+        let backstop = Instant::now() + HOLD_LIMIT;
         while !started.exists() {
             assert!(
                 !first.is_finished(),
                 "the first child ended before it started"
+            );
+            assert!(
+                Instant::now() < backstop,
+                "the first child did not start within {HOLD_LIMIT:?}"
             );
             std::thread::sleep(Duration::from_millis(2));
         }
@@ -258,76 +297,6 @@ pub(crate) mod tests {
         assert!(
             second_returned,
             "a second `output` could not return while the first child was still running"
-        );
-    }
-
-    /// See the module doc: the binary compiles its own `core`, so a spawn it
-    /// reached through the library would run behind a second gate. Code in a
-    /// module the library also compiles cannot name the library by its crate
-    /// name, since the library cannot name itself, so only the binary's own
-    /// modules can. Those are the ones `main.rs` declares and `lib.rs` does not.
-    /// In them, only `space::logging`, which never spawns, may be named.
-    #[test]
-    fn the_binary_reaches_the_library_only_through_logging() {
-        use std::path::PathBuf;
-
-        fn declared_modules(file: &Path) -> Vec<String> {
-            std::fs::read_to_string(file)
-                .unwrap()
-                .lines()
-                .filter_map(|line| {
-                    let line = line.trim();
-                    let line = line.strip_prefix("pub ").unwrap_or(line);
-                    let name = line.strip_prefix("mod ")?.strip_suffix(';')?;
-                    Some(name.to_string())
-                })
-                .collect()
-        }
-        fn rust_files(path: &Path, out: &mut Vec<PathBuf>) {
-            if path.is_dir() {
-                for entry in std::fs::read_dir(path).unwrap() {
-                    rust_files(&entry.unwrap().path(), out);
-                }
-            } else if path.is_file() && path.extension().is_some_and(|e| e == "rs") {
-                out.push(path.to_path_buf());
-            }
-        }
-
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let library = declared_modules(&src.join("lib.rs"));
-        let binary_only: Vec<String> = declared_modules(&src.join("main.rs"))
-            .into_iter()
-            .filter(|m| !library.contains(m))
-            .collect();
-        assert!(
-            !binary_only.is_empty(),
-            "found no module only the binary declares"
-        );
-        let mut files = vec![src.join("main.rs")];
-        for module in &binary_only {
-            rust_files(&src.join(format!("{module}.rs")), &mut files);
-            rust_files(&src.join(module), &mut files);
-        }
-
-        let mut offending = Vec::new();
-        for file in &files {
-            let text = std::fs::read_to_string(file).unwrap();
-            for (number, line) in text.lines().enumerate() {
-                let code = line.split("//").next().unwrap_or("");
-                for (at, _) in code.match_indices("space::") {
-                    let before = code[..at].chars().next_back();
-                    let names_the_crate = !before.is_some_and(|c| c.is_alphanumeric() || c == '_');
-                    if names_the_crate && !code[at..].starts_with("space::logging") {
-                        offending.push(format!("{}:{}", file.display(), number + 1));
-                    }
-                }
-            }
-        }
-        assert!(
-            offending.is_empty(),
-            "the binary reaches the library other than through space::logging at {:?}; \
-             a spawn reached that way runs behind the library's gate, not the binary's",
-            offending
         );
     }
 }

@@ -447,9 +447,11 @@ pub enum FetchOutcome {
     /// clock of the whole unattended run: the child's own time plus the
     /// bounded wait (at most `UNATTENDED_READER_GRACE`) for its stderr to
     /// drain, which normally ends at once because the pipe closes with the
-    /// child. It is what `is_slow` reads: a failure says nothing about
-    /// whether repeating it is cheap, and the duration does. It is
-    /// `Duration::ZERO` when nothing ran.
+    /// child. It also counts any wait for the spawn gate (`core::spawn`),
+    /// which is the length of other threads' spawns: milliseconds, far below
+    /// `SLOW_FETCH_THRESHOLD`. It is what `is_slow` reads: a failure says
+    /// nothing about whether repeating it is cheap, and the duration does. It
+    /// is `Duration::ZERO` when nothing ran.
     Failed {
         exit_code: Option<i32>,
         stderr: String,
