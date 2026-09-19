@@ -1782,16 +1782,15 @@ fn strategy_reads_origin(repo_path: &Path, strategy: &BranchStrategy) -> bool {
 /// refspec is made to work in a repo with a checked-out branch.
 fn fetch_writes_local_branches(repo: &git2::Repository) -> bool {
     // Every failure to read falls on the side that fetches, the same
-    // default `strategy_reads_origin` takes for a repo git2 cannot open;
-    // only an absent key (no `origin`, or one with no fetch refspec) means
-    // there is nothing for the fetch to move.
+    // default `strategy_reads_origin` takes for a repo git2 cannot open. An
+    // absent key (no `origin`, or one with no fetch refspec) is not a
+    // failure: the iterator is simply empty, and empty means there is
+    // nothing for the fetch to move.
     let Ok(config) = repo.config() else {
         return true;
     };
-    let mut entries = match config.multivar("remote.origin.fetch", None) {
-        Ok(entries) => entries,
-        Err(e) if e.code() == git2::ErrorCode::NotFound => return false,
-        Err(_) => return true,
+    let Ok(mut entries) = config.multivar("remote.origin.fetch", None) else {
+        return true;
     };
     while let Some(entry) = entries.next() {
         let Ok(entry) = entry else {
