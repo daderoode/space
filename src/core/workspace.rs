@@ -1,4 +1,5 @@
 use crate::core::git::{self, RepoStatus};
+use crate::core::spawn;
 use anyhow::{Context, Result};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -171,12 +172,11 @@ fn checked_space_name(name: &str) -> Result<()> {
 /// On refusal the error is git's own line with `fatal: ` stripped, e.g.
 /// `'-foo' is not a valid branch name`.
 pub fn check_branch_name(name: &str) -> Result<()> {
-    let out = match Command::new("git")
-        .args(["check-ref-format", "--branch", name])
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .output()
-    {
+    let out = match spawn::output(
+        Command::new("git")
+            .args(["check-ref-format", "--branch", name])
+            .env("LC_ALL", "C"),
+    ) {
         Ok(out) => out,
         Err(_) => return Ok(()),
     };
@@ -312,12 +312,13 @@ pub fn workspace_detail(ws_dir: &Path, name: &str) -> Result<Workspace> {
 /// the generic failure and the strategy-picker bounce would be dead again.
 /// The cost is that every `worktree add` refusal reaches the log in English.
 fn git_worktree_add(args: &[&str], cwd: &Path) -> Result<()> {
-    let out = Command::new("git")
-        .args(args)
-        .env("LC_ALL", "C")
-        .current_dir(cwd)
-        .output()
-        .with_context(|| "failed to spawn git")?;
+    let out = spawn::output(
+        Command::new("git")
+            .args(args)
+            .env("LC_ALL", "C")
+            .current_dir(cwd),
+    )
+    .with_context(|| "failed to spawn git")?;
 
     if out.status.success() {
         return Ok(());
@@ -346,10 +347,7 @@ fn git_worktree_add(args: &[&str], cwd: &Path) -> Result<()> {
 /// On non-zero exit, returns an error with the first meaningful git error line.
 #[allow(dead_code)] // used by switch_worktree_branch; bin crate has private mod core
 fn run_git_in(cwd: &Path, args: &[&str]) -> Result<()> {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
+    let out = spawn::output(Command::new("git").args(args).current_dir(cwd))
         .with_context(|| "failed to spawn git")?;
     if out.status.success() {
         return Ok(());
@@ -387,24 +385,26 @@ pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) ->
 
     // Check local branch (refs/heads/ scopes the lookup to branches only, not tags)
     let local_ref = format!("refs/heads/{}", local_name);
-    let local_exists = Command::new("git")
-        .args(["rev-parse", "--verify", &local_ref])
-        .current_dir(wt_path)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let local_exists = spawn::output(
+        Command::new("git")
+            .args(["rev-parse", "--verify", &local_ref])
+            .current_dir(wt_path),
+    )
+    .map(|o| o.status.success())
+    .unwrap_or(false);
 
     if local_exists {
         return run_git_in(wt_path, &["switch", "--", local_name]);
     }
 
     // Check remote branch
-    let remote_exists = Command::new("git")
-        .args(["rev-parse", "--verify", &remote_ref])
-        .current_dir(wt_path)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let remote_exists = spawn::output(
+        Command::new("git")
+            .args(["rev-parse", "--verify", &remote_ref])
+            .current_dir(wt_path),
+    )
+    .map(|o| o.status.success())
+    .unwrap_or(false);
 
     if remote_exists {
         return run_git_in(wt_path, &["switch", "-c", local_name, &remote_ref]);
@@ -447,9 +447,11 @@ pub enum FetchOutcome {
     /// clock of the whole unattended run: the child's own time plus the
     /// bounded wait (at most `UNATTENDED_READER_GRACE`) for its stderr to
     /// drain, which normally ends at once because the pipe closes with the
-    /// child. It is what `is_slow` reads: a failure says nothing about
-    /// whether repeating it is cheap, and the duration does. It is
-    /// `Duration::ZERO` when nothing ran.
+    /// child. It also counts any wait for the spawn gate (`core::spawn`),
+    /// which is the length of other threads' spawns: milliseconds, far below
+    /// `SLOW_FETCH_THRESHOLD`. It is what `is_slow` reads: a failure says
+    /// nothing about whether repeating it is cheap, and the duration does. It
+    /// is `Duration::ZERO` when nothing ran.
     Failed {
         exit_code: Option<i32>,
         stderr: String,
@@ -534,11 +536,27 @@ pub const UNATTENDED_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 pub const SLOW_FETCH_THRESHOLD: Duration = Duration::from_secs(5);
 /// How long a timed-out child gets to clean up after SIGTERM before SIGKILL.
 const UNATTENDED_KILL_GRACE: Duration = Duration::from_secs(2);
+/// How often an unattended run checks whether its child has exited, whether
+/// the stderr reader has finished and, after SIGTERM, whether the group leader
+/// is gone. Each check can notice a change up to one interval late, so up to
+/// two intervals land in every recorded `elapsed`: one for the child's exit,
+/// one for its reader. The reader grace and the kill grace can each run over
+/// by up to one interval. Hence the relation asserted below: the interval is
+/// at most a tenth of `UNATTENDED_READER_GRACE`, the shortest bound it cuts
+/// up, and at most a tenth of `SLOW_FETCH_THRESHOLD`, which every recorded
+/// `elapsed` is compared with. Until ticket 18, a 1s ceiling in a fetch test
+/// was the only thing that caught a slow interval, and only by accident.
 const UNATTENDED_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// How long to wait for git's stderr pipe to close after git itself exited.
 /// A helper that outlived git and still holds the pipe must not stall the
 /// caller: after this the captured text is used as is.
 const UNATTENDED_READER_GRACE: Duration = Duration::from_secs(1);
+const _: () = assert!(
+    UNATTENDED_POLL_INTERVAL.as_nanos() * 10 <= UNATTENDED_READER_GRACE.as_nanos()
+        && UNATTENDED_POLL_INTERVAL.as_nanos() * 10 <= SLOW_FETCH_THRESHOLD.as_nanos(),
+    "UNATTENDED_POLL_INTERVAL must be at most a tenth of UNATTENDED_READER_GRACE and of \
+     SLOW_FETCH_THRESHOLD"
+);
 
 /// Fetch from `origin` and fast-forward all local branches that are strictly
 /// behind their `origin/<branch>` ref (0 ahead, N behind); this assumes a single
@@ -595,12 +613,12 @@ pub fn sync_repo_cancellable(
         // `LC_ALL=C` pins git's output language so `parse_skip_reason` sees
         // the English refusal; a localized git would turn every skip into
         // `Other`.
-        let out = Command::new("git")
-            .args(["branch", "-f", &branch, &remote_ref])
-            .env("LC_ALL", "C")
-            .current_dir(repo_path)
-            .stdin(Stdio::null())
-            .output();
+        let out = spawn::output(
+            Command::new("git")
+                .args(["branch", "-f", &branch, &remote_ref])
+                .env("LC_ALL", "C")
+                .current_dir(repo_path),
+        );
         match out {
             Ok(o) if o.status.success() => forwarded.push(branch),
             Ok(o) => {
@@ -765,7 +783,7 @@ fn run_unattended(mut cmd: Command, timeout: Duration) -> Unattended {
             }
         });
     }
-    let mut child = match cmd.spawn() {
+    let mut child = match spawn::spawn(&mut cmd) {
         Ok(c) => c,
         Err(e) => return Unattended::SpawnFailed(e),
     };
@@ -1001,13 +1019,14 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
         }
     };
 
-    // `.output()` (not `.status()`): capture stderr both to surface the real
+    // `spawn::output` (not `spawn::status`): capture stderr both to surface the real
     // failure cause (auth, DNS, missing remote) and to keep git from writing
     // to the inherited stderr, which would scribble over the raw-mode TUI.
-    let fetch = Command::new("git")
-        .args(["fetch", "--quiet", "origin"])
-        .current_dir(repo_path)
-        .output();
+    let fetch = spawn::output(
+        Command::new("git")
+            .args(["fetch", "--quiet", "origin"])
+            .current_dir(repo_path),
+    );
     let fetch_failed_message = match &fetch {
         Ok(o) if o.status.success() => None,
         Ok(o) => {
@@ -1029,17 +1048,18 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
 
     // No `origin/<branch>` upstream to pull from (checked post-fetch so the
     // remote-tracking refs are fresh).
-    let remote_exists = Command::new("git")
-        .args([
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/remotes/origin/{}", branch),
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let remote_exists = spawn::output(
+        Command::new("git")
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/remotes/origin/{}", branch),
+            ])
+            .current_dir(repo_path),
+    )
+    .map(|o| o.status.success())
+    .unwrap_or(false);
     if !remote_exists {
         return PullResult {
             outcome: PullOutcome::NoUpstream,
@@ -1051,10 +1071,11 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
 
     if behind > 0 && ahead == 0 {
         let remote_ref = format!("origin/{}", branch);
-        let output = Command::new("git")
-            .args(["merge", "--ff-only", &remote_ref])
-            .current_dir(repo_path)
-            .output();
+        let output = spawn::output(
+            Command::new("git")
+                .args(["merge", "--ff-only", &remote_ref])
+                .current_dir(repo_path),
+        );
         match output {
             Ok(o) if o.status.success() => {
                 return PullResult {
@@ -1095,12 +1116,13 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
 
     if ahead > 0 && behind > 0 {
         let remote_ref = format!("origin/{}", branch);
-        let merged = Command::new("git")
-            .args(["merge", "--no-edit", &remote_ref])
-            .current_dir(repo_path)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        let merged = spawn::output(
+            Command::new("git")
+                .args(["merge", "--no-edit", &remote_ref])
+                .current_dir(repo_path),
+        )
+        .map(|o| o.status.success())
+        .unwrap_or(false);
         if merged {
             return PullResult {
                 outcome: PullOutcome::Merged,
@@ -1112,10 +1134,11 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
         }
         // Merge left conflicts: restore the pre-merge worktree so `space` never
         // leaves the repo half-merged.
-        let _ = Command::new("git")
-            .args(["merge", "--abort"])
-            .current_dir(repo_path)
-            .status();
+        let _ = spawn::status(
+            Command::new("git")
+                .args(["merge", "--abort"])
+                .current_dir(repo_path),
+        );
         return PullResult {
             outcome: PullOutcome::Conflicted,
             message: format!(
@@ -1180,10 +1203,7 @@ pub fn push_repo(repo_path: &Path, set_upstream: bool) -> PushResult {
         vec!["push".to_string()]
     };
 
-    let out = Command::new("git")
-        .args(&args)
-        .current_dir(repo_path)
-        .output();
+    let out = spawn::output(Command::new("git").args(&args).current_dir(repo_path));
 
     match out {
         Ok(o) => {
@@ -1224,10 +1244,11 @@ pub struct CommitResult {
 /// user's signature/gpg settings. A commit with nothing staged returns
 /// `success == false` with git's "nothing to commit" text in `message`.
 pub fn commit_repo(repo_path: &Path, message: &str) -> CommitResult {
-    let out = Command::new("git")
-        .args(["commit", "-m", message])
-        .current_dir(repo_path)
-        .output();
+    let out = spawn::output(
+        Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(repo_path),
+    );
 
     match out {
         Ok(o) => {
@@ -1332,21 +1353,23 @@ pub fn rebase_repo(repo_path: &Path, onto: &str) -> RebaseResult {
     // rebase can still proceed onto a local target. `GIT_TERMINAL_PROMPT=0`
     // keeps this optional fetch from opening a credential prompt on /dev/tty,
     // which would hang or scribble over the raw-mode TUI.
-    let _ = Command::new("git")
-        .args(["fetch", "--quiet", "origin"])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .current_dir(repo_path)
-        .output();
+    let _ = spawn::output(
+        Command::new("git")
+            .args(["fetch", "--quiet", "origin"])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .current_dir(repo_path),
+    );
 
     // `LC_ALL=C` pins git's output language so the up-to-date classification
     // below (`stdout.contains("is up to date")`) is stable: git localizes that
     // message via gettext, and a non-English LANG would misclassify UpToDate
     // as Rebased.
-    let out = Command::new("git")
-        .args(["rebase", onto])
-        .env("LC_ALL", "C")
-        .current_dir(repo_path)
-        .output();
+    let out = spawn::output(
+        Command::new("git")
+            .args(["rebase", onto])
+            .env("LC_ALL", "C")
+            .current_dir(repo_path),
+    );
 
     match out {
         Ok(o) if o.status.success() => {
@@ -1368,12 +1391,13 @@ pub fn rebase_repo(repo_path: &Path, onto: &str) -> RebaseResult {
             // `git rebase --abort` succeeds only when a rebase is in progress,
             // so its result cleanly distinguishes the two without touching the
             // worktree's git-dir layout.
-            let aborted = Command::new("git")
-                .args(["rebase", "--abort"])
-                .current_dir(repo_path)
-                .output()
-                .map(|a| a.status.success())
-                .unwrap_or(false);
+            let aborted = spawn::output(
+                Command::new("git")
+                    .args(["rebase", "--abort"])
+                    .current_dir(repo_path),
+            )
+            .map(|a| a.status.success())
+            .unwrap_or(false);
             if aborted {
                 RebaseResult {
                     outcome: RebaseOutcome::Conflicted,
@@ -1415,11 +1439,12 @@ pub fn rebase_repo(repo_path: &Path, onto: &str) -> RebaseResult {
 /// The current checked-out branch name, or `None` when HEAD is detached (no
 /// symbolic branch ref).
 fn current_branch_name(repo_path: &Path) -> Option<String> {
-    let out = Command::new("git")
-        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .current_dir(repo_path)
-        .output()
-        .ok()?;
+    let out = spawn::output(
+        Command::new("git")
+            .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .current_dir(repo_path),
+    )
+    .ok()?;
     if out.status.success() {
         Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
@@ -1860,21 +1885,23 @@ fn add_worktree(
     match strategy {
         BranchStrategy::NewBranch(branch_name) => {
             // 1. Local branch exists?
-            let local_exists = Command::new("git")
-                .args(["rev-parse", "--verify", branch_name])
-                .current_dir(repo_path)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
+            let local_exists = spawn::output(
+                Command::new("git")
+                    .args(["rev-parse", "--verify", branch_name])
+                    .current_dir(repo_path),
+            )
+            .map(|o| o.status.success())
+            .unwrap_or(false);
 
             // 2. Remote branch exists?
             let remote_ref = format!("origin/{}", branch_name);
-            let remote_exists = Command::new("git")
-                .args(["rev-parse", "--verify", &remote_ref])
-                .current_dir(repo_path)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
+            let remote_exists = spawn::output(
+                Command::new("git")
+                    .args(["rev-parse", "--verify", &remote_ref])
+                    .current_dir(repo_path),
+            )
+            .map(|o| o.status.success())
+            .unwrap_or(false);
 
             if local_exists {
                 git_worktree_add(&["worktree", "add", "--", &wt, branch_name], repo_path)?;
@@ -1899,12 +1926,13 @@ fn add_worktree(
                 // the sync step guarantees origin/<base> is the freshest shared state.
                 // Fall back to local only if the remote ref doesn't exist (offline / no remote).
                 let origin_base = format!("origin/{}", base_branch);
-                let origin_base_exists = Command::new("git")
-                    .args(["rev-parse", "--verify", &origin_base])
-                    .current_dir(repo_path)
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
+                let origin_base_exists = spawn::output(
+                    Command::new("git")
+                        .args(["rev-parse", "--verify", &origin_base])
+                        .current_dir(repo_path),
+                )
+                .map(|o| o.status.success())
+                .unwrap_or(false);
                 let start_point: &str = if origin_base_exists {
                     &origin_base
                 } else {
@@ -1975,11 +2003,7 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
         args.push(&wt_str);
 
         if let Some(main_repo) = find_main_repo(&wt_path) {
-            Command::new("git")
-                .args(&args)
-                .current_dir(&main_repo)
-                .status()
-                .ok();
+            spawn::status(Command::new("git").args(&args).current_dir(&main_repo)).ok();
         }
     }
 
@@ -2005,6 +2029,7 @@ fn find_main_repo(wt_path: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures start git directly (ADR 0002)
 mod tests {
     use super::*;
     use std::process::Command as Cmd;
@@ -2380,6 +2405,21 @@ mod tests {
             elapsed < UNATTENDED_KILL_GRACE + Duration::from_secs(2),
             "the child must be killed once the grace ends, took {:?}",
             elapsed
+        );
+    }
+
+    /// An unattended run starts its child behind the spawn gate, so the child
+    /// cannot inherit a pipe another thread made and has not yet marked
+    /// close-on-exec. If it could, its own `spawn` could block for another
+    /// child's lifetime before the limit even started (ticket 19).
+    #[test]
+    fn an_unattended_run_cannot_inherit_a_pipe_made_under_the_gate() {
+        let held = crate::core::spawn::tests::a_child_started_in_the_gap_holds_the_pipe(|child| {
+            run_unattended(child, Duration::from_secs(20));
+        });
+        assert!(
+            !held,
+            "a child started by `run_unattended` kept the pipe open"
         );
     }
 

@@ -2313,13 +2313,14 @@ fn run_gitop_worker(
         // Fetch streams git's live progress lines straight through.
         crate::tui::actions::GitOp::Fetch => {
             let args: &[&str] = &["fetch"];
-            let child = Command::new("git")
-                .args(args)
-                .current_dir(&repo_path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn();
+            let child = crate::core::spawn::spawn(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&repo_path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            );
 
             let mut child = match child {
                 Ok(c) => c,
@@ -3020,6 +3021,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures start git directly (ADR 0002)
 mod tests {
     use super::*;
     use crate::core::git::RepoStatus;

@@ -892,6 +892,7 @@ pub fn git_index_mtime(repo_path: &Path) -> Option<std::time::SystemTime> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures start git directly (ADR 0002)
 mod tests {
     use super::*;
     use std::process::Command as Cmd;

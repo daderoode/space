@@ -1,0 +1,10 @@
+# Every subprocess starts through crate::core::spawn, which never lets two
+# spawns overlap: on macOS a child started by one thread can otherwise inherit
+# a pipe another thread's spawn has not yet marked close-on-exec, and hold it
+# for its whole life (ticket 19, docs/adr/0002). Tests start fixtures directly
+# and allow this lint at their module or crate root.
+disallowed-methods = [
+    { path = "std::process::Command::spawn", reason = "start subprocesses through crate::core::spawn::spawn (ADR 0002)" },
+    { path = "std::process::Command::output", reason = "start subprocesses through crate::core::spawn::output (ADR 0002)" },
+    { path = "std::process::Command::status", reason = "start subprocesses through crate::core::spawn::status (ADR 0002)" },
+]
