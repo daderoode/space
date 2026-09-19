@@ -1807,17 +1807,28 @@ fn fetch_writes_local_branches(repo: &git2::Repository) -> bool {
     false
 }
 
-/// One configured fetch refspec: see `fetch_writes_local_branches`.
+/// One configured fetch refspec: see `fetch_writes_local_branches`. A
+/// destination writes a local branch when it is under `refs/heads/`, when
+/// it has no `refs/` prefix (git qualifies `feat` to `refs/heads/feat`), or
+/// when it is a wildcard whose literal part is a prefix of `refs/heads/`
+/// (`refs/*`, the mirror form, expands to `refs/heads/*` among others). A
+/// negative refspec has no destination by git's own grammar (`^a:b` is
+/// `fatal: invalid refspec`), so the no-colon arm carries it and no
+/// separate guard is needed.
 fn refspec_writes_local_branch(spec: &str) -> bool {
     let spec = spec.trim();
-    if spec.starts_with('^') {
-        return false;
-    }
     let spec = spec.strip_prefix('+').unwrap_or(spec);
     match spec.split_once(':') {
         None => false,
+        Some((_, "")) => false,
         Some((_, dst)) => {
-            !dst.is_empty() && (dst.starts_with("refs/heads/") || !dst.starts_with("refs/"))
+            if !dst.starts_with("refs/") || dst.starts_with("refs/heads/") {
+                return true;
+            }
+            match dst.split_once('*') {
+                Some((literal, _)) => "refs/heads/".starts_with(literal),
+                None => false,
+            }
         }
     }
 }
@@ -3379,6 +3390,47 @@ mod tests {
         );
         assert!(second.fetch.is_none(), "got {:?}", second.fetch);
         assert!(!marker.exists(), "neither attempt reads a remote ref");
+    }
+
+    /// The mirror destination `refs/*` (what `git clone --mirror` and
+    /// `git remote add --mirror=fetch` write) covers `refs/heads/*` without
+    /// spelling it, so a fetch through it moves local branches too. Here the
+    /// checked-out branch is one origin does not have, so git does not refuse
+    /// the fetch (git 2.50.1, reproduced: local `feat` moved, exit 0).
+    #[test]
+    fn a_wildcard_refs_destination_keeps_the_fetch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        git(&["checkout", "-q", "-b", "local-only"], &repo);
+        git(&["branch", "feat", "main"], &repo);
+        let origin_tip = get_sha(&repo, "origin/feat");
+        assert_ne!(get_sha(&repo, "feat"), origin_tip, "fixture");
+        git(
+            &[
+                "config",
+                "--replace-all",
+                "remote.origin.fetch",
+                "+refs/*:refs/*",
+            ],
+            &repo,
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::ExistingBranch("feat".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let wt = attempt.created.expect("the worktree must be created");
+        assert!(attempt.fetch.is_some(), "the fetch must run");
+        assert!(marker.exists(), "and reach the remote");
+        assert_eq!(
+            get_sha(&wt, "HEAD"),
+            origin_tip,
+            "the fetch moved local feat before the add"
+        );
     }
 
     /// The fetch outcome survives an add that then refused. Stale refs are a
