@@ -88,10 +88,11 @@ pub(crate) mod tests {
     /// ungated start creates its child well inside it (under a millisecond
     /// here), and a gated one cannot create it at all until the gap has
     /// closed, so a gated test always runs the whole gap. Every other gated
-    /// spawn in the test binary waits it out, so the four gated model tests
-    /// cost up to 800ms of gate time per test binary. Timing bounds elsewhere
-    /// in the suite leave room for that, and tightening one of them should
-    /// account for it. A machine too loaded to start a child within the gap
+    /// spawn in the test binary waits it out. Each unit-test binary has five
+    /// such tests: the four gated model tests, plus its by-name test in
+    /// `lib.rs` or `main.rs`. Together they cost up to 1s of gate time per
+    /// binary. Timing bounds elsewhere in the suite leave room for that, and
+    /// tightening one of them should account for it. A machine too loaded to start a child within the gap
     /// lets an ungated entry point pass one run, but never fails a gated one.
     const GAP: Duration = Duration::from_millis(200);
     /// A backstop, not a measurement: with nothing holding the pipe,
