@@ -3831,6 +3831,16 @@ mod tests {
                 "a\u{2066}b",
                 "Space name cannot contain control or formatting characters",
             ),
+            // The joiner the docs name as refused, and a tag character from
+            // the last range of the table.
+            (
+                "a\u{200d}b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\u{e0041}b",
+                "Space name cannot contain control or formatting characters",
+            ),
         ];
         for (name, rule) in rejected {
             let err = validate_space_name(name).expect_err(&format!("{:?} must be rejected", name));
