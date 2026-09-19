@@ -1739,23 +1739,44 @@ pub fn create_worktree_cancellable(
 ///   local ref; rev-parse never resolves a bare name to `origin/<name>`.
 ///
 /// The local-branch test runs before the fetch, which is sound because
-/// `git fetch origin` never creates or moves `refs/heads/*`; the sync stage
-/// is what fast-forwards local branches, and it has already run. A repo
-/// git2 cannot open is treated as reading origin, the side that fetches.
+/// under the default refspec `git fetch origin` never creates or moves
+/// `refs/heads/*`; the sync stage is what fast-forwards local branches, and
+/// it has already run. A repo whose fetch refspec does write into
+/// `refs/heads/*` (`fetch_writes_local_branches`) has no such fixed point,
+/// so it fetches whatever the strategy. A repo git2 cannot open is treated
+/// as reading origin, the side that fetches.
 fn strategy_reads_origin(repo_path: &Path, strategy: &BranchStrategy) -> bool {
-    match strategy {
-        BranchStrategy::NewBranch(_) => true,
-        BranchStrategy::DetachedHead => false,
-        BranchStrategy::ExistingBranch(name) => {
-            if name.starts_with("origin/") {
-                return true;
-            }
-            match git2::Repository::open(repo_path) {
-                Ok(repo) => repo.find_branch(name, git2::BranchType::Local).is_err(),
-                Err(_) => true,
-            }
-        }
+    let local_name = match strategy {
+        BranchStrategy::NewBranch(_) => return true,
+        BranchStrategy::ExistingBranch(name) if name.starts_with("origin/") => return true,
+        BranchStrategy::ExistingBranch(name) => Some(name.as_str()),
+        BranchStrategy::DetachedHead => None,
+    };
+    let Ok(repo) = git2::Repository::open(repo_path) else {
+        return true;
+    };
+    if fetch_writes_local_branches(&repo) {
+        return true;
     }
+    match local_name {
+        Some(name) => repo.find_branch(name, git2::BranchType::Local).is_err(),
+        None => false,
+    }
+}
+
+/// Whether a `git fetch origin` in this repo can move a local branch: true
+/// when any of `origin`'s fetch refspecs has a destination under
+/// `refs/heads/`, as a mirror-style clone's `+refs/heads/*:refs/heads/*`
+/// does. The default `+refs/heads/*:refs/remotes/origin/*` does not. A repo
+/// with no `origin` has nothing for the fetch to move.
+fn fetch_writes_local_branches(repo: &git2::Repository) -> bool {
+    let Ok(remote) = repo.find_remote("origin") else {
+        return false;
+    };
+    remote.refspecs().any(|spec| {
+        spec.direction() == git2::Direction::Fetch
+            && spec.dst().is_some_and(|dst| dst.starts_with("refs/heads/"))
+    })
 }
 
 /// `git worktree add` for one repo, per strategy. Split out of
@@ -3085,6 +3106,54 @@ mod tests {
             get_sha(&wt, "feat@{upstream}"),
             get_sha(&repo, "origin/feat"),
             "and set it up to track origin/feat"
+        );
+    }
+
+    /// The skip rests on `git fetch origin` leaving `refs/heads/*` alone,
+    /// which is a property of the default refspec, not of fetch. A repo
+    /// whose fetch refspec writes into `refs/heads/*` has its local
+    /// branches moved by the fetch, so a local branch is not the fixed
+    /// point the rule assumes and the fetch stays. Proof:
+    /// the local `feat` starts on the repo's own history and the worktree
+    /// comes out at the origin's tip, which only a fetch could have put
+    /// there. The refspec names `feat` alone: a `refs/heads/*` wildcard
+    /// would also cover the checked-out `main`, and git then refuses the
+    /// whole fetch before moving anything (git 2.50.1, `refusing to fetch
+    /// into branch`), which would prove nothing here.
+    #[test]
+    fn a_fetch_that_writes_local_branches_is_not_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        git(&["branch", "feat", "main"], &repo);
+        let origin_tip = get_sha(&repo, "origin/feat");
+        assert_ne!(get_sha(&repo, "feat"), origin_tip, "fixture");
+        git(
+            &[
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/feat:refs/heads/feat",
+            ],
+            &repo,
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::ExistingBranch("feat".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let wt = attempt.created.expect("the worktree must be created");
+        assert!(
+            attempt.fetch.is_some(),
+            "a fetch that can move local branches must run"
+        );
+        assert!(marker.exists(), "and must reach the remote");
+        assert_eq!(
+            get_sha(&wt, "HEAD"),
+            origin_tip,
+            "the fetch moved local feat to the origin's tip before the add"
         );
     }
 
