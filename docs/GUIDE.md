@@ -43,7 +43,7 @@ Git worktrees help by letting you have multiple branches checked out simultaneou
     web-frontend/         <-- git worktree
 ```
 
-Each subdirectory is a git worktree pointing back to the original repo. The workspace name (`feature-auth-upgrade`) doubles as the default branch name. A name is one plain path component: no `/` or `\`, no leading `-` or `.`, not empty (see [Stage 2](#stage-2-name-workspace)).
+Each subdirectory is a git worktree pointing back to the original repo. The workspace name (`feature-auth-upgrade`) doubles as the default branch name. A name is one plain path component: no `/` or `\`, no leading `-` or `.`, not empty (see [Stage 1](#stage-1-name-the-space)).
 
 ## Three Interfaces
 
@@ -75,13 +75,13 @@ There is no metadata database. The filesystem **is** the state. A workspace is s
 
 ### Creating a Workspace
 
-When you create a workspace, space does this for each selected repo:
+When you create a workspace, space does this for each selected repo, except a repo whose place in the workspace already holds a worktree of that repo, which is left as it is (no fetch, no `git worktree add`):
 
-1. Runs `git fetch --quiet origin` on the main repo (errors silently ignored for offline use), unless the strategy reads no remote ref, in which case the fetch is skipped. The rule: a detached HEAD skips, and an existing-branch name skips when it names a local branch (`refs/heads/<name>` exists). Everything else fetches: a new branch, an `origin/...` name, a name that exists only on origin (git resolves it to `origin/<name>` and tracks it), a tag name. A repo whose `remote.origin.fetch` refspec writes into `refs/heads/*` fetches whatever the strategy, because there the fetch moves local branches. Over MCP no sync runs first, so after a skipped fetch the repo's `origin/*` refs are as old as its last fetch; `workspace_status` compares each worktree's branch against `origin/<branch>` (a detached worktree against `origin/HEAD`, when the clone has one).
+1. Runs `git fetch --quiet origin` on the main repo (errors silently ignored for offline use), unless the strategy reads no remote ref, in which case the fetch is skipped. The rule: a detached HEAD skips, and an existing-branch name skips when it names a local branch (`refs/heads/<name>` exists). Everything else fetches: a new branch, an `origin/...` name, a name that exists only on origin (git resolves it to `origin/<name>` and tracks it), a tag name. A repo whose `remote.origin.fetch` refspec writes into `refs/heads/*` fetches whatever the strategy, because there the fetch moves local branches. Over MCP no sync runs first, so after a skipped fetch the repo's `origin/*` refs are as old as its last fetch; `workspace_status` compares each worktree's branch against `origin/<branch>` (a detached worktree against `origin/HEAD`, when the clone has one). In the TUI the sync report ([Stage 3](#stage-3-sync-report)) runs a fetch first, so this one is also skipped for a repo whose sync fetch worked, or timed out, or took 5 seconds or more to fail; the Creating log says so for the last two.
 2. Determines the branch based on the chosen strategy:
-   - **New branch:** checks for existing local branch first, then remote tracking branch, then creates off the base branch
+   - **New branch:** checks for existing local branch first, then remote tracking branch, then creates off the base branch, which is the branch the source repo has checked out (`origin/<base>` when that ref exists, else the local one)
    - **Existing branch:** strips `origin/` prefix if present, uses `--track` for remote branches
-   - **Detached HEAD:** uses `--detach`
+   - **Detached HEAD:** uses `--detach` at the commit the source repo has checked out (its current `HEAD`, not necessarily its default branch)
 3. Runs `git worktree add <workspace_dir>/<workspace_name>/<repo_name> ...`
 
 ### Removing a Workspace
@@ -251,9 +251,15 @@ Custom color palette:
 
 ## Create Workspace Flow
 
-A 5-stage wizard launched by pressing `c` or running `space create`:
+A 6-stage wizard launched by pressing `c` or running `space create`. Stage 5 is shown for some branch strategies only:
 
-### Stage 1: Pick Repos
+### Stage 1: Name the Space
+
+Text input for the workspace name (`Enter workspace name:`). Supports full readline-style editing: `Ctrl-A`/`Ctrl-E` (home/end), `Ctrl-W` (delete word), `Ctrl-U` (delete line), `Ctrl-K` (delete to end).
+
+The name becomes a directory under `workspaces.dir` and the default branch name, so it must be one plain path component: not empty, no `/` or `\`, no leading `-` or `.`, no control or invisible formatting characters (leading and trailing whitespace is trimmed). Interior spaces, dots and non-ASCII are fine, except the invisible joiners and marks some scripts use (a zero-width joiner in an emoji sequence, the zero-width non-joiner in Persian), which are refused because they make two names look alike. A name that breaks the rule stays in the field and the dialog says which clause it broke; nothing is rewritten. The branch name typed at the "new branch" stage is checked with `git check-ref-format --branch` before anything is created, and a refusal shows git's own sentence (for example `'-x' is not a valid branch name`).
+
+### Stage 2: Pick Repos
 
 Multi-select fuzzy picker powered by nucleo. Type to filter, `Tab` to toggle selection, `Enter` to confirm. Status line shows `N selected  matched/total matched`.
 
@@ -261,38 +267,36 @@ Multi-select fuzzy picker powered by nucleo. Type to filter, `Tab` to toggle sel
 
 If `space create repo-a repo-b` was used, those names pre-populate the search.
 
-### Stage 2: Name Workspace
+### Stage 3: Sync Report
 
-Text input for the workspace name. Supports full readline-style editing: `Ctrl-A`/`Ctrl-E` (home/end), `Ctrl-W` (delete word), `Ctrl-U` (delete line), `Ctrl-K` (delete to end).
+`Enter` on the picker fetches each selected repo from `origin` and fast-forwards its local branches that are strictly behind `origin/<branch>`; branches that are ahead, diverged or checked out are left as they are. The report has one row per repo and is titled `Sync report · N of M` while it runs, then `Sync report · N ok` or `Sync report · N ok, M failed`. It waits for `Enter`, which works once every repo is done. A failed fetch does not stop the create: `Enter` still continues, and the branch choices come from local refs, which may be behind origin. `Esc` returns to Pick Repos with the selection and query intact; a sync that is still running stops before its next git call.
 
-The name becomes a directory under `workspaces.dir` and the default branch name, so it must be one plain path component: not empty, no `/` or `\`, no leading `-` or `.`, no control or invisible formatting characters (leading and trailing whitespace is trimmed). Interior spaces, dots and non-ASCII are fine, except the invisible joiners and marks some scripts use (a zero-width joiner in an emoji sequence, the zero-width non-joiner in Persian), which are refused because they make two names look alike. A name that breaks the rule stays in the field and the dialog says which clause it broke; nothing is rewritten. The branch name typed at the "new branch" stage is checked with `git check-ref-format --branch` before anything is created, and a refusal shows git's own sentence (for example `'-x' is not a valid branch name`).
-
-### Stage 3: Pick Branch Strategy
-
-Four options:
+### Stage 4: Pick Branch Strategy
 
 | Option | Behaviour |
 |--------|-----------|
-| New branch (name = workspace name) | Creates a fresh branch in each repo |
-| Existing branch | Checks out a branch that already exists |
-| Detached HEAD | No branch created -- for read-only exploration |
-| Pick a branch... | Opens a branch picker (Stage 4) |
+| `New branch '<name>'` | Asks for the branch name (Stage 5), pre-filled with the space name, then puts each repo on that branch, creating it where it does not exist yet |
+| `Existing branch '<name>' (if present)` | Checks out the existing branch named like the space in each repo |
+| `Detached HEAD` | No branch created: each worktree is detached at the commit its source repo has checked out (not necessarily the default branch). For read-only exploration |
+| `Pick a branch...` | Opens a branch picker (Stage 5) |
 
-### Stage 4: Pick Branch (conditional)
+When the first selected repo has local branches, up to five of the most recently committed ones are listed under `Pick a branch...`: `Enter` on one uses it in every repo, and `Show more...` below them opens the branch picker.
 
-Only shown if "Pick a branch..." was chosen. Fuzzy picker showing all local and remote branches from the first selected repo.
+### Stage 5: Branch Name or Pick Branch (conditional)
 
-### Stage 5: Creating
+Shown for two of the options only. `New branch` opens a text input (`New branch name:`) pre-filled with the space name. `Pick a branch...` or `Show more...` opens a fuzzy picker of all local and remote branches from the first selected repo; the branch picked is used in every repo, and a remote one (`origin/<name>`) is checked out as a new local `<name>` tracking it.
 
-Progress log showing each repo with a checkmark or error. If a "branch already checked out" error occurs, routes back to the strategy picker with an explanation rather than failing cryptically.
+### Stage 6: Creating
 
-`Esc` at any stage goes back to the previous stage. `Esc` at Stage 1 returns to the dashboard.
+Progress log showing each repo with a checkmark or error. A repo whose place in the space already holds a worktree of that repo is left as it is, with no fetch and no `git worktree add`, and its row reads `✓ <repo> (already created)`; it counts as created. When no repo failed, the flow returns to the dashboard with the space selected, and the status message reads `Created workspace '<name>'`, `Created space; N of M repos were already in place` when some repos were already there, or `Nothing created: all M repos were already in this space` when all were. When a repo failed, the log stays up so it can be read, except for a "branch already checked out" error, which stops the run at that repo and routes back to the strategy picker with an explanation rather than failing cryptically.
+
+`Esc` goes back one stage, except at three points: at Stage 1 it returns to the dashboard; at Stage 4 it returns to Pick Repos, past the sync report; and at Stage 6 it leaves for the dashboard, stopping the run first if it is still going (the worktrees already made stay, and the status message says how many).
 
 ---
 
 ## Add Repos Flow
 
-4-stage wizard (same as Create minus the naming step). Launched by pressing `a` or running `space add <workspace> <repos>`. The fuzzy picker automatically excludes repos already in the workspace.
+5-stage wizard (same as Create minus the naming step). Launched by pressing `a` or running `space add <workspace> <repos>`. The fuzzy picker automatically excludes repos already in the workspace.
 
 ---
 
@@ -417,8 +421,8 @@ All worktrees removed, workspace directory cleaned up.
 **Scenario:** Renaming a shared type that's used across 5 repos.
 
 1. Open the TUI with `space`, press `c` to create
-2. Use the fuzzy picker to select all 5 repos (type to filter, `Tab` to toggle)
-3. Name the workspace `refactor-rename-user-to-account`
+2. Name the workspace `refactor-rename-user-to-account`
+3. Use the fuzzy picker to select all 5 repos (type to filter, `Tab` to toggle)
 4. Choose "new branch" strategy
 
 All 5 repos are now on the same branch in one directory. Make the rename, test each repo, commit, push, and open PRs -- all from one workspace.
@@ -433,18 +437,18 @@ All 5 repos are now on the same branch in one directory. Make the rename, test e
 space create
 ```
 
-1. Select the 3 repos
-2. Name the workspace `review-payment-v2`
-3. Choose **"existing"** strategy
-4. Enter branch name: `feature/payment-v2`
+1. Name the workspace `review-payment-v2`
+2. Select the 3 repos
+3. Choose **"Pick a branch..."** (or **"Show more..."** when recent branches are listed under it)
+4. Pick `origin/feature/payment-v2` (type `payment-v2` to filter)
 
-space checks out the existing branch in each repo. You can now build, run tests, and inspect the code. When you're done reviewing:
+space checks out the branch in each repo as a new local `feature/payment-v2` tracking `origin/feature/payment-v2`. You can now build, run tests, and inspect the code. When you're done reviewing:
 
 ```
 space rm review-payment-v2
 ```
 
-No stale branches left behind since you didn't create any.
+`space rm` removes the worktrees, not branches, so the local `feature/payment-v2` stays in each repo until you delete it.
 
 ---
 
@@ -456,8 +460,8 @@ No stale branches left behind since you didn't create any.
 space create
 ```
 
-1. Select the repos
-2. Name: `spike-new-api-design`
+1. Name: `spike-new-api-design`
+2. Select the repos
 3. Choose "new branch"
 
 Prototype freely. If the spike is promising, push and open PRs. If not:
@@ -466,7 +470,7 @@ Prototype freely. If the spike is promising, push and open PRs. If not:
 space rm spike-new-api-design
 ```
 
-The branches are cleaned up with the worktrees.
+The worktrees are removed; the `spike-new-api-design` branch stays in each repo until you delete it.
 
 ---
 
@@ -490,10 +494,10 @@ No branch pollution. Good for onboarding or investigating unfamiliar areas.
 space create
 ```
 
-1. Select the 2 repos
-2. Name: `hotfix-payment-timeout`
-3. Choose **"existing"** strategy
-4. Enter branch: `hotfix/payment-timeout`
+1. Name: `hotfix-payment-timeout`
+2. Select the 2 repos
+3. Choose **"Pick a branch..."** (or **"Show more..."** when recent branches are listed under it)
+4. Pick `hotfix/payment-timeout`, or `origin/hotfix/payment-timeout` if it is only on the remote (type `payment-timeout` to filter)
 
 Fix the bug in both repos from the same workspace, then clean up.
 
@@ -642,7 +646,7 @@ Create a workspace with git worktrees for selected repos, or complete one.
 |----------|-----------|
 | `"new"` | Creates a new branch. Name defaults to `name` param, or set `branch` explicitly. Checks local branches first, then remote tracking, then creates off the base branch |
 | `"existing"` | Checks out an existing branch. `branch` parameter is required. Strips `origin/` prefix, uses `--track` for remote branches |
-| `"detached"` | Detached HEAD at default branch. No branch created |
+| `"detached"` | Detached HEAD at the commit the source repo has checked out (its current `HEAD`, not necessarily its default branch). No branch created |
 
 **Returns:**
 
