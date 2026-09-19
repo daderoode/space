@@ -2426,24 +2426,40 @@ mod tests {
     /// holds it open until the test releases it, and a fast one in a repo
     /// with no remote at all, run start to finish inside that hold. Files
     /// order the two, not sleeps, so every assertion compares one
-    /// measurement with another and none says how fast this machine is:
-    /// several `cargo test` runs share it, and a fixed 1s ceiling here was
-    /// reported failing at 2.3s under load (ticket 18). The comparisons pin
-    /// `is_slow_with` rather than `SLOW_FETCH_THRESHOLD` itself: a test that
-    /// waited five seconds to check the constant would cost more than the
-    /// delay this rule removes.
+    /// measurement with another and none says how fast this machine is. A
+    /// fixed 1s ceiling here was reported failing at 2.3s with other tests
+    /// running (ticket 18): load stretches every spawn, and a child another
+    /// test spawns at the same moment can hold this run's pipes open
+    /// (ticket 19). The one bound left is the 20s fetch limit, a backstop
+    /// for a hold that never ends. The comparisons pin `is_slow_with` rather
+    /// than `SLOW_FETCH_THRESHOLD` itself: a test that waited five seconds
+    /// to check the constant would cost more than the delay this rule
+    /// removes.
     #[test]
     fn a_failed_fetch_records_how_long_it_took() {
         let (tmp, local) = make_behind_repo();
         let holding = tmp.path().join("upload-pack-holding");
         let release = tmp.path().join("upload-pack-release");
+        let released = tmp.path().join("upload-pack-released");
+        // The upload-pack holds until the test writes `release`, and records
+        // in `released` that it saw it. It gives up without that record once
+        // the test can no longer write `release`: `holding` is gone when the
+        // test's TempDir is dropped (it returned or panicked), and its pid is
+        // gone when it was killed. git runs in its own session, so nothing
+        // else would stop it.
         let script = tmp.path().join("held-failing-upload-pack.sh");
         std::fs::write(
             &script,
             format!(
-                ": > '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\nexit 1\n",
-                holding.display(),
-                release.display()
+                ": > '{holding}'\n\
+                 while [ -e '{holding}' ] && [ ! -e '{release}' ] && kill -0 {pid} 2>/dev/null\n\
+                 do sleep 0.1; done\n\
+                 [ -e '{release}' ] && : > '{released}'\n\
+                 exit 1\n",
+                holding = holding.display(),
+                release = release.display(),
+                released = released.display(),
+                pid = std::process::id()
             ),
         )
         .unwrap();
@@ -2460,13 +2476,7 @@ mod tests {
 
         // A repo with no remote at all: git fails before any upload-pack runs.
         let fast_tmp = tempfile::tempdir().unwrap();
-        Cmd::new("git")
-            .args(["init", "-b", "main"])
-            .current_dir(fast_tmp.path())
-            .output()
-            .unwrap();
-        git_setup(fast_tmp.path());
-        git(&["commit", "--allow-empty", "-m", "init"], fast_tmp.path());
+        let fast_repo = plain_repo(fast_tmp.path(), "no-remote");
 
         let slow_run = std::thread::spawn(move || {
             sync_repo_with_timeout(&local, Duration::from_secs(20)).fetch
@@ -2475,20 +2485,32 @@ mod tests {
             if slow_run.is_finished() {
                 panic!(
                     "the slow fetch ended before its upload-pack held it: {:?}",
-                    slow_run.join().unwrap()
+                    slow_run.join()
                 );
             }
             std::thread::sleep(Duration::from_millis(2));
         }
         let window_started = Instant::now();
-        let fast = sync_repo_with_timeout(fast_tmp.path(), Duration::from_secs(20)).fetch;
+        let fast = sync_repo_with_timeout(&fast_repo, Duration::from_secs(20)).fetch;
         let window = window_started.elapsed();
         std::fs::write(&release, "").unwrap();
         let slow = slow_run.join().unwrap();
+        // Everything below rests on the slow fetch still being held when the
+        // window closed, so check that from the upload-pack's side rather
+        // than by timing: it saw `release`, which is written after the window.
+        assert!(
+            released.exists(),
+            "the slow fetch's upload-pack must hold until the release: {:?}",
+            slow
+        );
 
         let slow_elapsed = match &slow {
             FetchOutcome::Failed { elapsed, .. } => *elapsed,
-            other => panic!("expected FetchOutcome::Failed, got {:?}", other),
+            other => panic!(
+                "expected FetchOutcome::Failed, got {:?}; a TimedOut means the \
+                 hold outlasted the fetch limit",
+                other
+            ),
         };
         let fast_elapsed = match &fast {
             FetchOutcome::Failed { elapsed, .. } => *elapsed,
@@ -2513,7 +2535,9 @@ mod tests {
         );
 
         // The comparison on a real outcome, at the elapsed it recorded and a
-        // nanosecond either side of it: the rule is at or above.
+        // nanosecond either side of it: the rule is at or above. The slow
+        // elapsed is above the window, so taking a nanosecond off cannot
+        // underflow.
         let nanosecond = Duration::from_nanos(1);
         assert!(
             slow.is_slow_with(slow_elapsed - nanosecond),
@@ -2537,6 +2561,29 @@ mod tests {
             "a fast failure is fetched again at a threshold the slow one meets: \
              {:?}",
             fast
+        );
+    }
+
+    /// Every unattended run passes through `join_bounded` once its child has
+    /// exited, so a wait there lands in every recorded `elapsed`: it must
+    /// return as soon as the reader has finished, not when the limit runs
+    /// out. The limit is far beyond anything a finished thread needs, so the
+    /// assertion fails only when the whole limit ran. Before ticket 18 only a
+    /// 1s ceiling on a real git spawn caught that.
+    #[test]
+    fn join_bounded_returns_once_the_reader_has_finished() {
+        let reader = std::thread::spawn(|| {});
+        while !reader.is_finished() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let limit = Duration::from_secs(10);
+        let started = Instant::now();
+        join_bounded(&reader, limit);
+        let took = started.elapsed();
+        assert!(
+            took < limit,
+            "a finished reader must not be waited on, took {:?}",
+            took
         );
     }
 
