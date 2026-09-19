@@ -77,7 +77,7 @@ There is no metadata database. The filesystem **is** the state. A workspace is s
 
 When you create a workspace, space does this for each selected repo:
 
-1. Runs `git fetch --quiet origin` on the main repo (errors silently ignored for offline use)
+1. Runs `git fetch --quiet origin` on the main repo (errors silently ignored for offline use), unless the strategy reads no remote ref, in which case the fetch is skipped. The rule: a detached HEAD skips, and an existing-branch name skips when it names a local branch (`refs/heads/<name>` exists). Everything else fetches: a new branch, an `origin/...` name, a name that exists only on origin (git resolves it to `origin/<name>` and tracks it), a tag name. A repo whose `remote.origin.fetch` refspec writes into `refs/heads/*` fetches whatever the strategy, because there the fetch moves local branches. Over MCP no sync runs first, so after a skipped fetch the repo's `origin/*` refs are as old as its last fetch; `workspace_status` compares each worktree's branch against `origin/<branch>` (a detached worktree against `origin/HEAD`, when the clone has one).
 2. Determines the branch based on the chosen strategy:
    - **New branch:** checks for existing local branch first, then remote tracking branch, then creates off the base branch
    - **Existing branch:** strips `origin/` prefix if present, uses `--track` for remote branches

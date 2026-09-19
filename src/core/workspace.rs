@@ -1450,7 +1450,9 @@ pub enum PreCreateFetch {
 #[derive(Debug)]
 pub struct WorktreeAttempt {
     /// The fetch outcome; `None` when `PreCreateFetch::Skip` meant none
-    /// ran, or when the attempt failed before the fetch could run.
+    /// ran, when the strategy reads no remote ref so none was needed
+    /// (`strategy_reads_origin`), or when the attempt failed before the
+    /// fetch could run.
     pub fetch: Option<FetchOutcome>,
     /// The new worktree's path, or why the creation refused.
     pub created: Result<PathBuf>,
@@ -1695,10 +1697,14 @@ pub fn create_worktree_cancellable(
 
     // Pre-create fetch under the unattended-run policy; a failure is ignored
     // for offline use and creation continues with local refs. Checkpoint 1:
-    // a cancelled run does not start one.
+    // a cancelled run does not start one. A strategy whose add reads no
+    // remote ref does not start one either (`strategy_reads_origin`): the
+    // fetch could not change what gets checked out, and it is silent
+    // because there is no age to warn about, unlike the slow-fetch skip.
     let fetch = match fetch {
         PreCreateFetch::Run(_) if cancel.load(Ordering::Relaxed) => None,
         PreCreateFetch::Skip => None,
+        PreCreateFetch::Run(_) if !strategy_reads_origin(repo_path, strategy) => None,
         PreCreateFetch::Run(limit) => Some(fetch_origin_unattended(repo_path, limit)),
     };
 
@@ -1714,6 +1720,122 @@ pub fn create_worktree_cancellable(
     WorktreeAttempt {
         fetch,
         created: add_worktree(repo_path, &wt_path, base_branch, strategy),
+    }
+}
+
+/// Whether `add_worktree` will read an `origin/*` ref for this strategy, and
+/// so whether the pre-create fetch can change what it checks out. Read from
+/// what each arm of `add_worktree` runs, not from the strategy's name:
+///
+/// - `NewBranch` probes `origin/<branch>` and `origin/<base>`: always.
+/// - `ExistingBranch("origin/x")` adds `--track` from that ref: always.
+/// - `ExistingBranch("x")` runs `git worktree add <wt> x`. With a local
+///   branch `x` git checks it out at its local tip and never looks at
+///   `origin/x`. Without one, git's own DWIM resolves `x` to `origin/x`
+///   when exactly one remote has it and adds `--track -b x origin/x`
+///   (git 2.50.1, and independent of `worktree.guessRemote`, which governs
+///   the no-commit-ish form only). So: reads origin iff no local `x`.
+/// - `DetachedHead` adds `--detach` at the source repo's own `HEAD` name, a
+///   local ref; rev-parse never resolves a bare name to `origin/<name>`.
+///
+/// The local-branch test runs before the fetch, which is sound because
+/// under the default refspec `git fetch origin` never creates or moves
+/// `refs/heads/*`; the sync stage is what fast-forwards local branches, and
+/// it has already run. A repo whose fetch refspec does write into
+/// `refs/heads/*` (`fetch_writes_local_branches`) has no such fixed point,
+/// so it fetches whatever the strategy. A repo git2 cannot open is treated
+/// as reading origin, the side that fetches.
+fn strategy_reads_origin(repo_path: &Path, strategy: &BranchStrategy) -> bool {
+    let local_name = match strategy {
+        BranchStrategy::NewBranch(_) => return true,
+        BranchStrategy::ExistingBranch(name) if name.starts_with("origin/") => return true,
+        BranchStrategy::ExistingBranch(name) => Some(name.as_str()),
+        BranchStrategy::DetachedHead => None,
+    };
+    let Ok(repo) = git2::Repository::open(repo_path) else {
+        return true;
+    };
+    if fetch_writes_local_branches(&repo) {
+        return true;
+    }
+    match local_name {
+        Some(name) => repo.find_branch(name, git2::BranchType::Local).is_err(),
+        None => false,
+    }
+}
+
+/// Whether a `git fetch origin` in this repo can move a local branch: true
+/// when any `remote.origin.fetch` entry has a destination under
+/// `refs/heads/`, or one git qualifies to it (a destination with no `refs/`
+/// prefix, as in `+refs/heads/feat:feat`, creates `refs/heads/feat`; git
+/// 2.50.1, reproduced). The default `+refs/heads/*:refs/remotes/origin/*`
+/// does not; an entry with no destination (`refs/heads/feat`) fetches into
+/// `FETCH_HEAD` only; a negative entry (`^refs/heads/main`) excludes rather
+/// than writes. A repo with no `origin` has nothing for the fetch to move;
+/// any other failure to read the config takes the side that fetches.
+///
+/// Read as raw config text, not through git2's parsed refspecs: git2 0.19's
+/// `Refspec::dst` unwraps a null destination, so the destination-less form
+/// panicked the caller, and libgit2 1.8 rejects a negative refspec, so the
+/// remote failed to load and the wildcard beside the negative entry went
+/// unseen. Both forms are legal to git and the second is how a mirror-style
+/// refspec is made to work in a repo with a checked-out branch.
+fn fetch_writes_local_branches(repo: &git2::Repository) -> bool {
+    // Every failure to read falls on the side that fetches, the same
+    // default `strategy_reads_origin` takes for a repo git2 cannot open. An
+    // absent key (no `origin`, or one with no fetch refspec) is not a
+    // failure: the iterator is simply empty, and empty means there is
+    // nothing for the fetch to move. Of the four returns below only the
+    // non-UTF-8 value is reachable from a repo on disk, and a test pins it.
+    // The other three are kept for the invariant, not because a repo can
+    // reach them: `Repository::open` already parses the whole config,
+    // includes too, so a config that fails to parse fails the open first
+    // (the caller's fail-safe), and `multivar` and its iterator fail only
+    // on an invalid key name or out of memory (probed on git2 0.19).
+    let Ok(config) = repo.config() else {
+        return true;
+    };
+    let Ok(mut entries) = config.multivar("remote.origin.fetch", None) else {
+        return true;
+    };
+    while let Some(entry) = entries.next() {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        let Some(spec) = entry.value() else {
+            // Not UTF-8: cannot parse.
+            return true;
+        };
+        if refspec_writes_local_branch(spec) {
+            return true;
+        }
+    }
+    false
+}
+
+/// One configured fetch refspec: see `fetch_writes_local_branches`. A
+/// destination writes a local branch when it is under `refs/heads/`, when
+/// it has no `refs/` prefix (git qualifies `feat` to `refs/heads/feat`), or
+/// when it is a wildcard whose literal part is a prefix of `refs/heads/`
+/// (`refs/*`, the mirror form, expands to `refs/heads/*` among others). A
+/// negative refspec has no destination by git's own grammar (`^a:b` is
+/// `fatal: invalid refspec`), so the no-colon arm carries it and no
+/// separate guard is needed.
+fn refspec_writes_local_branch(spec: &str) -> bool {
+    let spec = spec.trim();
+    let spec = spec.strip_prefix('+').unwrap_or(spec);
+    match spec.split_once(':') {
+        None => false,
+        Some((_, "")) => false,
+        Some((_, dst)) => {
+            if !dst.starts_with("refs/") || dst.starts_with("refs/heads/") {
+                return true;
+            }
+            match dst.split_once('*') {
+                Some((literal, _)) => "refs/heads/".starts_with(literal),
+                None => false,
+            }
+        }
     }
 }
 
@@ -2813,6 +2935,725 @@ mod tests {
         );
     }
 
+    /// A repo whose `origin` is a bare repo holding `main` and `feat`, both
+    /// already known locally as `origin/main` and `origin/feat` from one
+    /// ungated fetch during setup. `remote.origin.uploadpack` is gated after
+    /// that fetch, so a fetch that runs later leaves `marker` behind: git
+    /// runs the gate on the far side of a `file://` fetch, and the marker
+    /// exists iff a fetch reached the remote. That is the proof this file's
+    /// strategy-skip tests rest on, because `attempt.fetch` is what the code
+    /// chose to report, not what git did (PR #34's lesson). The repo's own
+    /// `main` is a separate history from the origin's, so a local branch
+    /// made from it never shares a tip with `origin/feat`.
+    fn gated_repo(parent: &Path, name: &str) -> (PathBuf, PathBuf) {
+        let repo = plain_repo(parent, name);
+        let marker = gate_origin(parent, name, &repo);
+        (repo, marker)
+    }
+
+    /// The origin half of `gated_repo`, for a repo made some other way.
+    fn gate_origin(parent: &Path, name: &str, repo: &Path) -> PathBuf {
+        let origin = parent.join(format!("{}-origin.git", name));
+        let seed = plain_repo(parent, &format!("{}-seed", name));
+        // A second commit, so the origin's history is not byte-identical to
+        // the repo's own (two empty `init` commits in the same second are).
+        git(&["commit", "--allow-empty", "-m", "origin-only"], &seed);
+        git(&["branch", "feat"], &seed);
+        git(&["init", "-q", "--bare", origin.to_str().unwrap()], parent);
+        git(
+            &["push", "-q", origin.to_str().unwrap(), "main", "feat"],
+            &seed,
+        );
+
+        git(
+            &[
+                "remote",
+                "add",
+                "origin",
+                &format!("file://{}", origin.display()),
+            ],
+            repo,
+        );
+        git(&["fetch", "-q", "origin"], repo);
+
+        let marker = parent.join(format!("FETCHED-{}", name));
+        let script = parent.join(format!("gate-{}.sh", name));
+        std::fs::write(
+            &script,
+            format!(
+                "touch \"{}\"\nexec git upload-pack \"$@\"\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        git(
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                &format!("/bin/sh {}", script.display()),
+            ],
+            repo,
+        );
+        marker
+    }
+
+    fn head_is_detached(wt: &Path) -> bool {
+        git2::Repository::open(wt).unwrap().head_detached().unwrap()
+    }
+
+    /// A detached HEAD is added from the source repo's own `HEAD` name, a
+    /// local ref, so the pre-create fetch cannot change what it checks out
+    /// and does not run. The contrast repo, same fixture and a strategy
+    /// that reads `origin/*`, must leave its marker: if the gate were broken
+    /// the first half would pass for the wrong reason.
+    #[test]
+    fn a_detached_head_create_runs_no_fetch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (detached, detached_marker) = gated_repo(tmp.path(), "detached");
+        let (new_branch, new_branch_marker) = gated_repo(tmp.path(), "new-branch");
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &detached,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::DetachedHead,
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let wt = attempt
+            .created
+            .expect("the detached worktree must be created");
+        assert!(
+            attempt.fetch.is_none(),
+            "a detached HEAD reads no remote ref, so no fetch is reported, got {:?}",
+            attempt.fetch
+        );
+        assert!(
+            !detached_marker.exists(),
+            "a detached HEAD reads no remote ref, so no fetch may reach origin"
+        );
+        assert!(head_is_detached(&wt), "the strategy is still applied");
+        assert_eq!(
+            get_sha(&wt, "HEAD"),
+            get_sha(&detached, "main"),
+            "detached at the source repo's own HEAD"
+        );
+
+        let attempt = create_worktree_with_fetch(
+            &new_branch,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::NewBranch("topic".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        attempt
+            .created
+            .expect("the contrast worktree must be created");
+        assert_eq!(
+            attempt.fetch,
+            Some(FetchOutcome::Ok),
+            "a new branch reads origin/<base>, so it fetches"
+        );
+        assert!(
+            new_branch_marker.exists(),
+            "the contrast proves the gate: a strategy that reads origin/* reaches the remote"
+        );
+    }
+
+    /// An `origin/`-prefixed name is added with `--track` from that very
+    /// ref, so the fetch stays.
+    #[test]
+    fn an_origin_existing_branch_still_fetches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::ExistingBranch("origin/feat".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let wt = attempt.created.expect("the worktree must be created");
+        assert_eq!(attempt.fetch, Some(FetchOutcome::Ok));
+        assert!(
+            marker.exists(),
+            "origin/feat is the ref the add reads, so the fetch must reach origin"
+        );
+        assert_eq!(git::current_branch(&wt).unwrap(), "feat");
+        assert_eq!(
+            get_sha(&wt, "feat@{upstream}"),
+            get_sha(&repo, "origin/feat"),
+            "the local branch tracks origin/feat"
+        );
+    }
+
+    /// A plain name that is a local branch is checked out at that branch's
+    /// local tip and `origin/<name>` is never read, so the fetch is skipped.
+    /// The local `feat` is deliberately a different history from
+    /// `origin/feat`, so the tip assertion can tell the two apart.
+    #[test]
+    fn a_local_existing_branch_runs_no_fetch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        git(&["branch", "feat", "main"], &repo);
+        assert_ne!(
+            get_sha(&repo, "feat"),
+            get_sha(&repo, "origin/feat"),
+            "fixture: local feat and origin/feat must differ"
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::ExistingBranch("feat".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let wt = attempt.created.expect("the worktree must be created");
+        assert!(
+            attempt.fetch.is_none(),
+            "a local branch reads no remote ref, got {:?}",
+            attempt.fetch
+        );
+        assert!(
+            !marker.exists(),
+            "a local branch reads no remote ref, so no fetch may reach origin"
+        );
+        assert_eq!(git::current_branch(&wt).unwrap(), "feat");
+        assert_eq!(
+            get_sha(&wt, "HEAD"),
+            get_sha(&repo, "feat"),
+            "checked out at the local tip, not origin's"
+        );
+    }
+
+    /// The case the ticket's premise missed. A plain name with no local
+    /// branch is not "no remote ref": git's `worktree add` resolves it to
+    /// `origin/<name>` when exactly one remote has it, and adds with
+    /// `--track -b` (git 2.50.1, reproduced during grilling). The fetch can
+    /// change what gets checked out, so it stays. This also pins the DWIM
+    /// itself: a git that stops doing it shows up here, not in a space.
+    #[test]
+    fn an_existing_branch_found_only_on_origin_still_fetches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        assert!(
+            git2::Repository::open(&repo)
+                .unwrap()
+                .find_branch("feat", git2::BranchType::Local)
+                .is_err(),
+            "fixture: feat must not exist locally"
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::ExistingBranch("feat".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let wt = attempt.created.expect("the worktree must be created");
+        assert_eq!(attempt.fetch, Some(FetchOutcome::Ok));
+        assert!(
+            marker.exists(),
+            "with no local feat the add reads origin/feat, so the fetch must reach origin"
+        );
+        assert_eq!(git::current_branch(&wt).unwrap(), "feat");
+        assert_eq!(
+            get_sha(&wt, "HEAD"),
+            get_sha(&repo, "origin/feat"),
+            "git resolved the plain name to origin/feat"
+        );
+        assert_eq!(
+            get_sha(&wt, "feat@{upstream}"),
+            get_sha(&repo, "origin/feat"),
+            "and set it up to track origin/feat"
+        );
+    }
+
+    /// The skip rests on `git fetch origin` leaving `refs/heads/*` alone,
+    /// which is a property of the default refspec, not of fetch. A repo
+    /// whose fetch refspec writes into `refs/heads/*` has its local
+    /// branches moved by the fetch, so a local branch is not the fixed
+    /// point the rule assumes and the fetch stays. Proof:
+    /// the local `feat` starts on the repo's own history and the worktree
+    /// comes out at the origin's tip, which only a fetch could have put
+    /// there. The refspec names `feat` alone: a `refs/heads/*` wildcard
+    /// would also cover the checked-out `main`, and git then refuses the
+    /// whole fetch before moving anything (git 2.50.1, `refusing to fetch
+    /// into branch`), which would prove nothing here.
+    #[test]
+    fn a_fetch_that_writes_local_branches_is_not_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        git(&["branch", "feat", "main"], &repo);
+        let origin_tip = get_sha(&repo, "origin/feat");
+        assert_ne!(get_sha(&repo, "feat"), origin_tip, "fixture");
+        git(
+            &[
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/feat:refs/heads/feat",
+            ],
+            &repo,
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::ExistingBranch("feat".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let wt = attempt.created.expect("the worktree must be created");
+        assert!(
+            attempt.fetch.is_some(),
+            "a fetch that can move local branches must run"
+        );
+        assert!(marker.exists(), "and must reach the remote");
+        assert_eq!(
+            get_sha(&wt, "HEAD"),
+            origin_tip,
+            "the fetch moved local feat to the origin's tip before the add"
+        );
+    }
+
+    /// A fetch refspec with no destination (`refs/heads/feat` on its own)
+    /// fetches into `FETCH_HEAD` only and writes no local branch, so the
+    /// skip stands. It is here because git accepts that form and git2's
+    /// refspec accessor does not: `Refspec::dst` unwraps a null destination
+    /// (git2 0.19, `refspec.rs:37`), so a rule that read refspecs through
+    /// it took the Creating worker down on such a repo.
+    #[test]
+    fn a_fetch_refspec_without_a_destination_still_skips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        git(
+            &["config", "--add", "remote.origin.fetch", "refs/heads/feat"],
+            &repo,
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::DetachedHead,
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        attempt.created.expect("the worktree must be created");
+        assert!(attempt.fetch.is_none(), "got {:?}", attempt.fetch);
+        assert!(
+            !marker.exists(),
+            "a destination-less refspec writes no local branch, so nothing to fetch for"
+        );
+    }
+
+    /// A fetch destination that is not fully qualified (`+refs/heads/feat:feat`)
+    /// is a local branch to git: the fetch creates or moves `refs/heads/feat`
+    /// (git 2.50.1, reproduced). So it counts as writing local branches and
+    /// the fetch stays, even though the destination does not spell
+    /// `refs/heads/`.
+    #[test]
+    fn an_unqualified_fetch_destination_is_a_local_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        git(&["branch", "feat", "main"], &repo);
+        let origin_tip = get_sha(&repo, "origin/feat");
+        assert_ne!(get_sha(&repo, "feat"), origin_tip, "fixture");
+        git(
+            &[
+                "config",
+                "--replace-all",
+                "remote.origin.fetch",
+                "+refs/heads/feat:feat",
+            ],
+            &repo,
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::ExistingBranch("feat".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let wt = attempt.created.expect("the worktree must be created");
+        assert!(attempt.fetch.is_some(), "the fetch must run");
+        assert!(marker.exists(), "and reach the remote");
+        assert_eq!(
+            get_sha(&wt, "HEAD"),
+            origin_tip,
+            "the fetch moved local feat before the add"
+        );
+    }
+
+    /// The realistic mirror setup in a non-bare repo: a wildcard into
+    /// `refs/heads/*` plus a negative refspec that exempts the checked-out
+    /// branch, so git no longer refuses the fetch and every other local
+    /// branch moves. The negative entry has no destination and must neither
+    /// hide the wildcard beside it nor break the rule.
+    #[test]
+    fn a_negative_refspec_beside_a_wildcard_keeps_the_fetch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        git(&["branch", "feat", "main"], &repo);
+        let origin_tip = get_sha(&repo, "origin/feat");
+        assert_ne!(get_sha(&repo, "feat"), origin_tip, "fixture");
+        git(
+            &[
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/heads/*",
+            ],
+            &repo,
+        );
+        git(
+            &["config", "--add", "remote.origin.fetch", "^refs/heads/main"],
+            &repo,
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::ExistingBranch("feat".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let wt = attempt.created.expect("the worktree must be created");
+        assert_eq!(
+            attempt.fetch,
+            Some(FetchOutcome::Ok),
+            "the fetch must run and succeed"
+        );
+        assert!(marker.exists(), "and reach the remote");
+        assert_eq!(
+            get_sha(&wt, "HEAD"),
+            origin_tip,
+            "the fetch moved local feat before the add"
+        );
+    }
+
+    /// A repo with no `origin` at all has nothing for a fetch to move, so a
+    /// detached HEAD is added without one. Before the skip this fetched and
+    /// failed; the line that reported that failure was the only trace.
+    #[test]
+    fn a_repo_without_origin_runs_no_fetch_for_a_detached_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = plain_repo(tmp.path(), "repo");
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::DetachedHead,
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let wt = attempt.created.expect("the worktree must be created");
+        assert!(attempt.fetch.is_none(), "got {:?}", attempt.fetch);
+        assert!(head_is_detached(&wt));
+    }
+
+    /// The one path where a skipped fetch and a refused add coincide: an
+    /// `ExistingBranch` of a present local branch that is checked out in
+    /// another worktree. The fetch is skipped (local branch, default
+    /// refspec) and the add is refused by git, and the attempt reports both
+    /// as they are, `fetch: None` beside the refusal, so a caller reading
+    /// them together is not led to blame stale refs for a checkout clash.
+    #[test]
+    fn a_refused_add_of_a_local_branch_reports_no_fetch_beside_the_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        git(&["branch", "feat", "main"], &repo);
+        let ws_dir = tmp.path().join("workspaces");
+
+        let first = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "first",
+            &BranchStrategy::ExistingBranch("feat".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        first.created.expect("the first worktree must be created");
+
+        let second = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "second",
+            &BranchStrategy::ExistingBranch("feat".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let err = second
+            .created
+            .expect_err("feat is checked out in the first worktree");
+        assert!(
+            refuses_because_checked_out(&err.to_string()),
+            "expected git's checked-out refusal, got: {}",
+            err
+        );
+        assert!(second.fetch.is_none(), "got {:?}", second.fetch);
+        assert!(!marker.exists(), "neither attempt reads a remote ref");
+    }
+
+    /// The mirror destination `refs/*` (what `git clone --mirror` and
+    /// `git remote add --mirror=fetch` write) covers `refs/heads/*` without
+    /// spelling it, so a fetch through it moves local branches too. Here the
+    /// checked-out branch is one origin does not have, so git does not refuse
+    /// the fetch (git 2.50.1, reproduced: local `feat` moved, exit 0).
+    #[test]
+    fn a_wildcard_refs_destination_keeps_the_fetch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        git(&["checkout", "-q", "-b", "local-only"], &repo);
+        git(&["branch", "feat", "main"], &repo);
+        let origin_tip = get_sha(&repo, "origin/feat");
+        assert_ne!(get_sha(&repo, "feat"), origin_tip, "fixture");
+        git(
+            &[
+                "config",
+                "--replace-all",
+                "remote.origin.fetch",
+                "+refs/*:refs/*",
+            ],
+            &repo,
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::ExistingBranch("feat".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let wt = attempt.created.expect("the worktree must be created");
+        assert!(attempt.fetch.is_some(), "the fetch must run");
+        assert!(marker.exists(), "and reach the remote");
+        assert_eq!(
+            get_sha(&wt, "HEAD"),
+            origin_tip,
+            "the fetch moved local feat before the add"
+        );
+    }
+
+    /// Every arm of the refspec classifier, pinned directly, so the arms
+    /// the marker fixtures do not reach (an empty destination, `src:`,
+    /// which git reads as "do not store"; the negative forms) have a
+    /// killing assertion too. False rows are the skip side and are the
+    /// ones that matter; true rows only cost a fetch.
+    #[test]
+    fn refspec_classifier_table() {
+        let cases = [
+            ("+refs/heads/*:refs/remotes/origin/*", false),
+            ("refs/heads/feat", false),
+            ("refs/heads/feat:", false),
+            ("^refs/heads/main", false),
+            ("+refs/heads/*:refs/remotes/*", false),
+            ("+refs/tags/*:refs/tags/*", false),
+            ("+refs/heads/*:refs/heads/*", true),
+            ("+refs/heads/feat:refs/heads/feat", true),
+            ("+refs/heads/feat:feat", true),
+            ("+refs/*:refs/*", true),
+            ("+refs/heads/*:refs/h*", true),
+            ("+refs/heads/*:*", true),
+            ("  +refs/heads/*:refs/heads/*  ", true),
+        ];
+        for (spec, expected) in cases {
+            assert_eq!(
+                refspec_writes_local_branch(spec),
+                expected,
+                "refspec {:?}",
+                spec
+            );
+        }
+    }
+
+    /// The config read's fail-safe, on the one path a repo can reach: a
+    /// `remote.origin.fetch` value git2 cannot decode as UTF-8. The entry
+    /// here writes under `refs/remotes/`, so git would not move a local
+    /// branch through it; the fetch runs because the value cannot be read,
+    /// which is the invariant, and a detached HEAD is the strategy that
+    /// would otherwise skip.
+    #[test]
+    fn a_fetch_refspec_git2_cannot_decode_takes_the_fetching_side() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        let config = repo.join(".git").join("config");
+        let mut bytes = std::fs::read(&config).unwrap();
+        bytes.extend_from_slice(
+            b"[remote \"origin\"]\n\tfetch = +refs/heads/*:refs/remotes/\xff/*\n",
+        );
+        std::fs::write(&config, bytes).unwrap();
+        let undecodable = {
+            let config = git2::Repository::open(&repo).unwrap().config().unwrap();
+            let mut entries = config.multivar("remote.origin.fetch", None).unwrap();
+            let mut found = false;
+            while let Some(Ok(entry)) = entries.next() {
+                found |= entry.value().is_none();
+            }
+            found
+        };
+        assert!(
+            undecodable,
+            "fixture: one fetch refspec must be undecodable to git2"
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::DetachedHead,
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        attempt.created.expect("the worktree must be created");
+        assert!(
+            attempt.fetch.is_some(),
+            "an unreadable refspec must not skip"
+        );
+        assert!(marker.exists(), "and the fetch must reach the remote");
+    }
+
+    /// The caller's fail-safe: a repo git2 cannot open is treated as reading
+    /// origin. A reftable repo is one git 2.50.1 works in and git2 0.19
+    /// refuses (`unsupported extension name extensions.refstorage`), so the
+    /// marker can prove the fetch reached the remote. The base branch comes
+    /// from git2 too and falls back to `main`, which is the branch here.
+    #[test]
+    fn a_repo_git2_cannot_open_takes_the_fetching_side() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(
+            &["init", "-q", "-b", "main", "--ref-format=reftable"],
+            &repo,
+        );
+        git_setup(&repo);
+        git(&["commit", "--allow-empty", "-m", "init"], &repo);
+        let marker = gate_origin(tmp.path(), "repo", &repo);
+        assert!(
+            git2::Repository::open(&repo).is_err(),
+            "fixture: git2 must be unable to open a reftable repo"
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::DetachedHead,
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let wt = attempt.created.expect("the worktree must be created");
+        assert_eq!(attempt.fetch, Some(FetchOutcome::Ok));
+        assert!(marker.exists(), "the fetch must reach the remote");
+        assert_eq!(get_sha(&wt, "HEAD"), get_sha(&repo, "main"));
+    }
+
+    /// The same fail-safe on the everyday way to break an open: a syntax
+    /// error in `.git/config`. Shell git dies reading the same file before
+    /// it reaches the remote (`fatal: bad config line`), so no marker can
+    /// appear here; what this pins is that the fetch was attempted, which
+    /// only a spawned `git fetch` can report.
+    #[test]
+    fn a_config_syntax_error_still_attempts_the_fetch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _marker) = gated_repo(tmp.path(), "repo");
+        let config = repo.join(".git").join("config");
+        let mut bytes = std::fs::read(&config).unwrap();
+        bytes.extend_from_slice(b"[broken\n");
+        std::fs::write(&config, bytes).unwrap();
+        assert!(git2::Repository::open(&repo).is_err(), "fixture");
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::DetachedHead,
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        match attempt.fetch {
+            Some(FetchOutcome::Failed { ref stderr, .. }) => assert!(
+                stderr.contains("bad config"),
+                "git fetch ran and refused the config, got: {}",
+                stderr
+            ),
+            ref other => panic!("the fetch must be attempted, got {:?}", other),
+        }
+    }
+
+    /// `origin/x` fetches because of its prefix, not because no local
+    /// branch has that name. A local branch literally named `origin/feat`
+    /// is legal, and with it present the local-branch rule alone would skip,
+    /// so this is the test where the unconditional-fetch arm decides.
+    #[test]
+    fn an_origin_name_fetches_even_beside_a_local_branch_of_that_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        git(&["branch", "origin/feat", "main"], &repo);
+        assert!(
+            git2::Repository::open(&repo)
+                .unwrap()
+                .find_branch("origin/feat", git2::BranchType::Local)
+                .is_ok(),
+            "fixture: a local branch named origin/feat"
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::ExistingBranch("origin/feat".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        assert_eq!(attempt.fetch, Some(FetchOutcome::Ok));
+        assert!(marker.exists(), "the fetch must reach the remote");
+    }
+
+    /// A detached HEAD skips only after the refspec check: a fetch refspec
+    /// that writes `refs/heads/*` can move the very branch the detached
+    /// worktree is added at, so the fetch stays. The checked-out branch is
+    /// one origin does not have, so git does not refuse the fetch.
+    #[test]
+    fn a_detached_head_fetches_when_the_refspec_writes_local_branches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        git(&["checkout", "-q", "-b", "local-only"], &repo);
+        git(
+            &[
+                "config",
+                "--replace-all",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/heads/*",
+            ],
+            &repo,
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::DetachedHead,
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let wt = attempt.created.expect("the worktree must be created");
+        assert_eq!(attempt.fetch, Some(FetchOutcome::Ok));
+        assert!(marker.exists(), "the fetch must reach the remote");
+        assert!(head_is_detached(&wt));
+    }
+
     /// The fetch outcome survives an add that then refused. Stale refs are a
     /// likely reason for such a refusal, so the caller must still get the
     /// fetch line that explains it. Offline: the origin is a path that does
@@ -2843,11 +3684,15 @@ mod tests {
         );
         assert!(first.created.is_ok(), "the first worktree must be created");
 
+        // `NewBranch` of a name that already exists locally adds that branch
+        // and is refused the same way, and it still fetches (it probes
+        // `origin/*`); an `ExistingBranch` of a present local branch would
+        // skip the fetch this test is about.
         let second = create_worktree_with_fetch(
             &repo,
             &ws_dir,
             "second",
-            &BranchStrategy::ExistingBranch("feature".to_string()),
+            &BranchStrategy::NewBranch("feature".to_string()),
             PreCreateFetch::Run(Duration::from_secs(20)),
         );
         let err = second

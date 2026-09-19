@@ -375,9 +375,23 @@ fn creating_logs_failed_pre_create_fetch_and_skips_it_for_already_fetched_repos(
         if let Screen::CreateWorkspace(ref mut st) = app.screen {
             st.selected_repos = repos;
             st.ws_name = tui_input::Input::default().with_value(ws_name.to_string());
-            st.branch_strategy_idx = 2; // DetachedHead: no branch name stage
+            // New branch: a strategy that reads `origin/*`, so the
+            // pre-create fetch this test is about actually runs (a detached
+            // HEAD skips it). Enter opens the branch-name stage prefilled
+            // with the space name; a second Enter starts creating.
+            st.branch_strategy_idx = 0;
             st.report = report;
             st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
+        }
+        app.handle_key(key(KeyCode::Enter));
+        match app.screen {
+            Screen::CreateWorkspace(ref st) => assert_eq!(
+                st.stage,
+                space::tui::screens::create::CreateStage::EnterBranchName,
+                "the first Enter must land on the branch-name stage, or the second \
+                 Enter starts something other than the flow this test observes"
+            ),
+            _ => panic!("expected the create screen after picking the strategy"),
         }
         app.handle_key(key(KeyCode::Enter));
         pump_creating(&mut app);

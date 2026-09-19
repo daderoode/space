@@ -678,3 +678,149 @@ fn create_workspace_accepts_an_interior_space() {
             .exists());
     });
 }
+
+/// Gate `repo`'s `origin` behind a script that leaves `marker` behind when a
+/// fetch reaches it (the `remote.origin.uploadpack` technique from the
+/// Creating worker's tests). The origin is a bare repo the fixture pushes
+/// the repo's `main` to before the gate goes in; that push is what writes
+/// `refs/remotes/origin/main`, so `origin/main` is known without a fetch.
+fn gate_origin(env: &TestEnv, repo: &std::path::Path, name: &str) -> PathBuf {
+    let run = |args: &[&str], dir: &std::path::Path| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let origin = env.dir.path().join(format!("{}-origin.git", name));
+    run(
+        &["init", "-q", "--bare", origin.to_str().unwrap()],
+        env.dir.path(),
+    );
+    run(
+        &[
+            "remote",
+            "add",
+            "origin",
+            &format!("file://{}", origin.display()),
+        ],
+        repo,
+    );
+    run(&["push", "-q", "origin", "main"], repo);
+    let marker = env.dir.path().join(format!("FETCHED-{}", name));
+    let script = env.dir.path().join(format!("gate-{}.sh", name));
+    std::fs::write(
+        &script,
+        format!(
+            "touch \"{}\"\nexec git upload-pack \"$@\"\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    run(
+        &[
+            "config",
+            "remote.origin.uploadpack",
+            &format!("/bin/sh {}", script.display()),
+        ],
+        repo,
+    );
+    marker
+}
+
+/// MCP has no sync stage, so the pre-create fetch was the only fetch a
+/// `create_workspace` ran. A `detached` create reads no remote ref and now
+/// runs none; the result carries the same fields as before. The `new`
+/// contrast on a second gated repo proves the gate: that strategy reads
+/// `origin/<base>` and must reach the remote.
+#[test]
+fn create_workspace_detached_runs_no_fetch() {
+    with_test_env(|env, server| {
+        let detached = env.create_repo("delta");
+        let fresh = env.create_repo("echo");
+        env.write_cache(&[detached.clone(), fresh.clone()]);
+        let detached_marker = gate_origin(env, &detached, "delta");
+        let fresh_marker = gate_origin(env, &fresh, "echo");
+
+        let result = server
+            .create_workspace(Parameters(CreateWorkspaceParams {
+                name: "quiet".to_string(),
+                repos: vec!["delta".to_string()],
+                strategy: "detached".to_string(),
+                branch: None,
+            }))
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result_text(&result)).unwrap();
+        assert_eq!(parsed["name"], "quiet");
+        assert_eq!(
+            parsed["repos_created"].as_array().unwrap(),
+            &[serde_json::json!("delta")]
+        );
+        assert!(env.workspaces_dir.join("quiet").join("delta").exists());
+        assert!(
+            !detached_marker.exists(),
+            "a detached create reads no remote ref, so no fetch may reach origin"
+        );
+
+        server
+            .create_workspace(Parameters(CreateWorkspaceParams {
+                name: "noisy".to_string(),
+                repos: vec!["echo".to_string()],
+                strategy: "new".to_string(),
+                branch: None,
+            }))
+            .unwrap();
+        assert!(
+            fresh_marker.exists(),
+            "the contrast proves the gate: a new branch reads origin/<base> and fetches"
+        );
+    });
+}
+
+/// `add_repos` reaches the same `create_worktree` and gets the same skip:
+/// a `detached` add runs no fetch, and the result carries the same fields
+/// as before. The workspace it adds to is made from a repo with no origin,
+/// which a detached create also skips the fetch for.
+#[test]
+fn add_repos_detached_runs_no_fetch() {
+    with_test_env(|env, server| {
+        let seed = env.create_repo("alpha");
+        let detached = env.create_repo("delta");
+        env.write_cache(&[seed, detached.clone()]);
+        let marker = gate_origin(env, &detached, "delta");
+
+        server
+            .create_workspace(Parameters(CreateWorkspaceParams {
+                name: "quiet".to_string(),
+                repos: vec!["alpha".to_string()],
+                strategy: "detached".to_string(),
+                branch: None,
+            }))
+            .unwrap();
+        let result = server
+            .add_repos(Parameters(AddReposParams {
+                workspace: "quiet".to_string(),
+                repos: vec!["delta".to_string()],
+                strategy: "detached".to_string(),
+                branch: None,
+            }))
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result_text(&result)).unwrap();
+        assert_eq!(parsed["workspace"], "quiet");
+        assert_eq!(
+            parsed["added"].as_array().unwrap(),
+            &[serde_json::json!("delta")]
+        );
+        assert!(env.workspaces_dir.join("quiet").join("delta").exists());
+        assert!(
+            !marker.exists(),
+            "a detached add reads no remote ref, so no fetch may reach origin"
+        );
+    });
+}
