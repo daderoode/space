@@ -303,13 +303,13 @@ impl CreateState {
                         slow_fetch_repos: self.report.slow_fetch_paths(),
                     })
                 } else if self.branch_strategy_idx == 0 {
-                    // New branch: open the branch name stage. The field is
-                    // the user's once they leave it saying something other
-                    // than the space name it was opened with; until then, or
-                    // once emptied, it follows the space name, so going back
-                    // to rename the space renames the branch too. It is read
-                    // trimmed, as Enter reads it, and replaced only when the
-                    // name changes, so the cursor stays where it was left.
+                    // New branch: open the branch name stage. A field left
+                    // reading the space name it was opened with, or nothing,
+                    // is not the user's and follows the space name, so going
+                    // back to rename the space renames the branch too;
+                    // anything else they typed is kept. It is read trimmed,
+                    // as Enter reads it, and replaced only when the name
+                    // changes, so the cursor stays where it was left.
                     let ws_name = self.ws_name.value().to_string();
                     let field = self.branch_name_input.value().trim();
                     let follows = field.is_empty() || field == self.branch_name_default;
@@ -721,17 +721,36 @@ mod tests {
         clear_field(&mut st);
         type_text(&mut st, "feat");
 
-        rename_space(&mut st, "b");
-
-        assert_eq!(
-            st.branch_name_input.value(),
-            "feat",
-            "a name the user typed is theirs and must be kept"
-        );
+        for name in ["b", "c"] {
+            rename_space(&mut st, name);
+            assert_eq!(
+                st.branch_name_input.value(),
+                "feat",
+                "a name the user typed is theirs and must be kept (space '{}')",
+                name
+            );
+        }
         assert_eq!(
             confirm_branch_name(&mut st),
-            ("feat".to_string(), "b".to_string())
+            ("feat".to_string(), "c".to_string())
         );
+    }
+
+    #[test]
+    fn a_typed_name_the_space_is_renamed_to_follows_the_space_from_then_on() {
+        // The accepted limit: a field that reads the space name when the
+        // user leaves it cannot be told from one they never touched.
+        let mut st = naming_state();
+        type_text(&mut st, "a");
+        forward_to_branch_name(&mut st);
+        clear_field(&mut st);
+        type_text(&mut st, "feat");
+        rename_space(&mut st, "feat");
+        assert_eq!(st.branch_name_input.value(), "feat");
+
+        rename_space(&mut st, "c");
+
+        assert_eq!(st.branch_name_input.value(), "c");
     }
 
     #[test]
