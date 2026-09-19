@@ -276,7 +276,7 @@ If `space create repo-a repo-b` was used, those names pre-populate the search.
 | Option | Behaviour |
 |--------|-----------|
 | `New branch '<name>'` | Asks for the branch name (Stage 5), then puts each repo on that branch, creating it where it does not exist yet |
-| `Existing branch '<name>' (if present)` | Checks out the existing branch named like the space in each repo. The space name must pass `git check-ref-format --branch`, checked when you choose this option, and a repo with no such branch, locally or on a remote, fails with git's error |
+| `Existing branch '<name>' (if present)` | Checks out the existing branch named like the space in each repo. The space name must pass `git check-ref-format --branch`, checked when you choose this option. In a repo with no such branch, locally or on a remote, git fails, unless the name resolves to something else, such as a tag, which is checked out detached |
 | `Detached HEAD` | No branch created: each worktree is detached at its source repo's current commit (see [Creating a Workspace](#creating-a-workspace)). For read-only exploration |
 | `Pick a branch...` | A heading over up to five local branches, the most recently committed ones: `Enter` on one uses it in every repo, and `Show more...` below them opens the branch picker (Stage 5). When there are no local branches to list, `Pick a branch...` opens the picker itself |
 
@@ -284,7 +284,7 @@ The branches listed here and in the picker come from one repo: the selected repo
 
 ### Stage 5: Branch Name or Pick Branch (conditional)
 
-`New branch` opens a text input (`New branch name:`), filled in with the space name whenever the field is empty; a name typed there earlier in the flow is kept. `Show more...` (or `Pick a branch...` with no local branches) opens a fuzzy picker of all local and remote branches of that one repo. The branch picked is used in every repo. A branch picked as `origin/<name>` is checked out as a new local `<name>` tracking it, which git refuses in a repo that already has a local `<name>`; pick `<name>` itself when the picker lists it.
+`New branch` opens a text input (`New branch name:`), filled in with the space name whenever the field is empty; a name typed there earlier in the flow is kept. `Show more...` (or `Pick a branch...` with no local branches) opens a fuzzy picker of all local and remote branches of that one repo. The branch picked is used in every repo. A branch picked as `origin/<name>` is checked out as a new local `<name>` tracking it, which git refuses in a repo that already has a local `<name>`; pick `<name>` itself when the picker lists it. A branch of any other remote (`upstream/<name>`) is checked out detached at its commit, with no local branch.
 
 ### Stage 6: Creating
 
@@ -397,7 +397,7 @@ Used in: repo picker, workspace picker, branch picker, and repo search.
 space create api-service shared-lib web-frontend
 ```
 
-The TUI walks you through naming the workspace (e.g. `feature-auth-upgrade`) and choosing a branch strategy. With "new branch", all three repos get a `feature-auth-upgrade` branch created from their respective base branches.
+The TUI walks you through naming the workspace (e.g. `feature-auth-upgrade`) and choosing a branch strategy. With "new branch", all three repos get a `feature-auth-upgrade` branch created from `origin/<base>` in each repo, `<base>` being the branch that repo has checked out (see [Creating a Workspace](#creating-a-workspace)).
 
 ```
 ~/workspaces/feature-auth-upgrade/
@@ -448,7 +448,7 @@ space checks out the branch in each repo; where the repo has no local `feature/p
 space rm review-payment-v2
 ```
 
-`space rm` removes the worktrees, not branches, so the local `feature/payment-v2` stays in each repo until you delete it.
+`space rm` removes the worktrees, not branches, so the local `feature/payment-v2` stays in each repo until you delete it. Delete it before a later review if the branch may have been rebased or force-pushed since: the sync fast-forwards a local branch only when it is strictly behind origin, so a rebased one keeps its old commits.
 
 ---
 
@@ -644,7 +644,7 @@ Create a workspace with git worktrees for selected repos, or complete one.
 
 | Strategy | Behaviour |
 |----------|-----------|
-| `"new"` | Creates a new branch. Name defaults to `name` param, or set `branch` explicitly. Checks local branches first, then remote tracking, then creates off the base branch |
+| `"new"` | Creates a new branch. Name defaults to `name` param, or set `branch` explicitly. Checks local branches first, then remote tracking, then creates off `origin/<base>`, or `<base>` without that ref (see [Creating a Workspace](#creating-a-workspace)) |
 | `"existing"` | Checks out an existing branch. `branch` parameter is required. Strips `origin/` prefix, uses `--track` for remote branches |
 | `"detached"` | Detached HEAD at the source repo's current commit (see [Creating a Workspace](#creating-a-workspace)). No branch created |
 
