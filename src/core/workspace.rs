@@ -3984,9 +3984,12 @@ mod tests {
             );
             // Which argv form ran is pinned by the upstream it left: the
             // `--track` forms set it to origin/feat, while the new-branch
-            // form off the base would set origin/main and the plain form
-            // none. Without this the new-branch arm could silently drift to
-            // the base form and still pass.
+            // form off the base would set origin/main. Without this the
+            // new-branch arm could silently drift to the base form and
+            // still pass. The plain form is not distinguished: git's DWIM
+            // treats a branch that exists only as one remote-tracking ref
+            // as `--track -b`, so it leaves origin/feat too, and its `--`
+            // is the same property this test pins.
             let upstream = Cmd::new("git")
                 .args(["rev-parse", "--abbrev-ref", "@{upstream}"])
                 .current_dir(local.join("-dashout"))
