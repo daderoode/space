@@ -681,8 +681,9 @@ fn create_workspace_accepts_an_interior_space() {
 
 /// Gate `repo`'s `origin` behind a script that leaves `marker` behind when a
 /// fetch reaches it (the `remote.origin.uploadpack` technique from the
-/// Creating worker's tests). The origin is a bare copy of the repo's `main`,
-/// fetched once before the gate goes in so `origin/main` is known.
+/// Creating worker's tests). The origin is a bare repo the fixture pushes
+/// the repo's `main` to before the gate goes in; that push is what writes
+/// `refs/remotes/origin/main`, so `origin/main` is known without a fetch.
 fn gate_origin(env: &TestEnv, repo: &std::path::Path, name: &str) -> PathBuf {
     let run = |args: &[&str], dir: &std::path::Path| {
         let out = std::process::Command::new("git")
@@ -778,6 +779,48 @@ fn create_workspace_detached_runs_no_fetch() {
         assert!(
             fresh_marker.exists(),
             "the contrast proves the gate: a new branch reads origin/<base> and fetches"
+        );
+    });
+}
+
+/// `add_repos` reaches the same `create_worktree` and gets the same skip:
+/// a `detached` add runs no fetch, and the result carries the same fields
+/// as before. The workspace it adds to is made from a repo with no origin,
+/// which a detached create also skips the fetch for.
+#[test]
+fn add_repos_detached_runs_no_fetch() {
+    with_test_env(|env, server| {
+        let seed = env.create_repo("alpha");
+        let detached = env.create_repo("delta");
+        env.write_cache(&[seed, detached.clone()]);
+        let marker = gate_origin(env, &detached, "delta");
+
+        server
+            .create_workspace(Parameters(CreateWorkspaceParams {
+                name: "quiet".to_string(),
+                repos: vec!["alpha".to_string()],
+                strategy: "detached".to_string(),
+                branch: None,
+            }))
+            .unwrap();
+        let result = server
+            .add_repos(Parameters(AddReposParams {
+                workspace: "quiet".to_string(),
+                repos: vec!["delta".to_string()],
+                strategy: "detached".to_string(),
+                branch: None,
+            }))
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result_text(&result)).unwrap();
+        assert_eq!(parsed["workspace"], "quiet");
+        assert_eq!(
+            parsed["added"].as_array().unwrap(),
+            &[serde_json::json!("delta")]
+        );
+        assert!(env.workspaces_dir.join("quiet").join("delta").exists());
+        assert!(
+            !marker.exists(),
+            "a detached add reads no remote ref, so no fetch may reach origin"
         );
     });
 }

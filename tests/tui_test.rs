@@ -384,6 +384,15 @@ fn creating_logs_failed_pre_create_fetch_and_skips_it_for_already_fetched_repos(
             st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
         }
         app.handle_key(key(KeyCode::Enter));
+        match app.screen {
+            Screen::CreateWorkspace(ref st) => assert_eq!(
+                st.stage,
+                space::tui::screens::create::CreateStage::EnterBranchName,
+                "the first Enter must land on the branch-name stage, or the second \
+                 Enter starts something other than the flow this test observes"
+            ),
+            _ => panic!("expected the create screen after picking the strategy"),
+        }
         app.handle_key(key(KeyCode::Enter));
         pump_creating(&mut app);
         match app.screen {

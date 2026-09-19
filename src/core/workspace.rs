@@ -1771,7 +1771,8 @@ fn strategy_reads_origin(repo_path: &Path, strategy: &BranchStrategy) -> bool {
 /// 2.50.1, reproduced). The default `+refs/heads/*:refs/remotes/origin/*`
 /// does not; an entry with no destination (`refs/heads/feat`) fetches into
 /// `FETCH_HEAD` only; a negative entry (`^refs/heads/main`) excludes rather
-/// than writes. A repo with no `origin` has nothing for the fetch to move.
+/// than writes. A repo with no `origin` has nothing for the fetch to move;
+/// any other failure to read the config takes the side that fetches.
 ///
 /// Read as raw config text, not through git2's parsed refspecs: git2 0.19's
 /// `Refspec::dst` unwraps a null destination, so the destination-less form
@@ -1780,16 +1781,24 @@ fn strategy_reads_origin(repo_path: &Path, strategy: &BranchStrategy) -> bool {
 /// unseen. Both forms are legal to git and the second is how a mirror-style
 /// refspec is made to work in a repo with a checked-out branch.
 fn fetch_writes_local_branches(repo: &git2::Repository) -> bool {
+    // Every failure to read falls on the side that fetches, the same
+    // default `strategy_reads_origin` takes for a repo git2 cannot open;
+    // only an absent key (no `origin`, or one with no fetch refspec) means
+    // there is nothing for the fetch to move.
     let Ok(config) = repo.config() else {
-        // Cannot tell, so take the side that fetches.
         return true;
     };
-    let Ok(mut entries) = config.multivar("remote.origin.fetch", None) else {
-        return false;
+    let mut entries = match config.multivar("remote.origin.fetch", None) {
+        Ok(entries) => entries,
+        Err(e) if e.code() == git2::ErrorCode::NotFound => return false,
+        Err(_) => return true,
     };
-    while let Some(Ok(entry)) = entries.next() {
+    while let Some(entry) = entries.next() {
+        let Ok(entry) = entry else {
+            return true;
+        };
         let Some(spec) = entry.value() else {
-            // Not UTF-8: cannot parse, so take the side that fetches.
+            // Not UTF-8: cannot parse.
             return true;
         };
         if refspec_writes_local_branch(spec) {
@@ -3330,6 +3339,47 @@ mod tests {
         let wt = attempt.created.expect("the worktree must be created");
         assert!(attempt.fetch.is_none(), "got {:?}", attempt.fetch);
         assert!(head_is_detached(&wt));
+    }
+
+    /// The one path where a skipped fetch and a refused add coincide: an
+    /// `ExistingBranch` of a present local branch that is checked out in
+    /// another worktree. The fetch is skipped (local branch, default
+    /// refspec) and the add is refused by git, and the attempt reports both
+    /// as they are, `fetch: None` beside the refusal, so a caller reading
+    /// them together is not led to blame stale refs for a checkout clash.
+    #[test]
+    fn a_refused_add_of_a_local_branch_reports_no_fetch_beside_the_refusal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        git(&["branch", "feat", "main"], &repo);
+        let ws_dir = tmp.path().join("workspaces");
+
+        let first = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "first",
+            &BranchStrategy::ExistingBranch("feat".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        first.created.expect("the first worktree must be created");
+
+        let second = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "second",
+            &BranchStrategy::ExistingBranch("feat".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let err = second
+            .created
+            .expect_err("feat is checked out in the first worktree");
+        assert!(
+            refuses_because_checked_out(&err.to_string()),
+            "expected git's checked-out refusal, got: {}",
+            err
+        );
+        assert!(second.fetch.is_none(), "got {:?}", second.fetch);
+        assert!(!marker.exists(), "neither attempt reads a remote ref");
     }
 
     /// The fetch outcome survives an add that then refused. Stale refs are a

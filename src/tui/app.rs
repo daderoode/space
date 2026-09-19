@@ -4385,6 +4385,35 @@ mod tests {
             ],
             "the start line and the row, nothing else: no fetch line, no skip note"
         );
+
+        // Contrast: the same replay with a fetch outcome in the message
+        // shows the fetch line, so the equality above is a claim this log
+        // path can falsify rather than one it could never fail.
+        let mut app = make_app(vec![]);
+        app.screen = creating_screen();
+        let (tx, _cancel, job) = make_job(create_params(&ws_dir, "ws-a", vec![repo]));
+        app.create_job = Some(job);
+        tx.send(CreateProgress::Started { index: 0 }).unwrap();
+        tx.send(CreateProgress::Finished {
+            index: 0,
+            fetch: Some(crate::core::workspace::FetchOutcome::Failed {
+                exit_code: Some(128),
+                stderr: "fatal: no such origin".to_string(),
+                elapsed: std::time::Duration::ZERO,
+            }),
+            created: CreateOutcome::Created,
+        })
+        .unwrap();
+        app.poll_create_result();
+        let log = match &app.screen {
+            Screen::CreateWorkspace(st) => st.progress.clone(),
+            _ => panic!("expected the create screen"),
+        };
+        assert!(
+            log.iter().any(|l| l.contains("fetch failed")),
+            "contrast: a reported fetch failure is logged, got {:?}",
+            log
+        );
     }
 
     /// "No fetch runs for a skipped repo" proved by observing git rather than
