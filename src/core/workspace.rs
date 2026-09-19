@@ -39,8 +39,11 @@ pub enum BranchStrategy {
 /// A character that can break a one-row display or a log line: the C0 and
 /// C1 control blocks and DEL (`char::is_control`), plus the Unicode line and
 /// paragraph separators, which are not controls but are line breaks to a
-/// terminal or a log. git accepts all of these in a branch name, so this is
-/// the only place they are refused.
+/// terminal or a log. git refuses the C0 block and DEL in a branch name but
+/// accepts the C1 block and the separators, so for those this is the only
+/// place they are refused. Whitespace that is not a control (a no-break
+/// space, say) passes; at the ends of a name the whitespace clause of the
+/// creation rule catches it.
 fn is_control_like(c: char) -> bool {
     c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
 }
@@ -3731,6 +3734,7 @@ mod tests {
         for ok in [
             "ws",
             "my space",
+            "a\u{a0}b",
             "\u{e9}",
             "v1..v2",
             "a.b",
