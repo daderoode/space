@@ -265,7 +265,7 @@ If `space create repo-a repo-b` was used, those names pre-populate the search.
 
 Text input for the workspace name. Supports full readline-style editing: `Ctrl-A`/`Ctrl-E` (home/end), `Ctrl-W` (delete word), `Ctrl-U` (delete line), `Ctrl-K` (delete to end).
 
-The name becomes a directory under `workspaces.dir` and the default branch name, so it must be one plain path component: not empty, no `/` or `\`, no leading `-` or `.`, no control or invisible formatting characters (leading and trailing whitespace is trimmed). Interior spaces, dots and non-ASCII are fine. A name that breaks the rule stays in the field and the dialog says which clause it broke; nothing is rewritten. The branch name typed at the "new branch" stage is checked with `git check-ref-format --branch` before anything is created, and a refusal shows git's own sentence (for example `'-x' is not a valid branch name`).
+The name becomes a directory under `workspaces.dir` and the default branch name, so it must be one plain path component: not empty, no `/` or `\`, no leading `-` or `.`, no control or invisible formatting characters (leading and trailing whitespace is trimmed). Interior spaces, dots and non-ASCII are fine, except the invisible joiners and marks some scripts use (a zero-width joiner in an emoji sequence, the zero-width non-joiner in Persian), which are refused because they make two names look alike. A name that breaks the rule stays in the field and the dialog says which clause it broke; nothing is rewritten. The branch name typed at the "new branch" stage is checked with `git check-ref-format --branch` before anything is created, and a refusal shows git's own sentence (for example `'-x' is not a valid branch name`).
 
 ### Stage 3: Pick Branch Strategy
 

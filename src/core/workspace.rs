@@ -87,7 +87,7 @@ fn is_format_char(c: char) -> bool {
 
 /// The lookup guard: `name` must be one plain path component before it is
 /// joined onto `workspaces.dir`. Rejects the empty name, `.` and `..`, any
-/// `/` or `\`, and control characters (`is_control_like`). `Path::join` gives `..` the
+/// `/` or `\`, and control or formatting characters (`is_control_like`). `Path::join` gives `..` the
 /// parent of `ws_dir`, an absolute name replaces `ws_dir` entirely, and the
 /// empty name is `ws_dir` itself, so without this every lookup by name can
 /// read, create under or remove a directory the caller never configured.
@@ -3980,6 +3980,22 @@ mod tests {
             assert!(
                 local.join("-dashout").join(".git").exists(),
                 "{}: the worktree was created at the dash-named relative path",
+                label
+            );
+            // Which argv form ran is pinned by the upstream it left: the
+            // `--track` forms set it to origin/feat, while the new-branch
+            // form off the base would set origin/main and the plain form
+            // none. Without this the new-branch arm could silently drift to
+            // the base form and still pass.
+            let upstream = Cmd::new("git")
+                .args(["rev-parse", "--abbrev-ref", "@{upstream}"])
+                .current_dir(local.join("-dashout"))
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&upstream.stdout).trim(),
+                "origin/feat",
+                "{}: the --track form ran, not another form with --",
                 label
             );
         }
