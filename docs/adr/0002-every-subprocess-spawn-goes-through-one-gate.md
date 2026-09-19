@@ -105,6 +105,33 @@ site that skips the gate shows up as one more clippy warning.
     seconds: up to its test's limit plus the kill grace, or until its test
     releases it. For the control's ungated child it is about half a second.
     This slows the fixture, not the gated call; no test times a fixture.
-- **The lint cannot see spawns made in a dependency**, or through `libc`
-  directly. There are none today: git2 is built without ssh or https, and rmcp
-  without its child-process transport.
+- **The lint cannot see spawns made inside a dependency**, or through `libc`
+  directly. Three pieces of dependency code compiled into the binary can start
+  a process:
+  - **crossterm 0.29.0's `terminal::size()`.** ratatui 0.30 calls it on every
+    draw, through `autoresize`, and `app.rs` calls it directly. It falls back
+    to running `tput cols` and `tput lines` (`src/terminal/sys/unix.rs:274`)
+    when the window-size query fails, on `/dev/tty` or on stdout if `/dev/tty`
+    cannot be opened. A TUI drawing on a terminal gets an answer to that query,
+    so the fallback runs only in unusual setups. Accepted, with its bounds in
+    both directions:
+    - A `tput` that inherits a gated spawn's pipe holds it only for its own
+      few milliseconds.
+    - crossterm builds its `tput` pipes without the gate. A gated child started
+      at the same instant keeps one of them, and the render path's `size()`
+      then waits for that child to exit. That needs the rare fallback and a
+      worker's spawn to coincide.
+  - **crossterm 0.28.1** has the same fallback (`src/terminal/sys/unix.rs:263`).
+    It is a direct dependency, and `tui-input`'s ratatui 0.29 also pulls it in.
+    Nothing in space calls it, because the TUI's terminal is ratatui 0.30 over
+    crossterm 0.29.0.
+  - **git2 0.19.0's `CredentialHelper`** runs `sh -c "<helper> get"`
+    (`src/cred.rs:374` and `:386`) whatever git2's ssh and https features are.
+    space uses git2 read-only and in process: open, status, diff, revwalk,
+    branches, config and a remote's URL. It never calls git2's credential,
+    fetch or push API. A future fetch through git2 would have to pass the gate
+    before it could start that helper.
+
+  rmcp's child-process transport and tokio's `process` module are not compiled
+  in (their features are off). The remaining hits in the dependency tree are
+  build scripts, test code, documentation, or `libc` declarations.
