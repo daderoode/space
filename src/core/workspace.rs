@@ -3831,14 +3831,14 @@ mod tests {
                 "a\u{2066}b",
                 "Space name cannot contain control or formatting characters",
             ),
-            // The joiner the docs name as refused, and a tag character from
-            // the last range of the table.
+            // The joiner the docs name as refused, and the last code point
+            // of the table's last range, so a truncated range is caught.
             (
                 "a\u{200d}b",
                 "Space name cannot contain control or formatting characters",
             ),
             (
-                "a\u{e0041}b",
+                "a\u{e007f}b",
                 "Space name cannot contain control or formatting characters",
             ),
         ];
