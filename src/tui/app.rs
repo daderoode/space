@@ -4323,6 +4323,70 @@ mod tests {
         );
     }
 
+    /// The strategy skip is silent. A detached HEAD reads no remote ref, so
+    /// there is no age to warn about, and a successful fetch already says
+    /// nothing at this stage: a create that needed no fetch must not log
+    /// more than one whose fetch went fine. The origin here is a path that
+    /// does not exist, so a fetch that did run would fail at once and put a
+    /// `fetch failed` line in the log; its absence is the assertion.
+    #[test]
+    fn a_detached_head_create_is_silent_in_the_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = make_repo(tmp.path(), "repo-a");
+        let dead = format!("file://{}", tmp.path().join("no-such-origin.git").display());
+        git_in(&repo, &["remote", "add", "origin", &dead]);
+        let ws_dir = tmp.path().join("spaces");
+        let mut params = create_params(&ws_dir, "ws-a", vec![repo.clone()]);
+        // Neither fresh nor slow, so the run would fetch this repo if the
+        // strategy did not rule it out.
+        params.fresh_repos = vec![];
+        assert!(matches!(
+            params.branch_strategy,
+            crate::core::workspace::BranchStrategy::DetachedHead
+        ));
+
+        let (tx, rx) = mpsc::sync_channel::<CreateProgress>(64);
+        run_create_worker(params.clone(), tx, Arc::new(AtomicBool::new(false)));
+        let messages: Vec<CreateProgress> = rx.into_iter().collect();
+        assert!(
+            messages.iter().any(|m| matches!(
+                m,
+                CreateProgress::Finished {
+                    fetch: None,
+                    created: CreateOutcome::Created,
+                    ..
+                }
+            )),
+            "the repo is created with no fetch reported"
+        );
+
+        // Replay the worker's messages through the App so the assertion is
+        // on the log the user sees, not on the channel. `Done` is held back
+        // because it leaves the screen and takes the log with it.
+        let mut app = make_app(vec![]);
+        app.screen = creating_screen();
+        let (tx, _cancel, job) = make_job(params);
+        app.create_job = Some(job);
+        for m in messages {
+            if !matches!(m, CreateProgress::Done) {
+                tx.send(m).unwrap();
+            }
+        }
+        app.poll_create_result();
+        let log = match &app.screen {
+            Screen::CreateWorkspace(st) => st.progress.clone(),
+            _ => panic!("expected the create screen"),
+        };
+        assert_eq!(
+            log,
+            vec![
+                "Creating worktree for repo-a...".to_string(),
+                "  \u{2713} repo-a".to_string()
+            ],
+            "the start line and the row, nothing else: no fetch line, no skip note"
+        );
+    }
+
     /// "No fetch runs for a skipped repo" proved by observing git rather than
     /// by reading the message the worker chose to send. `fetch: None` cannot
     /// tell a skip that fetched and threw the outcome away from one that
@@ -4392,9 +4456,12 @@ mod tests {
         .expect("the fixture's worktree must be created");
 
         let mut params = create_params(&ws_dir, "ws-a", vec![repo_a, repo_b]);
-        // Neither repo is fresh and neither was slow, so both would be
-        // fetched by a run that attempted them.
+        // Neither repo is fresh and neither was slow, and the strategy reads
+        // `origin/*` (a detached HEAD would skip the fetch on its own), so
+        // both would be fetched by a run that attempted them.
         params.fresh_repos = vec![];
+        params.branch_strategy =
+            crate::core::workspace::BranchStrategy::NewBranch("topic".to_string());
         let (tx, rx) = mpsc::sync_channel::<CreateProgress>(64);
         run_create_worker(params, tx, Arc::new(AtomicBool::new(false)));
         let messages: Vec<CreateProgress> = rx.into_iter().collect();

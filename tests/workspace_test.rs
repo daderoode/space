@@ -715,11 +715,13 @@ fn create_worktree_cancellable_reads_the_flag_again_after_the_fetch() {
         })
     };
 
+    // A strategy that reads `origin/*`, so the fetch this test gates on is
+    // one the attempt actually starts; a detached HEAD skips it.
     let attempt = create_worktree_cancellable(
         repo_dir.path(),
         ws_dir.path(),
         "test-ws",
-        &BranchStrategy::DetachedHead,
+        &BranchStrategy::NewBranch("topic".to_string()),
         PreCreateFetch::Run(Duration::from_secs(60)),
         &cancel,
     );
