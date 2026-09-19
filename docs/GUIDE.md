@@ -37,13 +37,13 @@ Git worktrees help by letting you have multiple branches checked out simultaneou
 
 ```
 ~/workspaces/
-  feature/auth-upgrade/
+  feature-auth-upgrade/
     api-service/          <-- git worktree
     shared-lib/           <-- git worktree
     web-frontend/         <-- git worktree
 ```
 
-Each subdirectory is a git worktree pointing back to the original repo. The workspace name (`feature/auth-upgrade`) doubles as the default branch name.
+Each subdirectory is a git worktree pointing back to the original repo. The workspace name (`feature-auth-upgrade`) doubles as the default branch name. A name is one plain path component: no `/` or `\`, no leading `-` or `.`, not empty (see [Stage 2](#stage-2-name-workspace)).
 
 ## Three Interfaces
 
@@ -265,6 +265,8 @@ If `space create repo-a repo-b` was used, those names pre-populate the search.
 
 Text input for the workspace name. Supports full readline-style editing: `Ctrl-A`/`Ctrl-E` (home/end), `Ctrl-W` (delete word), `Ctrl-U` (delete line), `Ctrl-K` (delete to end).
 
+The name becomes a directory under `workspaces.dir` and the default branch name, so it must be one plain path component: not empty, no `/` or `\`, no leading `-` or `.`, no control characters (leading and trailing whitespace is trimmed). Interior spaces, dots and non-ASCII are fine. A name that breaks the rule stays in the field and the dialog says which clause it broke; nothing is rewritten. The branch name typed at the "new branch" stage is checked with `git check-ref-format --branch` before anything is created, and a refusal shows git's own sentence (for example `'-x' is not a valid branch name`).
+
 ### Stage 3: Pick Branch Strategy
 
 Four options:
@@ -391,19 +393,19 @@ Used in: repo picker, workspace picker, branch picker, and repo search.
 space create api-service shared-lib web-frontend
 ```
 
-The TUI walks you through naming the workspace (e.g. `feature/auth-upgrade`) and choosing a branch strategy. With "new branch", all three repos get a `feature/auth-upgrade` branch created from their respective base branches.
+The TUI walks you through naming the workspace (e.g. `feature-auth-upgrade`) and choosing a branch strategy. With "new branch", all three repos get a `feature-auth-upgrade` branch created from their respective base branches.
 
 ```
-~/workspaces/feature/auth-upgrade/
-  api-service/       <- worktree on feature/auth-upgrade
-  shared-lib/        <- worktree on feature/auth-upgrade
-  web-frontend/      <- worktree on feature/auth-upgrade
+~/workspaces/feature-auth-upgrade/
+  api-service/       <- worktree on feature-auth-upgrade
+  shared-lib/        <- worktree on feature-auth-upgrade
+  web-frontend/      <- worktree on feature-auth-upgrade
 ```
 
-Your original checkouts stay untouched. `space go feature/auth-upgrade` drops you into the workspace directory. Work across all three repos, commit independently, and when you're done:
+Your original checkouts stay untouched. `space go feature-auth-upgrade` drops you into the workspace directory. Work across all three repos, commit independently, and when you're done:
 
 ```
-space rm feature/auth-upgrade
+space rm feature-auth-upgrade
 ```
 
 All worktrees removed, workspace directory cleaned up.
@@ -432,14 +434,14 @@ space create
 ```
 
 1. Select the 3 repos
-2. Name the workspace `review/payment-v2`
+2. Name the workspace `review-payment-v2`
 3. Choose **"existing"** strategy
 4. Enter branch name: `feature/payment-v2`
 
 space checks out the existing branch in each repo. You can now build, run tests, and inspect the code. When you're done reviewing:
 
 ```
-space rm review/payment-v2
+space rm review-payment-v2
 ```
 
 No stale branches left behind since you didn't create any.
@@ -489,7 +491,7 @@ space create
 ```
 
 1. Select the 2 repos
-2. Name: `hotfix/payment-timeout`
+2. Name: `hotfix-payment-timeout`
 3. Choose **"existing"** strategy
 4. Enter branch: `hotfix/payment-timeout`
 
@@ -504,10 +506,10 @@ Fix the bug in both repos from the same workspace, then clean up.
 The agent connects to `space mcp` (MCP server on stdio) and uses the tools programmatically:
 
 1. **Discover repos:** `list_repos(refresh: true)` to see what's available
-2. **Create workspace:** `create_workspace(name: "feature/add-metrics", repos: ["api", "dashboard"], strategy: "new")`
-3. **Check status:** `workspace_status(name: "feature/add-metrics")` to verify branches and dirty state
-4. **Add more repos later:** `add_repos(workspace: "feature/add-metrics", repos: ["shared-lib"])`
-5. **Clean up:** `remove_workspace(name: "feature/add-metrics")`
+2. **Create workspace:** `create_workspace(name: "feature-add-metrics", repos: ["api", "dashboard"], strategy: "new")`
+3. **Check status:** `workspace_status(name: "feature-add-metrics")` to verify branches and dirty state
+4. **Add more repos later:** `add_repos(workspace: "feature-add-metrics", repos: ["shared-lib"])`
+5. **Clean up:** `remove_workspace(name: "feature-add-metrics")`
 
 The agent skill at `~/.config/opencode/skills/superpowers/using-space/` teaches AI agents when and how to use these tools. See [MCP Tools](#tools-reference) for the full tool reference.
 
@@ -585,12 +587,12 @@ List all workspaces with per-repo branch and status information.
 ```json
 [
   {
-    "name": "feature/auth",
-    "path": "/Users/me/workspaces/feature/auth",
+    "name": "feature-auth",
+    "path": "/Users/me/workspaces/feature-auth",
     "repos": [
       {
         "name": "api-service",
-        "path": "/Users/me/workspaces/feature/auth/api-service",
+        "path": "/Users/me/workspaces/feature-auth/api-service",
         "branch": "feature/auth",
         "status": { "modified": 2, "staged": 0, "untracked": 1 },
         "ahead": 3,
@@ -611,11 +613,12 @@ Get detailed status for a specific workspace.
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `name` | `string` | Yes | Workspace name |
+| `name` | `string` | Yes | Workspace name. Must be one plain path component (no `/`, `\`, `.` or `..`, not empty) |
 
 **Returns:** Single workspace object (same structure as `list_workspaces` entries).
 
 **Errors:**
+- Invalid workspace name -> `invalid_params`, before the filesystem is read
 - Workspace not found -> `internal_error`
 
 ---
@@ -628,10 +631,10 @@ Create a new workspace with git worktrees for selected repos.
 
 | Name | Type | Default | Description |
 |------|------|---------|-------------|
-| `name` | `string` | -- | Workspace name (becomes a directory) |
+| `name` | `string` | -- | Workspace name (becomes a directory and the default branch). One plain path component: not empty, no `/` or `\`, no leading `-` or `.`, no surrounding whitespace, no control characters |
 | `repos` | `string[]` | -- | Repo names (matched case-insensitively against cache) |
 | `strategy` | `string` | `"new"` | Branch strategy: `"new"`, `"existing"`, or `"detached"` |
-| `branch` | `string?` | `null` | Branch name. Defaults to workspace name for `"new"`. Required for `"existing"` |
+| `branch` | `string?` | `null` | Branch name. Defaults to workspace name for `"new"`. Required for `"existing"`. Checked with `git check-ref-format --branch` |
 
 **Branch strategies:**
 
@@ -645,13 +648,15 @@ Create a new workspace with git worktrees for selected repos.
 
 ```json
 {
-  "name": "feature/my-work",
-  "path": "/Users/me/workspaces/feature/my-work",
+  "name": "feature-my-work",
+  "path": "/Users/me/workspaces/feature-my-work",
   "repos_created": ["api-service", "shared-lib"]
 }
 ```
 
 **Errors:**
+- Invalid workspace name -> `invalid_params` naming the clause, e.g. `invalid space name "../x": Space name cannot contain '/' or '\'`; nothing is created
+- Invalid branch name -> `invalid_params` with git's sentence, e.g. `'-x' is not a valid branch name`; nothing is created
 - Repo not found in cache -> `invalid_params` with hint to refresh
 - Ambiguous repo name (multiple paths with same basename) -> `invalid_params`
 - Unknown strategy -> `invalid_params`
@@ -670,7 +675,7 @@ Add repos to an existing workspace.
 
 | Name | Type | Default | Description |
 |------|------|---------|-------------|
-| `workspace` | `string` | -- | Existing workspace name |
+| `workspace` | `string` | -- | Existing workspace name. Must be one plain path component (no `/`, `\`, `.` or `..`, not empty) |
 | `repos` | `string[]` | -- | Repo names to add |
 | `strategy` | `string` | `"new"` | Branch strategy (same options as `create_workspace`) |
 | `branch` | `string?` | `null` | Branch name. Defaults to workspace name |
@@ -679,14 +684,15 @@ Add repos to an existing workspace.
 
 ```json
 {
-  "workspace": "feature/my-work",
+  "workspace": "feature-my-work",
   "added": ["web-frontend"]
 }
 ```
 
 **Errors:**
+- Invalid workspace name -> `invalid_params`, before the workspace is looked up
 - Workspace not found -> `invalid_params`
-- Same repo/strategy errors as `create_workspace`
+- Same repo, strategy and branch errors as `create_workspace`
 
 ---
 
@@ -698,13 +704,13 @@ Remove a workspace and all its git worktrees.
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `name` | `string` | Yes | Workspace to remove |
+| `name` | `string` | Yes | Workspace to remove. Must be one plain path component (no `/`, `\`, `.` or `..`, not empty); refused with `invalid_params` before anything is removed |
 
 **Returns:**
 
 ```json
 {
-  "removed": "feature/my-work"
+  "removed": "feature-my-work"
 }
 ```
 
@@ -745,6 +751,8 @@ If two repos in different root directories have the same basename, the call will
 
 | Error | Cause | Resolution |
 |-------|-------|------------|
+| "invalid space name ..." | Name is not one plain path component | Send a name without `/`, `\`, a leading `-` or `.`, or surrounding whitespace |
+| "'X' is not a valid branch name" | git rejects the branch name | Send a name `git check-ref-format --branch` accepts |
 | "repo 'X' not found in cache" | Repo not discovered or cache stale | Call `list_repos(refresh: true)` then retry |
 | "repo 'X' is ambiguous" | Multiple repos with same basename | Rename repo or adjust configured roots |
 | "branch name is required when strategy is 'existing'" | Missing `branch` param | Add `branch` parameter |
