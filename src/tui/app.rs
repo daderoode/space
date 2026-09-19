@@ -1735,6 +1735,9 @@ impl App {
                         tracing::warn!("{}", e);
                         let report = e.to_string();
                         let summary = report.lines().next().unwrap_or_default();
+                        // The prefix stays: the other failures here ("workspace
+                        // 'x' not found") do not say what was being attempted,
+                        // and this is the only line the user sees.
                         self.set_status(format!("Delete failed: {}", summary), StatusKind::Error);
                     }
                 }
@@ -6133,6 +6136,15 @@ mod tests {
             )
             .unwrap();
         }
+        // A second space, sorted before the one being deleted, so that
+        // "the kept space stays selected" cannot pass by landing on index 0.
+        create_worktree(
+            &free_repo,
+            &ws_dir,
+            "a-other",
+            &BranchStrategy::NewBranch("a-other".to_string()),
+        )
+        .unwrap();
         let locked_wt = ws_dir.join("ws").join("a-locked");
         let out = std::process::Command::new("git")
             .args(["worktree", "lock", "--reason", "on usb"])
@@ -6144,9 +6156,15 @@ mod tests {
 
         let mut app = make_app(crate::core::workspace::list_workspaces(&ws_dir).unwrap());
         app.config.workspaces.dir = ws_dir.clone();
+        app.selected_ws = app
+            .workspaces
+            .iter()
+            .position(|w| w.name == "ws")
+            .expect("fixture: the space to delete is listed");
+        assert_eq!(app.selected_ws, 1, "fixture: and it is not at index 0");
         app.load_selected_workspace_detail();
         assert_eq!(
-            app.workspaces[0].repos.len(),
+            app.workspaces[app.selected_ws].repos.len(),
             2,
             "fixture: the dashboard starts with both repos"
         );

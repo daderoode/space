@@ -1250,6 +1250,10 @@ fn remove_workspace_keeps_the_jsonrpc_stream_parseable() {
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
+    // Other tests in this binary set and remove process-wide environment
+    // variables. Reading `PATH` here without the lock is exactly the race
+    // that lock is documented to prevent.
+    let _guard = ENV_LOCK.lock().unwrap();
     let env = TestEnv::new();
     let repo = env.create_repo("alpha");
     create_worktree(
@@ -1264,16 +1268,20 @@ fn remove_workspace_keeps_the_jsonrpc_stream_parseable() {
     let mut server = Command::new(env!("CARGO_BIN_EXE_space"))
         .arg("mcp")
         .env("SPACE_CONFIG_DIR", &env.config_dir)
-        // Keep the server's git and its log file off the user's home.
+        // Keep the server's git config and any log file out of the user's
+        // home. (`space mcp` does not call `logging::init`, so HOME is what
+        // does this, not SPACE_LOG.)
         .env("HOME", env.dir.path())
-        .env("SPACE_LOG", "off")
         .env(
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        // The server logs to stderr through its own tracing subscriber
+        // (`mcp::run`). A piped stderr nobody drains would block the server
+        // as soon as the pipe filled, and it would then never answer.
+        .stderr(Stdio::null())
         .spawn()
         .expect("the built binary must start");
 
@@ -1319,6 +1327,9 @@ fn remove_workspace_keeps_the_jsonrpc_stream_parseable() {
         }
     }
     drop(stdin);
+    // Closing stdin is how the server is meant to end, but a server that
+    // cannot make progress would never see it, and `wait` has no deadline.
+    let _ = server.kill();
     let _ = server.wait();
     let _ = reader.join();
 

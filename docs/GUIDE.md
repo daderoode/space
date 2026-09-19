@@ -86,13 +86,17 @@ When you create a workspace, space does this for each selected repo, except a re
 
 ### Removing a Workspace
 
-For each directory in the workspace that holds a `.git`:
+Each directory in the workspace (symlinks are left alone) is sorted into one of five kinds first, before anything is run or deleted:
 
-1. Reads the `.git` file to find the worktree's admin directory, resolving a relative `gitdir:` against the worktree, the way git does
-2. Runs `git worktree remove` (with `--force` from every command in the app) inside the worktree itself, so git resolves the source repo, and captures its output instead of letting it through to the terminal
-3. Deletes the workspace directory, but only once step 2 has worked for every repo
+1. **A worktree.** Its `.git` file names an admin directory that is still there, and git agrees it is a worktree rather than a submodule checkout. A relative `gitdir:`, which git writes when `worktree.useRelativePaths` is set, is read against the worktree, the way git reads it
+2. **An orphan.** Its `.git` file names an admin directory that has gone, because the source repo was deleted or moved, or the entry was already pruned
+3. **A repository of its own**, which `space` never creates: a clone dropped in by hand, a bare repo, or a submodule checkout
+4. **Unreadable**: something claims to be a repository and cannot be read
+5. **Plain content**: no repository here at all
 
-A worktree git refuses to give up keeps the whole workspace: nothing is deleted, the repos that were removed stay removed, and the error names each directory kept along with git's own reason. The common case is a worktree locked with `git worktree lock`, where the error also names the `git worktree unlock` that clears it. A directory holding a repository of its own, which `space` never creates, is kept the same way, because deleting it would take its history with it. A worktree whose source repo has been deleted or moved is not a refusal: git has nothing left to unregister, so that directory goes with the rest.
+Then, for each worktree, `git worktree remove` (with `--force`, which every command in the app passes) runs inside the worktree itself, so git resolves the source repo, and its output is captured rather than let through to the terminal. The workspace directory is deleted, with the plain content in it, only once nothing has been kept.
+
+A worktree git refuses to give up keeps the whole workspace: the worktrees git already removed are gone, nothing further is deleted, and the error names each directory kept along with git's own reason. The common case is a worktree locked with `git worktree lock`, where the error also names the `git worktree unlock` that clears it, since `space` will not override a lock. A repository of its own is kept for the same reason, because deleting it would take its history with it, and so is an unreadable one, because what it is cannot be told. An orphan is not a refusal when the removal is forced, which is every command in the app: git has nothing left to unregister, so that directory goes with the rest and the report says so. Unforced, from the library API, an orphan is kept too, because git is no longer there to say whether it holds uncommitted work.
 
 ### Repo Discovery
 
@@ -306,7 +310,7 @@ Progress log showing each repo with a checkmark or error. A repo whose place in 
 
 Confirmation dialog showing `Delete workspace?`, the workspace name on its own line, and the worktrees that will be removed. The dialog defaults to No, like the push and rebase confirmations: only `y` or `Y` deletes, while `n`, `N`, `q`, `Enter` and `Esc` all cancel. Long names are truncated with `...`, and long repo lists keep the footer visible by showing `... and N more` when needed. With `space rm --force`, skips the dialog entirely.
 
-If git refuses to remove one of the worktrees, the workspace stays where it is and the status message says which repo and why, on one line; the whole report is in the log file. The dashboard is refreshed either way, since the worktrees git did remove are gone from disk.
+If git refuses to remove one of the worktrees, the workspace stays where it is and the status message names the kept repos and the first reason, on one line; the whole report, repo by repo, goes to the log file when logging is on (it is by default; see `SPACE_LOG`). The dashboard is refreshed either way, since the worktrees git did remove are gone from disk. The dialog lists every repo directory in the workspace, so a repository of its own that `space` will keep is listed there too.
 
 ---
 
@@ -728,7 +732,7 @@ Remove a workspace and all its git worktrees.
 }
 ```
 
-> **Note:** This always uses force removal. Each repo's worktree is removed with `git worktree remove --force`, and the workspace directory is deleted only once every one of them has worked. A worktree git refuses to give up (a locked one, for example) keeps the workspace: the call fails with an error naming each repo and git's reason, the repos already removed stay removed, and retrying after the cause is fixed removes the rest.
+> **Note:** This always uses force removal. Each repo's worktree is removed with `git worktree remove --force`, and the workspace directory is deleted only once nothing has been kept. A worktree git refuses to give up (a locked one, for example), a directory holding a repository of its own, and one that cannot be read are all kept: the call fails with an error naming each of them and the reason, the repos already removed stay removed, and retrying after the cause is fixed removes the rest.
 
 ---
 

@@ -447,10 +447,14 @@ fn rm_force_prints_only_its_own_line() {
 
     let bin = env.dir.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
+    let marker = env.dir.path().join("shim-ran.txt");
     let real_path = std::env::var("PATH").unwrap();
     std::fs::write(
         bin.join("git"),
-        format!("#!/bin/sh\necho \"shim: git $*\"\nPATH='{real_path}'\nexec git \"$@\"\n"),
+        format!(
+            "#!/bin/sh\necho \"shim: git $*\"\necho \"$*\" >> '{}'\nPATH='{real_path}'\nexec git \"$@\"\n",
+            marker.display()
+        ),
     )
     .unwrap();
     std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -461,4 +465,12 @@ fn rm_force_prints_only_its_own_line() {
         .assert()
         .success()
         .stdout(predicate::eq("Removed workspace 'quiet'\n"));
+
+    // Without this the test passes when nothing printed because nothing ran:
+    // stdout would be that one line whether or not git was ever started.
+    let ran = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert!(
+        ran.contains("worktree remove"),
+        "the printing git must be the one that removed the worktree, got {ran:?}"
+    );
 }

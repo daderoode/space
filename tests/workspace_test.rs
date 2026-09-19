@@ -1218,3 +1218,247 @@ fn remove_workspace_removes_a_repo_whose_name_begins_with_a_dash() {
         left
     );
 }
+
+/// Review of the first commit: a bare repo has no `.git` entry at all, so the
+/// scan never saw it and `remove_dir_all` took it with the space, history and
+/// all. The clone case and this one are the same promise.
+#[test]
+fn remove_workspace_keeps_a_bare_repo_in_the_space() {
+    let env = common::TestEnv::new();
+    let source = env.create_repo("a-repo");
+    let worktree = worktree_in_space(&env, &source, "bare-ws");
+    let bare = env.workspaces_dir.join("bare-ws").join("z-bare.git");
+    git_ok(
+        &env.workspaces_dir,
+        &[
+            "clone",
+            "--quiet",
+            "--bare",
+            source.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        !bare.join(".git").exists() && bare.join("HEAD").is_file(),
+        "fixture: a bare repo keeps its files at the top level"
+    );
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "bare-ws", true)
+        .expect_err("a bare repository must not be deleted with the space");
+    assert!(
+        err.to_string().contains("z-bare.git"),
+        "the report names it, got {:?}",
+        err.to_string()
+    );
+    assert_eq!(
+        git_ok(&bare, &["rev-list", "--count", "HEAD"]).trim(),
+        "1",
+        "the bare repository still answers for its own history"
+    );
+    assert!(!worktree.exists(), "the real worktree beside it still goes");
+}
+
+/// Review of the first commit: a submodule checkout's `.git` file points at
+/// `<host>/.git/modules/<name>`, which exists, so reading the gitfile alone
+/// called it a worktree and left git to refuse it with `is not a working
+/// tree`. git2's `is_worktree` is what `is_worktree_of` uses for this exact
+/// trap, and it gives the honest reason instead.
+#[test]
+fn remove_workspace_keeps_a_submodule_checkout() {
+    let env = common::TestEnv::new();
+    let inner = env.create_repo("inner");
+    let host = env.create_repo("host");
+    git_ok(
+        &host,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "--quiet",
+            "add",
+            inner.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    git_ok(&host, &["commit", "--quiet", "-m", "add submodule"]);
+
+    // The checkout is moved into the space, which is the only way one lands
+    // beside the worktrees: nothing in the app puts it there.
+    let space_dir = env.workspaces_dir.join("sub-ws");
+    std::fs::create_dir_all(&space_dir).unwrap();
+    let sub = space_dir.join("z-sub");
+    std::fs::rename(host.join("sub"), &sub).unwrap();
+    // git wrote that gitfile relative to where the checkout was; moving it
+    // would leave the target dangling, which is the orphan case, not this
+    // one. Point it at the module directory it came from, so what is being
+    // tested is a gitfile whose target exists and is not a worktree.
+    let modules = host.join(".git").join("modules").join("sub");
+    assert!(
+        modules.is_dir(),
+        "fixture: the submodule's git dir is there"
+    );
+    std::fs::write(sub.join(".git"), format!("gitdir: {}\n", modules.display())).unwrap();
+    // And point the module back at where the checkout now is, which is what
+    // makes this a submodule that still works rather than a broken one.
+    git_ok(
+        &env.workspaces_dir,
+        &[
+            "config",
+            "--file",
+            modules.join("config").to_str().unwrap(),
+            "core.worktree",
+            sub.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        git_ok(&sub, &["rev-parse", "--is-inside-work-tree"]).trim(),
+        "true",
+        "fixture: git can work in the submodule checkout where it now is"
+    );
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "sub-ws", true)
+        .expect_err("a submodule checkout is a repository, not a worktree");
+    let text = err.to_string();
+    assert!(
+        text.contains("z-sub") && text.contains("repository of its own"),
+        "the reason says what it is, rather than passing on git's `is not a working tree`, got {:?}",
+        text
+    );
+    assert!(sub.join(".git").exists(), "and it is still there");
+}
+
+/// Review of the first commit: `.git` unreadable or malformed used to mean
+/// "orphan", and an orphan is deleted. Not knowing what a directory is, is
+/// not a reason to destroy it.
+#[test]
+fn remove_workspace_keeps_a_directory_whose_gitfile_cannot_be_read() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("a-repo");
+    let worktree = worktree_in_space(&env, &repo, "odd-ws");
+    let odd = env.workspaces_dir.join("odd-ws").join("z-odd");
+    std::fs::create_dir_all(&odd).unwrap();
+    std::fs::write(odd.join(".git"), "this is not a gitfile\n").unwrap();
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "odd-ws", true)
+        .expect_err("a directory that cannot be read must not be deleted");
+    assert!(
+        err.to_string().contains("z-odd"),
+        "the report names it, got {:?}",
+        err.to_string()
+    );
+    assert!(odd.join(".git").exists(), "and it is still there");
+    assert!(!worktree.exists(), "the real worktree beside it still goes");
+}
+
+/// Review of the first commit: an orphaned worktree is deleted without git
+/// ever running, so `force: false` destroyed uncommitted work in the one
+/// case where git is not there to object.
+#[test]
+fn remove_workspace_keeps_an_orphan_when_not_forced() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "orphan-ws");
+    std::fs::write(wt.join("notes.txt"), "wip").unwrap();
+    std::fs::remove_dir_all(&repo).unwrap();
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "orphan-ws", false)
+        .expect_err("without force nothing is destroyed unchecked");
+    assert!(
+        err.to_string().contains("alpha"),
+        "the report names it, got {:?}",
+        err.to_string()
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.join("notes.txt")).unwrap(),
+        "wip",
+        "the uncommitted work is still on disk"
+    );
+
+    // With force it goes, and is accounted for rather than passed over.
+    let removed = space::core::workspace::remove_workspace(&env.workspaces_dir, "orphan-ws", true);
+    removed.unwrap();
+    assert!(!env.workspaces_dir.join("orphan-ws").exists());
+}
+
+/// Review of the first commit: the summary line repeated the only body line
+/// word for word when one repo was kept, git's second stderr line landed at
+/// column zero as though it were a report entry of its own, and the counts
+/// left orphans out of a total that included them.
+#[test]
+fn remove_workspace_report_reads_as_a_report() {
+    let env = common::TestEnv::new();
+    let locked_repo = env.create_repo("a-locked");
+    let free_repo = env.create_repo("b-free");
+    let orphan_repo = env.create_repo("c-orphan");
+    let locked_wt = worktree_in_space(&env, &locked_repo, "ws");
+    worktree_in_space(&env, &free_repo, "ws");
+    worktree_in_space(&env, &orphan_repo, "ws");
+    git_ok(
+        &locked_repo,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "on usb",
+            locked_wt.to_str().unwrap(),
+        ],
+    );
+    std::fs::remove_dir_all(&orphan_repo).unwrap();
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "ws", true)
+        .expect_err("the locked worktree is refused");
+    let text = err.to_string();
+    let lines: Vec<&str> = text.lines().collect();
+
+    assert!(
+        lines[0].contains("1 of 3 repos"),
+        "the count covers every repo the space held, got {:?}",
+        lines[0]
+    );
+    assert!(
+        lines[1..].iter().any(|l| l.contains("c-orphan")),
+        "including the one with no source repo left, which is not silently dropped: {:?}",
+        text
+    );
+    assert!(
+        lines[1..].iter().all(|l| l.starts_with("  ")),
+        "every line under the summary is indented, so git's second line cannot read as an entry of its own: {:?}",
+        text
+    );
+    assert!(
+        lines[1..].iter().all(|l| l.trim() != lines[0].trim()),
+        "no line repeats the summary word for word: {:?}",
+        text
+    );
+    assert!(
+        text.contains("b-free"),
+        "and what was removed is named: {:?}",
+        text
+    );
+}
+
+/// Review of the first commit: nothing pinned `--force` itself. The whole
+/// suite stayed green with the flag dropped, and after this ticket that
+/// regression is no longer invisible: it would make every space holding a
+/// modified file unremovable. This is the complement of the unforced test.
+#[test]
+fn remove_workspace_removes_a_dirty_worktree_when_forced() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "forced-ws");
+    std::fs::write(wt.join("notes.txt"), "wip").unwrap();
+    std::fs::write(wt.join("tracked.txt"), "changed").unwrap();
+
+    space::core::workspace::remove_workspace(&env.workspaces_dir, "forced-ws", true).unwrap();
+
+    assert!(
+        !env.workspaces_dir.join("forced-ws").exists(),
+        "force is what lets a space with uncommitted work go"
+    );
+    let left = registered_worktrees(&repo);
+    assert!(
+        !left.contains("forced-ws"),
+        "and the source repo is told about it, got {}",
+        left
+    );
+}
