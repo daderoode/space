@@ -86,17 +86,17 @@ When you create a workspace, space does this for each selected repo, except a re
 
 ### Removing a Workspace
 
-Each directory in the workspace (symlinks are left alone) is sorted into one of five kinds first, before anything is run or deleted:
+Each directory in the workspace (symlinks are left alone) is sorted into one of five kinds before anything is done to it, and nothing is deleted until every directory has been dealt with:
 
-1. **A worktree.** Its `.git` file names an admin directory that is still there, and git agrees it is a worktree rather than a submodule checkout. A relative `gitdir:`, which git writes when `worktree.useRelativePaths` is set, is read against the worktree, the way git reads it
+1. **A worktree.** Its `.git` file names an admin directory that is still there and holds a `commondir`, which is what a linked worktree has and a submodule checkout does not. A relative `gitdir:`, which git writes when `worktree.useRelativePaths` is set, is read against the worktree, the way git reads it
 2. **An orphan.** Its `.git` file names an admin directory that has gone, because the source repo was deleted or moved, or the entry was already pruned
-3. **A repository of its own**, which `space` never creates: a clone dropped in by hand, a bare repo, or a submodule checkout
-4. **Unreadable**: something claims to be a repository and cannot be read
+3. **A repository of its own**, which `space` never creates: a clone dropped in by hand, a bare repo, or a submodule checkout. A repository is recognised by the `objects` directory and `config` file that every repository has, in any format, rather than by asking a library, which would answer "not a repository" for a format it does not know and so delete it
+4. **Unreadable**: its `.git` file cannot be read, or does not name a gitdir
 5. **Plain content**: no repository here at all
 
-Then, for each worktree, `git worktree remove` (with `--force`, which every command in the app passes) runs inside the worktree itself, so git resolves the source repo, and its output is captured rather than let through to the terminal. The workspace directory is deleted, with the plain content in it, only once nothing has been kept.
+For each worktree, `git worktree remove` (with `--force`, which every command in the app passes) runs inside the worktree itself, so git resolves the source repo, and its output is captured rather than let through to the terminal. Only once every directory has been dealt with, and nothing has been kept, is the workspace directory deleted, with the plain content in it.
 
-A worktree git refuses to give up keeps the whole workspace: the worktrees git already removed are gone, nothing further is deleted, and the error names each directory kept along with git's own reason. The common case is a worktree locked with `git worktree lock`, where the error also names the `git worktree unlock` that clears it, since `space` will not override a lock. A repository of its own is kept for the same reason, because deleting it would take its history with it, and so is an unreadable one, because what it is cannot be told. An orphan is not a refusal when the removal is forced, which is every command in the app: git has nothing left to unregister, so that directory goes with the rest and the report says so. Unforced, from the library API, an orphan is kept too, because git is no longer there to say whether it holds uncommitted work.
+A worktree git refuses to give up keeps the whole workspace: the worktrees git already removed are gone, nothing further is deleted, and the error names each directory kept along with git's own reason. The common case is a worktree locked with `git worktree lock`, where the error also names the `git worktree unlock` that clears it, since `space` will not override a lock. A repository of its own is kept for the same reason, because deleting it would take its history with it, and so is an unreadable one, because what it is cannot be told. An orphan is not a refusal when the removal is forced, which is every command in the app: git has nothing left to unregister, so that directory goes with the rest, and it is listed in the report if something else in the space was kept. On a removal that succeeds there is no report, and nothing is said about it. Unforced, which only the library API can ask for, an orphan is kept too, because git is no longer there to say whether it holds uncommitted work.
 
 ### Repo Discovery
 
@@ -310,7 +310,7 @@ Progress log showing each repo with a checkmark or error. A repo whose place in 
 
 Confirmation dialog showing `Delete workspace?`, the workspace name on its own line, and the worktrees that will be removed. The dialog defaults to No, like the push and rebase confirmations: only `y` or `Y` deletes, while `n`, `N`, `q`, `Enter` and `Esc` all cancel. Long names are truncated with `...`, and long repo lists keep the footer visible by showing `... and N more` when needed. With `space rm --force`, skips the dialog entirely.
 
-If git refuses to remove one of the worktrees, the workspace stays where it is and the status message names the kept repos and the first reason, on one line; the whole report, repo by repo, goes to the log file when logging is on (it is by default; see `SPACE_LOG`). The dashboard is refreshed either way, since the worktrees git did remove are gone from disk. The dialog lists every repo directory in the workspace, so a repository of its own that `space` will keep is listed there too.
+If git refuses to remove one of the worktrees, the workspace stays where it is and the status message names the kept repos and the first reason, on one line; the whole report, repo by repo, goes to the log file when logging is on (it is by default; see `SPACE_LOG`). The dashboard is refreshed either way, since the worktrees git did remove are gone from disk. The dialog lists the repo directories `space` can see, which is every directory holding a `.git`; a bare repo has none, so one sitting in the workspace is not listed even though the removal will stop on it.
 
 ---
 

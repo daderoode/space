@@ -2030,9 +2030,14 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
             // Nothing registered points at this directory any more: its source
             // repo was deleted or moved, or the entry was already pruned. Git
             // has nothing to unregister, so with `force` the directory goes
-            // with the space rather than making the space unremovable. Without
-            // it, the caller asked for nothing to be destroyed unchecked, and
-            // there is no git left here to check anything.
+            // with the space rather than making the space unremovable.
+            //
+            // Every caller in the app passes `force` (`cli/remove.rs`, which
+            // refuses the command without `--force`, `mcp/mod.rs` and the TUI
+            // delete dialog), so the unforced arm is the library surface
+            // only. It is here because there is no git left in this case to
+            // say whether the directory holds uncommitted work, and silently
+            // destroying it is the one thing `force` is supposed to gate.
             SpaceEntry::Orphan => {
                 if force {
                     orphaned.push(repo);
@@ -2054,7 +2059,12 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
             )),
             SpaceEntry::Unreadable(why) => kept.push((
                 repo,
-                format!("{}, so what this directory is cannot be told", why),
+                format!(
+                    "{}, so what this directory is cannot be told; look at it, \
+                     then move it aside or delete it by hand, and remove the \
+                     space again",
+                    why
+                ),
             )),
             SpaceEntry::Worktree { admin } => match unregister_worktree(&dir, force, &admin) {
                 Ok(()) => removed.push(repo),
@@ -2091,33 +2101,50 @@ enum SpaceEntry {
 }
 
 /// Which of those a directory is, decided before anything is spawned or
-/// deleted. git2 answers the repository questions, in process and read only:
-/// `is_worktree` is the same test `is_worktree_of` uses, and for the same
-/// reason, that a submodule checkout's `.git` file points at a directory that
-/// exists and is not a worktree. Reading the `.git` file first is what
-/// separates a worktree whose admin directory has gone (an orphan, which git
-/// can do nothing about) from one that cannot be read at all.
+/// deleted, from git's own layout on disk.
+///
+/// Deliberately not from libgit2, though `is_worktree_of` uses it for the
+/// same worktree-or-submodule question. That helper only decides whether to
+/// skip a repo, and its failure is a `false`; this decides whether to delete
+/// a directory, and libgit2 refuses any repository format extension its
+/// version does not know. `git init --ref-format=reftable` (git 2.45 and
+/// later) writes `extensions.refstorage`, and `worktree.useRelativePaths`
+/// (git 2.48 and later) writes `extensions.relativeWorktrees` into the source
+/// repo, so asking libgit2 made a supported repository either "not a
+/// repository", which deletes it, or "unreadable", which makes the space
+/// unremovable. The layout this reads instead is git's own and does not move
+/// with a format extension.
 fn classify_space_entry(dir: &Path) -> SpaceEntry {
     let gitfile = dir.join(".git");
     if gitfile.is_file() {
-        match worktree_admin_dir(dir) {
-            Err(why) => return SpaceEntry::Unreadable(why),
-            Ok(admin) if !admin.is_dir() => return SpaceEntry::Orphan,
-            Ok(admin) => {
-                return match git2::Repository::open(dir) {
-                    Ok(repo) if repo.is_worktree() => SpaceEntry::Worktree { admin },
-                    Ok(_) => SpaceEntry::Repository,
-                    Err(e) => SpaceEntry::Unreadable(format!("git cannot open it ({})", e)),
-                }
-            }
-        }
+        return match worktree_admin_dir(dir) {
+            Err(why) => SpaceEntry::Unreadable(why),
+            Ok(admin) if !admin.is_dir() => SpaceEntry::Orphan,
+            // A linked worktree's admin directory holds `commondir` and
+            // `gitdir` and keeps its objects in the repo it belongs to. A
+            // submodule checkout's `.git` file points instead at
+            // `<host>/.git/modules/<name>`, a repository with its own
+            // `objects` and `config` and no `commondir`. That is the trap
+            // `is_worktree_of` documents, read from the directory itself.
+            Ok(admin) if admin.join("commondir").is_file() => SpaceEntry::Worktree { admin },
+            Ok(_) => SpaceEntry::Repository,
+        };
     }
-    // No `.git` file: a plain clone has a `.git` directory, and a bare repo
-    // has its `HEAD` and `objects` at the top level with no `.git` at all.
-    match git2::Repository::open(dir) {
-        Ok(_) => SpaceEntry::Repository,
-        Err(_) => SpaceEntry::Plain,
+    // No `.git` file: a clone has a `.git` directory, and a bare repo has no
+    // `.git` at all, its files sitting at the top level.
+    if gitfile.is_dir() || is_repository_dir(dir) {
+        return SpaceEntry::Repository;
     }
+    SpaceEntry::Plain
+}
+
+/// Whether `dir` is itself a repository, by what every repository has
+/// whatever its format or ref backend: `git init`, `git init --bare` and
+/// `git init --ref-format=reftable` all produce an `objects` directory and a
+/// `config` file. Erring towards "yes" keeps a directory and reports it;
+/// erring towards "no" deletes it, so this side of the line is the safe one.
+fn is_repository_dir(dir: &Path) -> bool {
+    dir.join("objects").is_dir() && dir.join("config").is_file()
 }
 
 /// The admin directory a linked worktree's `.git` file names. git writes a
@@ -2172,13 +2199,15 @@ fn unregister_worktree(dir: &Path, force: bool, admin: &Path) -> std::result::Re
             // which is how the lock is read here: matching git's sentence
             // would break in the next language or wording.
             Err(if admin.join("locked").exists() {
-                // git's own advice ends in `remove -f -f`, which space does
-                // not offer and will not: the lock is the user's. This names
-                // the one way out that space does honour.
+                // git's sentence, then space's own way out. git's remaining
+                // lines are dropped here, and only here: they end in
+                // `remove -f -f`, which space does not offer and will not,
+                // since the lock is the user's. Two instructions for one
+                // problem, one of them unreachable, is worse than one.
                 format!(
-                    "{}\n  space does not override a lock: run `git worktree unlock {}`, \
+                    "{}\nspace does not override a lock: run `git worktree unlock {}`, \
                      then remove the space again",
-                    reason,
+                    reason.lines().next().unwrap_or(reason),
                     dir.display()
                 )
             } else {
@@ -2191,7 +2220,9 @@ fn unregister_worktree(dir: &Path, force: bool, admin: &Path) -> std::result::Re
 
 /// The error a kept space reports. The first line stands alone as a summary,
 /// since the TUI's one-line status shows only that: it counts what was kept
-/// against everything the space held, names each kept directory, and ends
+/// against every repository the space held (directories that hold no
+/// repository are not counted, and go with the space), names each kept
+/// directory, and ends
 /// with the first reason, introduced so that nothing in it can read as part
 /// of git's own sentence. The lines under it carry every reason in full,
 /// indented, and what was removed before the run reached the rest.

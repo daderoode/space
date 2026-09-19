@@ -1462,3 +1462,236 @@ fn remove_workspace_removes_a_dirty_worktree_when_forced() {
         left
     );
 }
+
+/// A repository git2 cannot open is still a repository. libgit2 refuses a
+/// format extension it does not know (`git init --ref-format=reftable`
+/// writes `extensions.refstorage`, git 2.45 and later), and asking it
+/// "is this a repository" made the answer "no", which is the answer that
+/// deletes. Every repository has an `objects` directory and a `config` file,
+/// whatever its format, and that is what decides now.
+#[test]
+fn remove_workspace_keeps_a_repo_no_library_can_open() {
+    let env = common::TestEnv::new();
+    let source = env.create_repo("a-repo");
+    let worktree = worktree_in_space(&env, &source, "odd-format-ws");
+    let odd = env
+        .workspaces_dir
+        .join("odd-format-ws")
+        .join("z-odd-format");
+
+    let bare = env
+        .workspaces_dir
+        .join("odd-format-ws")
+        .join("z-odd-bare.git");
+
+    // Real repositories in a format this build's libgit2 does not support,
+    // in both shapes: one with a `.git` directory and one bare. Reftable
+    // when the local git can make one (git 2.45 and later), an unknown
+    // extension named in the config when it cannot; git2 refuses either.
+    for (path, args) in [
+        (&odd, vec!["init", "--quiet", "--ref-format=reftable"]),
+        (
+            &bare,
+            vec!["init", "--quiet", "--bare", "--ref-format=reftable"],
+        ),
+    ] {
+        let reftable = Command::new("git").args(&args).arg(path).output().unwrap();
+        if !reftable.status.success() {
+            let plain: Vec<&str> = args
+                .iter()
+                .filter(|a| *a != &"--ref-format=reftable")
+                .copied()
+                .collect();
+            Command::new("git").args(&plain).arg(path).output().unwrap();
+            git_ok(path, &["config", "core.repositoryformatversion", "1"]);
+            git_ok(path, &["config", "extensions.spaceUnknown", "true"]);
+        }
+        assert!(
+            git2::Repository::open(path).is_err(),
+            "fixture: git2 must refuse {}, or the test proves nothing",
+            path.display()
+        );
+    }
+    std::fs::write(odd.join("unpushed-marker.txt"), "work").unwrap();
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "odd-format-ws", true)
+        .expect_err("a repository must not be deleted because a library cannot read it");
+    let text = err.to_string();
+    assert!(
+        text.contains("z-odd-format") && text.contains("z-odd-bare.git"),
+        "the report names both, got {:?}",
+        text
+    );
+    assert!(
+        odd.join(".git").is_dir() && odd.join("unpushed-marker.txt").exists(),
+        "the repository with a .git directory and its contents are still on disk"
+    );
+    assert!(
+        bare.join("objects").is_dir(),
+        "and so is the bare one, objects and all"
+    );
+    assert!(!worktree.exists(), "the real worktree beside it still goes");
+}
+
+/// The source repo of a worktree made under `worktree.useRelativePaths`
+/// carries `extensions.relativeWorktrees` in its config (git 2.48 and
+/// later), which libgit2 also refuses. Asking it to tell a worktree from a
+/// submodule checkout therefore made every space of such a repo permanently
+/// unremovable. The hand-written fixture in the test above this one wrote
+/// the relative gitfile without that config, so it never saw this.
+#[test]
+fn remove_workspace_removes_a_worktree_whose_source_uses_relative_paths() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    git_ok(&repo, &["config", "worktree.useRelativePaths", "true"]);
+    let wt = env.workspaces_dir.join("relcfg-ws").join("alpha");
+    git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "relcfg-ws",
+            wt.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        wt.join(".git").is_file(),
+        "fixture: the worktree is where git put it"
+    );
+
+    space::core::workspace::remove_workspace(&env.workspaces_dir, "relcfg-ws", true).unwrap();
+
+    assert!(!env.workspaces_dir.join("relcfg-ws").exists());
+    let left = registered_worktrees(&repo);
+    assert!(
+        !left.contains("relcfg-ws"),
+        "git must have unregistered it, got {}",
+        left
+    );
+}
+
+/// The report quotes directory names with `{:?}`, which is a terminal-safety
+/// claim: a repo directory name is not the space name and nothing validates
+/// it, so it can hold a newline or an escape sequence. Neither may break the
+/// summary into two lines or reach a terminal as control characters.
+#[test]
+fn remove_workspace_report_neutralises_a_hostile_directory_name() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    worktree_in_space(&env, &repo, "hostile-ws");
+    // A directory that is a repository of its own, so it is reported, named
+    // with a newline and an escape sequence.
+    let hostile = env
+        .workspaces_dir
+        .join("hostile-ws")
+        .join("z-\u{1b}[2Jwiped\nsecond line");
+    std::fs::create_dir_all(&hostile).unwrap();
+    git_ok(&hostile, &["init", "--quiet"]);
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "hostile-ws", true)
+        .expect_err("the repository of its own is kept");
+    let text = err.to_string();
+    let summary = text.lines().next().unwrap();
+
+    assert!(
+        !summary.contains('\u{1b}'),
+        "no escape byte reaches a terminal through the summary, got {:?}",
+        summary
+    );
+    assert!(
+        summary.contains("wiped") && summary.contains("second line"),
+        "the name is still legible, escaped, got {:?}",
+        summary
+    );
+    assert!(
+        !text.contains("\n\u{1b}") && text.lines().skip(1).all(|l| l.starts_with("  ")),
+        "and it cannot open a line of its own in the body, got {:?}",
+        text
+    );
+}
+
+/// The summary names what was kept before it quotes a reason, so that
+/// nothing in git's sentence (which ends with the user's own lock reason)
+/// can read as part of the count or the list.
+#[test]
+fn remove_workspace_summary_puts_the_count_before_the_reason() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("a-locked");
+    let wt = worktree_in_space(&env, &repo, "order-ws");
+    git_ok(
+        &repo,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "on usb",
+            wt.to_str().unwrap(),
+        ],
+    );
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "order-ws", true)
+        .expect_err("the locked worktree is refused");
+    let summary = err.to_string().lines().next().unwrap().to_string();
+
+    let name_at = summary
+        .find("a-locked")
+        .expect("the summary names the repo");
+    let reason_at = summary
+        .find("cannot remove a locked working tree")
+        .expect("and carries git's reason");
+    assert!(
+        name_at < reason_at,
+        "the repo and count come first, git's sentence last, got {:?}",
+        summary
+    );
+}
+
+/// The scan sorts the directories, so the report and the order git is
+/// reached in do not inherit `read_dir`'s, which is not defined. Bare repos
+/// are the cheapest thing that is always kept, and they need no git run.
+#[test]
+fn remove_workspace_reports_in_name_order_whatever_read_dir_says() {
+    let env = common::TestEnv::new();
+    let space_dir = env.workspaces_dir.join("order-ws");
+    std::fs::create_dir_all(&space_dir).unwrap();
+    // Created back to front, so creation order is not name order.
+    for name in ["z-last", "m-mid", "a-first"] {
+        git_ok(
+            &space_dir,
+            &[
+                "init",
+                "--quiet",
+                "--bare",
+                space_dir.join(name).to_str().unwrap(),
+            ],
+        );
+    }
+
+    let on_disk: Vec<String> = std::fs::read_dir(&space_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let mut sorted = on_disk.clone();
+    sorted.sort();
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "order-ws", true)
+        .expect_err("three repositories of their own are kept");
+    let summary = err.to_string().lines().next().unwrap().to_string();
+    let at = |name: &str| summary.find(name).expect("every repo is named");
+
+    assert!(
+        at("a-first") < at("m-mid") && at("m-mid") < at("z-last"),
+        "the report is in name order, got {:?}",
+        summary
+    );
+    // If this filesystem hands them back sorted already, the assertion above
+    // holds either way and this test proves nothing; say so rather than
+    // quietly passing.
+    assert_ne!(
+        on_disk, sorted,
+        "fixture: read_dir returned name order by itself, so this test cannot \
+         see the sort (it is not a failure of the code)"
+    );
+}
