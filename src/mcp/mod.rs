@@ -8,7 +8,8 @@ use rmcp::{
     ServerHandler, ServiceExt,
 };
 use serde::Serialize;
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Input parameter types
@@ -78,13 +79,21 @@ struct RepoInfo {
 struct CreateResult {
     name: String,
     path: PathBuf,
+    /// Repos this call added a worktree for.
     repos_created: Vec<String>,
+    /// Repos whose place in the workspace already held a worktree of that
+    /// repo, so this call ran nothing for them (`place_repos`). Always
+    /// present, and empty on a clean run, so a client can rely on the key.
+    repos_already_created: Vec<String>,
 }
 
 #[derive(Serialize)]
 struct AddResult {
     workspace: String,
+    /// Repos this call added a worktree for.
     added: Vec<String>,
+    /// As `CreateResult::repos_already_created`.
+    already_added: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -188,6 +197,79 @@ fn checked_branch(strategy: &BranchStrategy) -> std::result::Result<(), McpError
     Ok(())
 }
 
+/// The repos one create or add call placed in a workspace, by directory
+/// name and in request order.
+struct Placed {
+    /// A worktree was added by this call.
+    created: Vec<String>,
+    /// A worktree of this repo was already in place; nothing was run.
+    already_created: Vec<String>,
+}
+
+/// Add a worktree in workspace `ws_name` for each repo in order, skipping a
+/// repo whose place already holds a worktree of that repo: the Creating
+/// worker's rule (`workspace::is_worktree_of` on `workspace::worktree_path`).
+/// A skipped repo runs no fetch and no add and is listed as already created,
+/// so a client retrying a call that failed part-way converges on a complete
+/// workspace instead of failing on `already exists` at the first repo the
+/// earlier call made. Branch and strategy are not compared, as in the
+/// worker: a retry after a checked-out refusal changes them by design.
+///
+/// A repo named more than once (`resolve_repos` matches case-insensitively,
+/// so `alpha` and `ALPHA` are one repo) is placed once, at its first
+/// position. Otherwise its second mention would find the worktree its first
+/// had just made and report it as already in place, which it was not when
+/// the call began.
+///
+/// The first failure still ends the call: repos before it stay in place,
+/// repos after it are not attempted, and the error is `failed to <verb>
+/// worktree for <repo path>: <git's line>`.
+///
+/// Callers refuse a bad workspace name and a bad branch before calling
+/// this. `worktree_path` joins `ws_name` as given, and a skipped repo never
+/// reaches `create_worktree`, so the core's own name and dash-branch guards
+/// are not what protect it.
+fn place_repos(
+    repo_paths: &[PathBuf],
+    ws_dir: &Path,
+    ws_name: &str,
+    strategy: &BranchStrategy,
+    verb: &str,
+) -> std::result::Result<Placed, McpError> {
+    let mut placed = Placed {
+        created: Vec::new(),
+        already_created: Vec::new(),
+    };
+    let mut seen = HashSet::new();
+    for repo_path in repo_paths {
+        if !seen.insert(repo_path) {
+            continue;
+        }
+        let name = repo_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let wt_path = workspace::worktree_path(ws_dir, ws_name, repo_path);
+        if workspace::is_worktree_of(&wt_path, repo_path) {
+            placed.already_created.push(name);
+            continue;
+        }
+        workspace::create_worktree(repo_path, ws_dir, ws_name, strategy).map_err(|e| {
+            McpError::internal_error(
+                format!(
+                    "failed to {} worktree for {}: {}",
+                    verb,
+                    repo_path.display(),
+                    e
+                ),
+                None,
+            )
+        })?;
+        placed.created.push(name);
+    }
+    Ok(placed)
+}
+
 fn load_repo_cache(cfg: &SpaceConfig, refresh: bool) -> Vec<PathBuf> {
     if !refresh {
         if let Some(cached) = repo::load_cache(&SpaceConfig::cache_path(), cfg.repos.cache_age_secs)
@@ -282,9 +364,11 @@ impl SpaceServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    /// Create a new workspace with git worktrees for the specified repos.
+    /// Create a workspace with git worktrees for the specified repos, or
+    /// complete one. A repo already in the workspace is left as it is and
+    /// listed under `repos_already_created` (`place_repos`).
     #[tool(
-        description = "Create a new workspace with git worktrees for selected repos. Strategy: 'new' (create branch, default), 'existing' (checkout existing branch), or 'detached' (detached HEAD)."
+        description = "Create a workspace with git worktrees for selected repos, or complete one. Strategy: 'new' (create branch, default), 'existing' (checkout existing branch), or 'detached' (detached HEAD). A repo whose worktree is already in the workspace is left as it is, on the branch it already has (this call's strategy and branch do not apply to it; workspace_status shows it), and is listed under repos_already_created, not repos_created. On a call that is not a retry, a non-empty repos_already_created means a workspace with this name already held those repos. The list covers only the repos this call names, so an empty one does not mean the name was free; list_workspaces or workspace_status shows what a workspace holds. The call stops at the first repo that fails; once the cause is fixed, retrying the same call completes the workspace."
     )]
     pub fn create_workspace(
         &self,
@@ -304,39 +388,24 @@ impl SpaceServer {
         checked_branch(&strategy)?;
 
         let ws_dir = &cfg.workspaces.dir;
-        let mut created = Vec::new();
-        for repo_path in &repo_paths {
-            workspace::create_worktree(repo_path, ws_dir, &params.name, &strategy).map_err(
-                |e| {
-                    McpError::internal_error(
-                        format!(
-                            "failed to create worktree for {}: {}",
-                            repo_path.display(),
-                            e
-                        ),
-                        None,
-                    )
-                },
-            )?;
-            let name = repo_path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            created.push(name);
-        }
+        let placed = place_repos(&repo_paths, ws_dir, &params.name, &strategy, "create")?;
 
         let result = CreateResult {
             name: params.name.clone(),
             path: ws_dir.join(&params.name),
-            repos_created: created,
+            repos_created: placed.created,
+            repos_already_created: placed.already_created,
         };
         let json = serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    /// Add repos to an existing workspace.
-    #[tool(description = "Add git worktrees for additional repos to an existing workspace")]
+    /// Add repos to an existing workspace. A repo already in it is left as it
+    /// is and listed under `already_added` (`place_repos`).
+    #[tool(
+        description = "Add git worktrees for additional repos to an existing workspace. A repo whose worktree is already in the workspace is left as it is, on the branch it already has (this call's strategy and branch do not apply to it; workspace_status shows it), and is listed under already_added, not added. The call stops at the first repo that fails; once the cause is fixed, retrying the same call adds the rest."
+    )]
     pub fn add_repos(
         &self,
         Parameters(params): Parameters<AddReposParams>,
@@ -369,26 +438,12 @@ impl SpaceServer {
             .map_err(|e| McpError::invalid_params(e, None))?;
         checked_branch(&strategy)?;
 
-        let mut added = Vec::new();
-        for repo_path in &repo_paths {
-            workspace::create_worktree(repo_path, ws_dir, &params.workspace, &strategy).map_err(
-                |e| {
-                    McpError::internal_error(
-                        format!("failed to add worktree for {}: {}", repo_path.display(), e),
-                        None,
-                    )
-                },
-            )?;
-            let name = repo_path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            added.push(name);
-        }
+        let placed = place_repos(&repo_paths, ws_dir, &params.workspace, &strategy, "add")?;
 
         let result = AddResult {
             workspace: params.workspace,
-            added,
+            added: placed.created,
+            already_added: placed.already_created,
         };
         let json = serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
