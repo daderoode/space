@@ -80,7 +80,7 @@ When you create a workspace, space does this for each selected repo, except a re
 1. Runs `git fetch --quiet origin` on the main repo (errors silently ignored for offline use), unless the strategy reads no remote ref, in which case the fetch is skipped. The rule: a detached HEAD skips, and an existing-branch name skips when it names a local branch (`refs/heads/<name>` exists). Everything else fetches: a new branch, an `origin/...` name, a name that exists only on origin (git resolves it to `origin/<name>` and tracks it), a tag name. A repo whose `remote.origin.fetch` refspec writes into `refs/heads/*` fetches whatever the strategy, because there the fetch moves local branches. Over MCP no sync runs first, so after a skipped fetch the repo's `origin/*` refs are as old as its last fetch; `workspace_status` compares each worktree's branch against `origin/<branch>` (a detached worktree against `origin/HEAD`, when the clone has one). In the TUI the sync report ([Stage 3](#stage-3-sync-report)) runs a fetch first, so this one is also skipped for a repo whose sync fetch worked, or timed out, or took 5 seconds or more to fail; the Creating log says so for the last two.
 2. Determines the branch based on the chosen strategy. `<base>` below is the name of the source repo's current `HEAD`: its checked-out branch, `HEAD` itself when it is detached, or `main` when it has no commit yet:
    - **New branch:** checks for existing local branch first, then remote tracking branch, then creates off `origin/<base>`, or `<base>` when that ref does not exist
-   - **Existing branch:** `origin/<name>` becomes a new local `<name>` tracking it (`--track`). Any other name goes to `git worktree add` as it is, and git decides: a local branch of that name is checked out; otherwise a tag or any other ref of that name (another remote's `upstream/<name>` included) is checked out detached, even when a remote has a branch of that name; otherwise a branch of that name on exactly one remote, or on the one `checkout.defaultRemote` names, becomes a new local branch tracking it; otherwise git fails
+   - **Existing branch:** `origin/<name>` becomes a new local `<name>` tracking it (`--track`). Any other name goes to `git worktree add` as it is, and git decides: a local branch of that name is checked out; otherwise a tag, a commit ID or any other ref of that name (another remote's `upstream/<name>` included) is checked out detached, even when a remote has a branch of that name; otherwise a branch of that name on exactly one remote, or on the one `checkout.defaultRemote` names, becomes a new local branch tracking it; otherwise git fails
    - **Detached HEAD:** uses `--detach` at `<base>`, so each worktree starts at its source repo's current commit (git resolves `<base>` by name, so a tag with the same name as the branch takes precedence, with a warning git prints and space does not show)
 3. Runs `git worktree add <workspace_dir>/<workspace_name>/<repo_name> ...`
 
@@ -275,7 +275,7 @@ If `space create repo-a repo-b` was used, those names pre-populate the search.
 
 | Option | Behaviour |
 |--------|-----------|
-| `New branch '<name>'` | Asks for the branch name (Stage 5), then puts each repo on that branch, creating it where it does not exist yet |
+| `New branch '<name>'` | Asks for the branch name (Stage 5), then puts each repo on that branch, creating it where it does not exist yet; a tag, commit ID or other ref of that name that is not a local branch is checked out detached instead, with no branch created |
 | `Existing branch '<name>' (if present)` | Uses the space name as the branch in each repo, resolved by git as described in [Creating a Workspace](#creating-a-workspace): a local branch of that name is checked out, and a tag of that name, when there is no local branch, gives a detached worktree. The space name must pass `git check-ref-format --branch`, checked when you choose this option |
 | `Detached HEAD` | No branch created: each worktree is detached at its source repo's current commit (see [Creating a Workspace](#creating-a-workspace)). For read-only exploration |
 | `Pick a branch...` | A heading over up to five local branches, the most recently committed ones: `Enter` on one uses it in every repo, and `Show more...` below them opens the branch picker (Stage 5). When there are no local branches to list, `Pick a branch...` opens the picker itself |
@@ -397,7 +397,7 @@ Used in: repo picker, workspace picker, branch picker, and repo search.
 space create api-service shared-lib web-frontend
 ```
 
-The TUI walks you through naming the workspace (e.g. `feature-auth-upgrade`) and choosing a branch strategy. With "new branch", all three repos get a `feature-auth-upgrade` branch created from `origin/<base>` in each repo, or from `<base>` itself where origin has no such branch, `<base>` being the branch that repo has checked out (see [Creating a Workspace](#creating-a-workspace)).
+The TUI walks you through naming the workspace (e.g. `feature-auth-upgrade`) and choosing a branch strategy. With "new branch", all three repos get a `feature-auth-upgrade` branch created from `origin/<base>` in each repo, or from `<base>` itself where the clone has no `origin/<base>` ref, `<base>` being the branch that repo has checked out (see [Creating a Workspace](#creating-a-workspace)).
 
 ```
 ~/workspaces/feature-auth-upgrade/
