@@ -3433,6 +3433,38 @@ mod tests {
         );
     }
 
+    /// Every arm of the refspec classifier, pinned directly, so the arms
+    /// the marker fixtures do not reach (an empty destination, `src:`,
+    /// which git reads as "do not store"; the negative forms) have a
+    /// killing assertion too. False rows are the skip side and are the
+    /// ones that matter; true rows only cost a fetch.
+    #[test]
+    fn refspec_classifier_table() {
+        let cases = [
+            ("+refs/heads/*:refs/remotes/origin/*", false),
+            ("refs/heads/feat", false),
+            ("refs/heads/feat:", false),
+            ("^refs/heads/main", false),
+            ("+refs/heads/*:refs/remotes/*", false),
+            ("+refs/tags/*:refs/tags/*", false),
+            ("+refs/heads/*:refs/heads/*", true),
+            ("+refs/heads/feat:refs/heads/feat", true),
+            ("+refs/heads/feat:feat", true),
+            ("+refs/*:refs/*", true),
+            ("+refs/heads/*:refs/h*", true),
+            ("+refs/heads/*:*", true),
+            ("  +refs/heads/*:refs/heads/*  ", true),
+        ];
+        for (spec, expected) in cases {
+            assert_eq!(
+                refspec_writes_local_branch(spec),
+                expected,
+                "refspec {:?}",
+                spec
+            );
+        }
+    }
+
     /// The fetch outcome survives an add that then refused. Stale refs are a
     /// likely reason for such a refusal, so the caller must still get the
     /// fetch line that explains it. Offline: the origin is a path that does
