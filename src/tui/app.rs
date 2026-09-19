@@ -3021,6 +3021,7 @@ fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures start git directly (ADR 0002)
 mod tests {
     use super::*;
     use crate::core::git::RepoStatus;

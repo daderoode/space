@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)] // fixtures start git directly (ADR 0002)
+
 mod common;
 
 use space::core::git::{

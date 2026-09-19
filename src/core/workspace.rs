@@ -2011,6 +2011,7 @@ fn find_main_repo(wt_path: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // fixtures start git directly (ADR 0002)
 mod tests {
     use super::*;
     use std::process::Command as Cmd;

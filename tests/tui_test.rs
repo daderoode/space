@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)] // fixtures start git directly (ADR 0002)
+
 mod common;
 
 use common::{key, shift_key, test_app, test_app_with_config, TestEnv};
