@@ -557,6 +557,23 @@ fn add_repos_rejects_a_traversal_workspace() {
             !env.dir.path().join("delta").exists(),
             "no worktree may be added to the parent of ws_dir"
         );
+
+        // A traversal name that does not resolve: the guard must answer
+        // before the exists check, or the message would say "not found"
+        // and reveal whether the traversal target exists.
+        let err = server
+            .add_repos(Parameters(AddReposParams {
+                workspace: "../nonexistent-zzz".to_string(),
+                repos: vec!["delta".to_string()],
+                strategy: "new".to_string(),
+                branch: Some("topic".to_string()),
+            }))
+            .expect_err("a traversal name must be refused whether or not it resolves");
+        let msg = invalid_params(&err);
+        assert_eq!(
+            msg,
+            "invalid space name \"../nonexistent-zzz\": Space name cannot contain '/' or '\\'"
+        );
     });
 }
 

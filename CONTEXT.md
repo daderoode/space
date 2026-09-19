@@ -9,7 +9,7 @@ A named group of repositories, each present as a git worktree, that a user works
 _Avoid_: workspace (the code type and older docs use it; new user-facing text says space)
 
 **Space name**:
-The name a space is created under; it becomes the directory under `workspaces.dir` and the default branch name. One plain path component: not empty, no `/` or `\`, no leading `-` or `.`, no surrounding whitespace, no control characters. Interior spaces, dots and non-ASCII are fine. A name that breaks the rule is refused with the clause it broke, never rewritten. Looking up an existing space by name is looser (only `.`, `..`, separators and control characters are refused), so a hand-made `-scratch` space stays viewable and removable.
+The name a space is created under; it becomes the directory under `workspaces.dir` and the default branch name. One plain path component: not empty, no `/` or `\`, no leading `-` or `.`, no surrounding whitespace, no control or invisible formatting characters. Interior spaces, dots and non-ASCII are fine. A name that breaks the rule is refused with the clause it broke, never rewritten. Looking up an existing space by name is looser (only the empty name, `.`, `..`, separators and control or formatting characters are refused), so a hand-made `-scratch` space stays viewable and removable.
 _Avoid_: workspace name, directory name
 
 **Repo list**:

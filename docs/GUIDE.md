@@ -265,7 +265,7 @@ If `space create repo-a repo-b` was used, those names pre-populate the search.
 
 Text input for the workspace name. Supports full readline-style editing: `Ctrl-A`/`Ctrl-E` (home/end), `Ctrl-W` (delete word), `Ctrl-U` (delete line), `Ctrl-K` (delete to end).
 
-The name becomes a directory under `workspaces.dir` and the default branch name, so it must be one plain path component: not empty, no `/` or `\`, no leading `-` or `.`, no control characters (leading and trailing whitespace is trimmed). Interior spaces, dots and non-ASCII are fine. A name that breaks the rule stays in the field and the dialog says which clause it broke; nothing is rewritten. The branch name typed at the "new branch" stage is checked with `git check-ref-format --branch` before anything is created, and a refusal shows git's own sentence (for example `'-x' is not a valid branch name`).
+The name becomes a directory under `workspaces.dir` and the default branch name, so it must be one plain path component: not empty, no `/` or `\`, no leading `-` or `.`, no control or invisible formatting characters (leading and trailing whitespace is trimmed). Interior spaces, dots and non-ASCII are fine. A name that breaks the rule stays in the field and the dialog says which clause it broke; nothing is rewritten. The branch name typed at the "new branch" stage is checked with `git check-ref-format --branch` before anything is created, and a refusal shows git's own sentence (for example `'-x' is not a valid branch name`).
 
 ### Stage 3: Pick Branch Strategy
 
@@ -613,7 +613,7 @@ Get detailed status for a specific workspace.
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `name` | `string` | Yes | Workspace name. Must be one plain path component (no `/`, `\`, `.` or `..`, not empty) |
+| `name` | `string` | Yes | Workspace name. Must be one plain path component (no `/`, `\`, `.` or `..`, no control or formatting characters, not empty) |
 
 **Returns:** Single workspace object (same structure as `list_workspaces` entries).
 
@@ -631,7 +631,7 @@ Create a new workspace with git worktrees for selected repos.
 
 | Name | Type | Default | Description |
 |------|------|---------|-------------|
-| `name` | `string` | -- | Workspace name (becomes a directory and the default branch). One plain path component: not empty, no `/` or `\`, no leading `-` or `.`, no surrounding whitespace, no control characters |
+| `name` | `string` | -- | Workspace name (becomes a directory and the default branch). One plain path component: not empty, no `/` or `\`, no leading `-` or `.`, no surrounding whitespace, no control or invisible formatting characters |
 | `repos` | `string[]` | -- | Repo names (matched case-insensitively against cache) |
 | `strategy` | `string` | `"new"` | Branch strategy: `"new"`, `"existing"`, or `"detached"` |
 | `branch` | `string?` | `null` | Branch name. Defaults to workspace name for `"new"`. Required for `"existing"`. Checked with `git check-ref-format --branch` |
@@ -675,7 +675,7 @@ Add repos to an existing workspace.
 
 | Name | Type | Default | Description |
 |------|------|---------|-------------|
-| `workspace` | `string` | -- | Existing workspace name. Must be one plain path component (no `/`, `\`, `.` or `..`, not empty) |
+| `workspace` | `string` | -- | Existing workspace name. Must be one plain path component (no `/`, `\`, `.` or `..`, no control or formatting characters, not empty) |
 | `repos` | `string[]` | -- | Repo names to add |
 | `strategy` | `string` | `"new"` | Branch strategy (same options as `create_workspace`) |
 | `branch` | `string?` | `null` | Branch name. Defaults to workspace name |
@@ -704,7 +704,7 @@ Remove a workspace and all its git worktrees.
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `name` | `string` | Yes | Workspace to remove. Must be one plain path component (no `/`, `\`, `.` or `..`, not empty); refused with `invalid_params` before anything is removed |
+| `name` | `string` | Yes | Workspace to remove. Must be one plain path component (no `/`, `\`, `.` or `..`, no control or formatting characters, not empty); refused with `invalid_params` before anything is removed |
 
 **Returns:**
 

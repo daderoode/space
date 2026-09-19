@@ -160,8 +160,8 @@ Add to your agent's MCP config:
 See [docs/GUIDE.md](docs/GUIDE.md#mcp-tools) for the full tool reference with
 parameters, return types, and error handling. Every tool that takes a
 workspace name refuses one that is not a plain path component (see
-[How it works](#how-it-works)) with `invalid_params` before touching the
-filesystem.
+[How it works](#how-it-works)) with `invalid_params` before the workspaces
+directory is read, created or removed.
 
 ## Configuration
 
@@ -198,7 +198,8 @@ runs `git worktree add` for each selected repo, placing the worktrees at
 `git worktree remove` and deletes the directory.
 
 A workspace name is one plain path component: not empty, no `/` or `\`, no
-leading `-` or `.`, no surrounding whitespace, no control characters. It is
+leading `-` or `.`, no surrounding whitespace, no control or invisible
+formatting characters. It is
 also the default branch name, and branch names are checked with
 `git check-ref-format --branch` before anything is created. A name that
 breaks either rule is refused with the reason (in the dialog, or as

@@ -36,16 +36,53 @@ pub enum BranchStrategy {
     DetachedHead,
 }
 
-/// A character that can break a one-row display or a log line: the C0 and
-/// C1 control blocks and DEL (`char::is_control`), plus the Unicode line and
-/// paragraph separators, which are not controls but are line breaks to a
-/// terminal or a log. git refuses the C0 block and DEL in a branch name but
-/// accepts the C1 block and the separators, so for those this is the only
-/// place they are refused. Whitespace that is not a control (a no-break
-/// space, say) passes; at the ends of a name the whitespace clause of the
-/// creation rule catches it.
+/// A character that can break a one-row display or a log line, or make a
+/// name read as a different name: the C0 and C1 control blocks and DEL
+/// (`char::is_control`); the Unicode line and paragraph separators, which
+/// are not controls but are line breaks to a terminal or a log; and the
+/// invisible formatting characters (general category Cf), which include the
+/// bidi overrides that render `safe\u{202e}elif.exe` reversed and the
+/// zero-width space that makes `..\u{200b}` look like `..`. git refuses the
+/// C0 block and DEL in a branch name but accepts everything else here, so
+/// for those this is the only place they are refused. Whitespace that is
+/// not a control (a no-break space, say) passes; at the ends of a name the
+/// whitespace clause of the creation rule catches it.
 fn is_control_like(c: char) -> bool {
-    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') || is_format_char(c)
+}
+
+/// Unicode general category Cf (format), Unicode 16.0, as the standard
+/// library has no category query and a dependency for one table is not
+/// worth it. Ranges from UnicodeData.txt; the soft hyphen, the Arabic
+/// number signs, the zero-width and bidi characters, the word joiner and
+/// invisible operators, the byte order mark, the interlinear annotation
+/// characters, the Kaithi and Egyptian format controls, the Duployan and
+/// musical formatting characters, and the tag characters.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
 }
 
 /// The lookup guard: `name` must be one plain path component before it is
@@ -70,7 +107,7 @@ pub fn require_plain_component(name: &str) -> Result<()> {
         anyhow::bail!("Space name cannot contain '/' or '\\'");
     }
     if name.chars().any(is_control_like) {
-        anyhow::bail!("Space name cannot contain control characters");
+        anyhow::bail!("Space name cannot contain control or formatting characters");
     }
     Ok(())
 }
@@ -100,7 +137,7 @@ pub fn validate_space_name(name: &str) -> Result<()> {
         anyhow::bail!("Space name cannot start with '-' or '.'");
     }
     if name.chars().any(is_control_like) {
-        anyhow::bail!("Space name cannot contain control characters");
+        anyhow::bail!("Space name cannot contain control or formatting characters");
     }
     require_plain_component(name)
 }
@@ -3758,11 +3795,42 @@ mod tests {
             (".", "Space name cannot start with '-' or '.'"),
             ("..", "Space name cannot start with '-' or '.'"),
             (".hidden", "Space name cannot start with '-' or '.'"),
-            ("a\nb", "Space name cannot contain control characters"),
-            ("a\0b", "Space name cannot contain control characters"),
-            ("a\x7fb", "Space name cannot contain control characters"),
-            ("a\u{85}b", "Space name cannot contain control characters"),
-            ("a\u{2028}b", "Space name cannot contain control characters"),
+            (
+                "a\nb",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\0b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\x7fb",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\u{85}b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\u{2028}b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            // Cf: a bidi override that renders the name reversed, a
+            // zero-width space (the lookup-guard table has it inside "..",
+            // which here the leading-dot clause answers first), an isolate
+            // control.
+            (
+                "safe\u{202e}elif.exe",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\u{200b}b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\u{2066}b",
+                "Space name cannot contain control or formatting characters",
+            ),
         ];
         for (name, rule) in rejected {
             let err = validate_space_name(name).expect_err(&format!("{:?} must be rejected", name));
@@ -3788,9 +3856,30 @@ mod tests {
             ("a/b", "Space name cannot contain '/' or '\\'"),
             ("/", "Space name cannot contain '/' or '\\'"),
             ("a\\b", "Space name cannot contain '/' or '\\'"),
-            ("a\tb", "Space name cannot contain control characters"),
-            ("a\u{9b}b", "Space name cannot contain control characters"),
-            ("a\u{2029}b", "Space name cannot contain control characters"),
+            (
+                "a\tb",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\0b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\u{9b}b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\u{2029}b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                ".\u{200b}.",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\u{200e}b",
+                "Space name cannot contain control or formatting characters",
+            ),
         ];
         for (name, rule) in rejected {
             let err =
@@ -3849,6 +3938,51 @@ mod tests {
             Some("feature/x")
         );
         assert_eq!(branch_slot_name(&BranchStrategy::DetachedHead), None);
+        assert_eq!(
+            branch_slot_name(&BranchStrategy::ExistingBranch(
+                "origin/origin/-x".to_string()
+            )),
+            Some("origin/-x"),
+            "one prefix is stripped, as add_worktree strips one, so the slot \
+             name does not begin with a dash and needs no refusal"
+        );
+    }
+
+    /// Ticket 13. The two `--track` forms' `--` protects their path slot,
+    /// which is testable the same way as the plain form: a relative
+    /// worktree path beginning with `-` against a branch that exists on
+    /// the remote and not locally (new branch) or is named by its remote
+    /// shorthand (existing branch).
+    #[test]
+    fn a_dash_path_is_a_path_in_both_track_forms() {
+        for (label, strategy) in [
+            (
+                "new branch that exists on the remote",
+                BranchStrategy::NewBranch("feat".to_string()),
+            ),
+            (
+                "existing branch by remote shorthand",
+                BranchStrategy::ExistingBranch("origin/feat".to_string()),
+            ),
+        ] {
+            let (_tmp, local) = origin_and_local();
+            git(&["push", "origin", "main:feat"], &local);
+            git(&["fetch", "origin"], &local);
+            let created =
+                add_worktree(&local, Path::new("-dashout"), "main".to_string(), &strategy)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "{}: with -- before the path, -dashout is a path: {}",
+                            label, e
+                        )
+                    });
+            assert_eq!(created, Path::new("-dashout"), "{}", label);
+            assert!(
+                local.join("-dashout").join(".git").exists(),
+                "{}: the worktree was created at the dash-named relative path",
+                label
+            );
+        }
     }
 
     /// Ticket 13. The one `git worktree add` form whose commit-ish cannot
