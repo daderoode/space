@@ -178,6 +178,32 @@ pub(crate) mod tests {
         held
     }
 
+    /// Whether `output` starts a child while `gate` is held. The caller locks
+    /// the gate by name from outside this module, so this checks the static
+    /// `enter` really locks without going through `hold`, which would move
+    /// with it. The child is released once the gate drops and must then run,
+    /// so a harness that cannot see a start cannot pass.
+    pub(crate) fn a_spawn_starts_while(gate: MutexGuard<'static, ()>) -> bool {
+        let tmp = tempfile::tempdir().unwrap();
+        let started = tmp.path().join("started");
+        let mut child = Command::new("/bin/sh");
+        child.arg("-c").arg(format!(": > '{}'", started.display()));
+        let starter = std::thread::spawn(move || output(&mut child).unwrap());
+        let gap_ends = Instant::now() + GAP;
+        while !started.exists() && Instant::now() < gap_ends {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let started_while_held = started.exists();
+        drop(gate);
+        let out = starter.join().unwrap();
+        assert!(
+            out.status.success() && started.exists(),
+            "the child must run once the gate is released: {:?}",
+            out
+        );
+        started_while_held
+    }
+
     #[test]
     fn a_child_started_through_spawn_cannot_inherit_a_pipe_made_under_the_gate() {
         let held = a_child_started_in_the_gap_holds_the_pipe(|mut child| {

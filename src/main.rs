@@ -100,3 +100,18 @@ pub enum CompleteTarget {
     /// Repos not yet in a workspace
     AvailableRepos { workspace: String },
 }
+
+#[cfg(test)]
+mod tests {
+    /// The binary compiles its own copy of `core`. Its `core::spawn` must lock
+    /// the library's gate, the one the library's own copy locks, or a process
+    /// that reached both copies would have two gates.
+    #[test]
+    fn the_binarys_core_spawn_waits_on_the_library_gate() {
+        let gate = space::SPAWN_GATE.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            !crate::core::spawn::tests::a_spawn_starts_while(gate),
+            "a spawn started while space::SPAWN_GATE was held"
+        );
+    }
+}

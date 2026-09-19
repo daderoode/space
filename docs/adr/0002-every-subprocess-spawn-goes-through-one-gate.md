@@ -21,9 +21,10 @@ A two-thread probe with no app code showed both. A `pre_exec` victim's
 `spawn()` blocked 4 times and its stderr was held 5 times in 128,874 calls,
 each time for the 0.30 s life of a concurrent `sleep 0.3`.
 
-So `src/core/spawn.rs` owns one `Mutex`. Its `spawn`, `output` and `status`
-hold it across `Command::spawn` and never across a wait, and every production
-spawn goes through them. With no two spawns overlapping, no process is created
+So one `Mutex`, `space::SPAWN_GATE` in `lib.rs`, is the process's spawn gate.
+The `spawn`, `output` and `status` in `src/core/spawn.rs` hold it across
+`Command::spawn` and never across a wait, and every production spawn goes
+through them. With no two spawns overlapping, no process is created
 while another spawn's pipe is still inheritable. `clippy.toml` disallows the raw
 `Command::spawn`, `Command::output` and `Command::status`, so a production call
 site that skips the gate shows up as one more clippy warning.
@@ -86,16 +87,24 @@ site that skips the gate shows up as one more clippy warning.
     to the library from either copy, and both lock the same static.
   - The model tests hold the gate by that name, so an entry point that locked
     anything else would fail them.
+  - Two more tests lock it by name from outside `spawn.rs`, one in `lib.rs` and
+    one in `main.rs`. Each checks that `core::spawn` cannot start a child
+    meanwhile, so a copy that went back to a static of its own would fail in
+    the library or in the binary.
 - **Test fixtures start git directly.** They allow the lint at their module or
   crate root, so the gate does not order them against anything. The effect
   runs both ways:
-  - A fixture's child can inherit a gated spawn's pipe. Every long-lived child
-    in the suite is started through the gate, so a fixture's child lives only
-    milliseconds, and that is all it can add to a gated run.
-  - A gated child started while a fixture's own pipe is in its gap keeps that
-    pipe. The fixture then waits for that child's life, which can be seconds:
-    up to its test's limit plus the kill grace, or until its test releases
-    it. This slows the fixture, not the gated call; no test times a fixture.
+  - A fixture's child can inherit a gated spawn's pipe. Fixtures start only
+    short git commands, so that child lives only milliseconds, and that is
+    all it can add to a gated run. Every long-lived child in the suite starts
+    through the gate. The one exception is the control test's child, which
+    starts ungated but only while that test holds the gate, when no gated
+    spawn can be in its gap.
+  - A child started while a fixture's own pipe is in its gap keeps that pipe,
+    and the fixture waits for the child's life. For a gated child that can be
+    seconds: up to its test's limit plus the kill grace, or until its test
+    releases it. For the control's ungated child it is about half a second.
+    This slows the fixture, not the gated call; no test times a fixture.
 - **The lint cannot see spawns made in a dependency**, or through `libc`
   directly. There are none today: git2 is built without ssh or https, and rmcp
   without its child-process transport.
