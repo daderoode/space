@@ -822,6 +822,24 @@ mod tests {
     }
 
     #[test]
+    fn a_leading_space_does_not_make_the_filled_in_name_the_users() {
+        let mut st = naming_state();
+        type_text(&mut st, "a");
+        forward_to_branch_name(&mut st);
+        press(&mut st, KeyCode::Home);
+        type_text(&mut st, " ");
+        assert_eq!(st.branch_name_input.value(), " a");
+
+        rename_space(&mut st, "b");
+
+        assert_eq!(
+            st.branch_name_input.value(),
+            "b",
+            "Enter would read 'a', the old space name, so the field must follow"
+        );
+    }
+
+    #[test]
     fn a_branch_field_edited_back_to_what_was_filled_in_still_follows_the_space() {
         let mut st = naming_state();
         type_text(&mut st, "a");
