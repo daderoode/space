@@ -284,7 +284,7 @@ The branches listed here and in the picker come from one repo: the selected repo
 
 ### Stage 5: Branch Name or Pick Branch (conditional)
 
-`New branch` opens a text input (`New branch name:`), filled in with the space name whenever the field is empty; a name typed there earlier in the flow is kept. `Show more...` (or `Pick a branch...` with no local branches) opens a fuzzy picker of all local and remote branches of that one repo. The branch picked is used in every repo. A branch picked as `origin/<name>` is checked out as a new local `<name>` tracking it, which git refuses in a repo that already has a local `<name>`; pick `<name>` itself when the picker lists it. A branch of any other remote (`upstream/<name>`) is checked out detached at its commit, with no local branch.
+`New branch` opens a text input (`New branch name:`), filled in with the space name. While the field reads the space name, or nothing, it follows the space name: going back to Stage 1 and renaming the space renames the branch too, and a field you emptied is filled in again. A branch name you typed that differs from the space name is kept. `Show more...` (or `Pick a branch...` with no local branches) opens a fuzzy picker of all local and remote branches of that one repo. The branch picked is used in every repo. A branch picked as `origin/<name>` is checked out as a new local `<name>` tracking it, which git refuses in a repo that already has a local `<name>`; pick `<name>` itself when the picker lists it. A branch of any other remote (`upstream/<name>`) is checked out detached at its commit, with no local branch.
 
 ### Stage 6: Creating
 

@@ -20,6 +20,10 @@ pub struct CreateState {
     pub picker: FuzzyPicker,
     pub ws_name: Input,
     pub branch_name_input: Input,
+    /// The space name the branch name stage was last opened with. A field
+    /// that still reads it, or nothing, when the stage is opened again is not
+    /// the user's and follows a renamed space.
+    branch_name_default: String,
     pub selected_repos: Vec<PathBuf>,
     pub branch_strategy_idx: usize, // 0=new branch, 1=existing, 2=detached, 3=pick branch
     pub branch_picker: Option<FuzzyPicker>, // populated when entering PickBranch stage
@@ -36,6 +40,8 @@ impl std::fmt::Debug for CreateState {
         f.debug_struct("CreateState")
             .field("stage", &self.stage)
             .field("ws_name", &self.ws_name.value())
+            .field("branch_name_input", &self.branch_name_input.value())
+            .field("branch_name_default", &self.branch_name_default)
             .field("selected_repos", &self.selected_repos)
             .field("branch_strategy_idx", &self.branch_strategy_idx)
             .field("picked_branch", &self.picked_branch)
@@ -63,6 +69,7 @@ impl CreateState {
             picker,
             ws_name: Input::default(),
             branch_name_input: Input::default(),
+            branch_name_default: String::new(),
             selected_repos: vec![],
             branch_strategy_idx: 0,
             branch_picker: None,
@@ -296,13 +303,20 @@ impl CreateState {
                         slow_fetch_repos: self.report.slow_fetch_paths(),
                     })
                 } else if self.branch_strategy_idx == 0 {
-                    // New branch — open branch name editing stage.
-                    // Only pre-fill when the field is empty; preserve whatever the
-                    // user typed if they Esc'd back and re-selected "New branch".
-                    if self.branch_name_input.value().is_empty() {
-                        let ws_name = self.ws_name.value().to_string();
-                        self.branch_name_input = Input::default().with_value(ws_name);
+                    // New branch: open the branch name stage. A field left
+                    // reading the space name it was opened with, or nothing,
+                    // is not the user's and follows the space name, so going
+                    // back to rename the space renames the branch too;
+                    // anything else they typed is kept. It is read trimmed,
+                    // as Enter reads it, and replaced only when the name
+                    // changes, so the cursor stays where it was left.
+                    let ws_name = self.ws_name.value().to_string();
+                    let field = self.branch_name_input.value().trim();
+                    let follows = field.is_empty() || field == self.branch_name_default;
+                    if follows && field != ws_name {
+                        self.branch_name_input = Input::default().with_value(ws_name.clone());
                     }
+                    self.branch_name_default = ws_name;
                     self.error = None;
                     self.stage = CreateStage::EnterBranchName;
                     ScreenAction::Continue
@@ -589,5 +603,277 @@ mod tests {
             }
             _ => panic!("a failed run must report why on the way out"),
         }
+    }
+
+    // The branch-name field across a rename of the space (ticket 26). Each
+    // test drives the screen by keys from the name stage to the branch-name
+    // stage, back to the name stage, and forward again.
+
+    fn press(st: &mut CreateState, code: KeyCode) -> ScreenAction {
+        st.handle_key(key(code), &ctx(false))
+    }
+
+    fn type_text(st: &mut CreateState, text: &str) {
+        for c in text.chars() {
+            press(st, KeyCode::Char(c));
+        }
+    }
+
+    /// Ctrl-U: empty the field the stage is editing.
+    fn clear_field(st: &mut CreateState) {
+        st.handle_key(
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            &ctx(false),
+        );
+    }
+
+    /// Name stage and back again, with the space renamed on the way.
+    fn rename_space(st: &mut CreateState, name: &str) {
+        back_to_name(st);
+        clear_field(st);
+        type_text(st, name);
+        forward_to_branch_name(st);
+    }
+
+    /// A create screen on its first stage with one repo to pick.
+    fn naming_state() -> CreateState {
+        CreateState::new(vec![PathBuf::from("/nonexistent/ticket-26/repo")], vec![])
+    }
+
+    /// Name stage to branch-name stage. The sync report and the move past it
+    /// belong to the app; this finishes the report and then does what
+    /// `App::advance_to_branch_strategy` does, with no recent branches.
+    fn forward_to_branch_name(st: &mut CreateState) {
+        assert_eq!(st.stage, CreateStage::EnterName);
+        press(st, KeyCode::Enter);
+        assert_eq!(
+            st.stage,
+            CreateStage::PickRepos,
+            "the name must be accepted"
+        );
+        assert!(matches!(
+            press(st, KeyCode::Enter),
+            ScreenAction::ExecuteSyncFlow(_)
+        ));
+        st.report.done = true;
+        assert!(matches!(
+            press(st, KeyCode::Enter),
+            ScreenAction::ContinueFromSyncReport
+        ));
+        st.recent_branches = vec![];
+        st.branch_strategy_idx = 0;
+        st.progress.clear();
+        st.stage = CreateStage::PickBranchStrategy;
+        press(st, KeyCode::Enter);
+        assert_eq!(st.stage, CreateStage::EnterBranchName);
+    }
+
+    /// Branch-name stage back to the name stage, one Esc per stage.
+    fn back_to_name(st: &mut CreateState) {
+        for stage in [
+            CreateStage::PickBranchStrategy,
+            CreateStage::PickRepos,
+            CreateStage::EnterName,
+        ] {
+            press(st, KeyCode::Esc);
+            assert_eq!(st.stage, stage);
+        }
+    }
+
+    /// Enter on the branch-name stage: the new-branch name it creates, and
+    /// the space it creates it in.
+    fn confirm_branch_name(st: &mut CreateState) -> (String, String) {
+        match press(st, KeyCode::Enter) {
+            ScreenAction::ExecuteWorktreeFlow(p) => match p.branch_strategy {
+                BranchStrategy::NewBranch(name) => (name, p.workspace_name),
+                other => panic!("expected a new branch, got {:?}", other),
+            },
+            _ => panic!("Enter on the branch name must start the create"),
+        }
+    }
+
+    #[test]
+    fn renaming_the_space_renames_the_branch_it_filled_in() {
+        let mut st = naming_state();
+        type_text(&mut st, "a");
+        forward_to_branch_name(&mut st);
+        assert_eq!(st.branch_name_input.value(), "a");
+
+        rename_space(&mut st, "b");
+
+        assert_eq!(
+            st.branch_name_input.value(),
+            "b",
+            "the field must follow the new space name, not keep the old one"
+        );
+        assert_eq!(
+            confirm_branch_name(&mut st),
+            ("b".to_string(), "b".to_string()),
+            "the branch is created under the new name"
+        );
+    }
+
+    #[test]
+    fn a_branch_name_the_user_typed_survives_renaming_the_space() {
+        let mut st = naming_state();
+        type_text(&mut st, "a");
+        forward_to_branch_name(&mut st);
+        clear_field(&mut st);
+        type_text(&mut st, "feat");
+
+        for name in ["b", "c"] {
+            rename_space(&mut st, name);
+            assert_eq!(
+                st.branch_name_input.value(),
+                "feat",
+                "a name the user typed is theirs and must be kept (space '{}')",
+                name
+            );
+        }
+        assert_eq!(
+            confirm_branch_name(&mut st),
+            ("feat".to_string(), "c".to_string())
+        );
+    }
+
+    #[test]
+    fn a_typed_name_the_space_is_renamed_to_follows_the_space_from_then_on() {
+        // The accepted limit: a field that reads the space name when the
+        // user leaves it cannot be told from one they never touched.
+        let mut st = naming_state();
+        type_text(&mut st, "a");
+        forward_to_branch_name(&mut st);
+        clear_field(&mut st);
+        type_text(&mut st, "feat");
+        rename_space(&mut st, "feat");
+        assert_eq!(st.branch_name_input.value(), "feat");
+
+        rename_space(&mut st, "c");
+
+        assert_eq!(st.branch_name_input.value(), "c");
+    }
+
+    #[test]
+    fn a_typed_name_that_matches_an_old_space_name_is_still_the_users() {
+        let mut st = naming_state();
+        type_text(&mut st, "a");
+        forward_to_branch_name(&mut st);
+        clear_field(&mut st);
+        type_text(&mut st, "x");
+        rename_space(&mut st, "b");
+        assert_eq!(st.branch_name_input.value(), "x");
+
+        // In space "b" the user asks for branch "a", the first space name.
+        clear_field(&mut st);
+        type_text(&mut st, "a");
+        rename_space(&mut st, "c");
+
+        assert_eq!(
+            st.branch_name_input.value(),
+            "a",
+            "the field said something other than 'b' when the user left it"
+        );
+    }
+
+    #[test]
+    fn an_emptied_branch_field_is_filled_with_the_new_space_name() {
+        let mut st = naming_state();
+        type_text(&mut st, "a");
+        forward_to_branch_name(&mut st);
+        clear_field(&mut st);
+        assert_eq!(st.branch_name_input.value(), "");
+
+        rename_space(&mut st, "b");
+
+        assert_eq!(st.branch_name_input.value(), "b");
+    }
+
+    #[test]
+    fn a_branch_field_of_only_spaces_counts_as_emptied() {
+        let mut st = naming_state();
+        type_text(&mut st, "a");
+        forward_to_branch_name(&mut st);
+        clear_field(&mut st);
+        type_text(&mut st, "  ");
+
+        rename_space(&mut st, "b");
+
+        assert_eq!(
+            st.branch_name_input.value(),
+            "b",
+            "Enter reads the field trimmed, so this field names no branch"
+        );
+    }
+
+    #[test]
+    fn a_trailing_space_does_not_make_the_filled_in_name_the_users() {
+        let mut st = naming_state();
+        type_text(&mut st, "a");
+        forward_to_branch_name(&mut st);
+        type_text(&mut st, " ");
+
+        rename_space(&mut st, "b");
+
+        assert_eq!(
+            st.branch_name_input.value(),
+            "b",
+            "Enter would read 'a', the old space name, so the field must follow"
+        );
+    }
+
+    #[test]
+    fn a_leading_space_does_not_make_the_filled_in_name_the_users() {
+        let mut st = naming_state();
+        type_text(&mut st, "a");
+        forward_to_branch_name(&mut st);
+        press(&mut st, KeyCode::Home);
+        type_text(&mut st, " ");
+        assert_eq!(st.branch_name_input.value(), " a");
+
+        rename_space(&mut st, "b");
+
+        assert_eq!(
+            st.branch_name_input.value(),
+            "b",
+            "Enter would read 'a', the old space name, so the field must follow"
+        );
+    }
+
+    #[test]
+    fn a_branch_field_edited_back_to_what_was_filled_in_still_follows_the_space() {
+        let mut st = naming_state();
+        type_text(&mut st, "a");
+        forward_to_branch_name(&mut st);
+        type_text(&mut st, "x");
+        press(&mut st, KeyCode::Backspace);
+        assert_eq!(st.branch_name_input.value(), "a");
+
+        rename_space(&mut st, "b");
+
+        assert_eq!(
+            st.branch_name_input.value(),
+            "b",
+            "the field reads what was filled in, so it is not the user's name"
+        );
+    }
+
+    #[test]
+    fn choosing_new_branch_again_leaves_the_cursor_where_it_was() {
+        let mut st = naming_state();
+        type_text(&mut st, "a");
+        forward_to_branch_name(&mut st);
+        press(&mut st, KeyCode::Home);
+
+        press(&mut st, KeyCode::Esc);
+        assert_eq!(st.stage, CreateStage::PickBranchStrategy);
+        press(&mut st, KeyCode::Enter);
+        assert_eq!(st.stage, CreateStage::EnterBranchName);
+        type_text(&mut st, "x");
+
+        assert_eq!(
+            st.branch_name_input.value(),
+            "xa",
+            "a field with nothing to change must not be rebuilt"
+        );
     }
 }
