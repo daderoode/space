@@ -1785,7 +1785,13 @@ fn fetch_writes_local_branches(repo: &git2::Repository) -> bool {
     // default `strategy_reads_origin` takes for a repo git2 cannot open. An
     // absent key (no `origin`, or one with no fetch refspec) is not a
     // failure: the iterator is simply empty, and empty means there is
-    // nothing for the fetch to move.
+    // nothing for the fetch to move. Of the four returns below only the
+    // non-UTF-8 value is reachable from a repo on disk, and a test pins it.
+    // The other three are kept for the invariant, not because a repo can
+    // reach them: `Repository::open` already parses the whole config,
+    // includes too, so a config that fails to parse fails the open first
+    // (the caller's fail-safe), and `multivar` and its iterator fail only
+    // on an invalid key name or out of memory (probed on git2 0.19).
     let Ok(config) = repo.config() else {
         return true;
     };
@@ -2940,6 +2946,13 @@ mod tests {
     /// `main` is a separate history from the origin's, so a local branch
     /// made from it never shares a tip with `origin/feat`.
     fn gated_repo(parent: &Path, name: &str) -> (PathBuf, PathBuf) {
+        let repo = plain_repo(parent, name);
+        let marker = gate_origin(parent, name, &repo);
+        (repo, marker)
+    }
+
+    /// The origin half of `gated_repo`, for a repo made some other way.
+    fn gate_origin(parent: &Path, name: &str, repo: &Path) -> PathBuf {
         let origin = parent.join(format!("{}-origin.git", name));
         let seed = plain_repo(parent, &format!("{}-seed", name));
         // A second commit, so the origin's history is not byte-identical to
@@ -2952,7 +2965,6 @@ mod tests {
             &seed,
         );
 
-        let repo = plain_repo(parent, name);
         git(
             &[
                 "remote",
@@ -2960,9 +2972,9 @@ mod tests {
                 "origin",
                 &format!("file://{}", origin.display()),
             ],
-            &repo,
+            repo,
         );
-        git(&["fetch", "-q", "origin"], &repo);
+        git(&["fetch", "-q", "origin"], repo);
 
         let marker = parent.join(format!("FETCHED-{}", name));
         let script = parent.join(format!("gate-{}.sh", name));
@@ -2980,9 +2992,9 @@ mod tests {
                 "remote.origin.uploadpack",
                 &format!("/bin/sh {}", script.display()),
             ],
-            &repo,
+            repo,
         );
-        (repo, marker)
+        marker
     }
 
     fn head_is_detached(wt: &Path) -> bool {
@@ -3463,6 +3475,183 @@ mod tests {
                 spec
             );
         }
+    }
+
+    /// The config read's fail-safe, on the one path a repo can reach: a
+    /// `remote.origin.fetch` value git2 cannot decode as UTF-8. The entry
+    /// here writes under `refs/remotes/`, so git would not move a local
+    /// branch through it; the fetch runs because the value cannot be read,
+    /// which is the invariant, and a detached HEAD is the strategy that
+    /// would otherwise skip.
+    #[test]
+    fn a_fetch_refspec_git2_cannot_decode_takes_the_fetching_side() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        let config = repo.join(".git").join("config");
+        let mut bytes = std::fs::read(&config).unwrap();
+        bytes.extend_from_slice(
+            b"[remote \"origin\"]\n\tfetch = +refs/heads/*:refs/remotes/\xff/*\n",
+        );
+        std::fs::write(&config, bytes).unwrap();
+        let undecodable = {
+            let config = git2::Repository::open(&repo).unwrap().config().unwrap();
+            let mut entries = config.multivar("remote.origin.fetch", None).unwrap();
+            let mut found = false;
+            while let Some(Ok(entry)) = entries.next() {
+                found |= entry.value().is_none();
+            }
+            found
+        };
+        assert!(
+            undecodable,
+            "fixture: one fetch refspec must be undecodable to git2"
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::DetachedHead,
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        attempt.created.expect("the worktree must be created");
+        assert!(
+            attempt.fetch.is_some(),
+            "an unreadable refspec must not skip"
+        );
+        assert!(marker.exists(), "and the fetch must reach the remote");
+    }
+
+    /// The caller's fail-safe: a repo git2 cannot open is treated as reading
+    /// origin. A reftable repo is one git 2.50.1 works in and git2 0.19
+    /// refuses (`unsupported extension name extensions.refstorage`), so the
+    /// marker can prove the fetch reached the remote. The base branch comes
+    /// from git2 too and falls back to `main`, which is the branch here.
+    #[test]
+    fn a_repo_git2_cannot_open_takes_the_fetching_side() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(
+            &["init", "-q", "-b", "main", "--ref-format=reftable"],
+            &repo,
+        );
+        git_setup(&repo);
+        git(&["commit", "--allow-empty", "-m", "init"], &repo);
+        let marker = gate_origin(tmp.path(), "repo", &repo);
+        assert!(
+            git2::Repository::open(&repo).is_err(),
+            "fixture: git2 must be unable to open a reftable repo"
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::DetachedHead,
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let wt = attempt.created.expect("the worktree must be created");
+        assert_eq!(attempt.fetch, Some(FetchOutcome::Ok));
+        assert!(marker.exists(), "the fetch must reach the remote");
+        assert_eq!(get_sha(&wt, "HEAD"), get_sha(&repo, "main"));
+    }
+
+    /// The same fail-safe on the everyday way to break an open: a syntax
+    /// error in `.git/config`. Shell git dies reading the same file before
+    /// it reaches the remote (`fatal: bad config line`), so no marker can
+    /// appear here; what this pins is that the fetch was attempted, which
+    /// only a spawned `git fetch` can report.
+    #[test]
+    fn a_config_syntax_error_still_attempts_the_fetch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _marker) = gated_repo(tmp.path(), "repo");
+        let config = repo.join(".git").join("config");
+        let mut bytes = std::fs::read(&config).unwrap();
+        bytes.extend_from_slice(b"[broken\n");
+        std::fs::write(&config, bytes).unwrap();
+        assert!(git2::Repository::open(&repo).is_err(), "fixture");
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::DetachedHead,
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        match attempt.fetch {
+            Some(FetchOutcome::Failed { ref stderr, .. }) => assert!(
+                stderr.contains("bad config"),
+                "git fetch ran and refused the config, got: {}",
+                stderr
+            ),
+            ref other => panic!("the fetch must be attempted, got {:?}", other),
+        }
+    }
+
+    /// `origin/x` fetches because of its prefix, not because no local
+    /// branch has that name. A local branch literally named `origin/feat`
+    /// is legal, and with it present the local-branch rule alone would skip,
+    /// so this is the test where the unconditional-fetch arm decides.
+    #[test]
+    fn an_origin_name_fetches_even_beside_a_local_branch_of_that_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        git(&["branch", "origin/feat", "main"], &repo);
+        assert!(
+            git2::Repository::open(&repo)
+                .unwrap()
+                .find_branch("origin/feat", git2::BranchType::Local)
+                .is_ok(),
+            "fixture: a local branch named origin/feat"
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::ExistingBranch("origin/feat".to_string()),
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        assert_eq!(attempt.fetch, Some(FetchOutcome::Ok));
+        assert!(marker.exists(), "the fetch must reach the remote");
+    }
+
+    /// A detached HEAD skips only after the refspec check: a fetch refspec
+    /// that writes `refs/heads/*` can move the very branch the detached
+    /// worktree is added at, so the fetch stays. The checked-out branch is
+    /// one origin does not have, so git does not refuse the fetch.
+    #[test]
+    fn a_detached_head_fetches_when_the_refspec_writes_local_branches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, marker) = gated_repo(tmp.path(), "repo");
+        git(&["checkout", "-q", "-b", "local-only"], &repo);
+        git(
+            &[
+                "config",
+                "--replace-all",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/heads/*",
+            ],
+            &repo,
+        );
+        let ws_dir = tmp.path().join("workspaces");
+
+        let attempt = create_worktree_with_fetch(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::DetachedHead,
+            PreCreateFetch::Run(Duration::from_secs(20)),
+        );
+        let wt = attempt.created.expect("the worktree must be created");
+        assert_eq!(attempt.fetch, Some(FetchOutcome::Ok));
+        assert!(marker.exists(), "the fetch must reach the remote");
+        assert!(head_is_detached(&wt));
     }
 
     /// The fetch outcome survives an add that then refused. Stale refs are a
