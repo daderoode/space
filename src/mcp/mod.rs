@@ -175,11 +175,13 @@ fn bad_space_name(name: &str, e: anyhow::Error) -> McpError {
 }
 
 /// Ask git whether the branch a strategy will create or check out is a
-/// valid branch name (`workspace::check_branch_name`). `detached` has no
-/// branch. The message is git's sentence, e.g. `'-x' is not a valid branch
-/// name`, as `invalid_params`.
+/// valid branch name (`workspace::check_branch_name`), on the name that
+/// reaches git's `-b` slot (`workspace::branch_slot_name`: for `existing`
+/// with an `origin/` prefix that is the stripped local name, the one git
+/// will create). `detached` has no branch. The message is git's sentence,
+/// e.g. `'-x' is not a valid branch name`, as `invalid_params`.
 fn checked_branch(strategy: &BranchStrategy) -> std::result::Result<(), McpError> {
-    if let BranchStrategy::NewBranch(branch) | BranchStrategy::ExistingBranch(branch) = strategy {
+    if let Some(branch) = workspace::branch_slot_name(strategy) {
         workspace::check_branch_name(branch)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
     }

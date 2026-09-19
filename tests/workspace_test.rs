@@ -796,6 +796,9 @@ fn create_worktree_refuses_a_dash_branch_before_touching_disk() {
     for strategy in [
         BranchStrategy::NewBranch("-x".to_string()),
         BranchStrategy::ExistingBranch("-x".to_string()),
+        // git accepts origin/-x as a branch name; the stripped -x is what
+        // reaches -b, so the guard must look at that.
+        BranchStrategy::ExistingBranch("origin/-x".to_string()),
     ] {
         let err = create_worktree(&repo_path, &env.workspaces_dir, "dashed", &strategy)
             .expect_err("a branch beginning with '-' must be refused");
@@ -873,5 +876,50 @@ fn workspace_detail_refuses_a_slash_name() {
         text.contains("Space name cannot contain '/' or '\\'"),
         "got {:?}",
         text
+    );
+}
+
+/// Ticket 13, found in review. `ExistingBranch("origin/-M")` passes git's
+/// own check as a whole name, and `add_worktree` strips the prefix so `-M`
+/// reaches `-b`, where git's child `git branch -M origin/-M` force-renames
+/// the checked-out branch of the SOURCE repo (reproduced on git 2.50.1 with
+/// a local branch named `origin/-M` present, as the `new` strategy can
+/// create). Positive evidence: the source repo's HEAD still names `main`.
+#[test]
+fn an_origin_prefixed_dash_branch_cannot_rename_the_checked_out_branch() {
+    let env = common::TestEnv::new();
+    let repo_path = env.create_repo("victim");
+    let out = Command::new("git")
+        .args(["branch", "origin/-M", "main"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "fixture: a local branch named origin/-M"
+    );
+
+    let err = create_worktree(
+        &repo_path,
+        &env.workspaces_dir,
+        "stage2",
+        &BranchStrategy::ExistingBranch("origin/-M".to_string()),
+    )
+    .expect_err("the derived -b name begins with '-' and must be refused");
+    assert_eq!(format!("{}", err), "'-M' is not a valid branch name");
+
+    let head = Command::new("git")
+        .args(["symbolic-ref", "HEAD"])
+        .current_dir(&repo_path)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&head.stdout).trim(),
+        "refs/heads/main",
+        "the source repo's checked-out branch keeps its name"
+    );
+    assert!(
+        !env.workspaces_dir.join("stage2").exists(),
+        "nothing is created for a refused branch"
     );
 }

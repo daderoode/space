@@ -258,13 +258,23 @@ impl AddState {
                     self.stage = AddStage::EnterBranchName;
                     ScreenAction::Continue
                 } else {
-                    // idx 1 (ExistingBranch) or idx 2 (DetachedHead)
+                    // idx 1 (ExistingBranch) or idx 2 (DetachedHead); see
+                    // the create flow for why git is asked here.
+                    let strategy = self.branch_strategy();
+                    if let Some(branch) = crate::core::workspace::branch_slot_name(&strategy) {
+                        if let Err(e) = crate::core::workspace::check_branch_name(branch) {
+                            self.error = Some(e.to_string());
+                            return ScreenAction::Continue;
+                        }
+                    }
+                    // The bounce reason (ticket 12) stays on the picker here;
+                    // the dispatch clears it, as it did before this check.
                     self.stage = AddStage::Creating;
                     ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
                         workspace_name: self.workspace_name.clone(),
                         workspace_dir: ctx.config.workspaces.dir.clone(),
                         repos: self.selected_repos.clone(),
-                        branch_strategy: self.branch_strategy(),
+                        branch_strategy: strategy,
                         is_new: false,
                         fresh_repos: self.report.fetched_ok_paths(),
                         slow_fetch_repos: self.report.slow_fetch_paths(),

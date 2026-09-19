@@ -9114,3 +9114,78 @@ fn add_branch_name_with_leading_dash_stays_on_the_branch_stage() {
         "no worktree flow ran"
     );
 }
+
+/// Ticket 13, found in review. The "existing branch" strategy reuses the
+/// space name as the branch, and the creation rule accepts `v1..v2` while
+/// git does not, so the strategy stage asks git before the flow starts.
+#[test]
+fn create_existing_branch_strategy_asks_git_about_the_space_name() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("dots-repo");
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.ws_name = tui_input::Input::default().with_value("v1..v2".to_string());
+        st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
+        st.branch_strategy_idx = 1;
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    let Screen::CreateWorkspace(ref st) = app.screen else {
+        panic!("expected CreateWorkspace screen, the flow must not have started");
+    };
+    assert_eq!(
+        st.stage,
+        space::tui::screens::create::CreateStage::PickBranchStrategy,
+        "a space name git rejects as a branch must not leave the strategy stage"
+    );
+    assert_eq!(
+        st.error.as_deref(),
+        Some("'v1..v2' is not a valid branch name")
+    );
+    assert!(!env.workspaces_dir.join("v1..v2").exists(), "no flow ran");
+}
+
+#[test]
+fn add_existing_branch_strategy_asks_git_about_the_space_name() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("dots-repo");
+    let ws_name = "v1..v2";
+    std::fs::create_dir_all(env.workspaces_dir.join(ws_name)).unwrap();
+    let config = config_from_env(&env);
+    let workspaces = vec![Workspace {
+        name: ws_name.to_string(),
+        path: env.workspaces_dir.join(ws_name),
+        repos: vec![],
+    }];
+    let mut app = test_app_with_config(config, workspaces, vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('a')));
+    if let Screen::AddRepos(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.stage = space::tui::screens::add::AddStage::PickBranchStrategy;
+        st.branch_strategy_idx = 1;
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    let Screen::AddRepos(ref st) = app.screen else {
+        panic!("expected AddRepos screen, the flow must not have started");
+    };
+    assert_eq!(
+        st.stage,
+        space::tui::screens::add::AddStage::PickBranchStrategy
+    );
+    assert_eq!(
+        st.error.as_deref(),
+        Some("'v1..v2' is not a valid branch name")
+    );
+    assert!(
+        !env.workspaces_dir.join(ws_name).join("dots-repo").exists(),
+        "no flow ran"
+    );
+}

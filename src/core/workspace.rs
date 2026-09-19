@@ -36,9 +36,18 @@ pub enum BranchStrategy {
     DetachedHead,
 }
 
+/// A character that can break a one-row display or a log line: the C0 and
+/// C1 control blocks and DEL (`char::is_control`), plus the Unicode line and
+/// paragraph separators, which are not controls but are line breaks to a
+/// terminal or a log. git accepts all of these in a branch name, so this is
+/// the only place they are refused.
+fn is_control_like(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
+}
+
 /// The lookup guard: `name` must be one plain path component before it is
 /// joined onto `workspaces.dir`. Rejects the empty name, `.` and `..`, any
-/// `/` or `\`, and ASCII control characters. `Path::join` gives `..` the
+/// `/` or `\`, and control characters (`is_control_like`). `Path::join` gives `..` the
 /// parent of `ws_dir`, an absolute name replaces `ws_dir` entirely, and the
 /// empty name is `ws_dir` itself, so without this every lookup by name can
 /// read, create under or remove a directory the caller never configured.
@@ -57,7 +66,7 @@ pub fn require_plain_component(name: &str) -> Result<()> {
     if name.contains(['/', '\\']) {
         anyhow::bail!("Space name cannot contain '/' or '\\'");
     }
-    if name.chars().any(|c| c.is_ascii_control()) {
+    if name.chars().any(is_control_like) {
         anyhow::bail!("Space name cannot contain control characters");
     }
     Ok(())
@@ -87,7 +96,7 @@ pub fn validate_space_name(name: &str) -> Result<()> {
     if name.starts_with('-') || name.starts_with('.') {
         anyhow::bail!("Space name cannot start with '-' or '.'");
     }
-    if name.chars().any(|c| c.is_ascii_control()) {
+    if name.chars().any(is_control_like) {
         anyhow::bail!("Space name cannot contain control characters");
     }
     require_plain_component(name)
@@ -1552,6 +1561,26 @@ pub fn is_worktree_of(wt_path: &Path, repo_path: &Path) -> bool {
     }
 }
 
+/// The branch name a strategy hands to the `-b` slot of `git worktree add`,
+/// exactly as `add_worktree` derives it: a `NewBranch` name verbatim, an
+/// `ExistingBranch` name with its `origin/` prefix stripped (the local branch
+/// git creates to track the remote one), and none for `DetachedHead`.
+///
+/// One function because two places must agree on it: the guard in
+/// `create_worktree_cancellable` and the entry points that ask git whether
+/// the name is a branch name. Checking the caller's string instead of this
+/// derived one is how `origin/-M` slipped past both: git accepts
+/// `origin/-M` as a branch name, but the stripped `-M` is what reaches `-b`,
+/// and git's child `git branch` then reads it as force-rename of the
+/// checked-out branch of the source repo (reproduced on git 2.50.1).
+pub fn branch_slot_name(strategy: &BranchStrategy) -> Option<&str> {
+    match strategy {
+        BranchStrategy::NewBranch(name) => Some(name),
+        BranchStrategy::ExistingBranch(name) => Some(name.strip_prefix("origin/").unwrap_or(name)),
+        BranchStrategy::DetachedHead => None,
+    }
+}
+
 /// `create_worktree_with_fetch` that can be stopped at a boundary, for the
 /// Creating stage's background worker.
 ///
@@ -1595,13 +1624,15 @@ pub fn create_worktree_cancellable(
             created: Err(e),
         };
     }
-    // A leading dash is refused here without spawning git, because the `-b`
-    // slot of `git worktree add` is not protected by `--`: git takes the
-    // next argv verbatim and its child `git branch` re-parses it as options,
-    // and short options bundle (`-bad` is `-b ad`). The commit-ish and path
-    // slots are protected by `--` in `add_worktree` instead. Same sentence
-    // as git's so the caller sees one wording whichever layer refused.
-    if let BranchStrategy::NewBranch(branch) | BranchStrategy::ExistingBranch(branch) = strategy {
+    // A leading dash in the name that reaches `-b` (`branch_slot_name`, the
+    // derived name, not the caller's string) is refused here without
+    // spawning git, because that slot is not protected by `--`: git takes
+    // the next argv verbatim and its child `git branch` re-parses it as
+    // options, and short options bundle (`-bad` is `-b ad`). The commit-ish
+    // and path slots are protected by `--` in `add_worktree` instead. Same
+    // sentence as git's so the caller sees one wording whichever layer
+    // refused.
+    if let Some(branch) = branch_slot_name(strategy) {
         if branch.starts_with('-') {
             return WorktreeAttempt {
                 fetch: None,
@@ -1654,7 +1685,8 @@ pub fn create_worktree_cancellable(
 /// the commit-ish slot is reported by git as `invalid reference: -foo`
 /// rather than parsed as an option (which surfaces as `unknown switch` plus
 /// the whole usage text). `--` does not protect the value of `-b`; that slot
-/// is guarded in `create_worktree_cancellable` before this runs.
+/// is guarded in `create_worktree_cancellable` before this runs, on the same
+/// derived name (`branch_slot_name`) the `ExistingBranch` arm strips here.
 fn add_worktree(
     repo_path: &Path,
     wt_path: &Path,
@@ -3725,6 +3757,8 @@ mod tests {
             ("a\nb", "Space name cannot contain control characters"),
             ("a\0b", "Space name cannot contain control characters"),
             ("a\x7fb", "Space name cannot contain control characters"),
+            ("a\u{85}b", "Space name cannot contain control characters"),
+            ("a\u{2028}b", "Space name cannot contain control characters"),
         ];
         for (name, rule) in rejected {
             let err = validate_space_name(name).expect_err(&format!("{:?} must be rejected", name));
@@ -3751,6 +3785,8 @@ mod tests {
             ("/", "Space name cannot contain '/' or '\\'"),
             ("a\\b", "Space name cannot contain '/' or '\\'"),
             ("a\tb", "Space name cannot contain control characters"),
+            ("a\u{9b}b", "Space name cannot contain control characters"),
+            ("a\u{2029}b", "Space name cannot contain control characters"),
         ];
         for (name, rule) in rejected {
             let err =
@@ -3788,6 +3824,50 @@ mod tests {
             check_branch_name("-foo").unwrap_err().to_string(),
             "'-foo' is not a valid branch name",
             "the error is git's sentence with 'fatal: ' stripped"
+        );
+    }
+
+    /// Ticket 13. The guard and the entry checks must see the name git will
+    /// put after `-b`, which for a remote-tracking form is the stripped one.
+    #[test]
+    fn branch_slot_name_is_the_stripped_local_name() {
+        assert_eq!(
+            branch_slot_name(&BranchStrategy::NewBranch("-x".to_string())),
+            Some("-x")
+        );
+        assert_eq!(
+            branch_slot_name(&BranchStrategy::ExistingBranch("origin/-M".to_string())),
+            Some("-M"),
+            "origin/-M passes git's check as a whole, but -M is what reaches -b"
+        );
+        assert_eq!(
+            branch_slot_name(&BranchStrategy::ExistingBranch("feature/x".to_string())),
+            Some("feature/x")
+        );
+        assert_eq!(branch_slot_name(&BranchStrategy::DetachedHead), None);
+    }
+
+    /// Ticket 13. The one `git worktree add` form whose commit-ish cannot
+    /// carry a dash (the local branch already exists, so the name passed the
+    /// guard) still has a path slot, and that is what its `--` protects: a
+    /// relative worktree path beginning with `-` is a path, not an option.
+    #[test]
+    fn a_dash_path_is_a_path_when_the_local_branch_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = plain_repo(tmp.path(), "repo");
+        git(&["branch", "topic", "main"], &repo);
+
+        let created = add_worktree(
+            &repo,
+            Path::new("-dashdir"),
+            "main".to_string(),
+            &BranchStrategy::NewBranch("topic".to_string()),
+        )
+        .expect("with -- before the path, -dashdir is a path");
+        assert_eq!(created, Path::new("-dashdir"));
+        assert!(
+            repo.join("-dashdir").join(".git").exists(),
+            "the worktree was created at the dash-named relative path"
         );
     }
 

@@ -418,7 +418,7 @@ All worktrees removed, workspace directory cleaned up.
 
 1. Open the TUI with `space`, press `c` to create
 2. Use the fuzzy picker to select all 5 repos (type to filter, `Tab` to toggle)
-3. Name the workspace `refactor/rename-user-to-account`
+3. Name the workspace `refactor-rename-user-to-account`
 4. Choose "new branch" strategy
 
 All 5 repos are now on the same branch in one directory. Make the rename, test each repo, commit, push, and open PRs -- all from one workspace.
@@ -457,13 +457,13 @@ space create
 ```
 
 1. Select the repos
-2. Name: `spike/new-api-design`
+2. Name: `spike-new-api-design`
 3. Choose "new branch"
 
 Prototype freely. If the spike is promising, push and open PRs. If not:
 
 ```
-space rm spike/new-api-design
+space rm spike-new-api-design
 ```
 
 The branches are cleaned up with the worktrees.

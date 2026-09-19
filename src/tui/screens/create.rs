@@ -308,12 +308,24 @@ impl CreateState {
                     ScreenAction::Continue
                 } else {
                     // idx 1 (ExistingBranch) or idx 2 (DetachedHead)
+                    // idx 1 reuses the space name as the branch, and the
+                    // creation rule accepts names git does not (`my space`,
+                    // `v1..v2`), so ask git here as the branch stage does.
+                    let strategy = self.branch_strategy();
+                    if let Some(branch) = crate::core::workspace::branch_slot_name(&strategy) {
+                        if let Err(e) = crate::core::workspace::check_branch_name(branch) {
+                            self.error = Some(e.to_string());
+                            return ScreenAction::Continue;
+                        }
+                    }
+                    // The bounce reason (ticket 12) stays on the picker here;
+                    // the dispatch clears it, as it did before this check.
                     self.stage = CreateStage::Creating;
                     ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
                         workspace_name: self.ws_name.value().to_string(),
                         workspace_dir: ctx.config.workspaces.dir.clone(),
                         repos: self.selected_repos.clone(),
-                        branch_strategy: self.branch_strategy(),
+                        branch_strategy: strategy,
                         is_new: true,
                         fresh_repos: self.report.fetched_ok_paths(),
                         slow_fetch_repos: self.report.slow_fetch_paths(),

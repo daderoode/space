@@ -610,3 +610,26 @@ fn workspace_status_rejects_a_slash_name() {
         );
     });
 }
+
+/// Ticket 13, found in review: `existing` with `origin/-x` passed both the
+/// whole-name git check and the dash guard, and the stripped `-x` reached
+/// `-b`. The check now runs on the name git will create.
+#[test]
+fn create_workspace_rejects_an_origin_prefixed_dash_branch() {
+    with_test_env(|env, server| {
+        let repo_path = env.create_repo("delta");
+        env.write_cache(&[repo_path]);
+
+        let err = server
+            .create_workspace(Parameters(CreateWorkspaceParams {
+                name: "dashed".to_string(),
+                repos: vec!["delta".to_string()],
+                strategy: "existing".to_string(),
+                branch: Some("origin/-x".to_string()),
+            }))
+            .expect_err("the local name git would create begins with '-'");
+        let msg = invalid_params(&err);
+        assert_eq!(msg, "'-x' is not a valid branch name");
+        assert!(!env.workspaces_dir.join("dashed").exists());
+    });
+}
