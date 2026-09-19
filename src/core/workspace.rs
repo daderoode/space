@@ -2421,17 +2421,32 @@ mod tests {
     }
 
     /// A fetch that failed carries how long it took, which is what the
-    /// pre-create skip rule reads. The remote is a `file://` origin whose
-    /// upload-pack sleeps and then exits non-zero, so the failure is slow
-    /// without touching the network and without running out the limit. The
-    /// two `is_slow_with` calls pin the comparison rather than
-    /// `SLOW_FETCH_THRESHOLD` itself: a test that waited five seconds to
-    /// check the constant would cost more than the delay this rule removes.
+    /// pre-create skip rule reads. Two fetches fail without touching the
+    /// network: a slow one through a `file://` origin whose upload-pack
+    /// holds it open until the test releases it, and a fast one in a repo
+    /// with no remote at all, run start to finish inside that hold. Files
+    /// order the two, not sleeps, so every assertion compares one
+    /// measurement with another and none says how fast this machine is:
+    /// several `cargo test` runs share it, and a fixed 1s ceiling here was
+    /// reported failing at 2.3s under load (ticket 18). The comparisons pin
+    /// `is_slow_with` rather than `SLOW_FETCH_THRESHOLD` itself: a test that
+    /// waited five seconds to check the constant would cost more than the
+    /// delay this rule removes.
     #[test]
     fn a_failed_fetch_records_how_long_it_took() {
         let (tmp, local) = make_behind_repo();
-        let script = tmp.path().join("slow-failing-upload-pack.sh");
-        std::fs::write(&script, "sleep 0.2\nexit 1\n").unwrap();
+        let holding = tmp.path().join("upload-pack-holding");
+        let release = tmp.path().join("upload-pack-release");
+        let script = tmp.path().join("held-failing-upload-pack.sh");
+        std::fs::write(
+            &script,
+            format!(
+                ": > '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\nexit 1\n",
+                holding.display(),
+                release.display()
+            ),
+        )
+        .unwrap();
         let origin_url = format!("file://{}", tmp.path().join("origin.git").display());
         git(&["remote", "set-url", "origin", &origin_url], &local);
         git(
@@ -2443,30 +2458,7 @@ mod tests {
             &local,
         );
 
-        let slow = sync_repo_with_timeout(&local, Duration::from_secs(20)).fetch;
-
-        let slow_elapsed = match &slow {
-            FetchOutcome::Failed { elapsed, .. } => *elapsed,
-            other => panic!("expected FetchOutcome::Failed, got {:?}", other),
-        };
-        assert!(
-            slow_elapsed >= Duration::from_millis(200),
-            "the outcome must carry the time the fetch spent, got {:?}",
-            slow_elapsed
-        );
-        assert!(
-            slow.is_slow_with(Duration::from_millis(100)),
-            "a fetch that spent 200ms is slow against a 100ms threshold: {:?}",
-            slow
-        );
-        assert!(
-            !slow.is_slow_with(Duration::from_secs(1)),
-            "the same outcome is not slow against a 1s threshold: {:?}",
-            slow
-        );
-
-        // A repo with no remote at all fails at once, so the creation still
-        // fetches it: the rule is how long it took, not that it failed.
+        // A repo with no remote at all: git fails before any upload-pack runs.
         let fast_tmp = tempfile::tempdir().unwrap();
         Cmd::new("git")
             .args(["init", "-b", "main"])
@@ -2476,29 +2468,74 @@ mod tests {
         git_setup(fast_tmp.path());
         git(&["commit", "--allow-empty", "-m", "init"], fast_tmp.path());
 
+        let slow_run = std::thread::spawn(move || {
+            sync_repo_with_timeout(&local, Duration::from_secs(20)).fetch
+        });
+        while !holding.exists() {
+            if slow_run.is_finished() {
+                panic!(
+                    "the slow fetch ended before its upload-pack held it: {:?}",
+                    slow_run.join().unwrap()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let window_started = Instant::now();
         let fast = sync_repo_with_timeout(fast_tmp.path(), Duration::from_secs(20)).fetch;
+        let window = window_started.elapsed();
+        std::fs::write(&release, "").unwrap();
+        let slow = slow_run.join().unwrap();
 
+        let slow_elapsed = match &slow {
+            FetchOutcome::Failed { elapsed, .. } => *elapsed,
+            other => panic!("expected FetchOutcome::Failed, got {:?}", other),
+        };
         let fast_elapsed = match &fast {
             FetchOutcome::Failed { elapsed, .. } => *elapsed,
             other => panic!("expected FetchOutcome::Failed, got {:?}", other),
         };
+        // Measured, not stamped. The slow fetch was held open across the
+        // whole window, so it recorded more than the window; the fast one
+        // ran inside it, so it recorded no more. Zero fails the first, and a
+        // constant cannot be both above the window and at or below it.
         assert!(
-            fast_elapsed < Duration::from_secs(1),
-            "a missing remote fails at once, took {:?}",
-            fast_elapsed
-        );
-        // Measured, not stamped: a constant would satisfy every bound above
-        // on its own, but it cannot be both below and at or above itself.
-        assert!(
-            fast_elapsed < slow_elapsed,
-            "a fetch that failed at once ({:?}) must record less than one \
-             that slept 200ms ({:?})",
-            fast_elapsed,
+            slow_elapsed > window,
+            "the slow fetch was held open for the {:?} the fast one took, so \
+             it must record more, got {:?}",
+            window,
             slow_elapsed
         );
         assert!(
-            !fast.is_slow(),
-            "a fast failure is fetched again before the worktree is created: {:?}",
+            fast_elapsed <= window,
+            "the fast fetch cannot record more than its call took ({:?}), got {:?}",
+            window,
+            fast_elapsed
+        );
+
+        // The comparison on a real outcome, at the elapsed it recorded and a
+        // nanosecond either side of it: the rule is at or above.
+        let nanosecond = Duration::from_nanos(1);
+        assert!(
+            slow.is_slow_with(slow_elapsed - nanosecond),
+            "a failure is slow against a threshold under what it took: {:?}",
+            slow
+        );
+        assert!(
+            slow.is_slow_with(slow_elapsed),
+            "a failure that took exactly the threshold is slow: {:?}",
+            slow
+        );
+        assert!(
+            !slow.is_slow_with(slow_elapsed + nanosecond),
+            "a failure is not slow against a threshold over what it took: {:?}",
+            slow
+        );
+        // The rule is how long it took, not that it failed: at a threshold
+        // the slow failure meets, the fast one is still fetched again.
+        assert!(
+            !fast.is_slow_with(slow_elapsed),
+            "a fast failure is fetched again at a threshold the slow one meets: \
+             {:?}",
             fast
         );
     }
