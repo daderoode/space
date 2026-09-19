@@ -2421,17 +2421,48 @@ mod tests {
     }
 
     /// A fetch that failed carries how long it took, which is what the
-    /// pre-create skip rule reads. The remote is a `file://` origin whose
-    /// upload-pack sleeps and then exits non-zero, so the failure is slow
-    /// without touching the network and without running out the limit. The
-    /// two `is_slow_with` calls pin the comparison rather than
-    /// `SLOW_FETCH_THRESHOLD` itself: a test that waited five seconds to
-    /// check the constant would cost more than the delay this rule removes.
+    /// pre-create skip rule reads. Two fetches fail without touching the
+    /// network: a slow one through a `file://` origin whose upload-pack
+    /// holds it open until the test releases it, and a fast one in a repo
+    /// with no remote at all, run start to finish inside that hold. Files
+    /// order the two, not sleeps, so every assertion compares one
+    /// measurement with another and none says how fast this machine is. A
+    /// fixed 1s ceiling here was reported failing at 2.3s with other tests
+    /// running (ticket 18): load stretches every spawn, and a child spawned
+    /// on another thread at the same moment can stretch this run's recorded
+    /// time (ticket 19). The one bound left is the 20s fetch limit, a backstop
+    /// for a hold that never ends. The comparisons pin `is_slow_with` rather
+    /// than `SLOW_FETCH_THRESHOLD` itself: a test that waited five seconds
+    /// to check the constant would cost more than the delay this rule
+    /// removes.
     #[test]
     fn a_failed_fetch_records_how_long_it_took() {
         let (tmp, local) = make_behind_repo();
-        let script = tmp.path().join("slow-failing-upload-pack.sh");
-        std::fs::write(&script, "sleep 0.2\nexit 1\n").unwrap();
+        let holding = tmp.path().join("upload-pack-holding");
+        let release = tmp.path().join("upload-pack-release");
+        let released = tmp.path().join("upload-pack-released");
+        // The upload-pack holds until the test writes `release`, and records
+        // in `released` that it saw it. It gives up without that record once
+        // the test can no longer write `release`: `holding` is gone when the
+        // test's TempDir is dropped (it returned or panicked), and its pid is
+        // gone when it was killed. git runs in its own session, so nothing
+        // else would stop it.
+        let script = tmp.path().join("held-failing-upload-pack.sh");
+        std::fs::write(
+            &script,
+            format!(
+                ": > '{holding}'\n\
+                 while [ -e '{holding}' ] && [ ! -e '{release}' ] && kill -0 {pid} 2>/dev/null\n\
+                 do sleep 0.1; done\n\
+                 [ -e '{release}' ] && : > '{released}'\n\
+                 exit 1\n",
+                holding = holding.display(),
+                release = release.display(),
+                released = released.display(),
+                pid = std::process::id()
+            ),
+        )
+        .unwrap();
         let origin_url = format!("file://{}", tmp.path().join("origin.git").display());
         git(&["remote", "set-url", "origin", &origin_url], &local);
         git(
@@ -2443,63 +2474,113 @@ mod tests {
             &local,
         );
 
-        let slow = sync_repo_with_timeout(&local, Duration::from_secs(20)).fetch;
+        // A repo with no remote at all: git fails before any upload-pack runs.
+        let fast_tmp = tempfile::tempdir().unwrap();
+        let fast_repo = plain_repo(fast_tmp.path(), "no-remote");
+
+        let slow_run = std::thread::spawn(move || {
+            sync_repo_with_timeout(&local, Duration::from_secs(20)).fetch
+        });
+        while !holding.exists() {
+            if slow_run.is_finished() {
+                panic!(
+                    "the slow fetch ended before its upload-pack held it: {:?}",
+                    slow_run.join()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let window_started = Instant::now();
+        let fast = sync_repo_with_timeout(&fast_repo, Duration::from_secs(20)).fetch;
+        let window = window_started.elapsed();
+        std::fs::write(&release, "").unwrap();
+        let slow = slow_run.join().unwrap();
+        // Everything below rests on the slow fetch still being held when the
+        // window closed, so check that from the upload-pack's side rather
+        // than by timing: it saw `release`, which is written after the window.
+        assert!(
+            released.exists(),
+            "the slow fetch's upload-pack must hold until the release (a \
+             TimedOut here means the hold outlasted the fetch limit): {:?}",
+            slow
+        );
 
         let slow_elapsed = match &slow {
             FetchOutcome::Failed { elapsed, .. } => *elapsed,
             other => panic!("expected FetchOutcome::Failed, got {:?}", other),
         };
-        assert!(
-            slow_elapsed >= Duration::from_millis(200),
-            "the outcome must carry the time the fetch spent, got {:?}",
-            slow_elapsed
-        );
-        assert!(
-            slow.is_slow_with(Duration::from_millis(100)),
-            "a fetch that spent 200ms is slow against a 100ms threshold: {:?}",
-            slow
-        );
-        assert!(
-            !slow.is_slow_with(Duration::from_secs(1)),
-            "the same outcome is not slow against a 1s threshold: {:?}",
-            slow
-        );
-
-        // A repo with no remote at all fails at once, so the creation still
-        // fetches it: the rule is how long it took, not that it failed.
-        let fast_tmp = tempfile::tempdir().unwrap();
-        Cmd::new("git")
-            .args(["init", "-b", "main"])
-            .current_dir(fast_tmp.path())
-            .output()
-            .unwrap();
-        git_setup(fast_tmp.path());
-        git(&["commit", "--allow-empty", "-m", "init"], fast_tmp.path());
-
-        let fast = sync_repo_with_timeout(fast_tmp.path(), Duration::from_secs(20)).fetch;
-
         let fast_elapsed = match &fast {
             FetchOutcome::Failed { elapsed, .. } => *elapsed,
             other => panic!("expected FetchOutcome::Failed, got {:?}", other),
         };
+        // Measured, not stamped. The slow fetch was held open across the
+        // whole window, so it recorded more than the window; the fast one
+        // ran inside it, so it recorded no more. Zero fails the first, and a
+        // constant cannot be both above the window and at or below it.
         assert!(
-            fast_elapsed < Duration::from_secs(1),
-            "a missing remote fails at once, took {:?}",
-            fast_elapsed
-        );
-        // Measured, not stamped: a constant would satisfy every bound above
-        // on its own, but it cannot be both below and at or above itself.
-        assert!(
-            fast_elapsed < slow_elapsed,
-            "a fetch that failed at once ({:?}) must record less than one \
-             that slept 200ms ({:?})",
-            fast_elapsed,
+            slow_elapsed > window,
+            "the slow fetch was held open for the {:?} the fast one took, so \
+             it must record more, got {:?}",
+            window,
             slow_elapsed
         );
         assert!(
-            !fast.is_slow(),
-            "a fast failure is fetched again before the worktree is created: {:?}",
+            fast_elapsed <= window,
+            "the fast fetch cannot record more than its call took ({:?}), got {:?}",
+            window,
+            fast_elapsed
+        );
+
+        // The comparison on a real outcome, at the elapsed it recorded and a
+        // nanosecond either side of it: the rule is at or above. The slow
+        // elapsed is above the window, so taking a nanosecond off cannot
+        // underflow.
+        let nanosecond = Duration::from_nanos(1);
+        assert!(
+            slow.is_slow_with(slow_elapsed - nanosecond),
+            "a failure is slow against a threshold under what it took: {:?}",
+            slow
+        );
+        assert!(
+            slow.is_slow_with(slow_elapsed),
+            "a failure that took exactly the threshold is slow: {:?}",
+            slow
+        );
+        assert!(
+            !slow.is_slow_with(slow_elapsed + nanosecond),
+            "a failure is not slow against a threshold over what it took: {:?}",
+            slow
+        );
+        // The rule is how long it took, not that it failed: at a threshold
+        // the slow failure meets, the fast one is still fetched again.
+        assert!(
+            !fast.is_slow_with(slow_elapsed),
+            "a fast failure is fetched again at a threshold the slow one meets: \
+             {:?}",
             fast
+        );
+    }
+
+    /// Every unattended run passes through `join_bounded` once its child has
+    /// exited, so a wait there lands in every recorded `elapsed`: it must
+    /// return as soon as the reader has finished, not when the limit runs
+    /// out. The limit is far beyond anything a finished thread needs, so the
+    /// assertion fails only when the whole limit ran. Before ticket 18 only a
+    /// 1s ceiling on a real git spawn caught that.
+    #[test]
+    fn join_bounded_returns_once_the_reader_has_finished() {
+        let reader = std::thread::spawn(|| {});
+        while !reader.is_finished() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let limit = Duration::from_secs(10);
+        let started = Instant::now();
+        join_bounded(&reader, limit);
+        let took = started.elapsed();
+        assert!(
+            took < limit,
+            "a finished reader must not be waited on, took {:?}",
+            took
         );
     }
 
