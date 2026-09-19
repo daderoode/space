@@ -288,6 +288,12 @@ impl AddState {
                     self.error = Some("Branch name cannot be empty".to_string());
                     return ScreenAction::Continue;
                 }
+                // Git's verdict on the name, before the flow starts (see the
+                // create flow's branch stage).
+                if let Err(e) = crate::core::workspace::check_branch_name(&name) {
+                    self.error = Some(e.to_string());
+                    return ScreenAction::Continue;
+                }
                 self.error = None;
                 self.stage = AddStage::Creating;
                 ScreenAction::ExecuteWorktreeFlow(WorktreeParams {

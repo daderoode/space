@@ -201,8 +201,11 @@ impl CreateState {
             KeyCode::Esc => ScreenAction::Back,
             KeyCode::Enter => {
                 let name = self.ws_name.value().trim().to_string();
-                if name.is_empty() {
-                    self.error = Some("Workspace name cannot be empty".to_string());
+                // The creation rule (`validate_space_name`): the name becomes
+                // a directory under `workspaces.dir` and the default branch.
+                // The field keeps what was typed so the user can fix it.
+                if let Err(e) = crate::core::workspace::validate_space_name(&name) {
+                    self.error = Some(e.to_string());
                     return ScreenAction::Continue;
                 }
                 // Normalize: write trimmed value back so all downstream uses
@@ -339,6 +342,14 @@ impl CreateState {
                 let name = self.branch_name_input.value().trim().to_string();
                 if name.is_empty() {
                     self.error = Some("Branch name cannot be empty".to_string());
+                    return ScreenAction::Continue;
+                }
+                // Git's verdict on the name, before the flow starts: one
+                // spawn on Enter, as `build_branch_picker` already does at
+                // this stage. Names from the recent list or the picker are
+                // git's own and are not re-checked.
+                if let Err(e) = crate::core::workspace::check_branch_name(&name) {
+                    self.error = Some(e.to_string());
                     return ScreenAction::Continue;
                 }
                 self.error = None;
