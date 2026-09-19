@@ -36,6 +36,164 @@ pub enum BranchStrategy {
     DetachedHead,
 }
 
+/// A character that can break a one-row display or a log line, or make a
+/// name read as a different name: the C0 and C1 control blocks and DEL
+/// (`char::is_control`); the Unicode line and paragraph separators, which
+/// are not controls but are line breaks to a terminal or a log; and the
+/// invisible formatting characters (general category Cf), which include the
+/// bidi overrides that render `safe\u{202e}elif.exe` reversed and the
+/// zero-width space that makes `..\u{200b}` look like `..`. git refuses the
+/// C0 block and DEL in a branch name but accepts everything else here, so
+/// for those this is the only place they are refused. Whitespace that is
+/// not a control (a no-break space, say) passes; at the ends of a name the
+/// whitespace clause of the creation rule catches it.
+fn is_control_like(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') || is_format_char(c)
+}
+
+/// Unicode general category Cf (format), Unicode 16.0, as the standard
+/// library has no category query and a dependency for one table is not
+/// worth it. Ranges from UnicodeData.txt; the soft hyphen, the Arabic
+/// number signs, the zero-width and bidi characters, the word joiner and
+/// invisible operators, the byte order mark, the interlinear annotation
+/// characters, the Kaithi and Egyptian format controls, the Duployan and
+/// musical formatting characters, and the tag characters.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+
+/// The lookup guard: `name` must be one plain path component before it is
+/// joined onto `workspaces.dir`. Rejects the empty name, `.` and `..`, any
+/// `/` or `\`, and control or formatting characters (`is_control_like`). `Path::join` gives `..` the
+/// parent of `ws_dir`, an absolute name replaces `ws_dir` entirely, and the
+/// empty name is `ws_dir` itself, so without this every lookup by name can
+/// read, create under or remove a directory the caller never configured.
+///
+/// Deliberately no stricter than that: `list_workspaces` hands the TUI
+/// whatever directories exist, and a hand-made `.old` or `-scratch` space
+/// must stay viewable and removable from the dashboard. The stricter rule for
+/// names being created is `validate_space_name`.
+pub fn require_plain_component(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("Space name cannot be empty");
+    }
+    if name == "." || name == ".." {
+        anyhow::bail!("Space name cannot be '.' or '..'");
+    }
+    if name.contains(['/', '\\']) {
+        anyhow::bail!("Space name cannot contain '/' or '\\'");
+    }
+    if name.chars().any(is_control_like) {
+        anyhow::bail!("Space name cannot contain control or formatting characters");
+    }
+    Ok(())
+}
+
+/// The creation rule for a space name, applied where a name is chosen: the
+/// TUI name stage and MCP `create_workspace`. It includes the lookup guard
+/// and adds: no leading or trailing whitespace (the TUI trims first, so this
+/// clause is for programs, which should send the name that will be created),
+/// and no leading `-` or `.` (one clause covers hidden directories and the
+/// argv ambiguity of `space rm -x` and of the default branch `-x` landing in
+/// `git worktree add -b`). Everything else is allowed, including interior
+/// spaces, dots and non-ASCII; there is no length cap because the OS reports
+/// `File name too long` truthfully and any number would be a guess across
+/// filesystems. Names are rejected, never rewritten: a sanitised name would
+/// create a directory the caller did not ask for and cannot find again.
+pub fn validate_space_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("Space name cannot be empty");
+    }
+    if name.trim() != name {
+        anyhow::bail!("Space name cannot start or end with whitespace");
+    }
+    if name.contains(['/', '\\']) {
+        anyhow::bail!("Space name cannot contain '/' or '\\'");
+    }
+    if name.starts_with('-') || name.starts_with('.') {
+        anyhow::bail!("Space name cannot start with '-' or '.'");
+    }
+    if name.chars().any(is_control_like) {
+        anyhow::bail!("Space name cannot contain control or formatting characters");
+    }
+    require_plain_component(name)
+}
+
+/// `require_plain_component` with the offending name in the message, for the
+/// core functions that take a name and join it: `invalid space name "..":
+/// Space name cannot be '.' or '..'`. `{:?}` so a control character prints
+/// escaped rather than acting on the terminal.
+fn checked_space_name(name: &str) -> Result<()> {
+    require_plain_component(name)
+        .map_err(|e| anyhow::anyhow!("invalid space name {:?}: {}", name, e))
+}
+
+/// Whether git accepts `name` as a branch name, by asking git:
+/// `git check-ref-format --branch <name>`. Not mirrored in Rust because the
+/// rule has subtleties (a trailing dot is a whole-name rule, `.lock` is per
+/// component, `@` alone is fine but `HEAD` is not) that a mirror would drift
+/// from, and the only test that could catch the drift is running git.
+///
+/// `--branch` takes the next argv verbatim, so `-foo` is checked rather than
+/// parsed (`--branch -- x` is a usage error, so no `--` is passed). It works
+/// outside any repository. `LC_ALL=C` pins the sentence the caller shows.
+///
+/// If git cannot be spawned at all the check passes. That is safe because
+/// the one hazard this check exists to close, a leading-dash name reaching
+/// the `-b` slot of `git worktree add`, is closed independently and without
+/// a spawn by the guard in `create_worktree_cancellable`; and any other bad
+/// name then fails a moment later in the add itself with `failed to spawn
+/// git`, which is the truthful report when there is no git.
+///
+/// On refusal the error is git's own line with `fatal: ` stripped, e.g.
+/// `'-foo' is not a valid branch name`.
+pub fn check_branch_name(name: &str) -> Result<()> {
+    let out = match Command::new("git")
+        .args(["check-ref-format", "--branch", name])
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(out) => out,
+        Err(_) => return Ok(()),
+    };
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let msg = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("fatal:"))
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("'{}' is not a valid branch name", name));
+    anyhow::bail!("{}", msg)
+}
+
 /// List all workspace directories inside `ws_dir`.
 pub fn list_workspaces(ws_dir: &Path) -> Result<Vec<Workspace>> {
     let mut workspaces = Vec::new();
@@ -95,6 +253,7 @@ pub fn workspace_repo_skeletons(ws_dir: &Path, name: &str) -> Vec<WorkspaceRepo>
 /// Return a workspace with populated repo details (branch, status, ahead/behind).
 pub fn workspace_detail(ws_dir: &Path, name: &str) -> Result<Workspace> {
     let t = std::time::Instant::now();
+    checked_space_name(name)?;
     let ws_path = ws_dir.join(name);
     if !ws_path.exists() {
         tracing::warn!(kind = "not_found", "workspace_detail failed");
@@ -1442,6 +1601,26 @@ pub fn is_worktree_of(wt_path: &Path, repo_path: &Path) -> bool {
     }
 }
 
+/// The branch name a strategy hands to the `-b` slot of `git worktree add`,
+/// exactly as `add_worktree` derives it: a `NewBranch` name verbatim, an
+/// `ExistingBranch` name with its `origin/` prefix stripped (the local branch
+/// git creates to track the remote one), and none for `DetachedHead`.
+///
+/// One function because two places must agree on it: the guard in
+/// `create_worktree_cancellable` and the entry points that ask git whether
+/// the name is a branch name. Checking the caller's string instead of this
+/// derived one is how `origin/-M` slipped past both: git accepts
+/// `origin/-M` as a branch name, but the stripped `-M` is what reaches `-b`,
+/// and git's child `git branch` then reads it as force-rename of the
+/// checked-out branch of the source repo (reproduced on git 2.50.1).
+pub fn branch_slot_name(strategy: &BranchStrategy) -> Option<&str> {
+    match strategy {
+        BranchStrategy::NewBranch(name) => Some(name),
+        BranchStrategy::ExistingBranch(name) => Some(name.strip_prefix("origin/").unwrap_or(name)),
+        BranchStrategy::DetachedHead => None,
+    }
+}
+
 /// `create_worktree_with_fetch` that can be stopped at a boundary, for the
 /// Creating stage's background worker.
 ///
@@ -1475,6 +1654,32 @@ pub fn create_worktree_cancellable(
     fetch: PreCreateFetch,
     cancel: &AtomicBool,
 ) -> WorktreeAttempt {
+    // Both refusals come before `worktree_path` and `create_dir_all`, so a
+    // rejected call joins nothing and leaves no directory behind. The name
+    // guard is the one place where "no name reaches `Path::join`
+    // unvalidated" holds by construction, whichever surface called.
+    if let Err(e) = checked_space_name(ws_name) {
+        return WorktreeAttempt {
+            fetch: None,
+            created: Err(e),
+        };
+    }
+    // A leading dash in the name that reaches `-b` (`branch_slot_name`, the
+    // derived name, not the caller's string) is refused here without
+    // spawning git, because that slot is not protected by `--`: git takes
+    // the next argv verbatim and its child `git branch` re-parses it as
+    // options, and short options bundle (`-bad` is `-b ad`). The commit-ish
+    // and path slots are protected by `--` in `add_worktree` instead. Same
+    // sentence as git's so the caller sees one wording whichever layer
+    // refused.
+    if let Some(branch) = branch_slot_name(strategy) {
+        if branch.starts_with('-') {
+            return WorktreeAttempt {
+                fetch: None,
+                created: Err(anyhow::anyhow!("'{}' is not a valid branch name", branch)),
+            };
+        }
+    }
     let wt_path = worktree_path(ws_dir, ws_name, repo_path);
 
     if let Err(e) = std::fs::create_dir_all(wt_path.parent().unwrap()) {
@@ -1515,6 +1720,13 @@ pub fn create_worktree_cancellable(
 /// `git worktree add` for one repo, per strategy. Split out of
 /// `create_worktree_with_fetch` so its `?` short-circuits into the attempt's
 /// `created` without discarding the fetch outcome alongside it.
+///
+/// Every form passes `--` before the path, so a leading dash in the path or
+/// the commit-ish slot is reported by git as `invalid reference: -foo`
+/// rather than parsed as an option (which surfaces as `unknown switch` plus
+/// the whole usage text). `--` does not protect the value of `-b`; that slot
+/// is guarded in `create_worktree_cancellable` before this runs, on the same
+/// derived name (`branch_slot_name`) the `ExistingBranch` arm strips here.
 fn add_worktree(
     repo_path: &Path,
     wt_path: &Path,
@@ -1543,7 +1755,7 @@ fn add_worktree(
                 .unwrap_or(false);
 
             if local_exists {
-                git_worktree_add(&["worktree", "add", &wt, branch_name], repo_path)?;
+                git_worktree_add(&["worktree", "add", "--", &wt, branch_name], repo_path)?;
             } else if remote_exists {
                 git_worktree_add(
                     &[
@@ -1552,6 +1764,7 @@ fn add_worktree(
                         "--track",
                         "-b",
                         branch_name,
+                        "--",
                         &wt,
                         &remote_ref,
                     ],
@@ -1560,7 +1773,7 @@ fn add_worktree(
             } else {
                 // Prefer origin/<base> so the new branch starts at the remote tip rather than
                 // a potentially stale local ref. Trade-off: if <base> has unpushed local
-                // commits they are NOT included in the new worktree. That is intentional —
+                // commits they are NOT included in the new worktree. That is intentional:
                 // the sync step guarantees origin/<base> is the freshest shared state.
                 // Fall back to local only if the remote ref doesn't exist (offline / no remote).
                 let origin_base = format!("origin/{}", base_branch);
@@ -1576,7 +1789,7 @@ fn add_worktree(
                     &base_branch
                 };
                 git_worktree_add(
-                    &["worktree", "add", "-b", branch_name, &wt, start_point],
+                    &["worktree", "add", "-b", branch_name, "--", &wt, start_point],
                     repo_path,
                 )?;
             }
@@ -1586,17 +1799,26 @@ fn add_worktree(
             let local = branch_name.strip_prefix("origin/").unwrap_or(branch_name);
             if branch_name.starts_with("origin/") {
                 git_worktree_add(
-                    &["worktree", "add", "--track", "-b", local, &wt, branch_name],
+                    &[
+                        "worktree",
+                        "add",
+                        "--track",
+                        "-b",
+                        local,
+                        "--",
+                        &wt,
+                        branch_name,
+                    ],
                     repo_path,
                 )?;
             } else {
-                git_worktree_add(&["worktree", "add", &wt, local], repo_path)?;
+                git_worktree_add(&["worktree", "add", "--", &wt, local], repo_path)?;
             }
         }
 
         BranchStrategy::DetachedHead => {
             git_worktree_add(
-                &["worktree", "add", "--detach", &wt, &base_branch],
+                &["worktree", "add", "--detach", "--", &wt, &base_branch],
                 repo_path,
             )?;
         }
@@ -1608,6 +1830,7 @@ fn add_worktree(
 /// Remove a workspace: call `git worktree remove` for each repo worktree,
 /// then delete the directory.
 pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
+    checked_space_name(name)?;
     let ws_path = ws_dir.join(name);
     if !ws_path.exists() {
         anyhow::bail!("workspace '{}' not found", name);
@@ -3539,5 +3762,328 @@ mod tests {
             get_sha(&wt, "HEAD"),
             "aborted rebase must leave feature at its pre-rebase commit"
         );
+    }
+
+    /// Ticket 13. One row per clause of the creation rule, and the names the
+    /// rule must keep accepting (interior spaces, dots, non-ASCII).
+    #[test]
+    fn validate_space_name_accepts_ordinary_names_and_rejects_each_clause() {
+        for ok in [
+            "ws",
+            "my space",
+            "a\u{a0}b",
+            "\u{e9}",
+            "v1..v2",
+            "a.b",
+            "feature-x",
+            "x-",
+        ] {
+            assert!(
+                validate_space_name(ok).is_ok(),
+                "{:?} is a valid space name",
+                ok
+            );
+        }
+        let rejected = [
+            ("", "Space name cannot be empty"),
+            (" x", "Space name cannot start or end with whitespace"),
+            ("x ", "Space name cannot start or end with whitespace"),
+            ("a/b", "Space name cannot contain '/' or '\\'"),
+            ("/etc/x", "Space name cannot contain '/' or '\\'"),
+            ("a\\b", "Space name cannot contain '/' or '\\'"),
+            ("-x", "Space name cannot start with '-' or '.'"),
+            (".", "Space name cannot start with '-' or '.'"),
+            ("..", "Space name cannot start with '-' or '.'"),
+            (".hidden", "Space name cannot start with '-' or '.'"),
+            (
+                "a\nb",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\0b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\x7fb",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\u{85}b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\u{2028}b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            // Cf: a bidi override that renders the name reversed, a
+            // zero-width space (the lookup-guard table has it inside "..",
+            // which here the leading-dot clause answers first), an isolate
+            // control.
+            (
+                "safe\u{202e}elif.exe",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\u{200b}b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\u{2066}b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            // The joiner the docs name as refused, and the last code point
+            // of the table's last range, so a truncated range is caught.
+            (
+                "a\u{200d}b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\u{e007f}b",
+                "Space name cannot contain control or formatting characters",
+            ),
+        ];
+        for (name, rule) in rejected {
+            let err = validate_space_name(name).expect_err(&format!("{:?} must be rejected", name));
+            assert_eq!(err.to_string(), rule, "wrong rule for {:?}", name);
+        }
+    }
+
+    /// Ticket 13. The lookup guard is looser than the creation rule on
+    /// purpose: a hand-made `-scratch` or `.old` space must stay addressable.
+    #[test]
+    fn require_plain_component_rejects_dot_dot_and_separators() {
+        for ok in ["ws", "-scratch", ".old", "a b", "x."] {
+            assert!(
+                require_plain_component(ok).is_ok(),
+                "{:?} is one plain component",
+                ok
+            );
+        }
+        let rejected = [
+            ("", "Space name cannot be empty"),
+            (".", "Space name cannot be '.' or '..'"),
+            ("..", "Space name cannot be '.' or '..'"),
+            ("a/b", "Space name cannot contain '/' or '\\'"),
+            ("/", "Space name cannot contain '/' or '\\'"),
+            ("a\\b", "Space name cannot contain '/' or '\\'"),
+            (
+                "a\tb",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\0b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\u{9b}b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\u{2029}b",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                ".\u{200b}.",
+                "Space name cannot contain control or formatting characters",
+            ),
+            (
+                "a\u{200e}b",
+                "Space name cannot contain control or formatting characters",
+            ),
+        ];
+        for (name, rule) in rejected {
+            let err =
+                require_plain_component(name).expect_err(&format!("{:?} must be rejected", name));
+            assert_eq!(err.to_string(), rule, "wrong rule for {:?}", name);
+        }
+        let err = checked_space_name("..").unwrap_err().to_string();
+        assert_eq!(
+            err, "invalid space name \"..\": Space name cannot be '.' or '..'",
+            "the core wrapper names the offending name"
+        );
+    }
+
+    /// Ticket 13. The check is git's verdict, not a mirror of it: the rows
+    /// are names whose status only git's rule settles.
+    #[test]
+    fn check_branch_name_agrees_with_git() {
+        for ok in ["feature/x", "@", "\u{e9}", "x.y", "a./b"] {
+            assert!(
+                check_branch_name(ok).is_ok(),
+                "git accepts {:?} as a branch name",
+                ok
+            );
+        }
+        for bad in [
+            "-foo", "-", "HEAD", "a..b", "foo.lock", "a b", ".a", "a.", "",
+        ] {
+            assert!(
+                check_branch_name(bad).is_err(),
+                "git rejects {:?} as a branch name",
+                bad
+            );
+        }
+        assert_eq!(
+            check_branch_name("-foo").unwrap_err().to_string(),
+            "'-foo' is not a valid branch name",
+            "the error is git's sentence with 'fatal: ' stripped"
+        );
+    }
+
+    /// Ticket 13. The guard and the entry checks must see the name git will
+    /// put after `-b`, which for a remote-tracking form is the stripped one.
+    #[test]
+    fn branch_slot_name_is_the_stripped_local_name() {
+        assert_eq!(
+            branch_slot_name(&BranchStrategy::NewBranch("-x".to_string())),
+            Some("-x")
+        );
+        assert_eq!(
+            branch_slot_name(&BranchStrategy::ExistingBranch("origin/-M".to_string())),
+            Some("-M"),
+            "origin/-M passes git's check as a whole, but -M is what reaches -b"
+        );
+        assert_eq!(
+            branch_slot_name(&BranchStrategy::ExistingBranch("feature/x".to_string())),
+            Some("feature/x")
+        );
+        assert_eq!(branch_slot_name(&BranchStrategy::DetachedHead), None);
+        assert_eq!(
+            branch_slot_name(&BranchStrategy::ExistingBranch(
+                "origin/origin/-x".to_string()
+            )),
+            Some("origin/-x"),
+            "one prefix is stripped, as add_worktree strips one, so the slot \
+             name does not begin with a dash and needs no refusal"
+        );
+    }
+
+    /// Ticket 13. The two `--track` forms' `--` protects their path slot,
+    /// which is testable the same way as the plain form: a relative
+    /// worktree path beginning with `-` against a branch that exists on
+    /// the remote and not locally (new branch) or is named by its remote
+    /// shorthand (existing branch).
+    #[test]
+    fn a_dash_path_is_a_path_in_both_track_forms() {
+        for (label, strategy) in [
+            (
+                "new branch that exists on the remote",
+                BranchStrategy::NewBranch("feat".to_string()),
+            ),
+            (
+                "existing branch by remote shorthand",
+                BranchStrategy::ExistingBranch("origin/feat".to_string()),
+            ),
+        ] {
+            let (_tmp, local) = origin_and_local();
+            git(&["push", "origin", "main:feat"], &local);
+            git(&["fetch", "origin"], &local);
+            let created =
+                add_worktree(&local, Path::new("-dashout"), "main".to_string(), &strategy)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "{}: with -- before the path, -dashout is a path: {}",
+                            label, e
+                        )
+                    });
+            assert_eq!(created, Path::new("-dashout"), "{}", label);
+            assert!(
+                local.join("-dashout").join(".git").exists(),
+                "{}: the worktree was created at the dash-named relative path",
+                label
+            );
+            // Which argv form ran is pinned by the upstream it left: the
+            // `--track` forms set it to origin/feat, while the new-branch
+            // form off the base would set origin/main. Without this the
+            // new-branch arm could silently drift to the base form and
+            // still pass. The plain form is not distinguished: git's DWIM
+            // treats a branch that exists only as one remote-tracking ref
+            // as `--track -b`, so it leaves origin/feat too, and its `--`
+            // is the same property this test pins.
+            let upstream = Cmd::new("git")
+                .args(["rev-parse", "--abbrev-ref", "@{upstream}"])
+                .current_dir(local.join("-dashout"))
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&upstream.stdout).trim(),
+                "origin/feat",
+                "{}: the --track form ran, not another form with --",
+                label
+            );
+        }
+    }
+
+    /// Ticket 13. The one `git worktree add` form whose commit-ish cannot
+    /// carry a dash (the local branch already exists, so the name passed the
+    /// guard) still has a path slot, and that is what its `--` protects: a
+    /// relative worktree path beginning with `-` is a path, not an option.
+    #[test]
+    fn a_dash_path_is_a_path_when_the_local_branch_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = plain_repo(tmp.path(), "repo");
+        git(&["branch", "topic", "main"], &repo);
+
+        let created = add_worktree(
+            &repo,
+            Path::new("-dashdir"),
+            "main".to_string(),
+            &BranchStrategy::NewBranch("topic".to_string()),
+        )
+        .expect("with -- before the path, -dashdir is a path");
+        assert_eq!(created, Path::new("-dashdir"));
+        assert!(
+            repo.join("-dashdir").join(".git").exists(),
+            "the worktree was created at the dash-named relative path"
+        );
+    }
+
+    /// Ticket 13. The `--` in every `git worktree add` form is only provable
+    /// by putting a dash in the commit-ish slot and reading git's answer, and
+    /// `create_worktree_cancellable` refuses such a branch before git runs,
+    /// so this calls `add_worktree` directly. Without `--` git says
+    /// `unknown switch 'o'` followed by its usage text.
+    #[test]
+    fn a_dash_commit_ish_is_reported_as_an_invalid_reference() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = plain_repo(tmp.path(), "repo");
+        let spaces = tmp.path().join("spaces");
+        std::fs::create_dir_all(spaces.join("ws")).unwrap();
+        let wt_path = spaces.join("ws").join("repo");
+
+        let cases: [(&str, String, BranchStrategy); 3] = [
+            (
+                "existing branch",
+                "main".to_string(),
+                BranchStrategy::ExistingBranch("-foo".to_string()),
+            ),
+            (
+                "detached at base",
+                "-foo".to_string(),
+                BranchStrategy::DetachedHead,
+            ),
+            (
+                "new branch off base",
+                "-foo".to_string(),
+                BranchStrategy::NewBranch("topic".to_string()),
+            ),
+        ];
+        for (label, base, strategy) in cases {
+            let err = add_worktree(&repo, &wt_path, base, &strategy)
+                .expect_err("a dash commit-ish cannot resolve");
+            let text = err.to_string();
+            assert!(
+                text.contains("invalid reference: -foo"),
+                "{}: git must see -foo as a reference, not an option, got {:?}",
+                label,
+                text
+            );
+            assert!(
+                !text.contains("unknown switch"),
+                "{}: an option parse means the -- is missing, got {:?}",
+                label,
+                text
+            );
+        }
     }
 }

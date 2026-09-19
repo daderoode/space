@@ -201,8 +201,11 @@ impl CreateState {
             KeyCode::Esc => ScreenAction::Back,
             KeyCode::Enter => {
                 let name = self.ws_name.value().trim().to_string();
-                if name.is_empty() {
-                    self.error = Some("Workspace name cannot be empty".to_string());
+                // The creation rule (`validate_space_name`): the name becomes
+                // a directory under `workspaces.dir` and the default branch.
+                // The field keeps what was typed so the user can fix it.
+                if let Err(e) = crate::core::workspace::validate_space_name(&name) {
+                    self.error = Some(e.to_string());
                     return ScreenAction::Continue;
                 }
                 // Normalize: write trimmed value back so all downstream uses
@@ -305,12 +308,24 @@ impl CreateState {
                     ScreenAction::Continue
                 } else {
                     // idx 1 (ExistingBranch) or idx 2 (DetachedHead)
+                    // idx 1 reuses the space name as the branch, and the
+                    // creation rule accepts names git does not (`my space`,
+                    // `v1..v2`), so ask git here as the branch stage does.
+                    let strategy = self.branch_strategy();
+                    if let Some(branch) = crate::core::workspace::branch_slot_name(&strategy) {
+                        if let Err(e) = crate::core::workspace::check_branch_name(branch) {
+                            self.error = Some(e.to_string());
+                            return ScreenAction::Continue;
+                        }
+                    }
+                    // The bounce reason (ticket 12) stays on the picker here;
+                    // the dispatch clears it, as it did before this check.
                     self.stage = CreateStage::Creating;
                     ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
                         workspace_name: self.ws_name.value().to_string(),
                         workspace_dir: ctx.config.workspaces.dir.clone(),
                         repos: self.selected_repos.clone(),
-                        branch_strategy: self.branch_strategy(),
+                        branch_strategy: strategy,
                         is_new: true,
                         fresh_repos: self.report.fetched_ok_paths(),
                         slow_fetch_repos: self.report.slow_fetch_paths(),
@@ -339,6 +354,14 @@ impl CreateState {
                 let name = self.branch_name_input.value().trim().to_string();
                 if name.is_empty() {
                     self.error = Some("Branch name cannot be empty".to_string());
+                    return ScreenAction::Continue;
+                }
+                // Git's verdict on the name, before the flow starts: one
+                // spawn on Enter, as `build_branch_picker` already does at
+                // this stage. Names from the recent list or the picker are
+                // git's own and are not re-checked.
+                if let Err(e) = crate::core::workspace::check_branch_name(&name) {
+                    self.error = Some(e.to_string());
                     return ScreenAction::Continue;
                 }
                 self.error = None;

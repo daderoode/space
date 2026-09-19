@@ -8978,3 +8978,237 @@ mod help_overlay_tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Ticket 13: the create dialog's name stage applies the creation rule, and
+// the branch stage of both flows asks git whether the name is a branch name.
+// ---------------------------------------------------------------------------
+
+/// Type `text` into whatever input the current stage edits.
+fn type_text(app: &mut App, text: &str) {
+    for ch in text.chars() {
+        app.handle_key(key(KeyCode::Char(ch)));
+    }
+}
+
+#[test]
+fn create_name_with_leading_dash_stays_on_the_name_stage() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('c')));
+    type_text(&mut app, "-scratch");
+
+    app.handle_key(key(KeyCode::Enter));
+
+    let Screen::CreateWorkspace(ref st) = app.screen else {
+        panic!("expected CreateWorkspace screen");
+    };
+    assert_eq!(
+        st.stage,
+        space::tui::screens::create::CreateStage::EnterName,
+        "a name beginning with '-' must not leave the name stage"
+    );
+    assert_eq!(
+        st.error.as_deref(),
+        Some("Space name cannot start with '-' or '.'"),
+        "the dialog names the rule that was broken"
+    );
+    assert_eq!(
+        st.ws_name.value(),
+        "-scratch",
+        "the typed name stays in the field for the user to fix"
+    );
+}
+
+#[test]
+fn create_name_with_a_slash_stays_on_the_name_stage() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('c')));
+    type_text(&mut app, "feature/auth");
+
+    app.handle_key(key(KeyCode::Enter));
+
+    let Screen::CreateWorkspace(ref st) = app.screen else {
+        panic!("expected CreateWorkspace screen");
+    };
+    assert_eq!(
+        st.stage,
+        space::tui::screens::create::CreateStage::EnterName,
+        "a name containing '/' must not leave the name stage"
+    );
+    assert_eq!(
+        st.error.as_deref(),
+        Some("Space name cannot contain '/' or '\\'")
+    );
+}
+
+#[test]
+fn create_branch_name_with_leading_dash_stays_on_the_branch_stage() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("dash-repo");
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.ws_name = tui_input::Input::default().with_value("my-ws".to_string());
+        st.stage = space::tui::screens::create::CreateStage::EnterBranchName;
+        st.branch_name_input = tui_input::Input::default().with_value("-x".to_string());
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    let Screen::CreateWorkspace(ref st) = app.screen else {
+        panic!("expected CreateWorkspace screen, the flow must not have started");
+    };
+    assert_eq!(
+        st.stage,
+        space::tui::screens::create::CreateStage::EnterBranchName,
+        "a branch name git rejects must not leave the branch stage"
+    );
+    assert_eq!(
+        st.error.as_deref(),
+        Some("'-x' is not a valid branch name"),
+        "the dialog shows git's sentence"
+    );
+    assert!(
+        !env.workspaces_dir.join("my-ws").exists(),
+        "no worktree flow ran"
+    );
+}
+
+#[test]
+fn add_branch_name_with_leading_dash_stays_on_the_branch_stage() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("dash-repo");
+    let ws_name = "add-ws";
+    std::fs::create_dir_all(env.workspaces_dir.join(ws_name)).unwrap();
+    let config = config_from_env(&env);
+    let workspaces = vec![Workspace {
+        name: ws_name.to_string(),
+        path: env.workspaces_dir.join(ws_name),
+        repos: vec![],
+    }];
+    let mut app = test_app_with_config(config, workspaces, vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('a')));
+    if let Screen::AddRepos(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.stage = space::tui::screens::add::AddStage::EnterBranchName;
+        st.branch_name_input = tui_input::Input::default().with_value("-x".to_string());
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    let Screen::AddRepos(ref st) = app.screen else {
+        panic!("expected AddRepos screen, the flow must not have started");
+    };
+    assert_eq!(
+        st.stage,
+        space::tui::screens::add::AddStage::EnterBranchName,
+        "a branch name git rejects must not leave the branch stage"
+    );
+    assert_eq!(st.error.as_deref(), Some("'-x' is not a valid branch name"));
+    assert!(
+        !env.workspaces_dir.join(ws_name).join("dash-repo").exists(),
+        "no worktree flow ran"
+    );
+}
+
+/// Ticket 13, found in review. The "existing branch" strategy reuses the
+/// space name as the branch, and the creation rule accepts `v1..v2` while
+/// git does not, so the strategy stage asks git before the flow starts.
+#[test]
+fn create_existing_branch_strategy_asks_git_about_the_space_name() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("dots-repo");
+    let config = config_from_env(&env);
+    let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.ws_name = tui_input::Input::default().with_value("v1..v2".to_string());
+        st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
+        st.branch_strategy_idx = 1;
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    let Screen::CreateWorkspace(ref st) = app.screen else {
+        panic!("expected CreateWorkspace screen, the flow must not have started");
+    };
+    assert_eq!(
+        st.stage,
+        space::tui::screens::create::CreateStage::PickBranchStrategy,
+        "a space name git rejects as a branch must not leave the strategy stage"
+    );
+    assert_eq!(
+        st.error.as_deref(),
+        Some("'v1..v2' is not a valid branch name")
+    );
+    assert!(!env.workspaces_dir.join("v1..v2").exists(), "no flow ran");
+}
+
+#[test]
+fn add_existing_branch_strategy_asks_git_about_the_space_name() {
+    let env = TestEnv::new();
+    let repo_path = env.create_repo("dots-repo");
+    let ws_name = "v1..v2";
+    std::fs::create_dir_all(env.workspaces_dir.join(ws_name)).unwrap();
+    let config = config_from_env(&env);
+    let workspaces = vec![Workspace {
+        name: ws_name.to_string(),
+        path: env.workspaces_dir.join(ws_name),
+        repos: vec![],
+    }];
+    let mut app = test_app_with_config(config, workspaces, vec![repo_path.clone()]);
+
+    app.handle_key(key(KeyCode::Char('a')));
+    if let Screen::AddRepos(ref mut st) = app.screen {
+        st.selected_repos = vec![repo_path];
+        st.stage = space::tui::screens::add::AddStage::PickBranchStrategy;
+        st.branch_strategy_idx = 1;
+    }
+
+    app.handle_key(key(KeyCode::Enter));
+
+    let Screen::AddRepos(ref st) = app.screen else {
+        panic!("expected AddRepos screen, the flow must not have started");
+    };
+    assert_eq!(
+        st.stage,
+        space::tui::screens::add::AddStage::PickBranchStrategy
+    );
+    assert_eq!(
+        st.error.as_deref(),
+        Some("'v1..v2' is not a valid branch name")
+    );
+    assert!(
+        !env.workspaces_dir.join(ws_name).join("dots-repo").exists(),
+        "no flow ran"
+    );
+}
+
+/// Ticket 13, coverage found in review: the name stage trims before it
+/// validates, so surrounding whitespace is not a refusal at the dialog and
+/// the trimmed name is what goes forward.
+#[test]
+fn create_name_is_trimmed_before_it_is_validated() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('c')));
+    type_text(&mut app, "  ws  ");
+
+    app.handle_key(key(KeyCode::Enter));
+
+    let Screen::CreateWorkspace(ref st) = app.screen else {
+        panic!("expected CreateWorkspace screen");
+    };
+    assert_eq!(
+        st.stage,
+        space::tui::screens::create::CreateStage::PickRepos,
+        "surrounding whitespace is trimmed, not refused"
+    );
+    assert_eq!(st.ws_name.value(), "ws");
+    assert!(st.error.is_none());
+}
