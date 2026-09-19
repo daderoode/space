@@ -650,9 +650,12 @@ Create a new workspace with git worktrees for selected repos.
 {
   "name": "feature-my-work",
   "path": "/Users/me/workspaces/feature-my-work",
-  "repos_created": ["api-service", "shared-lib"]
+  "repos_created": ["api-service", "shared-lib"],
+  "repos_already_created": []
 }
 ```
+
+`repos_created` lists the repos this call added a worktree for. `repos_already_created` lists the repos whose place in the workspace already held a worktree of that repo: the call left them as they were and ran no fetch and no git for them, whatever the strategy. The key is always present and empty on a clean run. A directory there that is not a worktree of that repo (a clone, or a worktree of another repo) is not adopted; it fails with `already exists`.
 
 **Errors:**
 - Invalid workspace name -> `invalid_params` naming the clause, e.g. `invalid space name "../x": Space name cannot contain '/' or '\'`; nothing is created
@@ -661,9 +664,9 @@ Create a new workspace with git worktrees for selected repos.
 - Ambiguous repo name (multiple paths with same basename) -> `invalid_params`
 - Unknown strategy -> `invalid_params`
 - `"existing"` without `branch` -> `invalid_params`
-- Worktree creation failure (e.g. branch already checked out) -> `internal_error`
+- Worktree creation failure (e.g. branch already checked out) -> `internal_error` naming the repo's path and git's message. The call stops at that repo: the repos before it stay in place and the repos after it are not attempted. Retrying the same call once the cause is fixed completes the workspace, with the repos the first call made listed under `repos_already_created`
 
-> **Warning:** Git does not allow the same branch to be checked out in two worktrees simultaneously. If you get a "branch already checked out" error, use `"existing"` strategy or choose a different branch name.
+> **Warning:** Git does not allow the same branch to be checked out in two worktrees simultaneously. If you get a "branch already checked out" error, use `"existing"` strategy or choose a different branch name, and retry the call: the repos it had already created keep their branch and are listed under `repos_already_created`.
 
 ---
 
@@ -685,9 +688,12 @@ Add repos to an existing workspace.
 ```json
 {
   "workspace": "feature-my-work",
-  "added": ["web-frontend"]
+  "added": ["web-frontend"],
+  "already_added": []
 }
 ```
+
+`added` and `already_added` mean what `repos_created` and `repos_already_created` mean for `create_workspace`: a repo already in the workspace is left as it is and listed under `already_added`.
 
 **Errors:**
 - Invalid workspace name -> `invalid_params`, before the workspace is looked up

@@ -296,6 +296,11 @@ fn create_workspace_success() {
         assert_eq!(parsed["name"], "new-ws");
         let created = parsed["repos_created"].as_array().unwrap();
         assert_eq!(created, &[serde_json::json!("delta")]);
+        assert_eq!(
+            parsed["repos_already_created"],
+            serde_json::json!([]),
+            "the key is present, and empty, on a clean run"
+        );
         assert!(env.workspaces_dir.join("new-ws").join("delta").exists());
     });
 }
@@ -351,6 +356,11 @@ fn add_repos_success() {
         assert_eq!(parsed["workspace"], "add-ws");
         let added = parsed["added"].as_array().unwrap();
         assert_eq!(added, &[serde_json::json!("repo-b")]);
+        assert_eq!(
+            parsed["already_added"],
+            serde_json::json!([]),
+            "the key is present, and empty, on a clean run"
+        );
         assert!(env.workspaces_dir.join("add-ws").join("repo-b").exists());
     });
 }
@@ -822,5 +832,351 @@ fn add_repos_detached_runs_no_fetch() {
             !marker.exists(),
             "a detached add reads no remote ref, so no fetch may reach origin"
         );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Ticket 15: a repo already in the space. The tools skip a repo whose place
+// in the space is already a worktree of that repo (`workspace::is_worktree_of`,
+// the Creating stage's predicate) and list it apart from the repos this call
+// created, so a client retrying after a partial failure converges on a
+// complete space. Evidence of what is on disk comes from git itself
+// (`git_lists_worktree`), not from the predicate under test.
+// ---------------------------------------------------------------------------
+
+/// Run git in `dir`, assert it succeeded, and return its trimmed stdout.
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {:?} in {} failed: {}",
+        args,
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Whether git lists `wt` among `repo`'s worktrees. Canonicalised because
+/// git reports `/private/var/...` for a temp dir the test holds as `/var/...`.
+fn git_lists_worktree(repo: &std::path::Path, wt: &std::path::Path) -> bool {
+    let Ok(want) = wt.canonicalize() else {
+        return false;
+    };
+    git(repo, &["worktree", "list", "--porcelain"])
+        .lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .any(|p| std::path::Path::new(p) == want)
+}
+
+fn create_ws(
+    server: &SpaceServer,
+    name: &str,
+    repos: &[&str],
+    strategy: &str,
+    branch: Option<&str>,
+) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    server.create_workspace(Parameters(CreateWorkspaceParams {
+        name: name.to_string(),
+        repos: repos.iter().map(|r| r.to_string()).collect(),
+        strategy: strategy.to_string(),
+        branch: branch.map(str::to_string),
+    }))
+}
+
+fn add_to_ws(
+    server: &SpaceServer,
+    workspace: &str,
+    repos: &[&str],
+    strategy: &str,
+    branch: Option<&str>,
+) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    server.add_repos(Parameters(AddReposParams {
+        workspace: workspace.to_string(),
+        repos: repos.iter().map(|r| r.to_string()).collect(),
+        strategy: strategy.to_string(),
+        branch: branch.map(str::to_string),
+    }))
+}
+
+fn parsed(result: &rmcp::model::CallToolResult) -> serde_json::Value {
+    serde_json::from_str(&result_text(result)).unwrap()
+}
+
+/// The string list under `key`. Panics when the key is missing or not an
+/// array, so a result without the field fails rather than reading as empty.
+fn names(parsed: &serde_json::Value, key: &str) -> Vec<String> {
+    parsed[key]
+        .as_array()
+        .unwrap_or_else(|| panic!("`{}` must be an array, result was {}", key, parsed))
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect()
+}
+
+/// The ticket's central claim. A call fails part-way (the middle repo's
+/// branch is checked out in its source, the MCP form of the TUI's
+/// checked-out bounce), leaving the first repo created and the last never
+/// attempted. The caller clears the cause and retries the very same call,
+/// which completes the space: the repo the first call made is listed as
+/// already created and left as it was, the other two are created.
+#[test]
+fn create_workspace_retry_after_a_partial_failure_completes_the_space() {
+    with_test_env(|env, server| {
+        let alpha = env.create_repo("alpha");
+        let bravo = env.create_repo("bravo");
+        let charlie = env.create_repo("charlie");
+        env.write_cache(&[alpha.clone(), bravo.clone(), charlie.clone()]);
+        git(&bravo, &["checkout", "-q", "-b", "ws"]);
+        let space = env.workspaces_dir.join("ws");
+        let call = || create_ws(server, "ws", &["alpha", "bravo", "charlie"], "new", None);
+
+        let err = call().expect_err("bravo's branch is checked out, so the first call stops there");
+        assert_eq!(
+            err.code,
+            rmcp::model::ErrorCode::INTERNAL_ERROR,
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains(&bravo.display().to_string()),
+            "the error names the repo that failed: {}",
+            err.message
+        );
+        assert!(
+            space::core::workspace::refuses_because_checked_out(&err.message),
+            "the failure is the checked-out refusal: {}",
+            err.message
+        );
+        assert!(
+            git_lists_worktree(&alpha, &space.join("alpha")),
+            "alpha, before the failure, was created"
+        );
+        assert!(!space.join("bravo").exists(), "bravo was refused");
+        assert!(
+            !space.join("charlie").exists(),
+            "charlie, after the failure, was never attempted"
+        );
+        // Work in progress in the repo the first call made: a retry that
+        // re-created alpha instead of leaving it would lose this file.
+        std::fs::write(space.join("alpha").join("WIP"), "keep").unwrap();
+
+        git(&bravo, &["checkout", "-q", "main"]);
+        let retry = parsed(&call().expect("the retry of the same call completes the space"));
+        assert_eq!(retry["name"], "ws");
+        assert_eq!(names(&retry, "repos_created"), ["bravo", "charlie"]);
+        assert_eq!(names(&retry, "repos_already_created"), ["alpha"]);
+
+        for (name, repo) in [("alpha", &alpha), ("bravo", &bravo), ("charlie", &charlie)] {
+            let wt = space.join(name);
+            assert!(
+                git_lists_worktree(repo, &wt),
+                "git lists {} as a worktree of its repo",
+                name
+            );
+            assert_eq!(
+                git(&wt, &["symbolic-ref", "--short", "HEAD"]),
+                "ws",
+                "{} is on the space's branch",
+                name
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(space.join("alpha").join("WIP")).unwrap(),
+            "keep",
+            "the retry left alpha as it was, work in progress included"
+        );
+        let status = parsed(
+            &server
+                .workspace_status(Parameters(WorkspaceStatusParams {
+                    name: "ws".to_string(),
+                }))
+                .unwrap(),
+        );
+        assert_eq!(
+            status["repos"].as_array().unwrap().len(),
+            3,
+            "workspace_status sees the complete space"
+        );
+    });
+}
+
+/// Adopted repos are listed apart from created ones, and the retry's
+/// strategy is not checked against them: the retry after a checked-out
+/// refusal exists because the strategy changed, so the repo already in
+/// place keeps the branch the first call gave it.
+#[test]
+fn create_workspace_lists_a_repo_already_in_place_apart_from_created() {
+    with_test_env(|env, server| {
+        let alpha = env.create_repo("alpha");
+        let bravo = env.create_repo("bravo");
+        env.write_cache(&[alpha.clone(), bravo.clone()]);
+        let space = env.workspaces_dir.join("ws");
+        create_ws(server, "ws", &["alpha"], "new", None).unwrap();
+
+        let result = create_ws(server, "ws", &["alpha", "bravo"], "detached", None).unwrap();
+        let parsed = parsed(&result);
+        assert_eq!(names(&parsed, "repos_created"), ["bravo"]);
+        assert_eq!(names(&parsed, "repos_already_created"), ["alpha"]);
+        assert_eq!(
+            git(&space.join("alpha"), &["symbolic-ref", "--short", "HEAD"]),
+            "ws",
+            "alpha keeps the branch the first call gave it"
+        );
+        assert!(git_lists_worktree(&bravo, &space.join("bravo")));
+        assert_eq!(
+            git(&space.join("bravo"), &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "HEAD",
+            "bravo was created detached, under this call's strategy"
+        );
+    });
+}
+
+/// `add_repos` gets the same skip: a repo already in the space is listed
+/// under `already_added`, and the rest are added.
+#[test]
+fn add_repos_lists_a_repo_already_in_the_space_apart_from_added() {
+    with_test_env(|env, server| {
+        let repo_a = env.create_repo("repo-a");
+        let repo_b = env.create_repo("repo-b");
+        env.write_cache(&[repo_a.clone(), repo_b.clone()]);
+        let space = env.workspaces_dir.join("add-ws");
+        create_ws(server, "add-ws", &["repo-a"], "new", None).unwrap();
+
+        let result = add_to_ws(server, "add-ws", &["repo-a", "repo-b"], "new", None).unwrap();
+        let parsed = parsed(&result);
+        assert_eq!(parsed["workspace"], "add-ws");
+        assert_eq!(names(&parsed, "added"), ["repo-b"]);
+        assert_eq!(names(&parsed, "already_added"), ["repo-a"]);
+        assert!(git_lists_worktree(&repo_a, &space.join("repo-a")));
+        assert!(git_lists_worktree(&repo_b, &space.join("repo-b")));
+    });
+}
+
+/// Only a worktree of the same repo is adopted. A clone sitting where the
+/// space wants the worktree is not this space's, so it still reaches
+/// `git worktree add` and fails `already exists`; the call stops there as
+/// it always has, and the repo after it is not attempted. Both tools, each
+/// with the error text it had before the two loops became one.
+#[test]
+fn a_clone_in_place_is_not_adopted_and_stops_the_call() {
+    with_test_env(|env, server| {
+        let alpha = env.create_repo("alpha");
+        let bravo = env.create_repo("bravo");
+        env.write_cache(&[alpha.clone(), bravo.clone()]);
+        let space = env.workspaces_dir.join("ws");
+        std::fs::create_dir_all(&space).unwrap();
+        git(&space, &["clone", "-q", alpha.to_str().unwrap(), "alpha"]);
+
+        let err = create_ws(server, "ws", &["alpha", "bravo"], "new", None)
+            .expect_err("a clone in place is not adopted");
+        assert_eq!(
+            err.code,
+            rmcp::model::ErrorCode::INTERNAL_ERROR,
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.starts_with(&format!(
+                "failed to create worktree for {}: ",
+                alpha.display()
+            )) && err.message.ends_with("already exists"),
+            "git's refusal for alpha, named by its repo path: {}",
+            err.message
+        );
+        assert!(
+            !space.join("bravo").exists(),
+            "the call stops at the first failure; bravo is not attempted"
+        );
+
+        // add_repos shares the loop and keeps its own verb.
+        let err = add_to_ws(server, "ws", &["alpha", "bravo"], "new", None)
+            .expect_err("add_repos does not adopt a clone either");
+        assert_eq!(
+            err.code,
+            rmcp::model::ErrorCode::INTERNAL_ERROR,
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message
+                .starts_with(&format!("failed to add worktree for {}: ", alpha.display()))
+                && err.message.ends_with("already exists"),
+            "git's refusal for alpha, named by its repo path: {}",
+            err.message
+        );
+        assert!(
+            !git_lists_worktree(&alpha, &space.join("alpha")),
+            "the clone is still not a worktree of alpha"
+        );
+        assert!(!space.join("bravo").exists(), "bravo is not attempted");
+    });
+}
+
+/// A repo already in place costs no git at all: no pre-create fetch and no
+/// add. Both repos are gated on their origin (`gate_origin`) after the first
+/// call, and the retry uses `new`, which reads `origin/<base>` and so always
+/// fetches; bravo's marker is the contrast that proves the gate works.
+#[test]
+fn a_repo_already_in_place_runs_no_fetch() {
+    with_test_env(|env, server| {
+        let alpha = env.create_repo("alpha");
+        let bravo = env.create_repo("bravo");
+        env.write_cache(&[alpha.clone(), bravo.clone()]);
+        create_ws(server, "ws", &["alpha"], "new", None).unwrap();
+        let alpha_marker = gate_origin(env, &alpha, "alpha");
+        let bravo_marker = gate_origin(env, &bravo, "bravo");
+
+        let result = create_ws(server, "ws", &["alpha", "bravo"], "new", None).unwrap();
+        let parsed = parsed(&result);
+        assert_eq!(names(&parsed, "repos_created"), ["bravo"]);
+        assert_eq!(names(&parsed, "repos_already_created"), ["alpha"]);
+        assert!(
+            !alpha_marker.exists(),
+            "a repo already in place is not fetched"
+        );
+        assert!(
+            bravo_marker.exists(),
+            "the contrast proves the gate: bravo was created and fetched"
+        );
+    });
+}
+
+/// The branch check runs before any repo is looked at, so an invalid branch
+/// is the caller's error whatever is on disk. The adopted path bypasses the
+/// core's own dash guard, so this is the only thing refusing the call when
+/// every repo is already in place.
+#[test]
+fn an_invalid_branch_is_refused_even_when_repos_are_in_place() {
+    with_test_env(|env, server| {
+        let alpha = env.create_repo("alpha");
+        let bravo = env.create_repo("bravo");
+        env.write_cache(&[alpha, bravo]);
+        let space = env.workspaces_dir.join("ws");
+        create_ws(server, "ws", &["alpha"], "new", None).unwrap();
+
+        for repos in [&["alpha"][..], &["alpha", "bravo"][..]] {
+            let err = create_ws(server, "ws", repos, "new", Some("-x"))
+                .expect_err("an invalid branch is refused");
+            assert_eq!(
+                invalid_params(&err),
+                "'-x' is not a valid branch name",
+                "create_workspace {:?}",
+                repos
+            );
+            let err = add_to_ws(server, "ws", repos, "new", Some("-x"))
+                .expect_err("an invalid branch is refused");
+            assert_eq!(
+                invalid_params(&err),
+                "'-x' is not a valid branch name",
+                "add_repos {:?}",
+                repos
+            );
+        }
+        assert!(!space.join("bravo").exists(), "nothing was created");
     });
 }
