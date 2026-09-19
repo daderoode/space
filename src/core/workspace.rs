@@ -1977,8 +1977,21 @@ fn add_worktree(
     Ok(wt_path.to_path_buf())
 }
 
-/// Remove a workspace: call `git worktree remove` for each repo worktree,
-/// then delete the directory.
+/// Remove a workspace: hand every repo worktree back to its source repo with
+/// `git worktree remove`, then delete the directory.
+///
+/// A worktree git refuses to give up (a locked one, or one its source repo no
+/// longer recognises) keeps the space: the run continues through the other
+/// repos, nothing is deleted, and the error names every directory it kept
+/// with git's own reason, so a retry once the cause is fixed only revisits
+/// what is left. The first line of that error stands alone as a summary,
+/// which is all the TUI's one-line status shows. A directory holding a
+/// repository of its own, which this app never creates, is kept the same way:
+/// deleting it would take its history with it.
+///
+/// git runs with its output captured (`spawn::output`), never inherited: the
+/// parent's stdout is the JSON-RPC stream under MCP and the terminal under
+/// the TUI, and git's stderr is the reason in the report.
 pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
     checked_space_name(name)?;
     let ws_path = ws_dir.join(name);
@@ -1986,25 +1999,47 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
         anyhow::bail!("workspace '{}' not found", name);
     }
 
+    let mut dirs: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(&ws_path)? {
         let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
+        if entry.file_type()?.is_dir() && entry.path().join(".git").exists() {
+            dirs.push(entry.path());
         }
-        let wt_path = entry.path();
-        if !wt_path.join(".git").exists() {
-            continue;
-        }
-        let mut args = vec!["worktree", "remove"];
-        if force {
-            args.push("--force");
-        }
-        let wt_str = wt_path.to_string_lossy().to_string();
-        args.push(&wt_str);
+    }
+    // `read_dir` has no defined order, and both the report and which repo a
+    // run reaches first would inherit it.
+    dirs.sort();
 
-        if let Some(main_repo) = find_main_repo(&wt_path) {
-            spawn::status(Command::new("git").args(&args).current_dir(&main_repo)).ok();
+    let total = dirs.len();
+    let mut removed: Vec<String> = Vec::new();
+    let mut kept: Vec<(String, String)> = Vec::new();
+    for dir in dirs {
+        let repo = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        match classify_space_entry(&dir) {
+            // Nothing registered points at this directory any more: its source
+            // repo was deleted or moved, or the entry was already pruned. Git
+            // has nothing to unregister, so the directory goes with the space
+            // rather than making the space unremovable.
+            SpaceEntry::Orphan => {}
+            SpaceEntry::Repository => kept.push((
+                repo,
+                "holds a git repository of its own, which space did not create; \
+                 move it aside or delete it by hand, then remove the space again"
+                    .to_string(),
+            )),
+            SpaceEntry::Worktree { admin } => match unregister_worktree(&dir, force, &admin) {
+                Ok(()) => removed.push(repo),
+                Err(reason) => kept.push((repo, reason)),
+            },
         }
+    }
+
+    if !kept.is_empty() {
+        anyhow::bail!(removal_report(name, total, &removed, &kept));
     }
 
     std::fs::remove_dir_all(&ws_path)
@@ -2012,20 +2047,116 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Given a worktree path, read its `.git` file to find the main repo root.
-fn find_main_repo(wt_path: &Path) -> Option<PathBuf> {
-    let git_file = wt_path.join(".git");
-    if git_file.is_file() {
-        let content = std::fs::read_to_string(&git_file).ok()?;
-        let gitdir = content.trim().strip_prefix("gitdir: ")?;
-        let path = PathBuf::from(gitdir);
-        path.ancestors()
-            .find(|p| p.join("config").exists() && p.ends_with(".git"))
-            .and_then(|p| p.parent())
-            .map(PathBuf::from)
-    } else {
-        None
+/// What a directory inside a space is, as far as removing it goes.
+enum SpaceEntry {
+    /// A linked worktree whose admin directory (`<source>/.git/worktrees/<id>`)
+    /// is still there, so git can unregister it.
+    Worktree { admin: PathBuf },
+    /// A `.git` file whose target has gone.
+    Orphan,
+    /// A repository in its own right, not a worktree: a clone dropped in the
+    /// space by hand.
+    Repository,
+}
+
+fn classify_space_entry(dir: &Path) -> SpaceEntry {
+    if dir.join(".git").is_dir() {
+        return SpaceEntry::Repository;
     }
+    match worktree_admin_dir(dir) {
+        Some(admin) if admin.is_dir() => SpaceEntry::Worktree { admin },
+        _ => SpaceEntry::Orphan,
+    }
+}
+
+/// The admin directory a linked worktree's `.git` file names. git writes a
+/// relative path there when the user sets `worktree.useRelativePaths` (git
+/// 2.48 and later) and reads it relative to the worktree, which is what this
+/// does: resolving it against the process's own working directory instead
+/// finds nothing, and then no git runs at all.
+fn worktree_admin_dir(dir: &Path) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(dir.join(".git")).ok()?;
+    let target = Path::new(content.trim().strip_prefix("gitdir: ")?.trim());
+    Some(if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        dir.join(target)
+    })
+}
+
+/// Hand one worktree back to its source repo, reporting git's reason when it
+/// refuses. git runs inside the worktree itself, so git resolves the source
+/// repo: that covers a relative `gitdir:` and a bare source repo, which
+/// tracing the `.git` file back by hand does not.
+fn unregister_worktree(dir: &Path, force: bool, admin: &Path) -> std::result::Result<(), String> {
+    let target = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let target = target.to_string_lossy().into_owned();
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    // Belt and braces: what git gets is the canonicalised path, so a repo
+    // directory named `-x` is already inside an absolute path. The separator
+    // is what still holds if the canonicalisation above ever falls back to
+    // the path as given. `git worktree add` in this module passes it too.
+    args.push("--");
+    args.push(&target);
+
+    match spawn::output(Command::new("git").args(&args).current_dir(dir)) {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let reason = stderr.trim();
+            let reason = if reason.is_empty() {
+                "git reported no error output"
+            } else {
+                reason
+            };
+            // A locked worktree has a `locked` file in its admin directory,
+            // which is how the lock is read here: matching git's sentence
+            // would break in the next language or wording.
+            Err(if admin.join("locked").exists() {
+                format!(
+                    "{}\n  run `git worktree unlock {}`, then remove the space again",
+                    reason,
+                    dir.display()
+                )
+            } else {
+                reason.to_string()
+            })
+        }
+        Err(e) => Err(format!("could not run git: {}", e)),
+    }
+}
+
+/// The error a kept space reports. The first line stands alone as a summary
+/// (the TUI shows only that); the lines under it name every directory kept,
+/// and what was removed before the run stopped short of the directory.
+fn removal_report(
+    name: &str,
+    total: usize,
+    removed: &[String],
+    kept: &[(String, String)],
+) -> String {
+    let (first_repo, first_reason) = &kept[0];
+    let mut report = format!(
+        "space '{}' was kept: {} of {} repos could not be removed: {}: {}",
+        name,
+        kept.len(),
+        total,
+        first_repo,
+        first_reason.lines().next().unwrap_or_default()
+    );
+    if kept.len() > 1 {
+        report.push_str(&format!(" and {} more", kept.len() - 1));
+    }
+    for (repo, reason) in kept {
+        report.push_str(&format!("\n  {}: {}", repo, reason));
+    }
+    if !removed.is_empty() {
+        report.push_str(&format!("\n  removed: {}", removed.join(", ")));
+    }
+    report
 }
 
 #[cfg(test)]

@@ -195,7 +195,9 @@ Or edit `~/.config/space/config.toml` directly.
 Each workspace is a directory under `workspaces.dir`. Creating a workspace
 runs `git worktree add` for each selected repo, placing the worktrees at
 `<workspaces_dir>/<workspace>/<repo>`. Removing a workspace runs
-`git worktree remove` and deletes the directory.
+`git worktree remove` for each repo and deletes the directory once they have
+all worked. A worktree git refuses to remove, such as one locked with
+`git worktree lock`, keeps the workspace and is reported instead.
 
 A workspace name is one plain path component: not empty, no `/` or `\`, no
 leading `-` or `.`, no surrounding whitespace, no control or invisible

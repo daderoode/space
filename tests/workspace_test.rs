@@ -4,6 +4,7 @@ mod common;
 
 use common::TestEnv;
 use space::core::workspace::{create_worktree, list_workspaces, BranchStrategy};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -947,5 +948,273 @@ fn an_invalid_name_is_reported_before_an_invalid_branch() {
         format!("{}", err).starts_with("invalid space name"),
         "the name guard runs first, got {:?}",
         format!("{}", err)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ticket 27: a failed `git worktree remove` must not be followed by deleting
+// the space directory.
+// ---------------------------------------------------------------------------
+
+/// Run git in `dir` and return its stdout, asserting it worked.
+fn git_ok(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The worktrees `repo` still has registered, as `git worktree list` sees them.
+fn registered_worktrees(repo: &Path) -> String {
+    git_ok(repo, &["worktree", "list", "--porcelain"])
+}
+
+/// Add one worktree of `repo` to space `ws_name`, on a branch of that name.
+fn worktree_in_space(env: &TestEnv, repo: &Path, ws_name: &str) -> PathBuf {
+    create_worktree(
+        repo,
+        &env.workspaces_dir,
+        ws_name,
+        &BranchStrategy::NewBranch(ws_name.to_string()),
+    )
+    .unwrap()
+}
+
+/// A locked worktree makes `git worktree remove --force` refuse (exit 128 on
+/// git 2.50.1). Deleting the directory anyway leaves the source repo with a
+/// `locked` admin entry that `git worktree prune` deliberately keeps and a
+/// branch that `git branch -D` then refuses to delete. The space is kept
+/// instead; the repos that could be removed still are, which is what makes
+/// "the run continued past the failure" observable.
+#[test]
+fn remove_workspace_keeps_a_locked_worktree_and_removes_the_others() {
+    let env = common::TestEnv::new();
+    // Entries are visited in name order, so the locked one is seen first.
+    let locked_repo = env.create_repo("a-locked");
+    let free_repo = env.create_repo("b-free");
+    let locked_wt = worktree_in_space(&env, &locked_repo, "test-ws");
+    let free_wt = worktree_in_space(&env, &free_repo, "test-ws");
+    git_ok(
+        &locked_repo,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "on usb",
+            locked_wt.to_str().unwrap(),
+        ],
+    );
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "test-ws", true)
+        .expect_err("a refused worktree removal must be reported, not swallowed");
+    let text = err.to_string();
+
+    assert!(
+        text.contains("a-locked") && text.contains("locked working tree"),
+        "the report names the repo and git's own reason, got {:?}",
+        text
+    );
+    assert!(
+        text.contains("git worktree unlock"),
+        "the report names the way out, got {:?}",
+        text
+    );
+    assert!(
+        text.lines().next().unwrap().contains("a-locked"),
+        "the first line stands alone as a summary (it is all the TUI shows), got {:?}",
+        text
+    );
+    assert!(
+        locked_wt.join(".git").exists() && env.workspaces_dir.join("test-ws").exists(),
+        "the space and the worktree git refused to remove must both survive"
+    );
+    let still = registered_worktrees(&locked_repo);
+    assert!(
+        still.contains("test-ws"),
+        "the source repo must still own the worktree it refused to give up, got {}",
+        still
+    );
+
+    assert!(
+        !free_wt.exists(),
+        "the run must continue past the failure and remove the other repo"
+    );
+    let freed = registered_worktrees(&free_repo);
+    assert!(
+        !freed.contains("test-ws"),
+        "the repo that was removed must be unregistered too, got {}",
+        freed
+    );
+    assert!(
+        text.contains("b-free"),
+        "the report says what it did remove, got {:?}",
+        text
+    );
+}
+
+/// `git worktree add` writes a relative `gitdir:` when the user sets
+/// `worktree.useRelativePaths` (git 2.48 and later). The old code resolved
+/// that against the process's own working directory, found no repo, and ran
+/// no git at all while still deleting the directory, so the source repo kept
+/// a prunable entry. The `.git` file is written by hand here, byte for byte
+/// what git writes for that setting, so the test does not depend on the git
+/// version the suite runs against.
+#[test]
+fn remove_workspace_unregisters_a_worktree_whose_gitdir_is_relative() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "rel-ws");
+
+    let admin = repo.join(".git").join("worktrees").join("alpha");
+    assert!(
+        admin.is_dir(),
+        "fixture: the admin directory is where git puts it"
+    );
+    // <ws_dir>/rel-ws/alpha -> <repos_dir>/alpha/.git/worktrees/alpha
+    std::fs::write(
+        wt.join(".git"),
+        "gitdir: ../../../repos/alpha/.git/worktrees/alpha\n",
+    )
+    .unwrap();
+    let branch = space::core::git::current_branch(&wt).unwrap();
+    assert_eq!(branch, "rel-ws", "fixture: git still reads the worktree");
+
+    space::core::workspace::remove_workspace(&env.workspaces_dir, "rel-ws", true).unwrap();
+
+    assert!(!env.workspaces_dir.join("rel-ws").exists());
+    let left = registered_worktrees(&repo);
+    assert!(
+        !left.contains("rel-ws"),
+        "git must have run and unregistered the worktree, got {}",
+        left
+    );
+}
+
+/// The opposite guard: when the source repo is gone, git has nothing to
+/// unregister, so the space stays removable rather than becoming stuck.
+#[test]
+fn remove_workspace_deletes_a_space_whose_source_repo_is_gone() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "orphan-ws");
+    std::fs::remove_dir_all(&repo).unwrap();
+    assert!(
+        wt.join(".git").is_file(),
+        "fixture: the gitfile outlives its repo"
+    );
+
+    space::core::workspace::remove_workspace(&env.workspaces_dir, "orphan-ws", true).unwrap();
+
+    assert!(
+        !env.workspaces_dir.join("orphan-ws").exists(),
+        "a space whose source repo is gone must still be removable"
+    );
+}
+
+/// Without `--force` git refuses a worktree with uncommitted work. Deleting
+/// the directory anyway destroyed exactly the work git was protecting. No
+/// production caller passes `force: false`; the library API does.
+#[test]
+fn remove_workspace_keeps_a_dirty_worktree_when_not_forced() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "dirty-ws");
+    std::fs::write(wt.join("notes.txt"), "wip").unwrap();
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "dirty-ws", false)
+        .expect_err("git refuses a dirty worktree without --force");
+    assert!(
+        err.to_string().contains("alpha"),
+        "the report names the repo, got {:?}",
+        err.to_string()
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.join("notes.txt")).unwrap(),
+        "wip",
+        "the uncommitted work git protected must still be on disk"
+    );
+}
+
+/// The headline case: a directory in a space that holds its own repository
+/// (a `git clone` dropped there by hand) is not a worktree of anything, so
+/// git never ran for it and `remove_dir_all` took the whole repository,
+/// unpushed commits and all. It is kept and reported now.
+#[test]
+fn remove_workspace_keeps_a_clone_that_is_not_a_worktree() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("a-repo");
+    let worktree = worktree_in_space(&env, &repo, "mixed-ws");
+
+    let clone = env.workspaces_dir.join("mixed-ws").join("z-clone");
+    git_ok(
+        &env.workspaces_dir,
+        &[
+            "clone",
+            "--quiet",
+            repo.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    for (key, value) in [
+        ("user.email", "space@local"),
+        ("user.name", "Test"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git_ok(&clone, &["config", key, value]);
+    }
+    git_ok(&clone, &["commit", "--allow-empty", "-m", "unpushed"]);
+    assert!(
+        clone.join(".git").is_dir(),
+        "fixture: a clone, not a worktree"
+    );
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "mixed-ws", true)
+        .expect_err("a repository space did not create must not be deleted");
+    assert!(
+        err.to_string().contains("z-clone"),
+        "the report names the directory it kept, got {:?}",
+        err.to_string()
+    );
+
+    assert_eq!(
+        git_ok(&clone, &["log", "-1", "--format=%s"]).trim(),
+        "unpushed",
+        "the clone's own commit must still be there afterwards"
+    );
+    assert!(
+        !worktree.exists(),
+        "the real worktree beside it is still removed"
+    );
+}
+
+/// A repo whose directory name begins with `-` is removed like any other.
+/// What reaches git is the canonicalised path, so the dash sits inside it and
+/// the `--` separator in the call is belt and braces, not what this test
+/// proves: dropping the separator keeps this test green. It proves the rest
+/// of the path, from classification to the source repo losing the
+/// registration, on a name that any argv handling is most likely to mangle.
+#[test]
+fn remove_workspace_removes_a_repo_whose_name_begins_with_a_dash() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("-dash");
+    let wt = worktree_in_space(&env, &repo, "dash-ws");
+    assert!(wt.join(".git").is_file(), "fixture: the worktree is there");
+
+    space::core::workspace::remove_workspace(&env.workspaces_dir, "dash-ws", true).unwrap();
+
+    assert!(!env.workspaces_dir.join("dash-ws").exists());
+    let left = registered_worktrees(&repo);
+    assert!(
+        !left.contains("dash-ws"),
+        "git must have unregistered it, got {}",
+        left
     );
 }

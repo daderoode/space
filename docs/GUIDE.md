@@ -86,11 +86,13 @@ When you create a workspace, space does this for each selected repo, except a re
 
 ### Removing a Workspace
 
-For each repo worktree in the workspace:
+For each directory in the workspace that holds a `.git`:
 
-1. Reads the `.git` file to trace back to the main repository
-2. Runs `git worktree remove` on the main repo
-3. Deletes the workspace directory
+1. Reads the `.git` file to find the worktree's admin directory, resolving a relative `gitdir:` against the worktree, the way git does
+2. Runs `git worktree remove` (with `--force` from every command in the app) inside the worktree itself, so git resolves the source repo, and captures its output instead of letting it through to the terminal
+3. Deletes the workspace directory, but only once step 2 has worked for every repo
+
+A worktree git refuses to give up keeps the whole workspace: nothing is deleted, the repos that were removed stay removed, and the error names each directory kept along with git's own reason. The common case is a worktree locked with `git worktree lock`, where the error also names the `git worktree unlock` that clears it. A directory holding a repository of its own, which `space` never creates, is kept the same way, because deleting it would take its history with it. A worktree whose source repo has been deleted or moved is not a refusal: git has nothing left to unregister, so that directory goes with the rest.
 
 ### Repo Discovery
 
@@ -303,6 +305,8 @@ Progress log showing each repo with a checkmark or error. A repo whose place in 
 ## Delete Workspace
 
 Confirmation dialog showing `Delete workspace?`, the workspace name on its own line, and the worktrees that will be removed. The dialog defaults to No, like the push and rebase confirmations: only `y` or `Y` deletes, while `n`, `N`, `q`, `Enter` and `Esc` all cancel. Long names are truncated with `...`, and long repo lists keep the footer visible by showing `... and N more` when needed. With `space rm --force`, skips the dialog entirely.
+
+If git refuses to remove one of the worktrees, the workspace stays where it is and the status message says which repo and why, on one line; the whole report is in the log file. The dashboard is refreshed either way, since the worktrees git did remove are gone from disk.
 
 ---
 
@@ -724,7 +728,7 @@ Remove a workspace and all its git worktrees.
 }
 ```
 
-> **Note:** This always uses force removal. Each repo's worktree is removed via `git worktree remove --force` on the main repository, then the workspace directory is deleted.
+> **Note:** This always uses force removal. Each repo's worktree is removed with `git worktree remove --force`, and the workspace directory is deleted only once every one of them has worked. A worktree git refuses to give up (a locked one, for example) keeps the workspace: the call fails with an error naming each repo and git's reason, the repos already removed stay removed, and retrying after the cause is fixed removes the rest.
 
 ---
 

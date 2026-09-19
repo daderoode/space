@@ -451,7 +451,9 @@ impl SpaceServer {
     }
 
     /// Remove a workspace and all its worktrees.
-    #[tool(description = "Remove a workspace and all its git worktrees")]
+    #[tool(
+        description = "Remove a workspace and all its git worktrees. A worktree git refuses to remove, for example one locked with 'git worktree lock', keeps the whole workspace: the call fails with an error naming each repo it kept and git's own reason, the repos it did remove stay removed, and retrying once the cause is fixed removes the rest."
+    )]
     pub fn remove_workspace(
         &self,
         Parameters(params): Parameters<RemoveWorkspaceParams>,
