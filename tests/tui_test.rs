@@ -628,26 +628,97 @@ fn creating_logs_failed_pre_create_fetch_and_skips_it_for_already_fetched_repos(
 /// it left behind. Nothing is cleaned up: the partially built space is still
 /// on the dashboard, selected by name.
 ///
-/// The count is deterministic at 0 here, and that is the point rather than an
-/// accident: it counts creations the UI has confirmed, and the UI confirms
-/// them in `poll_create_result`, which this test has not called. The space
-/// directory it waits for was made by the worker, so the message can undercount
-/// what is on disk exactly as its doc comment says.
+/// The count is 0 by construction, not by timing. It counts the repos whose
+/// `Finished` the UI has drained, and Esc drains before it cancels
+/// (`cancel_creating`), so any repo the worker finished before the key is
+/// counted. The first repo is therefore held inside its own `git worktree
+/// add` until after the Esc: the worker cannot send `Finished` for a repo
+/// whose add has not returned. Waiting only for the space directory, as this
+/// test once did, left the first repo free to finish before the Esc and read
+/// `1 of 2` (ticket 22). The hold is on the add rather than on the fetch
+/// because the detached-HEAD strategy runs no pre-create fetch (ticket 16).
 #[test]
 fn creating_esc_stops_the_run_and_leaves_the_partial_space() {
     let env = TestEnv::new();
     let repo_a = env.create_repo("cancel-repo-a");
     let repo_b = env.create_repo("cancel-repo-b");
 
+    // The hold. `git worktree add` runs the repo's `post-checkout` hook after
+    // it has checked the worktree out and before it exits. This one marks
+    // `holding`, waits for `release`, and records in `released` that it saw
+    // it. It gives up without that record once the test can no longer release
+    // it: `holding` goes with the TestEnv (the test returned or panicked), and
+    // the pid with the test process. Both of those can outlive this test
+    // though: the pid is the whole test binary's, and `TempDir::drop` discards
+    // the error from a `remove_dir_all` that can fail before it reaches
+    // `holding`. So the loop also counts itself out after 6000 iterations.
+    // That is not 60 seconds: each iteration pays a `sleep` process on top of
+    // its 0.01 seconds, so the unmodified loop was measured standalone at
+    // 98 s on one machine and 103 s on another, and it only grows under load.
+    // Being well above the 60 second deadlines below is the point. Those are
+    // wall clock, so one of them always expires first and reports the failure
+    // in its own words; the cap is only the backstop that ends a hold nobody
+    // released. `sh` is fine: the app documents macOS and Linux only.
+    let holding = env.dir.path().join("hold-holding");
+    let release = env.dir.path().join("hold-release");
+    let released = env.dir.path().join("hold-released");
+    let hooks = env.dir.path().join("hold-hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("post-checkout");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\n\
+             : > '{holding}'\n\
+             i=0\n\
+             while [ -e '{holding}' ] && [ ! -e '{release}' ] && kill -0 {pid} 2>/dev/null \\\n\
+             && [ $i -lt 6000 ]\n\
+             do i=$((i+1)); sleep 0.01; done\n\
+             [ -e '{release}' ] && : > '{released}'\n\
+             exit 0\n",
+            holding = holding.display(),
+            release = release.display(),
+            released = released.display(),
+            pid = std::process::id()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    // Repo A only, set in its own config so that a global `core.hooksPath`
+    // cannot send git to other hooks.
+    let out = std::process::Command::new("git")
+        .args(["config", "core.hooksPath"])
+        .arg(&hooks)
+        .current_dir(&repo_a)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git config core.hooksPath failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
     let config = config_from_env(&env);
     let mut app = test_app_with_config(config, vec![], vec![repo_a.clone(), repo_b.clone()]);
 
     app.handle_key(key(KeyCode::Char('c')));
     if let Screen::CreateWorkspace(ref mut st) = app.screen {
-        st.selected_repos = vec![repo_a, repo_b];
+        st.selected_repos = vec![repo_a.clone(), repo_b];
         st.ws_name = tui_input::Input::default().with_value("ws-cancel".to_string());
         st.branch_strategy_idx = 2; // DetachedHead: straight to Creating
         st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
+        // The hook holds repo A, and the worker takes this list in order, so
+        // the hold only lands on the FIRST repo while repo A is first. The
+        // flow copies this list verbatim into the worker's params.
+        assert_eq!(
+            st.selected_repos.first(),
+            Some(&repo_a),
+            "the held repo must be the one the worker starts with"
+        );
     }
     app.handle_key(key(KeyCode::Enter));
     assert!(
@@ -655,22 +726,32 @@ fn creating_esc_stops_the_run_and_leaves_the_partial_space() {
         "Enter must hand the work to the background worker"
     );
 
-    // The worker makes the space directory as it starts the first repo, so
-    // this waits until the run is provably under way before cancelling it.
+    // From here until `release` the worker is inside repo A's add, so it has
+    // sent `Finished` for no repo. Repo B's worktree appearing first would
+    // mean the worker got past repo A without the hold, which is said at once
+    // rather than after the deadline.
     let space_dir = env.workspaces_dir.join("ws-cancel");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while !space_dir.exists() {
+    while !holding.exists() {
+        assert!(
+            !space_dir.join("cancel-repo-b").exists(),
+            "the worker got past the first repo without reaching its hold"
+        );
         assert!(
             std::time::Instant::now() < deadline,
-            "the worker never started the first repo"
+            "the first repo never reached its hold: the hook did not run, or \
+             repo A's add ended before it (a refusal stops the worker at repo \
+             A, so repo B's worktree never appears either)"
         );
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
 
     // The footer says what is happening rather than claiming the run is over.
-    // The count is 0 because it advances in `poll_create_result`, which this
-    // test has not called; the spinner is on its first frame for the same
-    // reason, so both are deterministic here.
+    // In THIS frame, before the Esc, the count is 0 because it advances in
+    // `poll_create_result` and nothing has called it yet; the spinner is on its
+    // first frame for the same reason. That reasoning stops at the Esc, which
+    // drains (see the doc comment): what keeps the count 0 across the key is
+    // the hold, not this.
     let rendered = render_text(&app, 80, 24);
     assert!(
         rendered.contains("Creating 0 of 2 \u{b7}   \u{b7} ESC cancel"),
@@ -685,6 +766,8 @@ fn creating_esc_stops_the_run_and_leaves_the_partial_space() {
 
     app.handle_key(key(KeyCode::Esc));
 
+    // What Esc did, asserted before the hold is released, so a hold that
+    // regressed still reports these rather than dying on the release below.
     assert!(
         matches!(app.screen, Screen::Dashboard),
         "Esc leaves for the dashboard immediately, with no confirm dialog"
@@ -697,11 +780,39 @@ fn creating_esc_stops_the_run_and_leaves_the_partial_space() {
         space_dir.exists(),
         "the partial space is left in place: cancel means stop, not undo"
     );
+    let left_behind = app.workspaces.get(app.selected_ws);
     assert_eq!(
-        app.workspaces.get(app.selected_ws).map(|w| w.name.as_str()),
+        left_behind.map(|w| w.name.as_str()),
         Some("ws-cancel"),
         "the partial space is refreshed in and selected by name"
     );
+    // The count undercounts what is on disk, which `cancel_creating`'s doc
+    // comment allows and the hold now makes certain rather than occasional:
+    // repo A's worktree is complete and registered by the time its
+    // `post-checkout` hook runs, so the space the dashboard just loaded holds
+    // it while the message below says 0.
+    assert_eq!(
+        left_behind.map(|w| w.repos.len()),
+        Some(1),
+        "the space the Esc refreshed in holds the worktree the hold is inside"
+    );
+
+    // Released only now, after the Esc. The hook records that it saw the
+    // release, so it was still holding when the Esc landed: checked from the
+    // hook's side rather than assumed from timing. The count is asserted after
+    // that record, because the record is what makes 0 mean "nothing finished
+    // before the key" rather than "nothing finished yet".
+    std::fs::write(&release, "").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !released.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the hold on the first repo ended before the test released it, so \
+             nothing shows it was still holding when the Esc landed"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
     assert_eq!(
         app.status_message.as_deref(),
         Some("Stopped creating after 0 of 2 repos. Press a to add the rest.")
