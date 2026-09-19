@@ -666,7 +666,7 @@ Create a new workspace with git worktrees for selected repos.
 - `"existing"` without `branch` -> `invalid_params`
 - Worktree creation failure (e.g. branch already checked out) -> `internal_error` naming the repo's path and git's message. The call stops at that repo: the repos before it stay in place and the repos after it are not attempted. Retrying the same call once the cause is fixed completes the workspace, with the repos the first call made listed under `repos_already_created`
 
-> **Warning:** Git does not allow the same branch to be checked out in two worktrees simultaneously. If you get a "branch already checked out" error, use `"existing"` strategy or choose a different branch name, and retry the call: the repos it had already created keep their branch and are listed under `repos_already_created`.
+> **Warning:** Git does not allow the same branch to be checked out in two worktrees simultaneously. If you get a "branch already checked out" error (`is already used by worktree at`), either free the branch where it is checked out and retry the same call, or retry with a different `branch` or with `"detached"`. Switching to `"existing"` with the same branch is refused the same way. The repos the first call had already created keep their branch and are listed under `repos_already_created`.
 
 ---
 

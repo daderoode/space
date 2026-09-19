@@ -368,7 +368,7 @@ impl SpaceServer {
     /// repo already in the workspace is left as it is and listed under
     /// `repos_already_created` (`place_repos`).
     #[tool(
-        description = "Create a new workspace with git worktrees for selected repos. Strategy: 'new' (create branch, default), 'existing' (checkout existing branch), or 'detached' (detached HEAD). A repo whose worktree is already in the workspace is left as it is and listed under repos_already_created, so retrying a call that failed part-way completes the workspace."
+        description = "Create a workspace with git worktrees for selected repos, or complete one. Strategy: 'new' (create branch, default), 'existing' (checkout existing branch), or 'detached' (detached HEAD). A repo whose worktree is already in the workspace is left as it is, on the branch it already has (this call's strategy and branch do not apply to it; workspace_status shows it), and is listed under repos_already_created, not repos_created. On a call that is not a retry, a non-empty repos_already_created means a workspace with this name already held those repos. The call stops at the first repo that fails; once the cause is fixed, retrying the same call completes the workspace."
     )]
     pub fn create_workspace(
         &self,
@@ -404,7 +404,7 @@ impl SpaceServer {
     /// Add repos to an existing workspace. A repo already in it is left as it
     /// is and listed under `already_added` (`place_repos`).
     #[tool(
-        description = "Add git worktrees for additional repos to an existing workspace. A repo whose worktree is already in the workspace is left as it is and listed under already_added."
+        description = "Add git worktrees for additional repos to an existing workspace. A repo whose worktree is already in the workspace is left as it is, on the branch it already has (this call's strategy and branch do not apply to it; workspace_status shows it), and is listed under already_added, not added. The call stops at the first repo that fails; once the cause is fixed, retrying the same call adds the rest."
     )]
     pub fn add_repos(
         &self,
