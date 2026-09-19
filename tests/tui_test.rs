@@ -9189,3 +9189,26 @@ fn add_existing_branch_strategy_asks_git_about_the_space_name() {
         "no flow ran"
     );
 }
+
+/// Ticket 13, coverage found in review: the name stage trims before it
+/// validates, so surrounding whitespace is not a refusal at the dialog and
+/// the trimmed name is what goes forward.
+#[test]
+fn create_name_is_trimmed_before_it_is_validated() {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('c')));
+    type_text(&mut app, "  ws  ");
+
+    app.handle_key(key(KeyCode::Enter));
+
+    let Screen::CreateWorkspace(ref st) = app.screen else {
+        panic!("expected CreateWorkspace screen");
+    };
+    assert_eq!(
+        st.stage,
+        space::tui::screens::create::CreateStage::PickRepos,
+        "surrounding whitespace is trimmed, not refused"
+    );
+    assert_eq!(st.ws_name.value(), "ws");
+    assert!(st.error.is_none());
+}

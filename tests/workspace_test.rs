@@ -923,3 +923,25 @@ fn an_origin_prefixed_dash_branch_cannot_rename_the_checked_out_branch() {
         "nothing is created for a refused branch"
     );
 }
+
+/// Ticket 13, coverage found in review. When both the name and the branch
+/// are invalid, the name guard answers, because a rejected name has no
+/// space to put a branch in. Either order refuses before any write; this
+/// pins which sentence the caller sees.
+#[test]
+fn an_invalid_name_is_reported_before_an_invalid_branch() {
+    let env = common::TestEnv::new();
+    let repo_path = env.create_repo("alpha");
+    let err = create_worktree(
+        &repo_path,
+        &env.workspaces_dir,
+        "../escape",
+        &BranchStrategy::NewBranch("-x".to_string()),
+    )
+    .expect_err("both are invalid");
+    assert!(
+        format!("{}", err).starts_with("invalid space name"),
+        "the name guard runs first, got {:?}",
+        format!("{}", err)
+    );
+}

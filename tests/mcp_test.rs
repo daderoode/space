@@ -633,3 +633,31 @@ fn create_workspace_rejects_an_origin_prefixed_dash_branch() {
         assert!(!env.workspaces_dir.join("dashed").exists());
     });
 }
+
+/// Ticket 13, coverage found in review: the creation rule allows interior
+/// spaces, so a name with one must create end to end, not only pass the
+/// unit table.
+#[test]
+fn create_workspace_accepts_an_interior_space() {
+    with_test_env(|env, server| {
+        let repo_path = env.create_repo("delta");
+        env.write_cache(&[repo_path]);
+
+        let result = server
+            .create_workspace(Parameters(CreateWorkspaceParams {
+                name: "my space".to_string(),
+                repos: vec!["delta".to_string()],
+                strategy: "detached".to_string(),
+                branch: None,
+            }))
+            .expect("an interior space is allowed by the creation rule");
+        let parsed: serde_json::Value = serde_json::from_str(&result_text(&result)).unwrap();
+        assert_eq!(parsed["name"], "my space");
+        assert!(env
+            .workspaces_dir
+            .join("my space")
+            .join("delta")
+            .join(".git")
+            .exists());
+    });
+}
