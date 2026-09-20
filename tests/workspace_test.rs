@@ -1028,6 +1028,11 @@ fn remove_workspace_keeps_a_locked_worktree_and_removes_the_others() {
         text
     );
     assert!(
+        !text.contains("remove -f -f"),
+        "and not git's own advice for a flag space does not offer, got {:?}",
+        text
+    );
+    assert!(
         text.lines().next().unwrap().contains("a-locked"),
         "the first line stands alone as a summary (it is all the TUI shows), got {:?}",
         text
@@ -1179,8 +1184,8 @@ fn remove_workspace_keeps_a_clone_that_is_not_a_worktree() {
     let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "mixed-ws", true)
         .expect_err("a repository space did not create must not be deleted");
     assert!(
-        err.to_string().contains("z-clone"),
-        "the report names the directory it kept, got {:?}",
+        err.to_string().contains("z-clone") && err.to_string().contains("move it aside"),
+        "the report names the directory it kept and what to do, got {:?}",
         err.to_string()
     );
 
@@ -1342,8 +1347,8 @@ fn remove_workspace_keeps_a_directory_whose_gitfile_cannot_be_read() {
     let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "odd-ws", true)
         .expect_err("a directory that cannot be read must not be deleted");
     assert!(
-        err.to_string().contains("z-odd"),
-        "the report names it, got {:?}",
+        err.to_string().contains("z-odd") && err.to_string().contains("delete it by hand"),
+        "the report names it and what to do, got {:?}",
         err.to_string()
     );
     assert!(odd.join(".git").exists(), "and it is still there");
@@ -1364,8 +1369,9 @@ fn remove_workspace_keeps_an_orphan_when_not_forced() {
     let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "orphan-ws", false)
         .expect_err("without force nothing is destroyed unchecked");
     assert!(
-        err.to_string().contains("alpha"),
-        "the report names it, got {:?}",
+        err.to_string().contains("alpha")
+            && err.to_string().contains("remove the space with force"),
+        "the report names it and what to do, got {:?}",
         err.to_string()
     );
     assert_eq!(
@@ -1411,9 +1417,17 @@ fn remove_workspace_report_reads_as_a_report() {
     let lines: Vec<&str> = text.lines().collect();
 
     assert!(
-        lines[0].contains("1 of 3 repos"),
-        "the count covers every repo the space held, got {:?}",
+        lines[0].contains("a-locked") && lines[0].contains("ws"),
+        "the summary leads with what to act on, since a status row is clipped \
+         at 80 columns, got {:?}",
         lines[0]
+    );
+    assert!(
+        lines[1..]
+            .iter()
+            .any(|l| l.contains("1 of 3 repos in the space were kept")),
+        "and the count covers every repo the space held: {:?}",
+        text
     );
     assert!(
         lines[1..].iter().any(|l| l.contains("c-orphan")),
@@ -1589,6 +1603,10 @@ fn remove_workspace_report_neutralises_a_hostile_directory_name() {
         .join("z-\u{1b}[2Jwiped\nsecond line");
     std::fs::create_dir_all(&hostile).unwrap();
     git_ok(&hostile, &["init", "--quiet"]);
+    // And one just as hostile that is removed, so the `removed:` list is
+    // held to the same rule as the kept names.
+    let removed_repo = env.create_repo("b-\u{1b}[2Jgone\nalso second");
+    worktree_in_space(&env, &removed_repo, "hostile-ws");
 
     let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "hostile-ws", true)
         .expect_err("the repository of its own is kept");
@@ -1609,6 +1627,15 @@ fn remove_workspace_report_neutralises_a_hostile_directory_name() {
         !text.contains("\n\u{1b}") && text.lines().skip(1).all(|l| l.starts_with("  ")),
         "and it cannot open a line of its own in the body, got {:?}",
         text
+    );
+    let removed_line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("removed:"))
+        .expect("the hostile-named worktree was removed and is listed");
+    assert!(
+        !removed_line.contains('\u{1b}') && removed_line.contains("gone"),
+        "the removed list is escaped the same way, got {:?}",
+        removed_line
     );
 }
 
@@ -1646,6 +1673,11 @@ fn remove_workspace_summary_puts_the_count_before_the_reason() {
         "the repo and count come first, git's sentence last, got {:?}",
         summary
     );
+    assert!(
+        summary.contains("first reason:"),
+        "with git's sentence introduced, so it cannot read as part of the list, got {:?}",
+        summary
+    );
 }
 
 /// The scan sorts the directories, so the report and the order git is
@@ -1678,13 +1710,16 @@ fn remove_workspace_reports_in_name_order_whatever_read_dir_says() {
 
     let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "order-ws", true)
         .expect_err("three repositories of their own are kept");
-    let summary = err.to_string().lines().next().unwrap().to_string();
-    let at = |name: &str| summary.find(name).expect("every repo is named");
+    let text = err.to_string();
+    // The summary lists at most two names, so the order is read from the
+    // body, which carries every one of them.
+    let body = text.lines().skip(1).collect::<Vec<_>>().join("\n");
+    let at = |name: &str| body.find(name).expect("every repo is named in the body");
 
     assert!(
         at("a-first") < at("m-mid") && at("m-mid") < at("z-last"),
         "the report is in name order, got {:?}",
-        summary
+        text
     );
     // If this filesystem hands them back sorted already, the assertion above
     // holds either way and this test proves nothing; say so rather than
@@ -1693,5 +1728,221 @@ fn remove_workspace_reports_in_name_order_whatever_read_dir_says() {
         on_disk, sorted,
         "fixture: read_dir returned name order by itself, so this test cannot \
          see the sort (it is not a failure of the code)"
+    );
+}
+
+/// Skeptical review, pass 2: the orphan arm deleted a directory whenever its
+/// admin directory failed to resolve, for any reason. This needs no unusual
+/// input at all: a worktree copied beside its original shares the original's
+/// `.git` file, so removing the original destroyed the admin directory that
+/// the copy also named, and the copy was reclassified from worktree to
+/// orphan mid-run and deleted with its uncommitted work. Classification is
+/// one pass now, and acting on it is the next.
+#[test]
+fn remove_workspace_keeps_a_worktree_copied_beside_its_original() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("a-repo");
+    let original = worktree_in_space(&env, &repo, "copy-ws");
+    let copy = env.workspaces_dir.join("copy-ws").join("z-copy");
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::copy(original.join(".git"), copy.join(".git")).unwrap();
+    std::fs::write(copy.join("experiment.txt"), "a day of work").unwrap();
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "copy-ws", true)
+        .expect_err("the copy is not a worktree git knows, so it is kept");
+    assert!(
+        err.to_string().contains("z-copy"),
+        "the report names it, got {:?}",
+        err.to_string()
+    );
+    assert_eq!(
+        std::fs::read_to_string(copy.join("experiment.txt")).unwrap(),
+        "a day of work",
+        "and the work in it is still there"
+    );
+    assert!(!original.exists(), "the original was still removed");
+}
+
+/// The same arm, reached by a permission error rather than by absence: the
+/// source repo is intact and simply cannot be read right now, which is what
+/// an unmounted volume or a share that is offline looks like.
+#[test]
+fn remove_workspace_keeps_a_worktree_whose_admin_cannot_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "locked-out-ws");
+    std::fs::write(wt.join("uncommitted.txt"), "wip").unwrap();
+
+    let worktrees = repo.join(".git").join("worktrees");
+    let restore = std::fs::metadata(&worktrees).unwrap().permissions();
+    std::fs::set_permissions(&worktrees, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::symlink_metadata(worktrees.join("alpha")).is_ok() {
+        // Running as a user the mode does not apply to (root), so there is
+        // nothing to test here. Say so rather than passing quietly.
+        std::fs::set_permissions(&worktrees, restore).unwrap();
+        eprintln!("skipped: this user can read a directory with mode 000");
+        return;
+    }
+
+    let outcome =
+        space::core::workspace::remove_workspace(&env.workspaces_dir, "locked-out-ws", true);
+    std::fs::set_permissions(&worktrees, restore).unwrap();
+
+    let err = outcome.expect_err("a directory that cannot be read is not deleted");
+    assert!(
+        err.to_string().contains("alpha"),
+        "the report names it, got {:?}",
+        err.to_string()
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.join("uncommitted.txt")).unwrap(),
+        "wip",
+        "and the work in it is still there"
+    );
+    let still = registered_worktrees(&repo);
+    assert!(
+        still.contains("locked-out-ws"),
+        "the registration it could not unregister is intact, got {}",
+        still
+    );
+}
+
+/// git's own rule for a `.git` file is that the gitdir is the rest of that
+/// one line and a file carrying anything else is not a gitfile. Accepting
+/// more than git does is not harmless: the extra text became part of the
+/// path, the path did not exist, and a path that does not exist used to mean
+/// "orphan", which deletes.
+#[test]
+fn remove_workspace_keeps_a_gitfile_with_more_than_a_gitdir_line() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("a-repo");
+    let worktree = worktree_in_space(&env, &repo, "extra-line-ws");
+    let odd = env.workspaces_dir.join("extra-line-ws").join("z-odd");
+    std::fs::create_dir_all(&odd).unwrap();
+    let admin = repo.join(".git").join("worktrees").join("a-repo");
+    std::fs::write(
+        odd.join(".git"),
+        format!("gitdir: {}\n# a note someone left\n", admin.display()),
+    )
+    .unwrap();
+    std::fs::write(odd.join("keep.txt"), "work").unwrap();
+    // git does not accept it either, which is the point: space must not be
+    // laxer than git about a file that decides a deletion.
+    let git_says = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(&odd)
+        .output()
+        .unwrap();
+    assert!(
+        !git_says.status.success(),
+        "fixture: git rejects this gitfile, so space must not accept it"
+    );
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "extra-line-ws", true)
+        .expect_err("a gitfile space cannot read is not a licence to delete");
+    assert!(
+        err.to_string().contains("z-odd"),
+        "the report names it, got {:?}",
+        err.to_string()
+    );
+    assert!(odd.join("keep.txt").exists(), "and the work in it is there");
+    assert!(!worktree.exists(), "the real worktree beside it still goes");
+}
+
+/// A symlink in a space is left alone: `read_dir` reports the link, not what
+/// it points at, so it is never classified and never handed to git. The
+/// alternative, following it, would let a link inside a space aim
+/// `git worktree remove` at a worktree outside it.
+#[test]
+fn remove_workspace_does_not_follow_a_symlinked_entry() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    // A worktree of the same repo, in a space of its own, linked into this one.
+    let elsewhere = worktree_in_space(&env, &repo, "other-ws");
+    let inside = worktree_in_space(&env, &repo, "link-ws");
+    std::os::unix::fs::symlink(
+        &elsewhere,
+        env.workspaces_dir.join("link-ws").join("z-link"),
+    )
+    .unwrap();
+
+    space::core::workspace::remove_workspace(&env.workspaces_dir, "link-ws", true).unwrap();
+
+    assert!(!env.workspaces_dir.join("link-ws").exists());
+    assert!(!inside.exists(), "the real worktree in the space went");
+    assert!(
+        elsewhere.join(".git").exists(),
+        "what the link pointed at is untouched"
+    );
+    let still = registered_worktrees(&repo);
+    assert!(
+        still.contains("other-ws"),
+        "and still registered, so git was never aimed through the link: {}",
+        still
+    );
+}
+
+/// A repository that has lost part of itself is still a repository. A bare
+/// repo whose `objects` went is the case where the rest matters most.
+#[test]
+fn remove_workspace_keeps_a_damaged_bare_repo() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("a-repo");
+    let worktree = worktree_in_space(&env, &repo, "damaged-ws");
+    let bare = env.workspaces_dir.join("damaged-ws").join("z-damaged.git");
+    git_ok(
+        &env.workspaces_dir,
+        &["init", "--quiet", "--bare", bare.to_str().unwrap()],
+    );
+    std::fs::remove_dir_all(bare.join("objects")).unwrap();
+    assert!(
+        bare.join("config").is_file() && bare.join("HEAD").is_file(),
+        "fixture: what is left still says repository"
+    );
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "damaged-ws", true)
+        .expect_err("a damaged repository is still not ours to delete");
+    assert!(
+        err.to_string().contains("z-damaged.git"),
+        "the report names it, got {:?}",
+        err.to_string()
+    );
+    assert!(bare.join("config").is_file(), "and it is still there");
+    assert!(!worktree.exists(), "the real worktree beside it still goes");
+}
+
+/// A space directory moved or renamed by hand is the refusal a user is most
+/// likely to meet, and it was the only one arriving as git's raw sentence
+/// with no way out. It names `git worktree repair` now, and only it: the
+/// unlock hint belongs to a lock.
+#[test]
+fn remove_workspace_names_repair_for_a_space_that_was_moved() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    worktree_in_space(&env, &repo, "moved-ws");
+    std::fs::rename(
+        env.workspaces_dir.join("moved-ws"),
+        env.workspaces_dir.join("renamed-ws"),
+    )
+    .unwrap();
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "renamed-ws", true)
+        .expect_err("git refuses a worktree at a path it does not know");
+    let text = err.to_string();
+    assert!(
+        text.contains("git worktree repair"),
+        "the report names the one command that fixes it, got {:?}",
+        text
+    );
+    assert!(
+        !text.contains("git worktree unlock"),
+        "and not the one that does not apply, got {:?}",
+        text
+    );
+    assert!(
+        env.workspaces_dir.join("renamed-ws").exists(),
+        "the space is kept"
     );
 }
