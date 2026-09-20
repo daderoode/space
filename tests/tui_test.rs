@@ -3598,6 +3598,201 @@ fn create_new_branch_name_preserved_on_reentry() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Stage 4's "New branch" label (ticket 30)
+// ---------------------------------------------------------------------------
+
+/// A create screen parked on the branch strategy picker with one repo picked
+/// and the space named: where `App::advance_to_branch_strategy` leaves it once
+/// the sync report is done and the repo has no recent branches.
+fn create_at_branch_strategy(space_name: &str) -> App {
+    let mut app = test_app(vec![], vec![]);
+    app.handle_key(key(KeyCode::Char('c')));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        st.selected_repos = vec![PathBuf::from("/tmp/repos/foo")];
+        st.ws_name = tui_input::Input::default().with_value(space_name.to_string());
+        st.branch_strategy_idx = 0;
+        st.stage = space::tui::screens::create::CreateStage::PickBranchStrategy;
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+    app
+}
+
+/// Stage 4 to Stage 5, replace the name the stage filled in with `typed`, and
+/// Esc back to Stage 4. Asserts what the field held at each step, so a screen
+/// that never filled it in, or that dropped the typed name on the way back,
+/// fails here rather than passing the label assertion by luck.
+fn type_branch_name_and_go_back(app: &mut App, filled_in: &str, typed: &str) {
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+    use space::tui::screens::create::CreateStage;
+
+    app.handle_key(key(KeyCode::Enter));
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            CreateStage::EnterBranchName,
+            "New branch must open the branch name stage"
+        );
+        assert_eq!(
+            st.branch_name_input.value(),
+            filled_in,
+            "the stage fills the field in with the space name"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    for c in typed.chars() {
+        app.handle_key(key(KeyCode::Char(c)));
+    }
+    app.handle_key(key(KeyCode::Esc));
+
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            CreateStage::PickBranchStrategy,
+            "Esc returns to the strategy picker"
+        );
+        assert_eq!(
+            st.branch_name_input.value(),
+            typed,
+            "the typed name is what the field holds on the way back"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+/// The one line of a render that carries the New branch option.
+fn new_branch_row(rendered: &str) -> String {
+    let rows: Vec<&str> = rendered
+        .lines()
+        .filter(|line| line.contains("New branch '"))
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "expected exactly one New branch row, rendered:\n{}",
+        rendered
+    );
+    rows[0].to_string()
+}
+
+#[test]
+fn create_strategy_label_names_the_typed_branch_not_the_space() {
+    let mut app = create_at_branch_strategy("my-ws");
+    type_branch_name_and_go_back(&mut app, "my-ws", "feature/DEV-9999");
+
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("New branch 'feature/DEV-9999'"),
+        "Stage 4 must name the branch Stage 5 will open with, rendered:\n{}",
+        rendered
+    );
+    assert!(
+        !rendered.contains("New branch 'my-ws'"),
+        "the space name is no longer what this option creates, rendered:\n{}",
+        rendered
+    );
+    assert!(
+        rendered.contains("Existing branch 'my-ws' (if present)"),
+        "the Existing row reads the live space name and is unchanged, rendered:\n{}",
+        rendered
+    );
+
+    // The label is the name the stage opens with, not a lookalike: Enter on
+    // the row lands on exactly it, and Enter there reads the field trimmed.
+    app.handle_key(key(KeyCode::Enter));
+    if let Screen::CreateWorkspace(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            space::tui::screens::create::CreateStage::EnterBranchName
+        );
+        assert_eq!(
+            st.branch_name_input.value().trim(),
+            "feature/DEV-9999",
+            "the label must name what the stage it opens holds"
+        );
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+}
+
+#[test]
+fn create_strategy_label_follows_the_space_when_the_field_is_not_the_users() {
+    // The other half of the rule: a field still reading the name the stage
+    // filled in is not the user's, so the label follows a renamed space.
+    let mut app = create_at_branch_strategy("old-name");
+    app.handle_key(key(KeyCode::Enter));
+    app.handle_key(key(KeyCode::Esc));
+    if let Screen::CreateWorkspace(ref mut st) = app.screen {
+        assert_eq!(
+            st.branch_name_input.value(),
+            "old-name",
+            "the stage filled the field in and nothing typed over it"
+        );
+        st.ws_name = tui_input::Input::default().with_value("new-name".to_string());
+    } else {
+        panic!("expected CreateWorkspace screen");
+    }
+
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("New branch 'new-name'"),
+        "a filled-in field follows the space name, rendered:\n{}",
+        rendered
+    );
+    assert!(
+        !rendered.contains("New branch 'old-name'"),
+        "the old name is not what this option creates any more, rendered:\n{}",
+        rendered
+    );
+}
+
+#[test]
+fn create_strategy_label_truncates_a_long_typed_branch_name_at_80_columns() {
+    // At 80 columns the dialog is 62 wide and the option text is cut to 56
+    // columns, chrome included, so a name of 44 columns or more loses its
+    // tail and its closing quote. The row still fits inside the dialog.
+    let long = "feature/DEV-9999-a-branch-name-long-enough-to-truncate";
+    let mut app = create_at_branch_strategy("ws");
+    type_branch_name_and_go_back(&mut app, "ws", long);
+
+    let rendered = render_text(&app, 80, 24);
+    let kept: String = long.chars().take(41).collect();
+    let expected = format!("New branch '{}...", kept);
+    assert!(
+        rendered.contains(&expected),
+        "expected the label cut to {:?}, rendered:\n{}",
+        expected,
+        rendered
+    );
+    assert!(
+        !rendered.contains(long),
+        "the whole name cannot fit at 80 columns, rendered:\n{}",
+        rendered
+    );
+
+    let row = new_branch_row(&rendered);
+    assert!(
+        row.contains(&format!("\u{2502}> {}", expected)),
+        "the cut row sits inside the dialog border, row: {:?}",
+        row
+    );
+    assert_eq!(
+        UnicodeWidthStr::width(expected.as_str()),
+        56,
+        "the option text is exactly the dialog's option width"
+    );
+    assert!(
+        UnicodeWidthStr::width(row.as_str()) <= 80,
+        "the row cannot be wider than the frame, row: {:?}",
+        row
+    );
+}
+
 #[test]
 fn create_new_branch_esc_returns_to_strategy() {
     let mut app = test_app(vec![], vec![]);

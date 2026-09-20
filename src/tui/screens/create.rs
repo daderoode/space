@@ -309,11 +309,13 @@ impl CreateState {
                     // back to rename the space renames the branch too;
                     // anything else they typed is kept. It is read trimmed,
                     // as Enter reads it, and replaced only when the name
-                    // changes, so the cursor stays where it was left.
+                    // changes, so the cursor stays where it was left. The
+                    // picker's own label reads the same rule through
+                    // `new_branch_name`, so it names what this opens.
                     let ws_name = self.ws_name.value().to_string();
-                    let field = self.branch_name_input.value().trim();
-                    let follows = field.is_empty() || field == self.branch_name_default;
-                    if follows && field != ws_name {
+                    if self.branch_name_follows_space()
+                        && self.branch_name_input.value().trim() != ws_name
+                    {
                         self.branch_name_input = Input::default().with_value(ws_name.clone());
                     }
                     self.branch_name_default = ws_name;
@@ -494,6 +496,28 @@ impl CreateState {
         }
     }
 
+    /// Whether the branch name field is still the one this flow filled in, or
+    /// nothing, rather than a name the user typed. Read trimmed, as Enter
+    /// reads it, against the space name the branch name stage was last opened
+    /// with (ticket 26).
+    fn branch_name_follows_space(&self) -> bool {
+        let field = self.branch_name_input.value().trim();
+        field.is_empty() || field == self.branch_name_default
+    }
+
+    /// The branch the "New branch" option creates: the name its stage opens
+    /// with, which is the live space name while the field follows the space
+    /// and the user's name once they have typed one. The strategy picker's
+    /// label renders this, so the row cannot name a branch other than the one
+    /// choosing it leads to (ticket 30).
+    pub fn new_branch_name(&self) -> String {
+        if self.branch_name_follows_space() {
+            self.ws_name.value().to_string()
+        } else {
+            self.branch_name_input.value().trim().to_string()
+        }
+    }
+
     pub fn branch_strategy(&self) -> BranchStrategy {
         match self.branch_strategy_idx {
             1 => BranchStrategy::ExistingBranch(self.ws_name.value().to_string()),
@@ -503,17 +527,11 @@ impl CreateState {
                     .clone()
                     .unwrap_or_else(|| self.ws_name.value().to_string()),
             ),
-            // idx 0 — New Branch; name comes from the EnterBranchName stage input.
-            // Fall back to ws_name if branch_name_input is empty (direct callers,
-            // e.g. tests or future MCP tools, before the stage gate has run).
-            _ => {
-                let name = self.branch_name_input.value().trim().to_string();
-                BranchStrategy::NewBranch(if name.is_empty() {
-                    self.ws_name.value().to_string()
-                } else {
-                    name
-                })
-            }
+            // idx 0, New Branch: the name comes from the EnterBranchName
+            // stage input, and `new_branch_name` falls back to the space name
+            // for a field nobody has typed in, which is what a direct caller
+            // (a test, a future MCP tool) has before the stage gate has run.
+            _ => BranchStrategy::NewBranch(self.new_branch_name()),
         }
     }
 }
