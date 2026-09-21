@@ -11371,6 +11371,19 @@ mod push_remote_confirmation_tests {
         }
     }
 
+    /// A rendered screen read as one line. The dialog is 48 columns wide at
+    /// 80, so a prompt wraps over rows; the box border and padding are
+    /// dropped and each run of whitespace becomes one space.
+    fn flatten(text: &str) -> String {
+        text.replace(
+            ['\u{2502}', '\u{256d}', '\u{256e}', '\u{2570}', '\u{256f}'],
+            " ",
+        )
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+    }
+
     #[test]
     fn push_to_another_remote_asks_first() {
         let mut app = menu_app("upstream");
@@ -11442,14 +11455,7 @@ mod push_remote_confirmation_tests {
             "an unknown destination asks"
         );
         assert!(app.gitop_rx.is_none(), "no worker before the answer");
-        let flat = render_text(&app, 80, 24)
-            .replace(
-                ['\u{2502}', '\u{256d}', '\u{256e}', '\u{2570}', '\u{256f}'],
-                " ",
-            )
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let flat = flatten(&render_text(&app, 80, 24));
         assert!(
             flat.contains("Branch feat: where a push goes could not be read. Push anyway? [y/N]"),
             "the prompt says the destination is unknown, got:\n{}",
@@ -11518,14 +11524,7 @@ mod push_remote_confirmation_tests {
             GitOpsStage::ConfirmPushRemote,
             "a dot remote asks"
         );
-        let flat = render_text(&app, 80, 24)
-            .replace(
-                ['\u{2502}', '\u{256d}', '\u{256e}', '\u{2570}', '\u{256f}'],
-                " ",
-            )
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let flat = flatten(&render_text(&app, 80, 24));
         assert!(
             flat.contains(
                 "Branch feat tracks the local branch main. Push into this repository? [y/N]"
@@ -11543,44 +11542,55 @@ mod push_remote_confirmation_tests {
     fn real_two_remote_app(track: &str) -> (TestEnv, App) {
         let env = TestEnv::new();
         let repo = env.create_repo("two");
-        let run = |args: &[&str], dir: &std::path::Path| {
-            let out = std::process::Command::new("git")
-                .args(args)
-                .current_dir(dir)
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
         for remote in ["origin", "upstream"] {
             let bare = env.workspaces_dir.join(format!("{}.git", remote));
             std::fs::create_dir_all(&bare).unwrap();
-            run(&["init", "-q", "--bare", "-b", "main"], &bare);
-            run(&["remote", "add", remote, bare.to_str().unwrap()], &repo);
+            git(&["init", "-q", "--bare", "-b", "main"], &bare);
+            git(&["remote", "add", remote, bare.to_str().unwrap()], &repo);
         }
-        run(&["push", "-q", "origin", "main"], &repo);
-        run(&["push", "-q", "upstream", "main:feat"], &repo);
-        run(&["fetch", "-q", "--all"], &repo);
-        run(&["checkout", "-q", "-b", "feat", "--track", track], &repo);
+        git(&["push", "-q", "origin", "main"], &repo);
+        git(&["push", "-q", "upstream", "main:feat"], &repo);
+        git(&["fetch", "-q", "--all"], &repo);
+        git(&["checkout", "-q", "-b", "feat", "--track", track], &repo);
+        let app = git_ops_over(&env, &repo, "two");
+        (env, app)
+    }
 
+    /// Runs git in `dir`, fails the test if git fails, and returns its
+    /// trimmed stdout.
+    fn git(args: &[&str], dir: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// The dashboard over one real repo, `name`, on branch `feat`, with the
+    /// git-ops overlay opened by `G`, so `GitOpsState::new` reads the push
+    /// destination from the repo itself.
+    fn git_ops_over(env: &TestEnv, repo: &std::path::Path, name: &str) -> App {
         let ws = Workspace {
             name: "test-ws".into(),
             path: env.workspaces_dir.clone(),
             repos: vec![WorkspaceRepo {
-                name: "two".into(),
-                path: repo.clone(),
+                name: name.into(),
+                path: repo.to_path_buf(),
                 branch: "feat".into(),
                 status: RepoStatus::default(),
                 ahead: 0,
                 behind: 0,
             }],
         };
-        let config = config_from_env(&env);
-        let mut app = test_app_with_config(config, vec![ws], vec![repo]);
+        let config = config_from_env(env);
+        let mut app = test_app_with_config(config, vec![ws], vec![repo.to_path_buf()]);
         app.load_selected_workspace_detail();
         app.focus = Pane::Right;
         app.handle_key(shift_key(KeyCode::Char('G')));
@@ -11588,7 +11598,7 @@ mod push_remote_confirmation_tests {
             matches!(app.screen, Screen::GitOps(_)),
             "fixture must reach the git-ops overlay"
         );
-        (env, app)
+        app
     }
 
     #[test]
@@ -11620,16 +11630,7 @@ mod push_remote_confirmation_tests {
         let mut app = menu_app("upstream");
         app.handle_key(key(KeyCode::Char('P')));
         let text = render_text(&app, 80, 24);
-        // The dialog is 48 columns wide at 80, so the prompt wraps over two
-        // rows; read it across rows with the box border and padding removed.
-        let flat = text
-            .replace(
-                ['\u{2502}', '\u{256d}', '\u{256e}', '\u{2570}', '\u{256f}'],
-                " ",
-            )
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let flat = flatten(&text);
         assert!(
             flat.contains("Git: repo-a (feat)"),
             "the title names the repo and branch, got:\n{}",
@@ -11646,26 +11647,13 @@ mod push_remote_confirmation_tests {
     /// ticket 43). `mirror` is added with origin's own URL and `feat` tracks
     /// `mirror/feat`: the push goes to `mirror`, so it asks. A rule comparing
     /// the destination's URL with origin's would call it origin and push
-    /// unasked; the tests above cannot see that, because their repo path does
-    /// not exist, every URL lookup fails, and such a rule falls back to names.
+    /// unasked. No other test here can see that: `menu_app`'s repo path does
+    /// not exist, so every URL lookup fails and such a rule falls back to the
+    /// names, and `real_two_remote_app` gives each remote its own URL.
     #[test]
     fn a_remote_sharing_origins_url_still_asks_before_pushing() {
         let env = TestEnv::new();
         let repo = env.create_repo("shared");
-        let git = |args: &[&str], dir: &std::path::Path| {
-            let out = std::process::Command::new("git")
-                .args(args)
-                .current_dir(dir)
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&out.stderr)
-            );
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        };
         let bare = env.workspaces_dir.join("shared.git");
         std::fs::create_dir_all(&bare).unwrap();
         git(&["init", "-q", "--bare", "-b", "main"], &bare);
@@ -11684,23 +11672,7 @@ mod push_remote_confirmation_tests {
             "fixture: both remotes push to one URL"
         );
 
-        let ws = Workspace {
-            name: "test-ws".into(),
-            path: env.workspaces_dir.clone(),
-            repos: vec![WorkspaceRepo {
-                name: "shared".into(),
-                path: repo.clone(),
-                branch: "feat".into(),
-                status: RepoStatus::default(),
-                ahead: 0,
-                behind: 0,
-            }],
-        };
-        let config = config_from_env(&env);
-        let mut app = test_app_with_config(config, vec![ws], vec![repo]);
-        app.load_selected_workspace_detail();
-        app.focus = Pane::Right;
-        app.handle_key(shift_key(KeyCode::Char('G')));
+        let mut app = git_ops_over(&env, &repo, "shared");
         app.handle_key(key(KeyCode::Char('P')));
         assert_eq!(
             stage(&app),
@@ -11708,14 +11680,7 @@ mod push_remote_confirmation_tests {
             "mirror is not origin, whatever its URL, so Push asks"
         );
         assert!(app.gitop_rx.is_none(), "no worker before the answer");
-        let flat = render_text(&app, 80, 24)
-            .replace(
-                ['\u{2502}', '\u{256d}', '\u{256e}', '\u{2570}', '\u{256f}'],
-                " ",
-            )
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let flat = flatten(&render_text(&app, 80, 24));
         assert!(
             flat.contains("Branch feat tracks mirror/feat. Push to mirror? [y/N]"),
             "the prompt names the remote git pushes to, got:\n{}",

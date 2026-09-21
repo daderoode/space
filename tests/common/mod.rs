@@ -77,9 +77,12 @@ pub fn init_repo(dir: &Path) {
 /// Creates a TempDir with three subdirectories (`config/`, `repos/`, `workspaces/`)
 /// and writes a `config.toml` pointing at the temp dirs.
 ///
-/// Does NOT set env vars automatically -- callers decide. (Git config needs
-/// nothing from callers: `git_isolation` keeps the whole process off the
-/// invoking user's before `main`.)
+/// TestEnv itself sets no env vars; callers decide. Declaring `mod common`
+/// does set some, for the whole process, before `main`: `git_isolation`
+/// points HOME at `/dev/null`, sets `GIT_CONFIG_GLOBAL` and
+/// `GIT_CONFIG_NOSYSTEM`, and removes `XDG_CONFIG_HOME` and the `GIT_*`
+/// variables that point git at another repository or config. A test that
+/// needs a real home sets HOME on the command it runs.
 pub struct TestEnv {
     pub dir: TempDir,
     pub config_dir: PathBuf,
