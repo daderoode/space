@@ -3522,11 +3522,15 @@ mod tests {
         let slow_run = std::thread::spawn(move || {
             sync_repo_with_timeout(&local, Duration::from_secs(20)).fetch
         });
-        hold.wait_holding(Duration::from_secs(60), "the slow fetch", || {
-            slow_run
-                .is_finished()
-                .then(|| "the slow fetch ended before its upload-pack held it".to_string())
-        });
+        hold.wait_holding(
+            Duration::from_secs(60),
+            "the slow fetch's upload-pack never started holding",
+            || {
+                slow_run
+                    .is_finished()
+                    .then(|| "the slow fetch ended before its upload-pack held it".to_string())
+            },
+        );
         let window_started = Instant::now();
         let fast = sync_repo_with_timeout(&fast_repo, Duration::from_secs(20)).fetch;
         let window = window_started.elapsed();

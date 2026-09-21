@@ -699,7 +699,11 @@ fn create_worktree_cancellable_reads_the_flag_again_after_the_fetch() {
             // gate never starts, this fires first and says so, instead of
             // expiring together with the timeout it exists to test around and
             // leaving the failure ambiguous.
-            hold.wait_holding(Duration::from_secs(20), "the gated fetch", || None);
+            hold.wait_holding(
+                Duration::from_secs(20),
+                "the gated fetch never started",
+                || None,
+            );
             // Strictly ordered: the flag is set before the fetch is released,
             // so checkpoint 1 cannot have seen it and checkpoint 2 must.
             cancel.store(true, Ordering::Relaxed);
@@ -2782,6 +2786,10 @@ mod hold_guards {
             exit_within(&mut child, Duration::from_millis(300)).is_none(),
             "a helper nobody released must still be holding"
         );
+        // The first helper was killed with its marker still in place; clear it
+        // so the second start waits for its own helper rather than seeing the
+        // stale marker.
+        std::fs::remove_file(&hold.holding).unwrap();
         let mut child = start(&hold, &tmp, &format!(": > '{}'", done.display()));
         hold.release();
         let status = exit_within(&mut child, Duration::from_secs(5))

@@ -35,8 +35,8 @@ pub const POLL: &str = "0.01";
 /// wall-clock bound in the fixtures (5 s, 20 s and 60 s), so those fire
 /// first and say what happened in their own words; the cap is only the
 /// backstop that ends a hold nobody can release. Measured standalone at
-/// 92 s on this machine at a load average of about 3, not derived from the
-/// count (ticket 22 measured the same loop at 98 s and 103 s).
+/// 92 s and 107 s on this machine at load averages of about 3, not derived
+/// from the count (ticket 22 measured the same loop at 98 s and 103 s).
 pub const CAP: u32 = 6000;
 
 /// The three files of one hold, and the pid and cap its script checks.
@@ -120,23 +120,20 @@ impl Hold {
     /// Wait for the helper to start holding. `fail_fast` is polled first on
     /// every turn and its message fails the test at once, for the signature
     /// of a hold that was skipped (the worker got past the held repo, the
-    /// held fetch already returned); `what` names the hold in the message
-    /// when `deadline` passes instead.
+    /// held fetch already returned); `what` is the whole message when
+    /// `deadline` passes instead, with the deadline appended.
     pub fn wait_holding(
         &self,
         deadline: Duration,
         what: &str,
         mut fail_fast: impl FnMut() -> Option<String>,
     ) {
-        let deadline = Instant::now() + deadline;
+        let until = Instant::now() + deadline;
         while !self.is_holding() {
             if let Some(message) = fail_fast() {
                 panic!("{message}");
             }
-            assert!(
-                Instant::now() < deadline,
-                "{what}: the helper never started holding"
-            );
+            assert!(Instant::now() < until, "{what} (waited {deadline:?})");
             std::thread::sleep(Duration::from_millis(2));
         }
     }
