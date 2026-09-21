@@ -794,6 +794,15 @@ fn render_text_input_dialog(
 /// cell past the row, and `cursor_cell` pulls it onto the last cell. Shared
 /// by the text input dialog, the config editor's value row and the fuzzy
 /// picker's query row.
+///
+/// Two limits, both older than the sharing: tui-input's scroll counts
+/// columns per char while the cut keeps a straddled cluster whole, so a
+/// scroll that lands inside a flag draws the row a column or two earlier
+/// than the cursor cell assumes, and the character before the cursor can
+/// sit just off the right edge; and at `cols` of 0 every cluster is
+/// over-wide, the row is empty and the cell is 0, which a caller with a
+/// prefix (the picker's `> `) then places past a popup narrower than the
+/// prefix. Neither panics; both are the terminal's to clamp.
 pub(crate) struct InputWindow<'a> {
     /// The value from the scroll column on, whole clusters only.
     pub visible: &'a str,
