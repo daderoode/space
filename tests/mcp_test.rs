@@ -1514,20 +1514,30 @@ fn add_repos_existing_with_branch_checks_it_out() {
 /// real binary's stdio, keyed by tool name. Each value is the wire object
 /// (`name`, `description`, `inputSchema`). The reader thread and the 20 s
 /// give-up follow `remove_workspace_keeps_the_jsonrpc_stream_parseable`.
+///
+/// `ENV_LOCK` is held only across the spawn, which is when the child copies
+/// the environment other tests set and remove; every line read and every
+/// check runs outside it, so a failure here poisons nothing for the tests
+/// that lock it next. Lines are parsed strictly only after the child is
+/// killed and waited for, so a line that is not a message fails the test
+/// with no server left running.
 fn tools_over_stdio(env: &TestEnv) -> std::collections::BTreeMap<String, serde_json::Value> {
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
-    let mut server = Command::new(env!("CARGO_BIN_EXE_space"))
-        .arg("mcp")
-        .env("SPACE_CONFIG_DIR", &env.config_dir)
-        .env("HOME", env.dir.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the built binary must start");
+    let mut server = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        Command::new(env!("CARGO_BIN_EXE_space"))
+            .arg("mcp")
+            .env("SPACE_CONFIG_DIR", &env.config_dir)
+            .env("HOME", env.dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the built binary must start")
+    };
 
     let (tx, rx) = std::sync::mpsc::channel();
     let stdout = server.stdout.take().unwrap();
@@ -1554,17 +1564,25 @@ fn tools_over_stdio(env: &TestEnv) -> std::collections::BTreeMap<String, serde_j
         stdin.flush().unwrap();
     }
 
-    let mut listing = None;
-    while listing.is_none() {
+    // Collect until the answer to the listing arrives, the server ends, or
+    // 20 s pass; which one is reported once the server is cleaned up.
+    let mut lines: Vec<String> = Vec::new();
+    let mut answered = false;
+    let mut ended = "20 s passed";
+    while !answered {
         match rx.recv_timeout(Duration::from_secs(20)) {
             Ok(line) => {
-                let value: serde_json::Value = serde_json::from_str(&line)
-                    .unwrap_or_else(|e| panic!("not a message: {line:?} ({e})"));
-                if value.get("id").and_then(|id| id.as_u64()) == Some(2) {
-                    listing = Some(value);
-                }
+                answered = serde_json::from_str::<serde_json::Value>(&line)
+                    .ok()
+                    .and_then(|v| v.get("id").and_then(|id| id.as_u64()))
+                    == Some(2);
+                lines.push(line);
             }
-            Err(_) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                ended = "the server closed its stdout";
+                break;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
         }
     }
     drop(stdin);
@@ -1572,7 +1590,18 @@ fn tools_over_stdio(env: &TestEnv) -> std::collections::BTreeMap<String, serde_j
     let _ = server.wait();
     let _ = reader.join();
 
-    let listing = listing.expect("tools/list must be answered within 20 s");
+    let mut listing = None;
+    for line in &lines {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap_or_else(|e| {
+            panic!("stdout carried a line that is not a message: {line:?} ({e})")
+        });
+        if value.get("id").and_then(|id| id.as_u64()) == Some(2) {
+            listing = Some(value);
+        }
+    }
+    let listing = listing.unwrap_or_else(|| {
+        panic!("tools/list was not answered: {ended}; the server wrote {lines:#?}")
+    });
     listing["result"]["tools"]
         .as_array()
         .unwrap_or_else(|| panic!("tools/list result carries no tools array: {listing}"))
@@ -1591,7 +1620,6 @@ fn tools_over_stdio(env: &TestEnv) -> std::collections::BTreeMap<String, serde_j
 /// the schema because `new` defaults it.
 #[test]
 fn tools_list_carries_the_adopt_stop_and_branch_rules() {
-    let _guard = ENV_LOCK.lock().unwrap();
     let env = TestEnv::new();
     let tools = tools_over_stdio(&env);
     let served = |name: &str| -> (String, serde_json::Value) {
