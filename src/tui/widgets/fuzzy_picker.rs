@@ -405,20 +405,18 @@ pub fn render(picker: &FuzzyPicker, show_cursor: bool, frame: &mut Frame) {
     ])
     .split(inner);
 
-    // Input line
-    let input_text = format!("> {}", picker.input.value());
+    // Input line: `> ` then the query scrolled so the cursor stays in the
+    // row, cut on grapheme clusters like the text input dialog.
+    let query_cols = usize::from(sections[0].width.saturating_sub(2));
+    let window = crate::tui::ui::input_window(&picker.input, query_cols);
+    let input_text = format!("> {}", window.visible);
     frame.render_widget(Paragraph::new(input_text).style(theme::text()), sections[0]);
     // Show cursor at correct position (offset +2 for "> " prefix)
     if show_cursor {
-        // Known limitation: the query row has no horizontal scroll, so a
-        // query longer than the row asks for a cursor past the frame and the
-        // terminal clamps it. Past `u16::MAX` the column saturates rather
-        // than wrapping back to the start of the row (ticket 35); scrolling
-        // the row is a follow-up.
         let cursor_x = sections[0]
             .x
             .saturating_add(2)
-            .saturating_add(crate::tui::ui::fit_u16(picker.input.visual_cursor()));
+            .saturating_add(window.cursor_cell);
         let cursor_y = sections[0].y;
         frame.set_cursor_position((cursor_x, cursor_y));
     }
