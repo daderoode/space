@@ -25,10 +25,23 @@ impl Drop for EnvGuard {
     }
 }
 
+/// Take `ENV_LOCK`, recovering the guard if a previous holder panicked. This
+/// is the shape of `core::spawn::enter`: a `std::sync::Mutex` poisons when a
+/// holder panics, and a bare `unwrap()` would then fail every later test in
+/// this binary on acquisition, dozens of red tests for one failing
+/// assertion. The lock guards no data, only the process environment, and
+/// the panicking test's `EnvGuard` already removed the variable during its
+/// unwind, so the next holder starts from the same state it always did.
+/// Every site in this binary takes the lock through here, so
+/// `a_panic_under_the_env_lock_fails_only_its_own_test` covers them all.
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Run `f` with SPACE_CONFIG_DIR pointing at a fresh TestEnv.
 /// Serialised via ENV_LOCK so parallel test threads don't collide.
 fn with_test_env<F: FnOnce(&TestEnv, &SpaceServer)>(f: F) {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = env_lock();
     let env = TestEnv::new();
     unsafe { std::env::set_var("SPACE_CONFIG_DIR", &env.config_dir) };
     let _env_guard = EnvGuard;
@@ -1314,7 +1327,7 @@ fn remove_workspace_keeps_the_jsonrpc_stream_parseable() {
     // Other tests in this binary set and remove process-wide environment
     // variables. Reading `PATH` here without the lock is exactly the race
     // that lock is documented to prevent.
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = env_lock();
     let env = TestEnv::new();
     let repo = env.create_repo("alpha");
     create_worktree(
@@ -1538,8 +1551,9 @@ fn add_repos_existing_with_branch_checks_it_out() {
 ///
 /// `ENV_LOCK` is held only across the spawn, which is when the child copies
 /// the environment other tests set and remove; every line read and every
-/// check runs outside it, so a failure here poisons nothing for the tests
-/// that lock it next. Lines are parsed strictly only after the child is
+/// check runs outside it, so only a spawn that fails its `expect` can poison
+/// the lock, and `env_lock` recovers the guard from poison anyway. Lines
+/// are parsed strictly only after the child is
 /// killed and waited for, so a line that is not a message fails the test
 /// with no server left running.
 fn tools_over_stdio(env: &TestEnv) -> std::collections::BTreeMap<String, serde_json::Value> {
@@ -1548,7 +1562,7 @@ fn tools_over_stdio(env: &TestEnv) -> std::collections::BTreeMap<String, serde_j
     use std::time::Duration;
 
     let mut server = {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = env_lock();
         Command::new(env!("CARGO_BIN_EXE_space"))
             .arg("mcp")
             .env("SPACE_CONFIG_DIR", &env.config_dir)
@@ -1741,4 +1755,23 @@ fn tools_list_carries_the_adopt_stop_and_branch_rules() {
         schema["required"],
         serde_json::json!(["workspace", "repos"])
     );
+}
+
+/// One test panicking under `ENV_LOCK` must not fail the tests that lock it
+/// next. The guard drops while the thread is panicking, which is what poisons
+/// a `std::sync::Mutex`; the second acquisition then only succeeds because
+/// `env_lock` recovers the guard from the poison instead of unwrapping.
+/// Every site takes the lock through `env_lock`, so this one call covers
+/// them all whatever order the scheduler picks.
+///
+/// Recovering the guard does not clear the poison, so from this test on the
+/// lock stays poisoned for the rest of the binary; a site that bypasses
+/// `env_lock` with a bare `unwrap()` fails whenever it runs after this one.
+#[test]
+fn a_panic_under_the_env_lock_fails_only_its_own_test() {
+    let outcome = std::panic::catch_unwind(|| {
+        with_test_env(|_, _| panic!("deliberate panic while holding ENV_LOCK"));
+    });
+    assert!(outcome.is_err(), "the body must have panicked");
+    with_test_env(|env, _| assert!(env.config_dir.is_dir()));
 }
