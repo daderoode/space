@@ -5955,8 +5955,12 @@ mod tests {
 
     /// A ref named `MERGE_HEAD` (here a tag the fetch brings in) must not read
     /// as a merge in progress: git decides that by the file in the git dir,
-    /// and so does `pull_repo`. A ref-name lookup would refuse every pull of
-    /// a repo whose origin carries such a tag.
+    /// and so does `pull_repo`. A ref-name lookup (`rev-parse --verify`)
+    /// would refuse every pull of a repo whose origin carries such a tag. The
+    /// first pull fetches the tag and merges; it is the second pull, with the
+    /// tag now in the local refs when the pre-fetch check runs, that tells the
+    /// two implementations apart (the coordinator's review of PR #54 found the
+    /// one-pull version green on the ref lookup).
     #[test]
     fn pull_repo_ignores_a_ref_named_merge_head() {
         let (tmp, local) = origin_and_local();
@@ -5980,6 +5984,21 @@ mod tests {
             result.message
         );
         assert!(!merge_head_present(&local), "the merge was committed");
+        assert!(
+            get_sha(&local, "refs/tags/MERGE_HEAD") == get_sha(&local, "origin/main"),
+            "the fetch brought the tag in"
+        );
+
+        let again = pull_repo(&local);
+
+        // The merge commit puts main ahead of origin, so a second pull is a
+        // no-op success; a ref lookup would refuse it as mid-merge instead.
+        assert!(
+            again.success(),
+            "with the tag in the local refs the repo is still not mid-merge, got {:?}: {}",
+            again.outcome,
+            again.message
+        );
     }
 
     /// A behind-only branch with the user's merge in progress: refused by the
