@@ -3799,7 +3799,7 @@ fn a_near_miss_copy_is_kept_on_the_retry_after_its_original_goes() {
 }
 
 /// git writes an absolute worktree gitdir as `<common>/worktrees/<id>`, with
-/// no `..` and no line break, never inside another git directory. A `.git`
+/// no `..` and no line break. A `.git`
 /// naming anything else was written by hand (or is a `--separate-git-dir`
 /// checkout, which space never makes), so where its source repo would be
 /// cannot be read from it, and a `NotFound` on it is not proof the source
@@ -3807,18 +3807,19 @@ fn a_near_miss_copy_is_kept_on_the_retry_after_its_original_goes() {
 /// exists, and each sits alone in its own space: an orphan is deleted only
 /// with its space, which a kept neighbour would hold back.
 ///
-/// Two rules keep them, and each is pinned by a shape only it catches. The
-/// allow-list (`common_dir_in_gits_shape`): a last directory that is not
+/// Three rules keep them, and each is pinned by a shape only it catches.
+/// The allow-list (`common_dir_in_gits_shape`): a last directory that is not
 /// `worktrees`; a `..` through a directory that is not there; an old path on
 /// the first line and the new one on the second, split by `\n` or by a bare
-/// `\r`, which the near-miss check does not split on. The nesting rule (a
-/// made-up `<common>` inside a directory that is a repository): a note after
-/// the live repo's admin path on the same line (skeptical review of PR #61).
-/// The shapes the reviews reproduced, a `..` through the `worktrees`
-/// directory git has already removed and a second line after the live
-/// repo's admin path (code review of PR #61), run through the live repo's
-/// git directory, so both rules hold them. The reason leads with what is
-/// wrong, and the path, which may be long, stays off the summary line.
+/// `\r`, which the near-miss check does not split on. The near-miss check's
+/// blank-separated readings: the old path, a note, then the live repo's
+/// admin path on one line (skeptical review of PR #61, pass 3). The nesting
+/// rule (a missing `<common>` under a repository's `worktrees` directory):
+/// the live admin path with a note glued on with no blank. The shapes the
+/// reviews reproduced (a `..` through the `worktrees` directory git has
+/// already removed, a second line or a note after the live admin path) are
+/// held by more than one rule. The reason leads with what is wrong, and the
+/// path, which may be long, stays off the summary line.
 #[test]
 fn a_gitdir_not_in_gits_own_shape_is_kept_when_it_names_nothing() {
     let env = TestEnv::new();
@@ -3835,10 +3836,17 @@ fn a_gitdir_not_in_gits_own_shape_is_kept_when_it_names_nothing() {
     let joined = |sep: &str, first: &Path, second: &Path| {
         PathBuf::from(format!("{}{}{}", first.display(), sep, second.display()))
     };
+    // The phrase each shape's summary leads with names the rule that kept
+    // it: the allow-list ("does not write"), an alternative reading of the
+    // line naming something live ("does not read"), or the nesting rule.
+    let write = "in a form git does not write";
+    let read = "in a form git does not read";
+    let nested = "under another repository's worktrees directory";
     let shapes = [
         (
             "not-worktrees",
             env.dir.path().join("gone").join("deeper").join("alpha"),
+            write,
         ),
         (
             "dot-dot-missing",
@@ -3851,13 +3859,33 @@ fn a_gitdir_not_in_gits_own_shape_is_kept_when_it_names_nothing() {
                 .join(".git")
                 .join("worktrees")
                 .join("alpha"),
+            write,
         ),
-        ("two-lines-moved", joined("\n", &old_admin, &live_admin)),
+        (
+            "two-lines-moved",
+            joined("\n", &old_admin, &live_admin),
+            write,
+        ),
         (
             "carriage-return-moved",
             joined("\r", &old_admin, &live_admin),
+            write,
         ),
-        ("same-line", joined(" # was ", &live_admin, &old_admin)),
+        (
+            "same-line-moved",
+            joined(" # now ", &old_admin, &live_admin),
+            read,
+        ),
+        (
+            "same-line-no-blank",
+            joined("#was", &live_admin, &old_admin),
+            nested,
+        ),
+        (
+            "same-line",
+            joined(" # was ", &live_admin, &old_admin),
+            read,
+        ),
         (
             "dot-dot",
             repo.join(".git")
@@ -3865,9 +3893,18 @@ fn a_gitdir_not_in_gits_own_shape_is_kept_when_it_names_nothing() {
                 .join("..")
                 .join("worktrees")
                 .join("alpha"),
+            write,
         ),
-        ("two-lines", joined("\n# was ", &live_admin, &old_admin)),
-        ("carriage-return", joined("\r", &live_admin, &old_admin)),
+        (
+            "two-lines",
+            joined("\n# was ", &live_admin, &old_admin),
+            read,
+        ),
+        (
+            "carriage-return",
+            joined("\r", &live_admin, &old_admin),
+            write,
+        ),
     ];
     assert_eq!(
         env.dir.path().join("repos").join("alpha"),
@@ -3878,7 +3915,7 @@ fn a_gitdir_not_in_gits_own_shape_is_kept_when_it_names_nothing() {
         !repo.join(".git").join("worktrees").exists(),
         "fixture: the repo has no worktrees, so `worktrees/..` names nothing"
     );
-    for (name, gitdir) in &shapes {
+    for (name, gitdir, phrase) in &shapes {
         let dir = env.workspaces_dir.join(name).join("alpha");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
@@ -3896,10 +3933,10 @@ fn a_gitdir_not_in_gits_own_shape_is_kept_when_it_names_nothing() {
         );
         let summary = text.lines().next().unwrap_or_default();
         assert!(
-            summary.contains("in a form git does not write")
-                && !summary.contains(&env.dir.path().display().to_string()),
-            "{}: the summary says what is wrong and leaves the path off, got {:?}",
+            summary.contains(phrase) && !summary.contains(&env.dir.path().display().to_string()),
+            "{}: the summary says {:?} and leaves the path off, got {:?}",
             name,
+            phrase,
             summary
         );
         assert!(
@@ -4045,4 +4082,26 @@ fn an_orphan_beside_a_kept_directory_is_not_reported_removed() {
         line
     );
     assert!(orphan.exists(), "and it is indeed still there");
+}
+
+/// The nesting rule reads only a repository under whose `worktrees`
+/// directory the missing `<common>` sits. Its first form asked whether any
+/// ancestor up to `/` looked like a repository, by the loose test that also
+/// takes a directory holding `objects`, so a genuine orphan whose repos root
+/// held a repo named `objects` was kept and told its gitfile was not git's
+/// (skeptical review of PR #61, pass 3). It goes, as a genuine orphan does.
+#[test]
+fn a_genuine_orphan_beside_a_directory_that_looks_like_a_repository_is_removed() {
+    let env = TestEnv::new();
+    let repo = absolute_repo(&env, "alpha");
+    std::fs::create_dir_all(env.repos_dir.join("objects")).unwrap();
+    worktree_in_space(&env, &repo, "ws");
+    std::fs::remove_dir_all(&repo).unwrap();
+
+    remove_forced(&env, "ws").unwrap();
+
+    assert!(
+        !env.workspaces_dir.join("ws").exists(),
+        "a space whose source repo is gone is removed"
+    );
 }
