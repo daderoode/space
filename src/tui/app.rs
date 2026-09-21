@@ -6256,4 +6256,61 @@ mod tests {
             "a space that is not on disk any more is dropped from the dashboard"
         );
     }
+
+    /// Coordinator review of 175c8ce: the report said what a retry would do
+    /// to a copy, but it started about 350 characters past what the status
+    /// row shows at the supported 80 columns. The count of a kept pair now
+    /// sits right after the names, before any reason, and this reads it off
+    /// the drawn dashboard rather than off the string.
+    #[test]
+    fn a_kept_pair_is_counted_inside_eighty_columns() {
+        use crate::core::workspace::{create_worktree, BranchStrategy};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = make_repo(tmp.path(), "a");
+        let ws_dir = tmp.path().join("spaces");
+        let original = create_worktree(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::NewBranch("ws".to_string()),
+        )
+        .unwrap();
+        let copy = ws_dir.join("ws").join("b");
+        std::fs::create_dir_all(&copy).unwrap();
+        std::fs::copy(original.join(".git"), copy.join(".git")).unwrap();
+
+        let mut app = make_app(crate::core::workspace::list_workspaces(&ws_dir).unwrap());
+        app.config.workspaces.dir = ws_dir.clone();
+        app.process_action(crate::tui::actions::ScreenAction::DeleteWorkspace {
+            name: "ws".to_string(),
+            force: true,
+        });
+        assert_eq!(
+            app.status_kind,
+            StatusKind::Error,
+            "fixture: the delete was refused"
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::view(&app, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let status_row = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .find(|row| row.contains("Delete failed:"))
+            .expect("the status row is drawn");
+        assert!(
+            status_row.contains("2 share one worktree"),
+            "the pair's count is inside the 80 columns the user sees, got {:?}",
+            status_row
+        );
+    }
 }

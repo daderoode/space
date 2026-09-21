@@ -1731,15 +1731,14 @@ fn remove_workspace_reports_in_name_order_whatever_read_dir_says() {
     );
 }
 
-/// Skeptical review, pass 2: the orphan arm deleted a directory whenever its
-/// admin directory failed to resolve, for any reason. This needs no unusual
-/// input at all: a worktree copied beside its original shares the original's
-/// `.git` file, so removing the original destroyed the admin directory that
-/// the copy also named, and the copy was reclassified from worktree to
-/// orphan mid-run and deleted with its uncommitted work. Classification is
-/// one pass now, and acting on it is the next.
+/// A worktree copied beside its original in the same space shares its `.git`
+/// file, so both name one admin directory. Removing the original destroys
+/// that admin directory, after which the copy has nothing registered and a
+/// retry deletes it as an orphan, every such copy at once, with a clean
+/// success. So neither is handed to git: the pair is kept and reported
+/// together, and nothing is left in a state a retry reads as an orphan.
 #[test]
-fn remove_workspace_keeps_a_worktree_copied_beside_its_original() {
+fn remove_workspace_keeps_a_worktree_and_its_copy_across_retries() {
     let env = common::TestEnv::new();
     let repo = env.create_repo("a-repo");
     let original = worktree_in_space(&env, &repo, "copy-ws");
@@ -1748,33 +1747,64 @@ fn remove_workspace_keeps_a_worktree_copied_beside_its_original() {
     std::fs::copy(original.join(".git"), copy.join(".git")).unwrap();
     std::fs::write(copy.join("experiment.txt"), "a day of work").unwrap();
 
-    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "copy-ws", true)
-        .expect_err("the copy is not a worktree git knows, so it is kept");
+    for run in 1..=2 {
+        let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "copy-ws", true)
+            .expect_err("a worktree and its copy are kept together");
+        let text = err.to_string();
+        assert!(
+            text.contains("a-repo") && text.contains("z-copy"),
+            "run {}: the report names both halves of the pair, got {:?}",
+            run,
+            text
+        );
+        assert!(
+            original.join(".git").exists(),
+            "run {}: the original is kept, so the copy's admin directory survives",
+            run
+        );
+        assert_eq!(
+            std::fs::read_to_string(copy.join("experiment.txt")).unwrap(),
+            "a day of work",
+            "run {}: and the work in the copy is still there",
+            run
+        );
+    }
+    let still = registered_worktrees(&repo);
     assert!(
-        err.to_string().contains("z-copy"),
-        "the report names it, got {:?}",
-        err.to_string()
+        still.contains("copy-ws"),
+        "the original is still registered, so nothing was unregistered under it: {}",
+        still
     );
-    // git's own line names the original's admin path, which reads as though
-    // it were about some other repo; space says what happened before it.
+}
+
+/// The count of a kept pair sits in the summary right after the names and
+/// before the first reason, since the summary is all the TUI status shows.
+#[test]
+fn remove_workspace_summary_counts_a_kept_pair_before_the_reason() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("a-repo");
+    let original = worktree_in_space(&env, &repo, "pair-ws");
+    let copy = env.workspaces_dir.join("pair-ws").join("z-copy");
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::copy(original.join(".git"), copy.join(".git")).unwrap();
+
+    let summary = space::core::workspace::remove_workspace(&env.workspaces_dir, "pair-ws", true)
+        .expect_err("the pair is kept")
+        .to_string()
+        .lines()
+        .next()
+        .unwrap()
+        .to_string();
+    let count_at = summary
+        .find("2 share one worktree")
+        .expect("the summary counts the pair");
+    let names_end = summary.find("z-copy").expect("and names both halves");
+    let reason_at = summary.find("first reason:").expect("then the reason");
     assert!(
-        err.to_string().contains("removed earlier in this run"),
-        "the reason says the copy shared a worktree removed in this run, got {:?}",
-        err.to_string()
+        names_end < count_at && count_at < reason_at,
+        "names, then the count, then the reason, got {:?}",
+        summary
     );
-    // Removing the space again would delete it as an orphan, which is the
-    // agreed policy for an orphan, so the user is told before, not after.
-    assert!(
-        err.to_string().contains("deletes this copy"),
-        "and warns that removing the space again deletes it, got {:?}",
-        err.to_string()
-    );
-    assert_eq!(
-        std::fs::read_to_string(copy.join("experiment.txt")).unwrap(),
-        "a day of work",
-        "and the work in it is still there"
-    );
-    assert!(!original.exists(), "the original was still removed");
 }
 
 /// The same arm, reached by a permission error rather than by absence: the
@@ -2229,4 +2259,71 @@ fn remove_workspace_says_when_a_gitdir_names_a_file() {
         err.to_string()
     );
     assert!(odd.join(".git").exists(), "and it is still there");
+}
+
+/// Coordinator review of 175c8ce: a relative gitdir breaks when EITHER side
+/// moves, so for one a `NotFound` cannot tell "the source repo is gone" from
+/// "the space was moved". An absolute gitdir survives a move of the worktree,
+/// which is why only its `NotFound` is read as an orphan. This worktree was
+/// made under `worktree.useRelativePaths` and its space moved one level
+/// deeper; it used to be deleted on the first removal, with a clean success.
+/// It is kept, and the advice it gets is followed here to prove it works.
+#[test]
+fn remove_workspace_keeps_a_relative_worktree_whose_space_moved_deeper() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    git_ok(&repo, &["config", "worktree.useRelativePaths", "true"]);
+    let before = env.workspaces_dir.join("moved-ws").join("alpha");
+    git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "moved-ws",
+            before.to_str().unwrap(),
+        ],
+    );
+    let gitfile = std::fs::read_to_string(before.join(".git")).unwrap();
+    if !gitfile.starts_with("gitdir: ..") {
+        // This git predates worktree.useRelativePaths (git 2.48), so there is
+        // no relative gitdir to move; say so rather than passing quietly.
+        eprintln!(
+            "skipped: this git writes absolute gitdirs, got {:?}",
+            gitfile
+        );
+        return;
+    }
+    std::fs::write(before.join("uncommitted.txt"), "wip").unwrap();
+
+    // One level deeper: a new workspaces dir that holds the old one's space.
+    let deeper = env.workspaces_dir.join("nested");
+    std::fs::create_dir_all(&deeper).unwrap();
+    std::fs::rename(env.workspaces_dir.join("moved-ws"), deeper.join("moved-ws")).unwrap();
+    let after = deeper.join("moved-ws").join("alpha");
+
+    let text = space::core::workspace::remove_workspace(&deeper, "moved-ws", true)
+        .expect_err("a relative gitdir that does not resolve is not proof of an orphan")
+        .to_string();
+    assert_eq!(
+        std::fs::read_to_string(after.join("uncommitted.txt")).unwrap(),
+        "wip",
+        "the work in it is still there"
+    );
+    assert!(
+        text.contains("git worktree repair") && text.contains("from the source repo"),
+        "and the report says how to fix it, got {:?}",
+        text
+    );
+
+    // The advice works: repair from the source repo, then remove again.
+    git_ok(&repo, &["worktree", "repair", after.to_str().unwrap()]);
+    space::core::workspace::remove_workspace(&deeper, "moved-ws", true).unwrap();
+    let left = registered_worktrees(&repo);
+    assert!(
+        !left.contains("moved-ws"),
+        "after the repair the removal unregisters it, got {}",
+        left
+    );
 }

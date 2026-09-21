@@ -2021,7 +2021,7 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
     // same one (a worktree copied beside its original) would classify as a
     // worktree before that and as an orphan after it, which is the
     // difference between being handed to git and being deleted.
-    let classified: Vec<(PathBuf, SpaceEntry)> = dirs
+    let mut classified: Vec<(PathBuf, SpaceEntry)> = dirs
         .into_iter()
         .map(|dir| {
             let kind = classify_space_entry(&dir);
@@ -2029,16 +2029,69 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
         })
         .collect();
 
+    // Two worktrees in the space that name one admin directory are a worktree
+    // and its copy. Two passes are not enough on their own: removing the
+    // original still destroys that admin directory, the copy is kept with
+    // nothing registered under it, and the next removal deletes it as an
+    // orphan, every such copy at once, with a clean success. So neither is
+    // handed to git. Both are kept and reported as a pair, and the space is
+    // left exactly as it was found, which a retry then finds again.
+    let mut sharing: std::collections::HashMap<PathBuf, Vec<String>> =
+        std::collections::HashMap::new();
+    for (dir, kind) in &classified {
+        if let SpaceEntry::Worktree { admin } = kind {
+            let key = std::fs::canonicalize(admin).unwrap_or_else(|_| admin.clone());
+            sharing.entry(key).or_default().push(name_of(dir));
+        }
+    }
+    for (dir, kind) in classified.iter_mut() {
+        if let SpaceEntry::Worktree { admin } = kind {
+            let key = std::fs::canonicalize(&*admin).unwrap_or_else(|_| admin.clone());
+            if let Some(group) = sharing.get(&key).filter(|group| group.len() > 1) {
+                let here = name_of(dir);
+                let others: Vec<&String> = group.iter().filter(|n| **n != here).collect();
+                *kind = SpaceEntry::Shared {
+                    admin: admin.clone(),
+                    others: others.into_iter().cloned().collect(),
+                };
+            }
+        }
+    }
+    let shared_count = classified
+        .iter()
+        .filter(|(_, kind)| matches!(kind, SpaceEntry::Shared { .. }))
+        .count();
+    let shared_groups = sharing.values().filter(|group| group.len() > 1).count();
+
     let mut removed: Vec<String> = Vec::new();
     let mut orphaned: Vec<String> = Vec::new();
     let mut kept: Vec<(String, String)> = Vec::new();
     for (dir, kind) in classified {
-        let repo = dir
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
+        let repo = name_of(&dir);
         match kind {
+            SpaceEntry::Shared { admin, others } => {
+                let others = quoted(&others);
+                kept.push((
+                    repo,
+                    match recorded_at(&admin, &dir) {
+                        RecordedAt::Here => format!(
+                            "a copy of it in this space ({}) shares its admin directory, \
+                             so neither is removed: removing this one would leave the \
+                             copy with nothing registered, and removing the space again \
+                             would then delete the copy; keep what you need from the \
+                             copy, delete the copy by hand, then remove the space again",
+                            others
+                        ),
+                        _ => format!(
+                            "it is a copy of a worktree in this space ({}), sharing its \
+                             admin directory, and git does not know it, so it is kept \
+                             with its original; keep what you need from it, delete it by \
+                             hand, then remove the space again",
+                            others
+                        ),
+                    },
+                ));
+            }
             // Not a repository of any kind: ordinary content of the space,
             // which goes when the space does, as it always has.
             SpaceEntry::Plain => {}
@@ -2072,6 +2125,7 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
                  move it aside or delete it by hand, then remove the space again"
                     .to_string(),
             )),
+            SpaceEntry::Unresolved(reason) => kept.push((repo, reason)),
             SpaceEntry::Unreadable(why) => kept.push((
                 repo,
                 format!(
@@ -2089,7 +2143,13 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
     }
 
     if !kept.is_empty() {
-        anyhow::bail!(removal_report(name, &removed, &orphaned, &kept));
+        anyhow::bail!(removal_report(
+            name,
+            &removed,
+            &orphaned,
+            &kept,
+            (shared_count, shared_groups),
+        ));
     }
 
     std::fs::remove_dir_all(&ws_path)
@@ -2111,6 +2171,13 @@ enum SpaceEntry {
     /// Something claims to be a repository and cannot be read. Saying what it
     /// is would be a guess, and the guess that deletes is the wrong one.
     Unreadable(String),
+    /// A worktree that names the same admin directory as another directory in
+    /// the space: a worktree and its copy. Neither is handed to git.
+    Shared { admin: PathBuf, others: Vec<String> },
+    /// A relative gitdir that does not resolve: a moved space or a deleted
+    /// source repo, which nothing on disk tells apart. Kept, with a reason
+    /// that already says what to do in each case.
+    Unresolved(String),
     /// Ordinary content: no repository here.
     Plain,
 }
@@ -2132,8 +2199,8 @@ enum SpaceEntry {
 fn classify_space_entry(dir: &Path) -> SpaceEntry {
     let gitfile = dir.join(".git");
     if gitfile.is_file() {
-        let admin = match worktree_admin_dir(dir) {
-            Ok(admin) => admin,
+        let (admin, relative) = match worktree_admin_dir(dir) {
+            Ok(gitdir) => (gitdir.path, gitdir.relative),
             Err(why) => return SpaceEntry::Unreadable(why),
         };
         // Only a directory that is provably not there is an orphan, because
@@ -2141,6 +2208,20 @@ fn classify_space_entry(dir: &Path) -> SpaceEntry {
         // way to it or a name that resolves to something else, is a question
         // this cannot answer, and the answer that deletes is the wrong guess.
         return match std::fs::symlink_metadata(&admin) {
+            // A relative gitdir breaks when either side moves, so for one a
+            // `NotFound` cannot tell "the source repo is gone" from "this
+            // space was moved". An absolute gitdir survives a move of the
+            // worktree, which is why only its `NotFound` is read as an orphan.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && relative => {
+                SpaceEntry::Unresolved(format!(
+                    "its .git file names a relative gitdir that does not resolve from \
+                     where it is now, which moving the space leaves behind as well as \
+                     deleting the source repo; if the space was moved, run \
+                     `git worktree repair {}` from the source repo, and if the source \
+                     repo is gone, delete it by hand; then remove the space again",
+                    dir.display()
+                ))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => SpaceEntry::Orphan,
             Err(e) => SpaceEntry::Unreadable(format!(
                 "its .git file names {}, which cannot be read ({})",
@@ -2231,16 +2312,20 @@ fn is_repository_dir(dir: &Path) -> bool {
 /// answers with that repository's git dir, and the call would have to be
 /// fenced with `GIT_CEILING_DIRECTORIES` and its answer compared with what
 /// was expected anyway. It also costs a spawn per directory.
-fn worktree_admin_dir(dir: &Path) -> std::result::Result<PathBuf, String> {
+fn worktree_admin_dir(dir: &Path) -> std::result::Result<Gitdir, String> {
     let content = std::fs::read_to_string(dir.join(".git"))
         .map_err(|e| format!("its .git file cannot be read ({})", e))?;
     let rest = content
         .strip_prefix("gitdir: ")
         .ok_or_else(|| "its .git file does not name a gitdir".to_string())?;
     let as_git_reads_it = rest.trim_end_matches(['\n', '\r']);
+    let relative = !Path::new(as_git_reads_it).is_absolute();
     let resolved = resolve_against(dir, as_git_reads_it);
     if resolved.exists() {
-        return Ok(resolved);
+        return Ok(Gitdir {
+            path: resolved,
+            relative,
+        });
     }
     let first_line = as_git_reads_it
         .split('\n')
@@ -2258,7 +2343,17 @@ fn worktree_admin_dir(dir: &Path) -> std::result::Result<PathBuf, String> {
                 .to_string(),
         );
     }
-    Ok(resolved)
+    Ok(Gitdir {
+        path: resolved,
+        relative,
+    })
+}
+
+/// What a linked worktree's `.git` file names, and whether it named it by a
+/// relative path, which decides how much a `NotFound` for it proves.
+struct Gitdir {
+    path: PathBuf,
+    relative: bool,
 }
 
 fn resolve_against(dir: &Path, target: &str) -> PathBuf {
@@ -2346,24 +2441,6 @@ fn unregister_worktree(dir: &Path, force: bool, admin: &Path) -> std::result::Re
             // worktree whose directory was moved has an admin `gitdir` file
             // still naming the old path, which is what git refuses on.
             let first = reason.lines().next().unwrap_or(reason);
-            // The admin directory was there when this directory was
-            // classified, or it would not have been handed to git. If it has
-            // gone since, a worktree removed earlier in this same run shared
-            // it: a copy of a worktree beside its original. git then names
-            // the original's admin path, which reads as though it were about
-            // some other repo, so space says what happened first.
-            if std::fs::symlink_metadata(admin)
-                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-            {
-                return Err(format!(
-                    "it shared its .git file with a worktree removed earlier in this \
-                     run, so git no longer knows it; keep what you need from it, then \
-                     delete it by hand and remove the space again (removing the space \
-                     again as it is deletes this copy, since nothing registered points \
-                     at it any more)\n{}",
-                    first
-                ));
-            }
             Err(if admin.join("locked").exists() {
                 // git's sentence, then space's own way out. git's remaining
                 // lines are dropped here, and only here: they end in
@@ -2420,6 +2497,7 @@ fn removal_report(
     removed: &[String],
     orphaned: &[String],
     kept: &[(String, String)],
+    (shared, groups): (usize, usize),
 ) -> String {
     let total = removed.len() + orphaned.len() + kept.len();
     let names: Vec<String> = kept.iter().map(|(repo, _)| format!("{:?}", repo)).collect();
@@ -2435,9 +2513,17 @@ fn removal_report(
         0..=2 => names.join(", "),
         n => format!("{} and {} more", names[..2].join(", "), n - 2),
     };
+    // A kept pair is the one thing in a report whose consequence reaches
+    // past this run, so its count comes straight after the names, where the
+    // clipped status row still shows it, and leads with the number.
+    let pairs = match (shared, groups) {
+        (0, _) => String::new(),
+        (n, 1) => format!(" ({} share one worktree)", n),
+        (n, g) => format!(" ({} share {} worktrees)", n, g),
+    };
     let mut report = format!(
-        "could not remove {} from space '{}'; first reason: {}",
-        listed, name, first_reason
+        "could not remove {}{} from space '{}'; first reason: {}",
+        listed, pairs, name, first_reason
     );
     report.push_str(&format!(
         "\n  {} of {} repos in the space were kept",
@@ -2462,6 +2548,13 @@ fn removal_report(
         ));
     }
     report
+}
+
+fn name_of(dir: &Path) -> String {
+    dir.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn quoted(names: &[String]) -> String {
