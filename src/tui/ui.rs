@@ -2150,10 +2150,18 @@ fn render_gitops_overlay(
             Paragraph::new("Message (Enter to commit, Esc to cancel):").style(theme::muted()),
             sections[2],
         );
+        // The message scrolled so the cursor stays in the row, cut on
+        // grapheme clusters like the other single-row inputs.
+        let window = input_window(&state.message_input, usize::from(sections[3].width));
         frame.render_widget(
-            Paragraph::new(state.message_input.value()).style(theme::input_style()),
+            Paragraph::new(window.visible).style(theme::input_style()),
             sections[3],
         );
+        // Set terminal cursor position, unless help is drawn over us.
+        if show_cursor {
+            let cursor_x = sections[3].x.saturating_add(window.cursor_cell);
+            frame.set_cursor_position((cursor_x, sections[3].y));
+        }
         if let Some(status) = &state.status {
             frame.render_widget(
                 Paragraph::new(status.as_str()).style(theme::error()),
