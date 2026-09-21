@@ -3876,6 +3876,7 @@ fn a_gitdir_not_in_gits_own_shape_is_kept_when_it_names_nothing() {
             joined(" # now ", &old_admin, &live_admin),
             read,
         ),
+        ("tab-moved", joined("\t", &old_admin, &live_admin), read),
         (
             "same-line-no-blank",
             joined("#was", &live_admin, &old_admin),
@@ -4104,4 +4105,82 @@ fn a_genuine_orphan_beside_a_directory_that_looks_like_a_repository_is_removed()
         !env.workspaces_dir.join("ws").exists(),
         "a space whose source repo is gone is removed"
     );
+}
+
+/// A source repo outside `TestEnv`'s repos root, with absolute worktree
+/// gitdirs whatever the global config says (see `absolute_repo`).
+fn absolute_repo_at(path: &Path) -> PathBuf {
+    std::fs::create_dir_all(path).unwrap();
+    common::init_repo(path);
+    git_ok(path, &["config", "worktree.useRelativePaths", "false"]);
+    path.to_path_buf()
+}
+
+/// The blank-separated readings of a gitfile's line count only when one
+/// names a live worktree or a worktree path of a repository that is there,
+/// never merely something that exists. Counting existence kept a genuine
+/// orphan whose clean gitdir runs through `My Projects` whenever a folder
+/// `My` sat beside it, and told it its gitfile was not git's (independent
+/// review of PR #61's `907fa8f`).
+#[test]
+fn a_genuine_orphan_whose_path_has_a_blank_is_removed_beside_a_folder_named_like_its_prefix() {
+    let env = TestEnv::new();
+    let repo = absolute_repo_at(&env.dir.path().join("My Projects").join("alpha"));
+    std::fs::create_dir_all(env.dir.path().join("My")).unwrap();
+    worktree_in_space(&env, &repo, "ws");
+    std::fs::remove_dir_all(&repo).unwrap();
+
+    remove_forced(&env, "ws").unwrap();
+
+    assert!(
+        !env.workspaces_dir.join("ws").exists(),
+        "it goes, as a genuine orphan does"
+    );
+}
+
+/// The nesting rule reads a missing `<common>` that leaves a repository's
+/// `worktrees` directory into a name that does not exist, as a note glued to
+/// the live admin path does, and nothing wider: a genuine orphan whose repos
+/// root lies under a folder named `worktrees`, inside a directory that looks
+/// like a repository, runs through real directories all the way down to the
+/// deleted repo (independent review of PR #61's `907fa8f`).
+#[test]
+fn a_genuine_orphan_under_a_folder_named_worktrees_is_removed() {
+    let env = TestEnv::new();
+    let deep = env.dir.path().join("deep");
+    std::fs::create_dir_all(deep.join("objects")).unwrap();
+    let repo = absolute_repo_at(&deep.join("worktrees").join("projects").join("alpha"));
+    worktree_in_space(&env, &repo, "ws");
+    std::fs::remove_dir_all(&repo).unwrap();
+
+    remove_forced(&env, "ws").unwrap();
+
+    assert!(
+        !env.workspaces_dir.join("ws").exists(),
+        "it goes, as a genuine orphan does"
+    );
+}
+
+/// The trimmed reading still matters beside the words: a path that itself
+/// holds a blank splits into words that name nothing live, so only the
+/// whole trimmed path finds the live admin directory. Without it this live
+/// worktree would be told git has no record of it, which is false.
+#[test]
+fn a_gitfile_with_blanks_after_a_path_that_holds_a_blank_is_a_near_miss() {
+    let env = TestEnv::new();
+    let repo = absolute_repo_at(&env.dir.path().join("My Projects").join("alpha"));
+    let wt = worktree_in_space(&env, &repo, "ws");
+    let admin = admin_dir_of(&wt);
+    std::fs::write(wt.join(".git"), format!("gitdir: {}  \n", admin.display())).unwrap();
+    std::fs::write(wt.join("mine.txt"), "a day of work").unwrap();
+
+    let text = remove_forced(&env, "ws")
+        .expect_err("a gitfile git does not read is kept")
+        .to_string();
+    assert!(
+        text.contains("in a form git does not read") && !text.contains("no record"),
+        "it is told its gitfile is a near miss of a live worktree, got {:?}",
+        text
+    );
+    assert!(wt.join("mine.txt").exists(), "and its work is still there");
 }

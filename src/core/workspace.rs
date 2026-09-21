@@ -2766,8 +2766,8 @@ fn classify_space_entry(dir: &Path) -> SpaceEntry {
 /// made-up `<common>` (the code review of PR #61 found such a copy deleted).
 /// Both are kept.
 ///
-/// A `<common>` that is `NotFound` under the `worktrees` directory of a
-/// repository that is there is kept too. A `<common>` that is there is said to be the
+/// A `<common>` that is `NotFound` and leaves the `worktrees` directory of a
+/// repository that is there into a name that is not there is kept too. A `<common>` that is there is said to be the
 /// source repo only when it is a repository; anything else there is kept
 /// with what it is. After the
 /// admin directory itself answered `NotFound`, every directory on its path
@@ -2784,22 +2784,29 @@ fn absent_admin(admin: PathBuf) -> SpaceEntry {
         ));
     };
     match std::fs::symlink_metadata(common) {
-        // A missing `<common>` under the `worktrees` directory of a
-        // repository that is there: a note glued to the live repo's own
-        // admin path reads like this (skeptical review of PR #61), and so
-        // does a deleted submodule of a linked worktree, whose git dir git
-        // keeps at `<G>/worktrees/<id>/modules/<name>` (probed, git 2.50.1).
-        // Neither proves a source repo gone, and which it is cannot be told,
-        // so the reason says only what is on disk. Only this ancestor shape
-        // is read: asking whether any ancestor up to `/` looks like a
-        // repository kept genuine orphans under a repos root holding a repo
-        // named `objects` (skeptical review, pass 3).
+        // A missing `<common>` that leaves the `worktrees` directory of a
+        // repository that is there into a name that is not there: a note
+        // glued to the live repo's own admin path reads like this (skeptical
+        // review of PR #61). A genuine orphan's path runs through real
+        // directories down to its deleted repo, so it cannot leave a live
+        // `worktrees` directory into nothing, wherever it sits; asking only
+        // for a `worktrees` ancestor kept one whose repos root lay under a
+        // folder of that name (independent review), and asking whether any
+        // ancestor looked like a repository kept one beside a repo named
+        // `objects` (skeptical review, pass 3). The reason says only what is
+        // on disk.
         Err(e)
             if e.kind() == std::io::ErrorKind::NotFound
-                && common.ancestors().skip(1).any(|ancestor| {
-                    ancestor.file_name() == Some("worktrees".as_ref())
-                        && ancestor.parent().is_some_and(is_repository_dir)
-                }) =>
+                && common.ancestors().zip(common.ancestors().skip(1)).any(
+                    |(child, worktrees)| {
+                        worktrees.file_name() == Some("worktrees".as_ref())
+                            && worktrees.parent().is_some_and(is_repository_dir)
+                            && matches!(
+                                std::fs::symlink_metadata(child),
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                            )
+                    },
+                ) =>
         {
             SpaceEntry::Unreadable(format!(
                 "its .git file names a missing git directory under another repository's \
@@ -2869,12 +2876,12 @@ fn is_repository_dir(dir: &Path) -> bool {
 /// When git's reading names nothing that exists, that is not yet proof the
 /// source repo is gone, which is what deletes. The near misses a hand edit
 /// or a lax writer produces are tried first: the path trimmed at both ends,
-/// the first line alone, the first line trimmed, and each absolute path on
-/// the first line split at blanks. If any of those names something real, or
-/// a worktree admin path of a repository that is there (`<common>/worktrees/
-/// <id>` with the admin itself gone, as a copy's is once its original is
-/// removed), the file is not what git reads and which was meant cannot be
-/// told, so it is reported and kept. Only when every reading names
+/// the first line alone, the first line trimmed, and each blank-separated
+/// word of the first line. If one of the first three names something real,
+/// or any of them names a live worktree or a worktree admin path of a
+/// repository that is there (`<common>/worktrees/<id>` with the admin itself
+/// gone, as a copy's is once its original is removed), the file is not what
+/// git reads and which was meant cannot be told, so it is reported and kept. Only when every reading names
 /// nothing is git's path returned, for the caller to find absent. An earlier
 /// version trimmed all trailing whitespace instead, which looked safe and was
 /// not: it read a real path ending in a blank as a path that does not exist.
@@ -2910,21 +2917,25 @@ fn worktree_admin_dir(dir: &Path) -> std::result::Result<Gitdir, String> {
         .next()
         .unwrap_or(as_git_reads_it)
         .trim_end_matches('\r');
-    // Each absolute path on the first line, split at blanks, is a reading
-    // too: a note beside the path ("<old> # now <new>") leaves the live one
-    // among them (skeptical review of PR #61, pass 3). A reading counts when
-    // it names something there, or a worktree of a repository that is there.
-    let tokens = first_line
-        .split([' ', '\t'])
-        .filter(|token| token.starts_with('/'));
-    let mut near_misses = [as_git_reads_it.trim(), first_line, first_line.trim()]
-        .into_iter()
-        .chain(tokens);
-    if near_misses.any(|miss| {
+    // A near miss counts when it names something there, or a worktree of a
+    // repository that is there (a copy's admin directory is gone once its
+    // original is removed). Each blank-separated word of the first line is
+    // a reading too: a note beside the path ("<old> # now <new>") leaves the
+    // live one among them (skeptical review of PR #61, pass 3). A word counts
+    // only in the second way: a clean path with a blank in it splits into
+    // words that may name something unrelated, and existence kept a genuine
+    // orphan under `My Projects` beside a folder `My` (independent review).
+    let live = |path: &Path| {
+        path.join("commondir").is_file()
+            || common_dir_in_gits_shape(path).is_some_and(is_repository_dir)
+    };
+    let near_misses = [as_git_reads_it.trim(), first_line, first_line.trim()];
+    let mut words = first_line.split([' ', '\t']);
+    if near_misses.iter().any(|miss| {
         let path = resolve_against(dir, miss);
-        miss != as_git_reads_it
-            && (path.exists() || common_dir_in_gits_shape(&path).is_some_and(is_repository_dir))
-    }) {
+        *miss != as_git_reads_it && (path.exists() || live(&path))
+    }) || words.any(|word| word != as_git_reads_it && live(&resolve_against(dir, word)))
+    {
         return Err(
             "its .git file names a live worktree or repository in a form git does not \
              read (extra lines, other text on its line, or blanks around the path)"
