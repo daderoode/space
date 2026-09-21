@@ -352,7 +352,6 @@ fn git_worktree_add(args: &[&str], cwd: &Path) -> Result<()> {
 
 /// Helper: run a git command inside `cwd`, capturing stderr.
 /// On non-zero exit, returns an error with the first meaningful git error line.
-#[allow(dead_code)] // used by switch_worktree_branch; bin crate has private mod core
 fn run_git_in(cwd: &Path, args: &[&str]) -> Result<()> {
     let out = spawn::output(Command::new("git").args(args).current_dir(cwd))
         .with_context(|| "failed to spawn git")?;
@@ -373,52 +372,43 @@ fn run_git_in(cwd: &Path, args: &[&str]) -> Result<()> {
 ///
 /// - `new_branch = true`:  creates the branch from the current HEAD (`git switch -c <branch>`).
 ///   This works even from detached HEAD.
-/// - `new_branch = false`: checks for a local branch first; if absent, looks for
-///   `origin/<branch>` and creates a local tracking branch; if neither, passes through
-///   to git (which will error with a clear message).
-#[allow(dead_code)] // public API; called from integration tests and future callers
+/// - `new_branch = false`: a `<remote>/<x>` name from the branch picker is split the way
+///   the create path splits it (`split_remote_branch_in`: any configured remote, the
+///   longest first, and for any remote but origin a local branch named by the whole string
+///   wins); any other name is looked for on origin. A local `<x>` that exists is checked
+///   out; otherwise the remote-tracking ref becomes a new local `<x>` tracking it; if
+///   neither exists, git reports the name.
+///
+/// Every ref is asked for exactly (`ref_exists`) and the start point is the qualified
+/// remote-tracking ref, because `rev-parse --verify` and a bare `<remote>/<x>` both let a
+/// same-named tag answer instead (ticket 41): a tag named `refs/heads/<x>` passed for a
+/// local branch, a tag `origin/<x>` made `switch -c` ambiguous or started the branch at
+/// the tag, and a tag named `refs/remotes/origin/<x>` shadows even the qualified name.
 pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) -> Result<()> {
     if new_branch {
         return run_git_in(wt_path, &["switch", "-c", branch]);
     }
 
-    // Normalize: if the caller passes "origin/<name>" (from the full branch picker),
-    // strip the prefix so we check/create the local name and avoid "origin/origin/<name>".
-    let (local_name, remote_ref) = if let Some(name) = branch.strip_prefix("origin/") {
-        (name, branch.to_string())
-    } else {
-        (branch, format!("origin/{}", branch))
-    };
+    // The picker's `<remote>/<x>` rows name the local `<x>` to check out or
+    // create; a name that does not split is looked for on origin.
+    let (remote, local_name) = split_remote_branch_in(wt_path, branch, &remote_names(wt_path))
+        .unwrap_or((DEFAULT_REMOTE, branch));
 
-    // Check local branch (refs/heads/ scopes the lookup to branches only, not tags)
-    let local_ref = format!("refs/heads/{}", local_name);
-    let local_exists = spawn::output(
-        Command::new("git")
-            .args(["rev-parse", "--verify", &local_ref])
-            .current_dir(wt_path),
-    )
-    .map(|o| o.status.success())
-    .unwrap_or(false);
-
-    if local_exists {
+    // The bare name in the switch slot, deliberately: `git switch --
+    // refs/heads/<x>` refuses (`a branch is expected`), while the bare name
+    // checks out the branch even beside a tag of that name.
+    if ref_exists(wt_path, &format!("refs/heads/{}", local_name)) {
         return run_git_in(wt_path, &["switch", "--", local_name]);
     }
 
-    // Check remote branch
-    let remote_exists = spawn::output(
-        Command::new("git")
-            .args(["rev-parse", "--verify", &remote_ref])
-            .current_dir(wt_path),
-    )
-    .map(|o| o.status.success())
-    .unwrap_or(false);
-
-    if remote_exists {
+    let remote_ref = remote_tracking_ref(remote, local_name);
+    if ref_exists(wt_path, &remote_ref) {
         return run_git_in(wt_path, &["switch", "-c", local_name, &remote_ref]);
     }
 
-    // Let git provide the error message
-    run_git_in(wt_path, &["switch", "--", local_name])
+    // Let git provide the error message. `--no-guess`, so git does not
+    // create a branch tracking some other remote that carries `<x>`.
+    run_git_in(wt_path, &["switch", "--no-guess", "--", local_name])
 }
 
 /// Why a branch that was strictly behind `origin/<name>` was not fast-forwarded.
