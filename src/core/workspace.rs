@@ -4748,8 +4748,10 @@ mod tests {
     /// index). A `--no-checkout` worktree the user then locked has no index
     /// but no `index.lock` either, since no checkout ever ran: it is adopted
     /// too, because refusing it would let the remove side delete files the
-    /// user put there by hand. And the add's lock is required: a stale
-    /// `index.lock` with no index in an unlocked worktree is not an add.
+    /// user put there by hand. Each of the three signs is required on its
+    /// own: a stale `index.lock` beside a surviving `index` under a user's
+    /// lock is a killed index writer, not an add; a stale `index.lock` with
+    /// no index in an unlocked worktree is not an add either.
     #[test]
     fn placement_of_adopts_a_worktree_the_user_locked() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4794,6 +4796,32 @@ mod tests {
             placement_of(&marker_word, &repo),
             Placement::Adopted,
             "a finished tree the user locked with git's own word is theirs"
+        );
+
+        // A user's lock on a finished tree whose index writer died: `index`
+        // survives because git writes it lock-then-rename, and the stale
+        // `index.lock` beside it must not read as a checkout in progress.
+        let stale_lock = worktree_in(&repo, &spaces, "ws-f");
+        git(
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "initializing",
+                stale_lock.to_str().unwrap(),
+            ],
+            &repo,
+        );
+        let stale_admin = admin_dir_of(&stale_lock);
+        std::fs::write(stale_admin.join("index.lock"), "").unwrap();
+        assert!(
+            stale_admin.join("index").is_file(),
+            "fixture: the index survived"
+        );
+        assert_eq!(
+            placement_of(&stale_lock, &repo),
+            Placement::Adopted,
+            "a finished tree with a stale index.lock under a user lock is theirs"
         );
 
         // No lock at all: the add finished (git unlinks the lock last), so
