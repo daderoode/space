@@ -1673,8 +1673,10 @@ fn admin_belongs_to(admin: &Path, repo_path: &Path) -> bool {
 ///
 /// The marker is translated (`initialisiere` in de.po, `initialisation` in
 /// fr.po at v2.50.1; Apple Git is built without gettext, Homebrew git is
-/// not), so a second reading of the same state is needed, and it is the one
-/// that means files are missing: `reset --hard` takes `index.lock`, writes
+/// not). The app's own add runs under `LC_ALL=C` (`git_worktree_add`), so
+/// its debris always carries the English word; the second reading is for a
+/// worktree a user added by hand at a space path with a localised git, and
+/// it is the one that means files are missing: `reset --hard` takes `index.lock`, writes
 /// every file, and commits `index` last, so a lock with `index.lock` and no
 /// `index` is a checkout that never finished. Probed three times on git
 /// 2.50.1 with parent and child killed together: that shape every time.
@@ -1695,7 +1697,10 @@ fn admin_belongs_to(admin: &Path, repo_path: &Path) -> bool {
 /// dead one for as long as it runs; a forced removal of its space then
 /// removes the tree under it, where git alone would have refused on the
 /// lock. The tree being built holds nothing of the user's, and the next
-/// removal deletes what is left as an orphan.
+/// removal deletes what is left as an orphan. The running add then still
+/// exits 0 (its final unlink of `locked` tolerates a file already gone),
+/// so the process that started it shows that repo as created; that row is
+/// this race, not a worker bug.
 fn half_built(admin: &Path) -> Option<&'static str> {
     let locked = std::fs::read_to_string(admin.join("locked")).ok()?;
     if locked.trim() == "initializing" {
