@@ -6,5 +6,5 @@
 disallowed-methods = [
     { path = "std::process::Command::spawn", reason = "start subprocesses through crate::core::spawn::spawn (ADR 0002)" },
     { path = "std::process::Command::output", reason = "start subprocesses through crate::core::spawn::output (ADR 0002)" },
-    { path = "std::process::Command::status", reason = "start subprocesses through crate::core::spawn::status (ADR 0002)" },
+    { path = "std::process::Command::status", reason = "start subprocesses through crate::core::spawn::output (ADR 0002); no production spawn inherits the terminal since ticket 28" },
 ]

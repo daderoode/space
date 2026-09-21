@@ -27,7 +27,7 @@
 //! however this module is reached.
 
 use std::io;
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::MutexGuard;
 
 fn enter() -> MutexGuard<'static, ()> {
@@ -57,13 +57,6 @@ pub fn output(cmd: &mut Command) -> io::Result<Output> {
     spawn(cmd)?.wait_with_output()
 }
 
-/// `Command::status` with only the spawn behind the gate: the wait for the
-/// child runs outside it. Streams the caller left unset are inherited, as
-/// `Command::status` does.
-pub fn status(cmd: &mut Command) -> io::Result<ExitStatus> {
-    spawn(cmd)?.wait()
-}
-
 /// Hold the gate for as long as the guard lives, so a test can make a pipe the
 /// way std does and show that nothing started through this module inherits it.
 /// It locks the gate by its own name rather than through `enter`, so an entry
@@ -88,9 +81,9 @@ pub(crate) mod tests {
     /// ungated start creates its child well inside it (under a millisecond
     /// here), and a gated one cannot create it at all until the gap has
     /// closed, so a gated test always runs the whole gap. Every other gated
-    /// spawn in the test binary waits it out. Each unit-test binary has five
-    /// such tests: the four gated model tests, plus its by-name test in
-    /// `lib.rs` or `main.rs`. Together they cost up to 1s of gate time per
+    /// spawn in the test binary waits it out. Each unit-test binary has four
+    /// such tests: the three gated model tests, plus its by-name test in
+    /// `lib.rs` or `main.rs`. Together they cost up to 0.8s of gate time per
     /// binary. Timing bounds elsewhere in the suite leave room for that, and
     /// tightening one of them should account for it. A machine too loaded to start a child within the gap
     /// lets an ungated entry point pass one run, but never fails a gated one.
@@ -221,15 +214,7 @@ pub(crate) mod tests {
         assert!(!held, "a child started through `output` kept the pipe open");
     }
 
-    #[test]
-    fn a_child_started_through_status_cannot_inherit_a_pipe_made_under_the_gate() {
-        let held = a_child_started_in_the_gap_holds_the_pipe(|mut child| {
-            status(&mut child).unwrap();
-        });
-        assert!(!held, "a child started through `status` kept the pipe open");
-    }
-
-    /// The control for the four tests above: with no gate at all, a child
+    /// The control for the three tests above: with no gate at all, a child
     /// started in the gap keeps the pipe, so the harness can see what they
     /// assert is absent. The gap may run to `HOLD_LIMIT` here because an
     /// ungated child starts, and closes the gap, within milliseconds. The

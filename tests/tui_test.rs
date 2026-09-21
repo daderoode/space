@@ -4557,6 +4557,175 @@ mod gitops_tests {
         );
     }
 
+    /// Run `git` in `dir` for a fixture, failing the test on a non-zero exit.
+    fn fixture_git(args: &[&str], dir: &std::path::Path) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git failed to run");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A clone under `env.repos_dir` whose `main` has diverged from its origin
+    /// with a conflict on `base.txt`, armed so that the `git merge --abort`
+    /// `pull_repo` runs after the conflict fails: a `post-index-change` hook
+    /// edits `other.txt`, which the merge updated cleanly, at the merge's
+    /// checkout write (`$1 = 1`, no MERGE_HEAD yet), the only index write
+    /// before the abort; the abort's own write comes after its reset, so the
+    /// gate never fires there. The same fixture, with its reasoning, lives in
+    /// `src/core/workspace.rs`'s `arm_conflicted_merge_hook`.
+    fn conflicting_pull_repo(env: &TestEnv, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let origin = env.repos_dir.join(format!("{name}-origin.git"));
+        let local = env.repos_dir.join(name);
+        fixture_git(
+            &["init", "--bare", "-b", "main", origin.to_str().unwrap()],
+            &env.repos_dir,
+        );
+        fixture_git(
+            &["clone", origin.to_str().unwrap(), local.to_str().unwrap()],
+            &env.repos_dir,
+        );
+        fixture_git(&["config", "user.email", "space@local"], &local);
+        fixture_git(&["config", "user.name", "Test"], &local);
+        fixture_git(&["config", "commit.gpgsign", "false"], &local);
+        std::fs::write(local.join("base.txt"), "base\n").unwrap();
+        std::fs::write(local.join("other.txt"), "other\n").unwrap();
+        fixture_git(&["add", "."], &local);
+        fixture_git(&["commit", "-m", "init"], &local);
+        fixture_git(&["push", "-u", "origin", "main"], &local);
+
+        let helper = env.repos_dir.join(format!("{name}-helper"));
+        fixture_git(
+            &["clone", origin.to_str().unwrap(), helper.to_str().unwrap()],
+            &env.repos_dir,
+        );
+        fixture_git(&["config", "user.email", "space@local"], &helper);
+        fixture_git(&["config", "user.name", "Test"], &helper);
+        fixture_git(&["config", "commit.gpgsign", "false"], &helper);
+        std::fs::write(helper.join("base.txt"), "helper-version\n").unwrap();
+        std::fs::write(helper.join("other.txt"), "helper-other\n").unwrap();
+        fixture_git(&["commit", "-am", "helper-edit"], &helper);
+        fixture_git(&["push", "origin", "main"], &helper);
+
+        std::fs::write(local.join("base.txt"), "local-version\n").unwrap();
+        fixture_git(&["commit", "-am", "local-edit"], &local);
+
+        let hooks = local.join(".git").join("ticket-28-hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("post-index-change");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nD=$(git rev-parse --absolute-git-dir)\n\
+             if [ \"$1\" = 1 ] && [ ! -e \"$D/MERGE_HEAD\" ]; then\n\
+             printf edited > other.txt\nfi\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fixture_git(
+            &["config", "core.hooksPath", hooks.to_str().unwrap()],
+            &local,
+        );
+        local
+    }
+
+    /// A pull whose conflicted merge cannot be aborted, driven through the
+    /// real worker and drawn at 80x24: the Running overlay shows the failed
+    /// header, the core's three-line report wrapped inside the 48-column
+    /// dialog with the mid-merge line intact, and stays open (no auto-close).
+    #[test]
+    fn gitops_pull_overlay_reports_a_failed_abort_at_80_columns() {
+        let env = TestEnv::new();
+        let repo_path = conflicting_pull_repo(&env, "abort-fails");
+        let ws = Workspace {
+            name: "test-ws".into(),
+            path: env.workspaces_dir.clone(),
+            repos: vec![WorkspaceRepo {
+                name: "abort-fails".into(),
+                path: repo_path.clone(),
+                branch: "main".into(),
+                status: RepoStatus::default(),
+                ahead: 0,
+                behind: 0,
+            }],
+        };
+        let mut app = test_app_with_config(config_from_env(&env), vec![ws], vec![repo_path]);
+        app.load_selected_workspace_detail();
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('p')));
+        assert!(app.gitop_rx.is_some(), "p must start the pull worker");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            app.poll_gitop_result();
+            let finished = match &app.screen {
+                Screen::GitOps(st) => st.finished,
+                _ => panic!("the overlay must stay open while the pull runs"),
+            };
+            if finished.is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pull worker did not finish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        match &app.screen {
+            Screen::GitOps(st) => {
+                assert_eq!(st.finished, Some(false), "a failed abort is a failed pull");
+                assert!(st.close_at.is_none(), "a failure keeps the overlay open");
+            }
+            _ => unreachable!(),
+        }
+
+        let rendered = render_text(&app, 80, 24);
+        let rows: Vec<&str> = rendered.lines().collect();
+        // The 48x14 dialog sits at x 16..=63, y 5..=18; its inner area is
+        // 46x12 at (17, 6), the header row first, then the output rows.
+        assert!(
+            rows[6].contains("\u{2717} Pull failed (Esc/q to close)"),
+            "header row:\n{}",
+            rendered
+        );
+        let output_rows = &rows[7..=17];
+        assert!(
+            output_rows.iter().any(|r| r.contains("mid-merge")),
+            "the state line must be drawn inside the dialog:\n{}",
+            rendered
+        );
+        assert!(
+            output_rows.iter().any(|r| r.contains("not uptodate")),
+            "git's reason must be drawn inside the dialog:\n{}",
+            rendered
+        );
+        // The command names sit past column 46 of the state line, so they are
+        // only visible when the line wraps rather than truncates (the word
+        // wrap splits `git merge` from `--continue`).
+        assert!(
+            output_rows.iter().any(|r| r.contains("--continue',")),
+            "the wrapped tail of the state line must be drawn:\n{}",
+            rendered
+        );
+        for (i, row) in output_rows.iter().enumerate() {
+            let chars: Vec<char> = row.chars().collect();
+            let inside: String = chars[17..63].iter().collect();
+            assert!(
+                inside.trim().is_empty() || (chars[16] == '\u{2502}' && chars[63] == '\u{2502}'),
+                "output row {} must be wrapped inside the dialog borders: {:?}",
+                i + 7,
+                row
+            );
+        }
+    }
+
     #[test]
     fn gitops_menu_commit_disabled_when_nothing_staged() {
         // workspace_with_repos uses a fake /tmp path, so file_diff fails and

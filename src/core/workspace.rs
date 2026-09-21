@@ -993,6 +993,11 @@ pub enum PullOutcome {
     /// Local and upstream diverged with conflicts; the merge was aborted and
     /// the worktree restored to its pre-merge state.
     Conflicted,
+    /// Local and upstream diverged with conflicts and `git merge --abort`
+    /// failed, so the repo is left mid-merge (MERGE_HEAD present, conflict
+    /// markers in the tree) for the user to finish or abort by hand; git's
+    /// reason is in the message.
+    AbortFailed,
     /// The pull could not be applied (e.g. a blocked fast-forward); git's
     /// error output is in the message.
     Failed,
@@ -1007,7 +1012,7 @@ pub struct PullResult {
 impl PullResult {
     /// Whether the pull left the repo in a good state: true for up to date,
     /// ahead, fast-forwarded, or merged; false for fetch failures, detached
-    /// HEAD, no upstream, conflicts, and failed fast-forwards.
+    /// HEAD, no upstream, conflicts, a failed abort, and failed fast-forwards.
     pub fn success(&self) -> bool {
         matches!(
             self.outcome,
@@ -1019,11 +1024,39 @@ impl PullResult {
     }
 }
 
+/// Whether `repo_path` has a merge in progress: the `MERGE_HEAD` file exists
+/// in its git dir, which is git's own test. The path comes from `git rev-parse
+/// --git-path`, so a linked worktree's private git dir is honoured (a relative
+/// answer is relative to the worktree). Not `rev-parse --verify MERGE_HEAD`,
+/// which also resolves a branch or tag of that name, so a tag named
+/// `MERGE_HEAD` on origin would read as a merge in progress after every fetch.
+/// An error means git could not be asked; callers treat that as unknown and
+/// act on nothing.
+fn merge_in_progress(repo_path: &Path) -> std::io::Result<bool> {
+    let out = spawn::output(
+        Command::new("git")
+            .args(["rev-parse", "--git-path", "MERGE_HEAD"])
+            .env("LC_ALL", "C")
+            .current_dir(repo_path),
+    )?;
+    if !out.status.success() {
+        return Err(std::io::Error::other(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok(repo_path.join(path).exists())
+}
+
 /// Pull the current branch of `repo_path` from its `origin/<branch>` upstream.
 ///
 /// Fetches first, then classifies the branch state and acts:
 /// - behind only  → fast-forward (`FastForwarded`)
-/// - diverged     → real merge; on conflict, `git merge --abort` (`Merged`/`Conflicted`)
+/// - diverged     → real merge; on conflict, `git merge --abort` (`Merged`/`Conflicted`,
+///   or `AbortFailed` when the abort itself fails and the repo stays mid-merge);
+///   a merge that never started is `Failed` and nothing is aborted
+/// - a merge already in progress (MERGE_HEAD) → `Failed` before the fetch, whatever
+///   the branch state, so the abort only ever runs on a merge this call started
 /// - up to date / only ahead → no-op (`UpToDate`/`Ahead`)
 /// - detached HEAD / no upstream / fetch failure → report without acting.
 pub fn pull_repo(repo_path: &Path) -> PullResult {
@@ -1038,6 +1071,35 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
             };
         }
     };
+
+    // A merge the user left in progress is refused before anything runs,
+    // whatever the branch state: "already up to date" or "nothing to pull"
+    // would be false with conflict markers in the tree, git refuses a merge
+    // or fast-forward over unmerged entries anyway, and the abort below must
+    // only ever run on a merge this call started. Checked before the fetch,
+    // like the detached-HEAD refusal: report without acting.
+    match merge_in_progress(repo_path) {
+        Ok(false) => {}
+        Ok(true) => {
+            return PullResult {
+                outcome: PullOutcome::Failed,
+                message: format!(
+                    "{} is mid-merge (MERGE_HEAD present); run 'git merge --continue' \
+                     or 'git merge --abort' in that repo before pulling.",
+                    branch
+                ),
+            };
+        }
+        Err(err) => {
+            return PullResult {
+                outcome: PullOutcome::Failed,
+                message: format!(
+                    "Could not tell whether {} is mid-merge ({}); nothing was pulled.",
+                    branch, err
+                ),
+            };
+        }
+    }
 
     // `spawn::output` (not `spawn::status`): capture stderr both to surface the real
     // failure cause (auth, DNS, missing remote) and to keep git from writing
@@ -1136,35 +1198,105 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
 
     if ahead > 0 && behind > 0 {
         let remote_ref = format!("origin/{}", branch);
-        let merged = spawn::output(
+        // `LC_ALL=C` keeps git's text English for the readers of the merge's
+        // and the abort's stderr: the report shown in the overlay, and the
+        // tests that assert on its wording.
+        let merge = spawn::output(
             Command::new("git")
                 .args(["merge", "--no-edit", &remote_ref])
+                .env("LC_ALL", "C")
                 .current_dir(repo_path),
-        )
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-        if merged {
+        );
+        let merge = match merge {
+            Ok(o) if o.status.success() => {
+                return PullResult {
+                    outcome: PullOutcome::Merged,
+                    message: format!(
+                        "Merged {} into {} ({} ahead, {} behind).",
+                        remote_ref, branch, ahead, behind
+                    ),
+                };
+            }
+            Ok(o) => o,
+            Err(err) => {
+                return PullResult {
+                    outcome: PullOutcome::Failed,
+                    message: format!("Merge of {} into {} failed: {}", remote_ref, branch, err),
+                };
+            }
+        };
+        // Exit codes do not separate the shapes (a conflict exits 1, a dirty
+        // tree 2, a locked index 128); MERGE_HEAD does. Absent, the merge never
+        // started and there is nothing to abort: the tree is as the user left
+        // it, and git's text says why.
+        let in_progress = merge_in_progress(repo_path);
+        if !matches!(in_progress, Ok(true)) {
+            let stderr = String::from_utf8_lossy(&merge.stderr);
+            let detail = stderr.trim();
+            let detail = if detail.is_empty() {
+                "git reported no error output"
+            } else {
+                detail
+            };
+            // Unknown is not "not started": say so, and abort nothing, since
+            // an abort only ever runs on a merge this call is sure it began.
+            let unknown = match in_progress {
+                Err(err) => format!(
+                    "\ngit could not say whether a merge was left in progress ({}); \
+                     check 'git status' in that repo before pulling again.",
+                    err
+                ),
+                Ok(_) => String::new(),
+            };
             return PullResult {
-                outcome: PullOutcome::Merged,
+                outcome: PullOutcome::Failed,
                 message: format!(
-                    "Merged {} into {} ({} ahead, {} behind).",
-                    remote_ref, branch, ahead, behind
+                    "Merge of {} into {} failed: {}{}",
+                    remote_ref, branch, detail, unknown
                 ),
             };
         }
-        // Merge left conflicts: restore the pre-merge worktree so `space` never
-        // leaves the repo half-merged.
-        let _ = spawn::status(
+        // The merge conflicted: restore the pre-merge worktree so `space` never
+        // leaves the repo half-merged. `spawn::output` keeps git's stderr off
+        // the TUI's screen and in the report if the abort fails too.
+        let abort = spawn::output(
             Command::new("git")
                 .args(["merge", "--abort"])
+                .env("LC_ALL", "C")
                 .current_dir(repo_path),
         );
-        return PullResult {
-            outcome: PullOutcome::Conflicted,
-            message: format!(
-                "Merge of {} into {} conflicted; aborted and restored a clean worktree.",
-                remote_ref, branch
-            ),
+        let abort_failure = match abort {
+            Ok(o) if o.status.success() => None,
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                // The first line only: git follows a lock refusal with six
+                // lines of advice, and the Running overlay windows by line
+                // then wraps, so a long report pushes its last line out.
+                let first = stderr.lines().map(str::trim).find(|l| !l.is_empty());
+                Some(first.unwrap_or("git reported no error output").to_string())
+            }
+            Err(err) => Some(err.to_string()),
+        };
+        return match abort_failure {
+            None => PullResult {
+                outcome: PullOutcome::Conflicted,
+                message: format!(
+                    "Merge of {} into {} conflicted; aborted and restored a clean worktree.",
+                    remote_ref, branch
+                ),
+            },
+            Some(reason) => PullResult {
+                outcome: PullOutcome::AbortFailed,
+                // Three lines, each streamed as its own overlay line: what
+                // happened, git's reason, what to do.
+                message: format!(
+                    "Merge of {} into {} conflicted and 'git merge --abort' failed:\n\
+                     {}\n\
+                     {} is still mid-merge (MERGE_HEAD present); resolve the conflicts and \
+                     run 'git merge --continue', or run 'git merge --abort'.",
+                    remote_ref, branch, reason, branch
+                ),
+            },
         };
     }
 
@@ -5581,6 +5713,415 @@ mod tests {
             sha_before,
             get_sha(&local, "main"),
             "aborted merge must leave main at its pre-merge commit"
+        );
+    }
+
+    /// Whether `dir` (a clone or a linked worktree) has a merge in progress:
+    /// the `MERGE_HEAD` file in its git dir, the way git and `pull_repo` test
+    /// it, so a linked worktree's private git dir is honoured and a ref named
+    /// `MERGE_HEAD` does not count.
+    fn merge_head_present(dir: &Path) -> bool {
+        let out = Cmd::new("git")
+            .args(["rev-parse", "--git-path", "MERGE_HEAD"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git rev-parse --git-path failed");
+        dir.join(String::from_utf8_lossy(&out.stdout).trim())
+            .exists()
+    }
+
+    /// Diverge `local` from origin so that a merge conflicts on `base.txt` and
+    /// updates `other.txt` cleanly (origin alone changes it). The clean update
+    /// is what a failed abort trips over in the dirty-file shape.
+    fn conflicting_diverge(tmp: &Path, local: &Path) {
+        std::fs::write(local.join("other.txt"), "other\n").unwrap();
+        git(&["add", "."], local);
+        git(&["commit", "-m", "add-other"], local);
+        git(&["push", "origin", "main"], local);
+        advance_origin(tmp, |helper| {
+            std::fs::write(helper.join("base.txt"), "helper-version\n").unwrap();
+            std::fs::write(helper.join("other.txt"), "helper-other\n").unwrap();
+            git(&["add", "."], helper);
+            git(&["commit", "-m", "helper-edit"], helper);
+        });
+        std::fs::write(local.join("base.txt"), "local-version\n").unwrap();
+        git(&["add", "."], local);
+        git(&["commit", "-m", "local-edit"], local);
+    }
+
+    /// Install a `post-index-change` hook in `local` that runs `action` (a
+    /// `/bin/sh` snippet; cwd is the worktree, `$D` the absolute git dir)
+    /// exactly once: at the index write that checks out a conflicted merge,
+    /// which is the last thing `git merge` does before `pull_repo` runs
+    /// `git merge --abort` with nothing in between.
+    ///
+    /// Why it fires once and never during the abort: git runs the hook after
+    /// every index write, with `$1 = 1` only when entries changed. A conflicted
+    /// merge writes the index twice, a refresh (`$1 = 0`) and the checkout
+    /// (`$1 = 1`), both before MERGE_HEAD is written; the abort writes it once,
+    /// with MERGE_HEAD present, after its reset has already succeeded. Gating on
+    /// `$1 = 1` and no MERGE_HEAD therefore matches the checkout write alone, so
+    /// the abort meets whatever `action` left behind (probed on git 2.50.1,
+    /// ticket 28). `core.hooksPath` is set in the local config to an absolute
+    /// directory, because a global `core.hooksPath` would otherwise skip
+    /// `.git/hooks` silently and the test would pass on the unfixed code.
+    fn arm_conflicted_merge_hook(local: &Path, action: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let hooks = local.join(".git").join("ticket-28-hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("post-index-change");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nD=$(git rev-parse --absolute-git-dir)\n\
+                 if [ \"$1\" = 1 ] && [ ! -e \"$D/MERGE_HEAD\" ]; then\n{action}\nfi\nexit 0\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(
+            &["config", "core.hooksPath", hooks.to_str().unwrap()],
+            local,
+        );
+    }
+
+    /// The abort after a conflicted merge fails because a file the merge
+    /// updated cleanly was changed underneath it (git: "not uptodate"). The
+    /// repo stays mid-merge and the report must say so, with git's reason.
+    #[test]
+    fn pull_repo_reports_a_failed_abort_and_leaves_the_merge_in_place() {
+        let (tmp, local) = origin_and_local();
+        conflicting_diverge(tmp.path(), &local);
+        arm_conflicted_merge_hook(&local, "printf edited > other.txt");
+
+        let result = pull_repo(&local);
+
+        assert!(
+            matches!(result.outcome, PullOutcome::AbortFailed),
+            "a failed abort must report AbortFailed, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(!result.success(), "AbortFailed is not a success");
+        assert!(
+            result.message.contains("not uptodate"),
+            "the report must carry git's reason, got: {}",
+            result.message
+        );
+        assert!(
+            result.message.contains("MERGE_HEAD"),
+            "the report must say the repo is left mid-merge, got: {}",
+            result.message
+        );
+        assert!(
+            merge_head_present(&local),
+            "a failed abort leaves MERGE_HEAD in place"
+        );
+        assert!(
+            std::fs::read_to_string(local.join("base.txt"))
+                .unwrap()
+                .contains("<<<<<<<"),
+            "the conflict markers are still there for the user to resolve"
+        );
+    }
+
+    /// The abort fails because an `index.lock` appeared after the merge
+    /// conflicted. git's first stderr line names the lock; the report carries
+    /// that line and nothing more of git's seven-line advice, so the three
+    /// lines fit the Running overlay at 80x24.
+    #[test]
+    fn pull_repo_reports_a_failed_abort_when_the_index_is_locked() {
+        let (tmp, local) = origin_and_local();
+        conflicting_diverge(tmp.path(), &local);
+        arm_conflicted_merge_hook(&local, ": > \"$D/index.lock\"");
+
+        let result = pull_repo(&local);
+
+        assert!(
+            matches!(result.outcome, PullOutcome::AbortFailed),
+            "a locked abort must report AbortFailed, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(
+            result.message.contains("index.lock"),
+            "the report must carry git's first stderr line, got: {}",
+            result.message
+        );
+        assert_eq!(
+            result.message.lines().count(),
+            3,
+            "what happened, git's first line, what to do: {}",
+            result.message
+        );
+        assert!(
+            merge_head_present(&local),
+            "a failed abort leaves MERGE_HEAD in place"
+        );
+    }
+
+    /// An unstaged local edit stops the merge from starting at all. Nothing is
+    /// mid-merge, so nothing is aborted: the report is a plain failure with
+    /// git's own text, the diverged twin of the blocked fast-forward test.
+    #[test]
+    fn pull_repo_does_not_abort_a_merge_that_never_started() {
+        let (tmp, local) = origin_and_local();
+        conflicting_diverge(tmp.path(), &local);
+        std::fs::write(local.join("base.txt"), "dirty-local\n").unwrap();
+
+        let result = pull_repo(&local);
+
+        assert!(
+            matches!(result.outcome, PullOutcome::Failed),
+            "a merge that never started must report Failed, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(
+            result
+                .message
+                .starts_with("Merge of origin/main into main failed:"),
+            "got: {}",
+            result.message
+        );
+        assert!(
+            result.message.contains("would be overwritten"),
+            "the report must carry git's reason, got: {}",
+            result.message
+        );
+        assert!(
+            !result.message.contains("restored"),
+            "nothing was aborted, so nothing was restored: {}",
+            result.message
+        );
+        assert!(!merge_head_present(&local), "no merge was started");
+        assert_eq!(
+            std::fs::read_to_string(local.join("base.txt")).unwrap(),
+            "dirty-local\n",
+            "the local edit must survive untouched"
+        );
+    }
+
+    /// The user's own merge is mid-conflict when pull runs. Pull must refuse
+    /// before touching anything: on the unfixed code the merge fails to start
+    /// and the blanket abort throws the user's merge away, then reports a
+    /// clean restore.
+    #[test]
+    fn pull_repo_leaves_a_pre_existing_merge_alone() {
+        let (tmp, local) = origin_and_local();
+        conflicting_diverge(tmp.path(), &local);
+        git(&["checkout", "-b", "side", "HEAD~1"], &local);
+        std::fs::write(local.join("base.txt"), "side-version\n").unwrap();
+        git(&["add", "."], &local);
+        git(&["commit", "-m", "side-edit"], &local);
+        git(&["checkout", "main"], &local);
+        let merge = Cmd::new("git")
+            .args(["merge", "--no-edit", "side"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        assert!(!merge.status.success(), "the fixture merge must conflict");
+        assert!(
+            merge_head_present(&local),
+            "the fixture leaves a merge in progress"
+        );
+        let markers_before = std::fs::read_to_string(local.join("base.txt")).unwrap();
+        assert!(markers_before.contains("<<<<<<<"));
+
+        let result = pull_repo(&local);
+
+        assert!(
+            matches!(result.outcome, PullOutcome::Failed),
+            "a pre-existing merge must be refused as Failed, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(
+            result.message.contains("MERGE_HEAD") && result.message.contains("git merge --abort"),
+            "the refusal must name the state and the commands, got: {}",
+            result.message
+        );
+        assert!(
+            merge_head_present(&local),
+            "the user's merge must still be in progress"
+        );
+        assert_eq!(
+            std::fs::read_to_string(local.join("base.txt")).unwrap(),
+            markers_before,
+            "the user's conflict must be untouched"
+        );
+    }
+
+    /// A ref named `MERGE_HEAD` (here a tag the fetch brings in) must not read
+    /// as a merge in progress: git decides that by the file in the git dir,
+    /// and so does `pull_repo`. A ref-name lookup (`rev-parse --verify`)
+    /// would refuse every pull of a repo whose origin carries such a tag. The
+    /// first pull fetches the tag and merges; it is the second pull, with the
+    /// tag now in the local refs when the pre-fetch check runs, that tells the
+    /// two implementations apart (the coordinator's review of PR #54 found the
+    /// one-pull version green on the ref lookup).
+    #[test]
+    fn pull_repo_ignores_a_ref_named_merge_head() {
+        let (tmp, local) = origin_and_local();
+        advance_origin(tmp.path(), |helper| {
+            std::fs::write(helper.join("remote.txt"), "remote\n").unwrap();
+            git(&["add", "."], helper);
+            git(&["commit", "-m", "remote-edit"], helper);
+            git(&["tag", "MERGE_HEAD"], helper);
+            git(&["push", "origin", "MERGE_HEAD"], helper);
+        });
+        std::fs::write(local.join("local.txt"), "local\n").unwrap();
+        git(&["add", "."], &local);
+        git(&["commit", "-m", "local-edit"], &local);
+
+        let result = pull_repo(&local);
+
+        assert!(
+            matches!(result.outcome, PullOutcome::Merged),
+            "a tag named MERGE_HEAD is not a merge in progress, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(!merge_head_present(&local), "the merge was committed");
+        assert!(
+            get_sha(&local, "refs/tags/MERGE_HEAD") == get_sha(&local, "origin/main"),
+            "the fetch brought the tag in"
+        );
+
+        let again = pull_repo(&local);
+
+        // The merge commit puts main ahead of origin, so a second pull is a
+        // no-op success; a ref lookup would refuse it as mid-merge instead.
+        assert!(
+            again.success(),
+            "with the tag in the local refs the repo is still not mid-merge, got {:?}: {}",
+            again.outcome,
+            again.message
+        );
+    }
+
+    /// A behind-only branch with the user's merge in progress: refused by the
+    /// check before the fetch, and git's `merge --ff-only` would refuse too
+    /// (probed on git 2.50.1, exit 128), so the user's merge is left alone.
+    #[test]
+    fn pull_repo_fast_forward_arm_leaves_a_pre_existing_merge_alone() {
+        let (tmp, local) = origin_and_local();
+        let base_sha = get_sha(&local, "main");
+        // origin: base -> B (edits base.txt) -> C (adds remote.txt). Local
+        // main moves to B only, so it is strictly behind (0 ahead, 1 behind).
+        advance_origin(tmp.path(), |helper| {
+            std::fs::write(helper.join("base.txt"), "b-version\n").unwrap();
+            git(&["add", "."], helper);
+            git(&["commit", "-m", "b-edit"], helper);
+            std::fs::write(helper.join("remote.txt"), "remote\n").unwrap();
+            git(&["add", "."], helper);
+            git(&["commit", "-m", "c-edit"], helper);
+        });
+        git(&["fetch", "origin"], &local);
+        git(&["merge", "--ff-only", "origin/main~1"], &local);
+        // A side branch from the base edits base.txt too, so merging it into
+        // main (at B) conflicts without moving main.
+        git(&["checkout", "-b", "side", &base_sha], &local);
+        std::fs::write(local.join("base.txt"), "side-version\n").unwrap();
+        git(&["add", "."], &local);
+        git(&["commit", "-m", "side-edit"], &local);
+        git(&["checkout", "main"], &local);
+        let merge = Cmd::new("git")
+            .args(["merge", "--no-edit", "side"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        assert!(!merge.status.success(), "the fixture merge must conflict");
+        assert!(
+            merge_head_present(&local),
+            "the fixture leaves a merge in progress"
+        );
+        assert_eq!(
+            git::ahead_behind(&local).unwrap(),
+            (0, 1),
+            "main is behind only"
+        );
+        let markers_before = std::fs::read_to_string(local.join("base.txt")).unwrap();
+        assert!(markers_before.contains("<<<<<<<"));
+        let sha_before = get_sha(&local, "main");
+
+        let result = pull_repo(&local);
+
+        assert!(
+            matches!(result.outcome, PullOutcome::Failed),
+            "git refuses the fast-forward, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(
+            merge_head_present(&local),
+            "the user's merge is still in progress"
+        );
+        assert_eq!(sha_before, get_sha(&local, "main"), "main did not move");
+        assert_eq!(
+            std::fs::read_to_string(local.join("base.txt")).unwrap(),
+            markers_before,
+            "the user's conflict is untouched"
+        );
+    }
+
+    /// The refusal does not depend on the branch state: a repo that is up to
+    /// date with origin but mid-merge is refused too, not told "nothing to
+    /// pull" while conflict markers sit in the tree (found by the independent
+    /// reviewer of PR #54 on the version that checked only the diverged arm).
+    #[test]
+    fn pull_repo_refuses_a_pre_existing_merge_when_up_to_date() {
+        let (_tmp, local) = origin_and_local();
+        let base_sha = get_sha(&local, "main");
+        std::fs::write(local.join("base.txt"), "main-version\n").unwrap();
+        git(&["add", "."], &local);
+        git(&["commit", "-m", "main-edit"], &local);
+        git(&["push", "origin", "main"], &local);
+        git(&["checkout", "-b", "side", &base_sha], &local);
+        std::fs::write(local.join("base.txt"), "side-version\n").unwrap();
+        git(&["add", "."], &local);
+        git(&["commit", "-m", "side-edit"], &local);
+        git(&["checkout", "main"], &local);
+        let merge = Cmd::new("git")
+            .args(["merge", "--no-edit", "side"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        assert!(!merge.status.success(), "the fixture merge must conflict");
+        assert!(
+            merge_head_present(&local),
+            "the fixture leaves a merge in progress"
+        );
+        assert_eq!(
+            git::ahead_behind(&local).unwrap(),
+            (0, 0),
+            "main is up to date"
+        );
+        let markers_before = std::fs::read_to_string(local.join("base.txt")).unwrap();
+        assert!(markers_before.contains("<<<<<<<"));
+
+        let result = pull_repo(&local);
+
+        assert!(
+            matches!(result.outcome, PullOutcome::Failed),
+            "a pre-existing merge must be refused as Failed, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(
+            result.message.contains("mid-merge") && result.message.contains("git merge --continue"),
+            "the refusal must name the state and the commands, got: {}",
+            result.message
+        );
+        assert!(
+            merge_head_present(&local),
+            "the user's merge is still in progress"
+        );
+        assert_eq!(
+            std::fs::read_to_string(local.join("base.txt")).unwrap(),
+            markers_before,
+            "the user's conflict is untouched"
         );
     }
 
