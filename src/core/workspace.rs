@@ -7581,7 +7581,7 @@ mod tests {
                 Path::new("-dashout"),
                 "main".to_string(),
                 &strategy,
-                None,
+                existing_split(&local, &strategy, &[]),
             )
             .unwrap_or_else(|e| {
                 panic!(
