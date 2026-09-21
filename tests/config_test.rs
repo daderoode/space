@@ -7,13 +7,18 @@ use tempfile::TempDir;
 /// concurrently.  Rust's test harness runs tests in parallel by default;
 /// without this lock, config_path_is_under_config_dir can observe the temp
 /// path set by config_dir_respects_space_config_dir_env and fail the
-/// `ends_with("space/config.toml")` assertion.
-///
-/// Taken with `into_inner()` on poison (the shape of `core::spawn::enter`):
-/// a `std::sync::Mutex` poisons when a holder panics, and a bare `unwrap()`
-/// would fail every later holder in this binary for one failing assertion.
-/// The lock guards no data, only the order of the tests.
+/// `ends_with("space/config.toml")` assertion. Taken through `env_lock`.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// Take `ENV_LOCK`, recovering the guard if a previous holder panicked (the
+/// shape of `core::spawn::enter`): a `std::sync::Mutex` poisons when a
+/// holder panics, and a bare `unwrap()` would fail every later holder in
+/// this binary for one failing assertion. The lock guards no data, only the
+/// order of the tests. Every site takes the lock through here, so
+/// `a_panic_under_the_env_lock_fails_only_its_own_test` covers them all.
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Removes `SPACE_CONFIG_DIR` when dropped, so a panic between `set_var` and
 /// the removal (an unwind under `ENV_LOCK`) cannot leak the temp path into
@@ -54,7 +59,7 @@ dir = "/tmp/test-workspaces"
 
 #[test]
 fn config_path_is_under_config_dir() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = env_lock();
     let path = SpaceConfig::config_path();
     assert!(
         path.ends_with("space/config.toml"),
@@ -66,7 +71,7 @@ fn config_path_is_under_config_dir() {
 fn config_dir_respects_space_config_dir_env() {
     // ENV_LOCK serialises this test with config_path_is_under_config_dir so
     // the set_var/remove_var pair does not race with the assertion there.
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = env_lock();
     let tmp = TempDir::new().unwrap();
     std::env::set_var("SPACE_CONFIG_DIR", tmp.path());
     let _env_guard = EnvGuard;
@@ -105,19 +110,20 @@ fn config_save_load_round_trip() {
 
 /// One test panicking under `ENV_LOCK` must not fail the tests that lock it
 /// next. The guard drops while the thread is panicking, which is what poisons
-/// a `std::sync::Mutex`; the second acquisition then only succeeds because the
-/// lock is taken with `into_inner()` on poison instead of a bare `unwrap()`.
+/// a `std::sync::Mutex`; the second acquisition then only succeeds because
+/// `env_lock` recovers the guard from the poison instead of unwrapping.
+/// Every site takes the lock through `env_lock`, so this one call covers
+/// them all whatever order the scheduler picks.
 ///
 /// Recovering the guard does not clear the poison, so from this test on the
-/// lock stays poisoned for the rest of the binary and a bare `unwrap()`
-/// reintroduced at either other site fails whenever it runs after this one.
-/// The name sorts first so that under `--test-threads=1` both do.
+/// lock stays poisoned for the rest of the binary; a site that bypasses
+/// `env_lock` with a bare `unwrap()` fails whenever it runs after this one.
 #[test]
 fn a_panic_under_the_env_lock_fails_only_its_own_test() {
     let outcome = std::panic::catch_unwind(|| {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = env_lock();
         panic!("deliberate panic while holding ENV_LOCK");
     });
     assert!(outcome.is_err(), "the body must have panicked");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = env_lock();
 }
