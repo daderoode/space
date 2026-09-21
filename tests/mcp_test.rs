@@ -1452,3 +1452,293 @@ fn remove_workspace_reports_a_locked_worktree() {
         );
     });
 }
+
+/// `existing` names no branch, so the tool refuses before anything is
+/// placed, with the sentence `create_workspace` uses for the same omission.
+/// Until ticket 21 the missing branch was silently the space name: a local
+/// branch of that name was checked out, a remote-only one was guessed into a
+/// tracking branch by git, and neither gave `invalid reference` from git
+/// rather than the parameter the client left out.
+#[test]
+fn add_repos_existing_without_branch_is_refused_before_anything_is_added() {
+    with_test_env(|env, server| {
+        let repo_a = env.create_repo("repo-a");
+        let repo_b = env.create_repo("repo-b");
+        env.write_cache(&[repo_a.clone(), repo_b.clone()]);
+        // repo-b has the branch the old default would have picked, so a
+        // silent default would succeed here rather than fail on git.
+        git(&repo_b, &["branch", "add-ws"]);
+        create_ws(server, "add-ws", &["repo-a"], "new", None).unwrap();
+
+        let err = add_to_ws(server, "add-ws", &["repo-b"], "existing", None)
+            .expect_err("existing without a branch must be refused");
+        assert_eq!(
+            invalid_params(&err),
+            "branch name is required when strategy is 'existing'"
+        );
+        let place = env.workspaces_dir.join("add-ws").join("repo-b");
+        assert!(!place.exists(), "nothing was added at {}", place.display());
+        assert!(
+            !git_lists_worktree(&repo_b, &place),
+            "and git knows no worktree there"
+        );
+    });
+}
+
+/// The gates run in `create_workspace`'s order: the repo names are resolved
+/// before the branch rule, so a call that omits the branch for `existing`
+/// and names a repo the cache does not hold is told about the repo, not the
+/// branch. Swapping the two gates in `add_repos` fails this test.
+#[test]
+fn add_repos_reports_an_unknown_repo_ahead_of_a_missing_branch() {
+    with_test_env(|env, server| {
+        let repo_a = env.create_repo("repo-a");
+        env.write_cache(std::slice::from_ref(&repo_a));
+        create_ws(server, "add-ws", &["repo-a"], "new", None).unwrap();
+
+        let err = add_to_ws(server, "add-ws", &["ghost"], "existing", None)
+            .expect_err("an unknown repo must be refused");
+        assert_eq!(
+            invalid_params(&err),
+            "repo 'ghost' not found in cache. Run list_repos with refresh=true to rescan.",
+            "the repo is reported, not the branch"
+        );
+    });
+}
+
+/// The guard against over-fixing: `existing` with a branch still checks
+/// that branch out, and the worktree's HEAD is the branch the call named.
+#[test]
+fn add_repos_existing_with_branch_checks_it_out() {
+    with_test_env(|env, server| {
+        let repo_a = env.create_repo("repo-a");
+        let repo_b = env.create_repo("repo-b");
+        env.write_cache(&[repo_a.clone(), repo_b.clone()]);
+        git(&repo_b, &["branch", "topic"]);
+        create_ws(server, "add-ws", &["repo-a"], "new", None).unwrap();
+
+        let result = add_to_ws(server, "add-ws", &["repo-b"], "existing", Some("topic")).unwrap();
+        let parsed = parsed(&result);
+        assert_eq!(names(&parsed, "added"), ["repo-b"]);
+        assert_eq!(names(&parsed, "already_added"), Vec::<String>::new());
+        let place = env.workspaces_dir.join("add-ws").join("repo-b");
+        assert!(git_lists_worktree(&repo_b, &place));
+        assert_eq!(
+            space::core::git::current_branch(&place).unwrap(),
+            "topic",
+            "the worktree is on the branch the call named"
+        );
+    });
+}
+
+/// The tools as the server serves them to a client: `tools/list` over the
+/// real binary's stdio, keyed by tool name. Each value is the wire object
+/// (`name`, `description`, `inputSchema`). The reader thread and the 20 s
+/// give-up follow `remove_workspace_keeps_the_jsonrpc_stream_parseable`.
+///
+/// `ENV_LOCK` is held only across the spawn, which is when the child copies
+/// the environment other tests set and remove; every line read and every
+/// check runs outside it, so a failure here poisons nothing for the tests
+/// that lock it next. Lines are parsed strictly only after the child is
+/// killed and waited for, so a line that is not a message fails the test
+/// with no server left running.
+fn tools_over_stdio(env: &TestEnv) -> std::collections::BTreeMap<String, serde_json::Value> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    let mut server = {
+        let _guard = ENV_LOCK.lock().unwrap();
+        Command::new(env!("CARGO_BIN_EXE_space"))
+            .arg("mcp")
+            .env("SPACE_CONFIG_DIR", &env.config_dir)
+            .env("HOME", env.dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the built binary must start")
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = server.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(line) => {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut stdin = server.stdin.take().unwrap();
+    for message in [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+    ] {
+        writeln!(stdin, "{message}").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    // Collect until the answer to the listing arrives, the server ends, or
+    // 20 s pass; which one is reported once the server is cleaned up.
+    let mut lines: Vec<String> = Vec::new();
+    let mut answered = false;
+    let mut ended = "20 s passed";
+    while !answered {
+        match rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(line) => {
+                answered = serde_json::from_str::<serde_json::Value>(&line)
+                    .ok()
+                    .and_then(|v| v.get("id").and_then(|id| id.as_u64()))
+                    == Some(2);
+                lines.push(line);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                ended = "the server closed its stdout";
+                break;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+        }
+    }
+    drop(stdin);
+    let _ = server.kill();
+    let _ = server.wait();
+    let _ = reader.join();
+
+    let mut listing = None;
+    for line in &lines {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap_or_else(|e| {
+            panic!("stdout carried a line that is not a message: {line:?} ({e})")
+        });
+        if value.get("id").and_then(|id| id.as_u64()) == Some(2) {
+            listing = Some(value);
+        }
+    }
+    let listing = listing.unwrap_or_else(|| {
+        panic!("tools/list was not answered: {ended}; the server wrote {lines:#?}")
+    });
+    listing["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools/list result carries no tools array: {listing}"))
+        .iter()
+        .map(|tool| (tool["name"].as_str().unwrap().to_string(), tool.clone()))
+        .collect()
+}
+
+/// The tool description and input schema are the only contract an MCP
+/// client reads; the guide is never served to it. These are the sentences a
+/// client acts on, as served: an adopted repo keeps its branch and this
+/// call's strategy and branch do not apply to it (the sentence PR #38's
+/// review falsified and no test caught), the call stops at the first repo
+/// that fails, an empty `repos_already_created` does not mean the name was
+/// free, and the branch rule of each strategy. `branch` stays optional in
+/// the schema because `new` defaults it. Presence is not enough: the old
+/// schema sentence claimed `branch` was required for `new` too, so both
+/// tools are also checked not to say it, or a contradicting sentence added
+/// beside the pinned one would pass.
+#[test]
+fn tools_list_carries_the_adopt_stop_and_branch_rules() {
+    let env = TestEnv::new();
+    let tools = tools_over_stdio(&env);
+    let served = |name: &str| -> (String, serde_json::Value) {
+        let tool = tools
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} is not served; tools: {:?}", tools.keys()));
+        (
+            tool["description"].as_str().unwrap().to_string(),
+            tool["inputSchema"].clone(),
+        )
+    };
+    let has = |text: &str, sentence: &str, rule: &str| {
+        assert!(
+            text.contains(sentence),
+            "{rule}: {sentence:?} not in {text:?}"
+        );
+    };
+    let lacks = |text: &str, sentence: &str, rule: &str| {
+        assert!(
+            !text.contains(sentence),
+            "{rule}: {sentence:?} still in {text:?}"
+        );
+    };
+    let branch_rule =
+        "Branch name. Defaults to the workspace name for \"new\". Required for \"existing\".";
+    // The sentence both schemas served before ticket 21.
+    let old_branch_rule = "Required when strategy is";
+
+    let (desc, schema) = served("create_workspace");
+    has(
+        &desc,
+        "is left as it is, on the branch it already has (this call's strategy and branch do not apply to it; workspace_status shows it), and is listed under repos_already_created, not repos_created",
+        "create: an adopted repo keeps its branch",
+    );
+    has(
+        &desc,
+        "so an empty one does not mean the name was free",
+        "create: an empty list is not a free name",
+    );
+    has(
+        &desc,
+        "The call stops at the first repo that fails",
+        "create: stops at the first failure",
+    );
+    has(
+        &desc,
+        "'existing' (checkout existing branch",
+        "create: the strategies",
+    );
+    let branch_doc = schema["properties"]["branch"]["description"]
+        .as_str()
+        .unwrap();
+    has(
+        branch_doc,
+        branch_rule,
+        "create: the branch rule in the schema",
+    );
+    lacks(
+        branch_doc,
+        old_branch_rule,
+        "create: the old branch sentence is gone",
+    );
+    assert_eq!(schema["required"], serde_json::json!(["name", "repos"]));
+
+    let (desc, schema) = served("add_repos");
+    has(
+        &desc,
+        "is left as it is, on the branch it already has (this call's strategy and branch do not apply to it; workspace_status shows it), and is listed under already_added, not added",
+        "add: an adopted repo keeps its branch",
+    );
+    has(
+        &desc,
+        "The call stops at the first repo that fails",
+        "add: stops at the first failure",
+    );
+    has(
+        &desc,
+        "Strategy: 'new' (create branch named after the workspace unless branch is given, default), 'existing' (checkout existing branch; branch is required), or 'detached' (detached HEAD).",
+        "add: the strategies and the branch rule",
+    );
+    let branch_doc = schema["properties"]["branch"]["description"]
+        .as_str()
+        .unwrap();
+    has(
+        branch_doc,
+        branch_rule,
+        "add: the branch rule in the schema",
+    );
+    lacks(
+        branch_doc,
+        old_branch_rule,
+        "add: the old branch sentence is gone",
+    );
+    assert_eq!(
+        schema["required"],
+        serde_json::json!(["workspace", "repos"])
+    );
+}

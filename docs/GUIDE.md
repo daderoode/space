@@ -693,7 +693,7 @@ Add repos to an existing workspace.
 | `workspace` | `string` | -- | Existing workspace name. Must be one plain path component (no `/`, `\`, `.` or `..`, no control or formatting characters, not empty) |
 | `repos` | `string[]` | -- | Repo names to add |
 | `strategy` | `string` | `"new"` | Branch strategy (same options as `create_workspace`) |
-| `branch` | `string?` | `null` | Branch name. Defaults to workspace name |
+| `branch` | `string?` | `null` | Branch name. Defaults to workspace name for `"new"`. Required for `"existing"`. Checked with `git check-ref-format --branch` |
 
 **Returns:**
 
