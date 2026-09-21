@@ -11334,3 +11334,311 @@ fn add_two_exact_names_preselects_both() {
     let text = render_text(&app, 80, 24);
     assert!(text.contains("2 selected  3/3 matched"), "{text}");
 }
+
+// ---------------------------------------------------------------------------
+// Ticket 25: a push whose destination is not origin asks first.
+// ---------------------------------------------------------------------------
+
+mod push_remote_confirmation_tests {
+    use super::*;
+    use space::core::git::PushTarget;
+    use space::tui::screens::gitops::{GitOpsStage, GitOpsState};
+
+    /// The git-ops menu on a repo whose branch `feat` has an upstream and
+    /// whose bare push would go to `remote`. The path is not a repo, so the
+    /// state is set by hand, as the worker never runs in these tests except
+    /// where a test says so.
+    fn menu_app(remote: &str) -> App {
+        let mut app = test_app(vec![], vec![]);
+        let mut st = GitOpsState::new(
+            "repo-a".to_string(),
+            PathBuf::from("/nonexistent/ticket-25/repo-a"),
+        );
+        st.branch = "feat".to_string();
+        st.has_upstream = true;
+        st.push_target = Some(PushTarget {
+            remote: remote.to_string(),
+            tracks: format!("{}/feat", remote),
+        });
+        app.screen = Screen::GitOps(st);
+        app
+    }
+
+    fn stage(app: &App) -> GitOpsStage {
+        match &app.screen {
+            Screen::GitOps(st) => st.stage.clone(),
+            other => panic!("left the overlay: {:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    #[test]
+    fn push_to_another_remote_asks_first() {
+        let mut app = menu_app("upstream");
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::ConfirmPushRemote,
+            "a push bound for upstream must ask, not run"
+        );
+        assert!(app.gitop_rx.is_none(), "no worker before the answer");
+    }
+
+    #[test]
+    fn push_to_origin_runs_without_asking() {
+        let mut app = menu_app("origin");
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::Running,
+            "a push bound for origin keeps today's no-prompt path"
+        );
+        assert!(app.gitop_rx.is_some(), "the worker starts at once");
+    }
+
+    #[test]
+    fn y_confirms_the_push_to_the_other_remote() {
+        let mut app = menu_app("upstream");
+        app.handle_key(key(KeyCode::Char('P')));
+        app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(stage(&app), GitOpsStage::Running);
+        assert!(app.gitop_rx.is_some(), "y starts the push worker");
+    }
+
+    #[test]
+    fn n_esc_and_enter_push_nothing() {
+        for code in [
+            KeyCode::Char('n'),
+            KeyCode::Char('q'),
+            KeyCode::Esc,
+            KeyCode::Enter,
+        ] {
+            let mut app = menu_app("upstream");
+            app.handle_key(key(KeyCode::Char('P')));
+            app.handle_key(key(code));
+            assert_eq!(
+                stage(&app),
+                GitOpsStage::Menu,
+                "{:?} declines back to the menu",
+                code
+            );
+            assert!(app.gitop_rx.is_none(), "{:?} starts no worker", code);
+        }
+    }
+
+    /// An upstream whose push destination could not be read (a config
+    /// value git2 cannot decode, a ref name that is not UTF-8) is not a
+    /// reason to push unasked: the destination is unknown, so the stage
+    /// asks, and says so.
+    #[test]
+    fn an_unreadable_destination_asks_rather_than_pushing() {
+        let mut app = menu_app("upstream");
+        if let Screen::GitOps(st) = &mut app.screen {
+            st.push_target = None;
+        }
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::ConfirmPushRemote,
+            "an unknown destination asks"
+        );
+        assert!(app.gitop_rx.is_none(), "no worker before the answer");
+        let flat = render_text(&app, 80, 24)
+            .replace(
+                ['\u{2502}', '\u{256d}', '\u{256e}', '\u{2570}', '\u{256f}'],
+                " ",
+            )
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            flat.contains("Branch feat: where a push goes could not be read. Push anyway? [y/N]"),
+            "the prompt says the destination is unknown, got:\n{}",
+            flat
+        );
+    }
+
+    /// `?` opens the help overlay over the stage and closing it returns
+    /// there, as on every other git-ops stage (ADR 0001).
+    #[test]
+    fn question_mark_opens_help_over_the_confirmation_and_returns_to_it() {
+        let mut app = menu_app("upstream");
+        app.handle_key(key(KeyCode::Char('P')));
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_some(), "? opens help on the confirmation stage");
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::ConfirmPushRemote,
+            "the stage waits underneath"
+        );
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.help.is_none(), "Esc closes the help overlay");
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::ConfirmPushRemote,
+            "and returns to the prompt"
+        );
+        assert!(app.gitop_rx.is_none(), "help never starts a push");
+    }
+
+    /// The dialog is seven rows at 80x24, the same shape as the no-upstream
+    /// confirmation: the title row, the prompt's rows, and the bottom border.
+    #[test]
+    fn the_confirmation_dialog_is_seven_rows_at_80_by_24() {
+        let mut app = menu_app("upstream");
+        app.handle_key(key(KeyCode::Char('P')));
+        let text = render_text(&app, 80, 24);
+        let lines: Vec<&str> = text.lines().collect();
+        let top = lines
+            .iter()
+            .position(|l| l.contains("Git: repo-a (feat)"))
+            .expect("the dialog title row");
+        let bottom = lines[top..]
+            .iter()
+            .position(|l| l.contains("\u{2570}"))
+            .map(|i| top + i)
+            .expect("the dialog's bottom border");
+        assert_eq!(bottom - top + 1, 7, "dialog rows, got:\n{}", text);
+    }
+
+    /// A branch that tracks a local branch has `branch.<n>.remote = .`,
+    /// git's name for the repository itself; the prompt says that instead
+    /// of printing a dot.
+    #[test]
+    fn a_dot_remote_is_named_as_this_repository() {
+        let mut app = menu_app(".");
+        if let Screen::GitOps(st) = &mut app.screen {
+            st.push_target = Some(PushTarget {
+                remote: ".".to_string(),
+                tracks: "main".to_string(),
+            });
+        }
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::ConfirmPushRemote,
+            "a dot remote asks"
+        );
+        let flat = render_text(&app, 80, 24)
+            .replace(
+                ['\u{2502}', '\u{256d}', '\u{256e}', '\u{2570}', '\u{256f}'],
+                " ",
+            )
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            flat.contains(
+                "Branch feat tracks the local branch main. Push into this repository? [y/N]"
+            ),
+            "got:\n{}",
+            flat
+        );
+    }
+
+    /// The whole path on a real repository, not three stubs: a repo with
+    /// two remotes whose checked-out branch tracks `upstream/feat`, the
+    /// overlay opened with `G` (so `GitOpsState::new` resolves the
+    /// destination itself), then `P`. Its mirror on a branch tracking
+    /// `origin/main` takes the no-prompt path.
+    fn real_two_remote_app(track: &str) -> (TestEnv, App) {
+        let env = TestEnv::new();
+        let repo = env.create_repo("two");
+        let run = |args: &[&str], dir: &std::path::Path| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        for remote in ["origin", "upstream"] {
+            let bare = env.workspaces_dir.join(format!("{}.git", remote));
+            std::fs::create_dir_all(&bare).unwrap();
+            run(&["init", "-q", "--bare", "-b", "main"], &bare);
+            run(&["remote", "add", remote, bare.to_str().unwrap()], &repo);
+        }
+        run(&["push", "-q", "origin", "main"], &repo);
+        run(&["push", "-q", "upstream", "main:feat"], &repo);
+        run(&["fetch", "-q", "--all"], &repo);
+        run(&["checkout", "-q", "-b", "feat", "--track", track], &repo);
+
+        let ws = Workspace {
+            name: "test-ws".into(),
+            path: env.workspaces_dir.clone(),
+            repos: vec![WorkspaceRepo {
+                name: "two".into(),
+                path: repo.clone(),
+                branch: "feat".into(),
+                status: RepoStatus::default(),
+                ahead: 0,
+                behind: 0,
+            }],
+        };
+        let config = config_from_env(&env);
+        let mut app = test_app_with_config(config, vec![ws], vec![repo]);
+        app.load_selected_workspace_detail();
+        app.focus = Pane::Right;
+        app.handle_key(shift_key(KeyCode::Char('G')));
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "fixture must reach the git-ops overlay"
+        );
+        (env, app)
+    }
+
+    #[test]
+    fn a_real_worktree_tracking_upstream_asks_before_pushing() {
+        let (_env, mut app) = real_two_remote_app("upstream/feat");
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::ConfirmPushRemote,
+            "the destination read from the real repo is upstream, so Push asks"
+        );
+        assert!(app.gitop_rx.is_none(), "no worker before the answer");
+    }
+
+    #[test]
+    fn a_real_worktree_tracking_origin_pushes_without_asking() {
+        let (_env, mut app) = real_two_remote_app("origin/main");
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::Running,
+            "the destination read from the real repo is origin, so Push runs"
+        );
+        assert!(app.gitop_rx.is_some(), "the worker starts at once");
+    }
+
+    #[test]
+    fn the_prompt_names_the_branch_and_both_remotes_at_80_by_24() {
+        let mut app = menu_app("upstream");
+        app.handle_key(key(KeyCode::Char('P')));
+        let text = render_text(&app, 80, 24);
+        // The dialog is 48 columns wide at 80, so the prompt wraps over two
+        // rows; read it across rows with the box border and padding removed.
+        let flat = text
+            .replace(
+                ['\u{2502}', '\u{256d}', '\u{256e}', '\u{2570}', '\u{256f}'],
+                " ",
+            )
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            flat.contains("Git: repo-a (feat)"),
+            "the title names the repo and branch, got:\n{}",
+            text
+        );
+        assert!(
+            flat.contains("Branch feat tracks upstream/feat. Push to upstream? [y/N]"),
+            "the prompt is shown whole at the documented minimum, got:\n{}",
+            text
+        );
+    }
+}

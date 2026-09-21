@@ -323,7 +323,12 @@ impl CreateState {
                     // creation rule accepts names git does not (`my space`,
                     // `v1..v2`), so ask git here as the branch stage does.
                     let strategy = self.branch_strategy();
-                    if let Some(branch) = crate::core::workspace::branch_slot_name(&strategy) {
+                    // A space name has no `/`, so no remote prefix can
+                    // apply here; the per-repo guard in the worker derives
+                    // the real name.
+                    if let Some(branch) =
+                        crate::core::workspace::branch_slot_name(&strategy, &[], None)
+                    {
                         if let Err(e) = crate::core::workspace::check_branch_name(branch) {
                             self.error = Some(e.to_string());
                             return ScreenAction::Continue;

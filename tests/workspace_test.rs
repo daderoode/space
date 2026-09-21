@@ -2686,6 +2686,517 @@ fn remove_workspace_never_tells_copies_of_an_outside_worktree_to_repair() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Ticket 25: a remote-tracking branch of any remote becomes a local tracking
+// branch, the way `origin/<name>` always has.
+// ---------------------------------------------------------------------------
+
+/// A repo with two remotes, `origin` and `upstream` (bare repos beside it),
+/// plus a third remote named `a/b` (a slash in a remote name is legal) that
+/// points at the same bare repo as `upstream`. `feat` exists on both `origin`
+/// and `upstream` at DIFFERENT tips, so an assertion on the checked-out
+/// commit can tell the two apart; `only-up` exists on `upstream` only. The
+/// repo itself keeps one local branch, `main`, and every remote-tracking ref
+/// is fetched. `upstream/HEAD` is set so the picker's `*/HEAD` exclusion is
+/// exercised.
+struct TwoRemotes {
+    _tmp: TempDir,
+    repo: PathBuf,
+    origin: PathBuf,
+    origin_feat: String,
+    upstream_feat: String,
+}
+
+fn two_remote_repo(env: &TestEnv) -> TwoRemotes {
+    let tmp = TempDir::new().unwrap();
+    let repo = env.create_repo("two");
+    let origin = tmp.path().join("origin.git");
+    let upstream = tmp.path().join("upstream.git");
+    for bare in [&origin, &upstream] {
+        std::fs::create_dir_all(bare).unwrap();
+        git_ok(bare, &["init", "-q", "--bare", "-b", "main"]);
+    }
+    git_ok(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git_ok(
+        &repo,
+        &["remote", "add", "upstream", upstream.to_str().unwrap()],
+    );
+    git_ok(&repo, &["remote", "add", "a/b", upstream.to_str().unwrap()]);
+
+    git_ok(&repo, &["branch", "feat", "main"]);
+    git_ok(&repo, &["push", "-q", "origin", "main", "feat"]);
+    let origin_feat = git_ok(&repo, &["rev-parse", "refs/heads/feat"])
+        .trim()
+        .to_string();
+
+    // A decoy tip for upstream's `feat`, minted without touching the
+    // checked-out branch (ticket 24's lesson: two empty commits in one
+    // second are the same commit, so mint through `commit-tree`).
+    let decoy = git_ok(
+        &repo,
+        &[
+            "commit-tree",
+            "HEAD^{tree}",
+            "-p",
+            "HEAD",
+            "-m",
+            "upstream-only",
+        ],
+    )
+    .trim()
+    .to_string();
+    assert_ne!(decoy, origin_feat, "fixture: upstream's feat must differ");
+    git_ok(&repo, &["update-ref", "refs/heads/feat", &decoy]);
+    git_ok(&repo, &["branch", "only-up", "main"]);
+    git_ok(
+        &repo,
+        &["push", "-q", "upstream", "main", "feat", "only-up"],
+    );
+    git_ok(&repo, &["branch", "-q", "-D", "feat", "only-up"]);
+
+    git_ok(&repo, &["fetch", "-q", "--all"]);
+    git_ok(&repo, &["remote", "set-head", "upstream", "main"]);
+    assert_eq!(
+        git_ok(&repo, &["rev-parse", "refs/remotes/upstream/feat"]).trim(),
+        decoy,
+        "fixture: upstream/feat is the decoy"
+    );
+    TwoRemotes {
+        _tmp: tmp,
+        repo,
+        origin,
+        origin_feat,
+        upstream_feat: decoy,
+    }
+}
+
+fn head_symref(wt: &Path) -> String {
+    git_ok(wt, &["symbolic-ref", "HEAD"]).trim().to_string()
+}
+
+fn upstream_of(repo: &Path, branch: &str) -> String {
+    git_ok(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(upstream)",
+            &format!("refs/heads/{}", branch),
+        ],
+    )
+    .trim()
+    .to_string()
+}
+
+/// T1. `upstream/feat` from the picker is checked out as a new local `feat`
+/// tracking `refs/remotes/upstream/feat`, at upstream's tip and not
+/// origin's. Before the fix git took the name as a commit-ish and detached.
+#[test]
+fn an_upstream_existing_branch_becomes_a_local_tracking_branch() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t1",
+        &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+    )
+    .expect("upstream/feat must be checked out as a tracking branch");
+
+    assert_eq!(
+        head_symref(&wt),
+        "refs/heads/feat",
+        "on a branch, not detached"
+    );
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/upstream/feat");
+    let head = git_ok(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(head, f.upstream_feat, "at upstream's tip");
+    assert_ne!(head, f.origin_feat, "and not origin's");
+}
+
+/// T2. When a local `feat` already exists, whichever remote it tracks, git
+/// refuses with its own sentence and nothing is created or moved; the same
+/// rule `origin/<name>` has always had, with no fallback to the local
+/// branch.
+#[test]
+fn an_upstream_branch_whose_local_name_exists_is_refused() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(&f.repo, &["branch", "-q", "--track", "feat", "origin/feat"]);
+
+    for (ws, tracks) in [
+        ("t2-origin", "origin/feat"),
+        ("t2-upstream", "upstream/feat"),
+    ] {
+        git_ok(&f.repo, &["branch", "-q", "-u", tracks, "feat"]);
+        let err = create_worktree(
+            &f.repo,
+            &env.workspaces_dir,
+            ws,
+            &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+        )
+        .expect_err("a local feat already exists")
+        .to_string();
+        assert!(
+            err.contains("a branch named 'feat' already exists"),
+            "git's own refusal, got {:?}",
+            err
+        );
+        // The space directory itself is made before the add, as it is for
+        // every strategy; the worktree is what must be absent.
+        assert!(
+            !env.workspaces_dir.join(ws).join("two").exists(),
+            "no worktree is created for {}",
+            ws
+        );
+        assert!(
+            !registered_worktrees(&f.repo).contains(ws),
+            "and none is registered for {}",
+            ws
+        );
+        assert_eq!(
+            git_ok(&f.repo, &["rev-parse", "refs/heads/feat"]).trim(),
+            f.origin_feat,
+            "the local feat is not moved"
+        );
+        assert_eq!(
+            upstream_of(&f.repo, "feat"),
+            format!("refs/remotes/{}", tracks),
+            "and keeps its upstream"
+        );
+    }
+}
+
+/// T3. A remote named `a/b` is matched as a whole, so `a/b/feat` becomes the
+/// local `feat` tracking `refs/remotes/a/b/feat`, not a local `b/feat`.
+#[test]
+fn a_remote_named_with_a_slash_splits_at_the_remote() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t3",
+        &BranchStrategy::ExistingBranch("a/b/feat".to_string()),
+    )
+    .expect("a/b/feat must be checked out as a tracking branch");
+
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/a/b/feat");
+}
+
+/// T4. A prefix that names no configured remote is not a remote: the name
+/// goes to git as it is, and a local branch called `nobody/feat` is checked
+/// out as that branch.
+#[test]
+fn a_prefix_that_names_no_remote_stays_a_plain_name() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(&f.repo, &["branch", "-q", "nobody/feat", "main"]);
+
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t4",
+        &BranchStrategy::ExistingBranch("nobody/feat".to_string()),
+    )
+    .expect("a local branch with a slash in its name is checked out");
+
+    assert_eq!(head_symref(&wt), "refs/heads/nobody/feat");
+}
+
+/// T5. Ticket 13's guard runs on the derived name for every remote: the
+/// `-M` that `upstream/-M` would hand to `-b` is refused before git runs,
+/// with git's sentence, and the source repo's checked-out branch keeps its
+/// name. (A local branch of that whole name would win instead, and is
+/// checked out safely: T18.)
+#[test]
+fn an_upstream_dash_branch_is_refused_before_git() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+
+    let err = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t5",
+        &BranchStrategy::ExistingBranch("upstream/-M".to_string()),
+    )
+    .expect_err("the derived -b name begins with '-'");
+    assert_eq!(err.to_string(), "'-M' is not a valid branch name");
+    assert_eq!(head_symref(&f.repo), "refs/heads/main");
+    assert!(!env.workspaces_dir.join("t5").exists());
+}
+
+/// T6. `upstream/feat` reads `refs/remotes/upstream/feat`, which a fetch of
+/// `origin` never writes under the default refspec, so the pre-create fetch
+/// is skipped (ticket 16's rule, generalised). Positive evidence: origin
+/// gains a branch after the clone, and after the create the repo still has
+/// no `refs/remotes/origin/newb`, which the fetch would have created.
+#[test]
+fn an_upstream_existing_branch_runs_no_fetch() {
+    use space::core::workspace::{create_worktree_with_fetch, PreCreateFetch};
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.origin,
+        &["update-ref", "refs/heads/newb", &f.origin_feat],
+    );
+
+    let attempt = create_worktree_with_fetch(
+        &f.repo,
+        &env.workspaces_dir,
+        "t6",
+        &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+        PreCreateFetch::Run(std::time::Duration::from_secs(20)),
+    );
+    let wt = attempt.created.expect("the worktree must be created");
+    assert_eq!(attempt.fetch, None, "the fetch is skipped");
+    let seen = Command::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/remotes/origin/newb",
+        ])
+        .current_dir(&f.repo)
+        .status()
+        .unwrap();
+    assert!(
+        !seen.success(),
+        "no fetch reached origin: origin/newb is unknown"
+    );
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/upstream/feat");
+}
+
+/// T7. When origin's fetch refspec writes under `refs/remotes/upstream/`,
+/// the fetch can change what `upstream/feat` names, so it runs. Positive
+/// evidence: the worktree lands on what origin wrote there (origin's
+/// `feat`), not on the decoy the ref held before. Upstream's own refspec is
+/// dropped first: with two remotes mapping the same ref, git refuses
+/// `--track` outright (`not tracking: ambiguous information for ref`,
+/// git 2.50.1), whether or not a fetch ran.
+#[test]
+fn an_origin_refspec_writing_another_remotes_refs_still_fetches() {
+    use space::core::workspace::{create_worktree_with_fetch, FetchOutcome, PreCreateFetch};
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(&f.repo, &["config", "--unset-all", "remote.upstream.fetch"]);
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/upstream/*",
+        ],
+    );
+
+    let attempt = create_worktree_with_fetch(
+        &f.repo,
+        &env.workspaces_dir,
+        "t7",
+        &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+        PreCreateFetch::Run(std::time::Duration::from_secs(20)),
+    );
+    let wt = attempt.created.expect("the worktree must be created");
+    assert_eq!(attempt.fetch, Some(FetchOutcome::Ok), "the fetch ran");
+    assert_eq!(
+        git_ok(&wt, &["rev-parse", "HEAD"]).trim(),
+        f.origin_feat,
+        "the add read the ref origin's fetch had just written"
+    );
+}
+
+/// T8. The picker's source lists every remote's branches, not origin's
+/// alone, each marked remote, and no `*/HEAD`.
+#[test]
+fn list_branches_offers_every_remotes_branches() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+
+    let branches = space::core::git::list_branches(&f.repo).unwrap();
+    for name in [
+        "origin/feat",
+        "upstream/feat",
+        "upstream/only-up",
+        "a/b/feat",
+    ] {
+        let row = branches
+            .iter()
+            .find(|b| b.name == name)
+            .unwrap_or_else(|| panic!("{} is listed, got {:?}", name, branches));
+        assert!(row.is_remote, "{} is marked remote", name);
+    }
+    assert!(
+        branches.iter().all(|b| !b.name.ends_with("/HEAD")),
+        "no remote HEAD row, got {:?}",
+        branches
+    );
+}
+
+/// T11 (skeptical review of PR #59). The tracking arm creates a local
+/// branch as well as reading a remote-tracking ref, so ticket 16's other
+/// invariant still holds for it: a repo whose origin refspec writes into
+/// `refs/heads/*` fetches whatever the strategy. Positive evidence: the
+/// fetch writes the local `mirror-main` the refspec names, and the add
+/// still lands on upstream's `feat`.
+#[test]
+fn an_origin_refspec_writing_local_branches_fetches_for_an_upstream_name() {
+    use space::core::workspace::{create_worktree_with_fetch, FetchOutcome, PreCreateFetch};
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/main:refs/heads/mirror-main",
+        ],
+    );
+
+    let attempt = create_worktree_with_fetch(
+        &f.repo,
+        &env.workspaces_dir,
+        "t11",
+        &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+        PreCreateFetch::Run(std::time::Duration::from_secs(20)),
+    );
+    let wt = attempt.created.expect("the worktree must be created");
+    assert_eq!(attempt.fetch, Some(FetchOutcome::Ok), "the fetch ran");
+    let mirrored = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/mirror-main"])
+        .current_dir(&f.repo)
+        .status()
+        .unwrap();
+    assert!(
+        mirrored.success(),
+        "the fetch wrote the local branch its refspec names"
+    );
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/upstream/feat");
+}
+
+// ---------------------------------------------------------------------------
+// Ticket 25, push confirmation: where a bare push of a tracking branch goes.
+// ---------------------------------------------------------------------------
+
+/// T12. A confirmed push from a worktree made from `upstream/feat` lands on
+/// upstream, and nowhere else: the bare `git push` the git-ops worker runs
+/// after the confirmation follows the branch's own remote.
+#[test]
+fn a_confirmed_push_from_an_upstream_tracking_branch_lands_on_upstream() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let upstream = f._tmp.path().join("upstream.git");
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t12",
+        &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+    )
+    .unwrap();
+    git_ok(&wt, &["commit", "-q", "--allow-empty", "-m", "local-work"]);
+    let pushed = git_ok(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+
+    let result = space::core::workspace::push_repo(&wt, false);
+
+    assert!(result.success, "the push must succeed: {}", result.message);
+    assert_eq!(
+        git_ok(&upstream, &["rev-parse", "refs/heads/feat"]).trim(),
+        pushed,
+        "upstream's feat is the pushed commit"
+    );
+    assert_eq!(
+        git_ok(&f.origin, &["rev-parse", "refs/heads/feat"]).trim(),
+        f.origin_feat,
+        "origin's feat is untouched"
+    );
+}
+
+/// T13. `git::push_target` names the remote git would push to and what the
+/// branch tracks, resolved as git resolves a bare push: `branch.<n>.pushRemote`
+/// first, then `remote.pushDefault`, then `branch.<n>.remote`.
+#[test]
+fn push_target_resolves_the_destination_as_git_does() {
+    use space::core::git::push_target;
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t13",
+        &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+    )
+    .unwrap();
+
+    let t = push_target(&wt).expect("a tracking branch has a push target");
+    assert_eq!(
+        (t.remote.as_str(), t.tracks.as_str()),
+        ("upstream", "upstream/feat")
+    );
+
+    git_ok(&wt, &["config", "remote.pushDefault", "a/b"]);
+    let t = push_target(&wt).unwrap();
+    assert_eq!(
+        t.remote, "a/b",
+        "remote.pushDefault overrides the branch's remote"
+    );
+    assert_eq!(
+        t.tracks, "upstream/feat",
+        "and does not change what it tracks"
+    );
+
+    git_ok(&wt, &["config", "branch.feat.pushRemote", "origin"]);
+    let t = push_target(&wt).unwrap();
+    assert_eq!(t.remote, "origin", "branch.<n>.pushRemote overrides both");
+
+    git_ok(&f.repo, &["checkout", "-q", "--detach"]);
+    assert!(
+        push_target(&f.repo).is_none(),
+        "a detached HEAD has no target"
+    );
+    git_ok(&f.repo, &["checkout", "-q", "main"]);
+    assert!(
+        push_target(&f.repo).is_none(),
+        "a branch with no upstream has no target: that case has its own prompt"
+    );
+}
+
+/// T14 (security pass). A push-destination key that is present but cannot
+/// be read is not skipped in favour of a lower-priority key, which git
+/// would not do either: the destination is unknown, and the caller asks.
+#[test]
+fn push_target_is_unknown_when_a_higher_priority_key_cannot_be_read() {
+    use space::core::git::push_target;
+    use std::io::Write;
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t14",
+        &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+    )
+    .unwrap();
+    assert_eq!(push_target(&wt).unwrap().remote, "upstream");
+
+    let config = f.repo.join(".git").join("config");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&config)
+        .unwrap();
+    file.write_all(b"[branch \"feat\"]\n\tpushRemote = \xff\xfe\n")
+        .unwrap();
+
+    assert!(
+        push_target(&wt).is_none(),
+        "an unreadable pushRemote is unknown, not upstream"
+    );
+}
 /// The shared hold's give-up guards, each run directly under `sh` so the
 /// suite itself can fail a guard that was dropped (ticket 31). Every fixture
 /// that uses the hold relies on these and cannot prove them: in a healthy run
@@ -2822,4 +3333,248 @@ mod hold_guards {
         );
         assert!(done.exists(), "the tail must have run");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Ticket 25, residual 3 (coordinator decision): for a remote other than
+// origin, a local branch named by the whole string wins, git's own
+// precedence and master's behaviour for those names.
+// ---------------------------------------------------------------------------
+
+/// The two-remote fixture plus a remote named `alice` (the same bare repo as
+/// `upstream`) with a branch `fix` on it, so `alice/fix` is a remote-tracking
+/// ref and a plausible local branch name at once.
+fn with_alice(f: &TwoRemotes) {
+    let upstream = f._tmp.path().join("upstream.git");
+    git_ok(
+        &f.repo,
+        &["remote", "add", "alice", upstream.to_str().unwrap()],
+    );
+    git_ok(&f.repo, &["push", "-q", "upstream", "main:fix"]);
+    git_ok(&f.repo, &["fetch", "-q", "alice"]);
+}
+
+/// T15. A local branch `alice/fix` beside a remote `alice` that has `fix`:
+/// picking the local row checks out that branch, as master did; no local
+/// `fix` is created.
+#[test]
+fn a_local_branch_named_like_another_remotes_branch_is_checked_out() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    with_alice(&f);
+    git_ok(&f.repo, &["branch", "-q", "alice/fix", "main"]);
+
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t15",
+        &BranchStrategy::ExistingBranch("alice/fix".to_string()),
+    )
+    .expect("the local branch is checked out");
+
+    assert_eq!(head_symref(&wt), "refs/heads/alice/fix");
+    let fix = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/fix"])
+        .current_dir(&f.repo)
+        .status()
+        .unwrap();
+    assert!(!fix.success(), "no local fix is created for the local row");
+}
+
+/// T16. Without the local branch, `alice/fix` is the remote-tracking form:
+/// a local `fix` tracking `refs/remotes/alice/fix`.
+#[test]
+fn without_the_local_branch_another_remotes_branch_still_tracks() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    with_alice(&f);
+
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t16",
+        &BranchStrategy::ExistingBranch("alice/fix".to_string()),
+    )
+    .expect("alice/fix is checked out as a tracking branch");
+
+    assert_eq!(head_symref(&wt), "refs/heads/fix");
+    assert_eq!(upstream_of(&f.repo, "fix"), "refs/remotes/alice/fix");
+}
+
+/// T17. `origin/<x>` keeps master's rule: always the tracking form, even
+/// beside a local branch literally named `origin/<x>` (master: the
+/// `origin/` prefix test ran before anything else; probed on git 2.50.1,
+/// `--track -b feat -- wt refs/remotes/origin/feat` ignores a local
+/// `origin/feat`).
+#[test]
+fn an_origin_collision_keeps_masters_rule() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(&f.repo, &["branch", "-q", "origin/feat", "main"]);
+
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t17",
+        &BranchStrategy::ExistingBranch("origin/feat".to_string()),
+    )
+    .expect("origin/feat is the tracking form");
+
+    assert_eq!(
+        head_symref(&wt),
+        "refs/heads/feat",
+        "not the local origin/feat"
+    );
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/origin/feat");
+    assert_eq!(
+        git_ok(&wt, &["rev-parse", "HEAD"]).trim(),
+        f.origin_feat,
+        "at origin's tip"
+    );
+}
+
+/// T18. The dash guard follows the same rule: a local branch named
+/// `alice/-M` is checked out as that branch (the name sits after `--`, so
+/// `-M` never reaches `-b`) and the source repo's checked-out branch keeps
+/// its name; without the local branch the derived `-M` is still refused.
+#[test]
+fn a_local_dash_branch_named_like_another_remotes_is_checked_out_safely() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    with_alice(&f);
+
+    let err = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t18-refused",
+        &BranchStrategy::ExistingBranch("alice/-M".to_string()),
+    )
+    .expect_err("with no such local branch the derived -b name is refused");
+    assert_eq!(err.to_string(), "'-M' is not a valid branch name");
+
+    git_ok(&f.repo, &["branch", "-q", "alice/-M", "main"]);
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t18",
+        &BranchStrategy::ExistingBranch("alice/-M".to_string()),
+    )
+    .expect("the local branch is checked out");
+    assert_eq!(head_symref(&wt), "refs/heads/alice/-M");
+    assert_eq!(
+        head_symref(&f.repo),
+        "refs/heads/main",
+        "the source branch keeps its name"
+    );
+}
+
+/// T19 (independent review). The skip rule derives through the same
+/// repo-aware split as the add: a local `alice/fix` makes `alice/fix` the
+/// plain-name arm, which reads no origin ref, so the fetch is skipped even
+/// when origin's refspec writes under `refs/remotes/alice/` (which the
+/// tracking arm would have to fetch for). Positive evidence: origin gains a
+/// branch after the clone and the repo never learns of it under the
+/// refspec that would have written it.
+#[test]
+fn a_local_branch_named_like_another_remotes_branch_skips_the_fetch() {
+    use space::core::workspace::{create_worktree_with_fetch, PreCreateFetch};
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    with_alice(&f);
+    git_ok(&f.repo, &["branch", "-q", "alice/fix", "main"]);
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/alice/*",
+        ],
+    );
+    git_ok(
+        &f.origin,
+        &["update-ref", "refs/heads/newb", &f.origin_feat],
+    );
+
+    let attempt = create_worktree_with_fetch(
+        &f.repo,
+        &env.workspaces_dir,
+        "t19",
+        &BranchStrategy::ExistingBranch("alice/fix".to_string()),
+        PreCreateFetch::Run(std::time::Duration::from_secs(20)),
+    );
+    let wt = attempt.created.expect("the local branch is checked out");
+    assert_eq!(attempt.fetch, None, "the fetch is skipped");
+    let seen = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", "refs/remotes/alice/newb"])
+        .current_dir(&f.repo)
+        .status()
+        .unwrap();
+    assert!(
+        !seen.success(),
+        "no fetch reached origin: alice/newb is unknown"
+    );
+    assert_eq!(head_symref(&wt), "refs/heads/alice/fix");
+}
+
+/// T20 (skeptical review). The pre-create fetch can delete the local
+/// branch the guard relied on: an origin refspec writing under
+/// `refs/heads/alice/` with `fetch.prune` removes a local `alice/-M` that
+/// origin does not have. The name is derived once, before the fetch, so the
+/// add still runs the form the guard accepted (the whole name after `--`)
+/// and `-M` never reaches `-b`: the source repo's checked-out branch keeps
+/// its name whatever the add then does. Positive evidence that the prune
+/// path was exercised: the local branch is gone afterwards.
+#[test]
+fn a_local_branch_pruned_by_the_fetch_cannot_turn_into_a_dash_option() {
+    use space::core::workspace::{create_worktree_with_fetch, FetchOutcome, PreCreateFetch};
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    with_alice(&f);
+    git_ok(&f.repo, &["push", "-q", "upstream", "main:-M"]);
+    git_ok(&f.repo, &["fetch", "-q", "alice"]);
+    git_ok(&f.repo, &["branch", "-q", "alice/-M", "main"]);
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/heads/alice/*",
+        ],
+    );
+    git_ok(&f.repo, &["config", "fetch.prune", "true"]);
+
+    let attempt = create_worktree_with_fetch(
+        &f.repo,
+        &env.workspaces_dir,
+        "t20",
+        &BranchStrategy::ExistingBranch("alice/-M".to_string()),
+        PreCreateFetch::Run(std::time::Duration::from_secs(20)),
+    );
+
+    assert_eq!(attempt.fetch, Some(FetchOutcome::Ok), "the fetch ran");
+    let pruned = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/alice/-M"])
+        .current_dir(&f.repo)
+        .status()
+        .unwrap();
+    assert!(
+        !pruned.success(),
+        "the fetch pruned the local branch, the window this pins"
+    );
+    assert_eq!(
+        head_symref(&f.repo),
+        "refs/heads/main",
+        "the source repo's checked-out branch keeps its name: {:?}",
+        attempt
+            .created
+            .as_ref()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    );
+    let renamed = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/-M"])
+        .current_dir(&f.repo)
+        .status()
+        .unwrap();
+    assert!(!renamed.success(), "no branch named -M was created");
 }

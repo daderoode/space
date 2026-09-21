@@ -185,12 +185,28 @@ fn bad_space_name(name: &str, e: anyhow::Error) -> McpError {
 /// Ask git whether the branch a strategy will create or check out is a
 /// valid branch name (`workspace::check_branch_name`), on the name that
 /// reaches git's `-b` slot (`workspace::branch_slot_name`: for `existing`
-/// with an `origin/` prefix that is the stripped local name, the one git
-/// will create). `detached` has no branch. The message is git's sentence,
-/// e.g. `'-x' is not a valid branch name`, as `invalid_params`.
-fn checked_branch(strategy: &BranchStrategy) -> std::result::Result<(), McpError> {
-    if let Some(branch) = workspace::branch_slot_name(strategy) {
-        workspace::check_branch_name(branch)
+/// with a `<remote>/` prefix that is the stripped local name, the one git
+/// will create). Which prefixes count depends on each repo's configured
+/// remotes, so the name is derived per repo, and once more with no
+/// remotes (the `origin/` rule alone, the check this call made before the
+/// derivation became per repo), so a call with no repos still refuses an
+/// invalid name; each distinct result is checked once. `detached` has no
+/// branch. The message is git's sentence, e.g. `'-x' is not a valid branch
+/// name`, as `invalid_params`.
+fn checked_branch(
+    strategy: &BranchStrategy,
+    repo_paths: &[PathBuf],
+) -> std::result::Result<(), McpError> {
+    let names: std::collections::BTreeSet<String> = repo_paths
+        .iter()
+        .map(|repo| (workspace::remote_names(repo), Some(repo.as_path())))
+        .chain(std::iter::once((Vec::new(), None)))
+        .filter_map(|(remotes, repo)| {
+            workspace::branch_slot_name(strategy, &remotes, repo).map(String::from)
+        })
+        .collect();
+    for branch in names {
+        workspace::check_branch_name(&branch)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
     }
     Ok(())
@@ -401,7 +417,7 @@ impl SpaceServer {
             resolve_repos(&params.repos, &cache).map_err(|e| McpError::invalid_params(e, None))?;
         let strategy = build_strategy(&params.strategy, params.branch.as_deref(), &params.name)
             .map_err(|e| McpError::invalid_params(e, None))?;
-        checked_branch(&strategy)?;
+        checked_branch(&strategy, &repo_paths)?;
 
         let ws_dir = &cfg.workspaces.dir;
         let placed = place_repos(&repo_paths, ws_dir, &params.name, &strategy, "create")?;
@@ -457,7 +473,7 @@ impl SpaceServer {
             &params.workspace,
         )
         .map_err(|e| McpError::invalid_params(e, None))?;
-        checked_branch(&strategy)?;
+        checked_branch(&strategy, &repo_paths)?;
 
         let placed = place_repos(&repo_paths, ws_dir, &params.workspace, &strategy, "add")?;
 

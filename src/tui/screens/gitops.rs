@@ -32,6 +32,11 @@ pub enum GitOpsStage {
     Running,
     /// Confirm publishing a branch that has no upstream yet (push -u origin).
     ConfirmPush,
+    /// Confirm a push whose destination is a remote other than origin: the
+    /// branch tracks another remote (a worktree made from `upstream/<x>`,
+    /// ticket 25) or is configured to push elsewhere, so a bare `git push`
+    /// would publish there. Default No, like `ConfirmPush`.
+    ConfirmPushRemote,
     /// Rebase pre-flight: shows the branch state and either a blocking reason
     /// (detached HEAD / dirty tree) or a ready-to-continue prompt.
     RebasePreflight,
@@ -57,6 +62,12 @@ pub struct GitOpsState {
     /// Whether the current branch already has a configured upstream. Drives the
     /// push routing: plain push when true, ConfirmPush (set upstream) when false.
     pub has_upstream: bool,
+    /// Where a bare `git push` of the current branch goes and what the branch
+    /// tracks (`git::push_target`), when it has an upstream. A destination
+    /// other than origin routes the push through `ConfirmPushRemote` instead
+    /// of straight to the worker, and so does `None` while `has_upstream`
+    /// is set: a destination that could not be read is unknown, not origin.
+    pub push_target: Option<crate::core::git::PushTarget>,
     pub status: Option<String>,
     /// The network op currently running (fetch / pull / push), used by the
     /// Running-stage header. `None` when no op has run.
@@ -113,7 +124,12 @@ impl GitOpsState {
             })
             .unwrap_or_default();
         let has_staged = !staged_files.is_empty();
+        // Read together and kept together: the routing in `fire` trusts
+        // `push_target` only while `has_upstream` is set, so whoever
+        // refreshes one after an op in the same overlay must refresh both,
+        // or an origin push after `push -u` would ask as if unreadable.
         let has_upstream = crate::core::git::has_upstream(&repo_path);
+        let push_target = crate::core::git::push_target(&repo_path);
         Self {
             stage: GitOpsStage::Menu,
             repo_name,
@@ -124,6 +140,7 @@ impl GitOpsState {
             staged_files,
             message_input: Input::default(),
             has_upstream,
+            push_target,
             status: None,
             running_op: None,
             output: Vec::new(),
@@ -159,6 +176,7 @@ impl GitOpsState {
                     | GitOpsStage::Log
                     | GitOpsStage::Running
                     | GitOpsStage::ConfirmPush
+                    | GitOpsStage::ConfirmPushRemote
                     | GitOpsStage::RebasePreflight
                     | GitOpsStage::RebaseConfirm
             ),
@@ -172,6 +190,7 @@ impl GitOpsState {
                 _ => ScreenAction::Continue,
             },
             GitOpsStage::ConfirmPush => self.handle_confirm_push_key(key),
+            GitOpsStage::ConfirmPushRemote => self.handle_confirm_push_remote_key(key),
             GitOpsStage::Committing => self.handle_committing_key(key),
             GitOpsStage::Log => self.handle_log_key(key),
             GitOpsStage::RebasePreflight => self.handle_rebase_preflight_key(key),
@@ -271,6 +290,34 @@ impl GitOpsState {
         }
     }
 
+    /// Handle keys in the ConfirmPushRemote stage (the push would go to a
+    /// remote other than origin). Only `y`/`Y` confirms, running the same
+    /// bare `git push` the no-prompt path runs, which git routes to that
+    /// remote; `n`, `q`, Enter and Esc decline, because the prompt is
+    /// `[y/N]` (default No) and the remote may not be the user's to write.
+    fn handle_confirm_push_remote_key(&mut self, key: KeyEvent) -> ScreenAction {
+        match default_no_confirm(key.code) {
+            Some(true) => self.start_network_op(GitOp::Push {
+                set_upstream: false,
+            }),
+            Some(false) => {
+                self.stage = GitOpsStage::Menu;
+                ScreenAction::Continue
+            }
+            None => ScreenAction::Continue,
+        }
+    }
+
+    /// Whether a push of the current branch must ask first: its destination
+    /// is a remote other than origin, or could not be read at all (an
+    /// unknown destination is not origin). Only a destination read as
+    /// origin pushes unasked.
+    pub fn push_needs_confirmation(&self) -> bool {
+        self.push_target
+            .as_ref()
+            .is_none_or(|t| t.remote != "origin")
+    }
+
     fn handle_menu_key(&mut self, key: KeyEvent) -> ScreenAction {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => ScreenAction::Back,
@@ -309,9 +356,15 @@ impl GitOpsState {
             0 => self.start_network_op(GitOp::Fetch),
             1 => self.start_network_op(GitOp::Pull),
             2 => {
-                // With an upstream, push straight away; otherwise confirm before
-                // publishing the branch (push -u origin <branch>).
-                if self.has_upstream {
+                // With an upstream that pushes to origin, push straight away;
+                // with one that pushes elsewhere, confirm the remote first;
+                // with none, confirm before publishing the branch (push -u
+                // origin <branch>).
+                if self.has_upstream && self.push_needs_confirmation() {
+                    self.stage = GitOpsStage::ConfirmPushRemote;
+                    self.status = None;
+                    ScreenAction::Continue
+                } else if self.has_upstream {
                     self.start_network_op(GitOp::Push {
                         set_upstream: false,
                     })

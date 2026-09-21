@@ -394,6 +394,55 @@ pub fn has_upstream(repo_path: &Path) -> bool {
     has
 }
 
+/// Where a bare `git push` of the current branch goes, and what the branch
+/// tracks, for the push confirmation (ticket 25). `remote` is resolved the
+/// way git resolves the destination of a push with no remote argument:
+/// `branch.<name>.pushRemote`, else `remote.pushDefault`, else
+/// `branch.<name>.remote`. `tracks` is the upstream's short name
+/// (`upstream/feat`), for the prompt. `None` on a detached HEAD, a branch
+/// with no upstream (that case has its own confirmation, which sets one on
+/// origin), a branch whose remote is not configured, or anything that
+/// cannot be read: a key that is present but not valid UTF-8 is not
+/// skipped in favour of a lower-priority one, since git would honour it,
+/// so the destination is unknown rather than guessed. The git-ops overlay
+/// treats an unknown destination on a branch with an upstream as a reason
+/// to ask, never as origin.
+pub struct PushTarget {
+    pub remote: String,
+    pub tracks: String,
+}
+
+pub fn push_target(repo_path: &Path) -> Option<PushTarget> {
+    let repo = Repository::open(repo_path).ok()?;
+    let head = repo.head().ok()?;
+    if !head.is_branch() {
+        return None;
+    }
+    let name = head.shorthand()?.to_string();
+    let tracks = repo
+        .find_branch(&name, git2::BranchType::Local)
+        .ok()?
+        .upstream()
+        .ok()?
+        .name()
+        .ok()??
+        .to_string();
+    let config = repo.config().ok()?;
+    let keys = [
+        format!("branch.{}.pushRemote", name),
+        "remote.pushDefault".to_string(),
+        format!("branch.{}.remote", name),
+    ];
+    for key in &keys {
+        match config.get_string(key) {
+            Ok(remote) => return Some(PushTarget { remote, tracks }),
+            Err(e) if e.code() == git2::ErrorCode::NotFound => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
 /// Return the names of all local branches that are strictly behind their
 /// `origin/<branch>` ref (0 commits ahead, 1+ commits behind). The comparison is
 /// always against `refs/remotes/origin/<name>`, not any configured upstream, so

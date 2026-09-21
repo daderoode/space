@@ -1331,11 +1331,16 @@ pub struct PushResult {
     pub message: String,
 }
 
-/// Push the current branch of `repo_path` to `origin`.
+/// Push the current branch of `repo_path`.
 ///
 /// - `set_upstream == true`  → `git push -u origin <branch>` (first publish of a
 ///   branch with no upstream; also records the tracking ref).
-/// - `set_upstream == false` → `git push` (branch already has an upstream).
+/// - `set_upstream == false` → `git push` (branch already has an upstream),
+///   which git routes to the branch's own push destination
+///   (`git::push_target`): origin for a branch that tracks origin, another
+///   remote for a branch that tracks it (a worktree made from
+///   `upstream/<x>`, ticket 25). The git-ops overlay confirms that second
+///   case before calling this.
 ///
 /// Never forces. A rejected push (remote ahead / non-fast-forward) returns
 /// `success == false` with git's rejection text in `message`, so callers can
@@ -1866,10 +1871,89 @@ fn half_built(admin: &Path) -> bool {
         && !admin.join("index").exists()
 }
 
+/// The remote the app fetches before an add and compares worktrees
+/// against. Its prefix is read as a remote-tracking name in every repo,
+/// configured or not, as it was before ticket 25 made the other remotes'
+/// prefixes count.
+const DEFAULT_REMOTE: &str = "origin";
+
+/// The remotes configured in `repo_path`, by name, for `split_remote_branch`.
+/// A repo git2 cannot open, or whose remotes it cannot list, gives an empty
+/// list: `DEFAULT_REMOTE` still applies, and the add itself reports what is
+/// wrong with the repo.
+pub fn remote_names(repo_path: &Path) -> Vec<String> {
+    git2::Repository::open(repo_path)
+        .ok()
+        .and_then(|repo| repo.remotes().ok())
+        .map(|names| names.iter().flatten().map(String::from).collect())
+        .unwrap_or_default()
+}
+
+/// Split an existing-branch name into `(remote, local)` when it is the
+/// `<remote>/<local>` form the branch picker offers for a remote-tracking
+/// branch: `remote` is one of `remotes` (the repo's configured remotes) or
+/// `DEFAULT_REMOTE`, and `local` is what follows the `/`, the name of the
+/// branch git will create to track it. The longest remote wins, because a
+/// remote name may itself contain `/` (`git remote add a/b` is legal and its
+/// refs live under `refs/remotes/a/b/`), so `a/b/feat` beside remotes `a`
+/// and `a/b` is `feat` on `a/b`. A name whose prefix is no remote
+/// (`feature/x`, or `nobody/feat`) is not split and goes to git as it is.
+/// An empty local part (`upstream/`) is not a branch name and is not split
+/// either.
+fn split_remote_branch<'a>(name: &'a str, remotes: &[String]) -> Option<(&'a str, &'a str)> {
+    let mut best: Option<(&str, &str)> = None;
+    for remote in remotes
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(DEFAULT_REMOTE))
+    {
+        let Some(local) = name
+            .strip_prefix(remote)
+            .and_then(|rest| rest.strip_prefix('/'))
+        else {
+            continue;
+        };
+        if local.is_empty() {
+            continue;
+        }
+        if best.is_none_or(|(found, _)| remote.len() > found.len()) {
+            best = Some((&name[..remote.len()], local));
+        }
+    }
+    best
+}
+
+/// `split_remote_branch` settled against the repo's own branches: for a
+/// remote other than origin, a local branch named by the whole string wins
+/// (`refs/heads/<name>` exists, asked exactly through `ref_exists`), so the
+/// name is not split and goes to git as it is, which checks that branch
+/// out. That is git's own precedence and what master did for those names
+/// (a coworker's fork added as remote `alice` beside branches named
+/// `alice/<x>` is the realistic collision). `origin/<x>` is always the
+/// tracking form, as it has been since ticket 13, whatever local branch
+/// exists. `add_worktree`, the skip rule and the `-b` guard all derive
+/// through this one function.
+fn split_remote_branch_in<'a>(
+    repo_path: &Path,
+    name: &'a str,
+    remotes: &[String],
+) -> Option<(&'a str, &'a str)> {
+    let (remote, local) = split_remote_branch(name, remotes)?;
+    if remote != DEFAULT_REMOTE && ref_exists(repo_path, &format!("refs/heads/{}", name)) {
+        return None;
+    }
+    Some((remote, local))
+}
+
 /// The branch name a strategy hands to the `-b` slot of `git worktree add`,
 /// exactly as `add_worktree` derives it: a `NewBranch` name verbatim, an
-/// `ExistingBranch` name with its `origin/` prefix stripped (the local branch
-/// git creates to track the remote one), and none for `DetachedHead`.
+/// `ExistingBranch` name with its `<remote>/` prefix stripped
+/// (`split_remote_branch_in`: the local branch git creates to track the
+/// remote one), and none for `DetachedHead`. `remotes` is the repo's
+/// configured remotes (`remote_names`) and `repo_path` the repo whose local
+/// branches settle a collision; a caller with no repo in hand passes an
+/// empty list and `None` and gets the `origin/` rule alone, which needs
+/// neither.
 ///
 /// One function because two places must agree on it: the guard in
 /// `create_worktree_cancellable` and the entry points that ask git whether
@@ -1878,11 +1962,54 @@ fn half_built(admin: &Path) -> bool {
 /// `origin/-M` as a branch name, but the stripped `-M` is what reaches `-b`,
 /// and git's child `git branch` then reads it as force-rename of the
 /// checked-out branch of the source repo (reproduced on git 2.50.1).
-pub fn branch_slot_name(strategy: &BranchStrategy) -> Option<&str> {
+pub fn branch_slot_name<'a>(
+    strategy: &'a BranchStrategy,
+    remotes: &[String],
+    repo_path: Option<&Path>,
+) -> Option<&'a str> {
+    let split = match (strategy, repo_path) {
+        (BranchStrategy::ExistingBranch(name), Some(repo)) => {
+            split_remote_branch_in(repo, name, remotes)
+        }
+        (BranchStrategy::ExistingBranch(name), None) => split_remote_branch(name, remotes),
+        _ => None,
+    };
+    slot_for(strategy, split)
+}
+
+/// The `-b` slot name for a strategy whose existing-branch split has
+/// already been settled (`split` is `split_remote_branch_in`'s answer, or
+/// `None` for the other strategies). `create_worktree_cancellable` settles
+/// the split once, before the pre-create fetch, and hands the same value
+/// to this guard, to the skip rule and to the add, so the name the guard
+/// accepted is the name the add uses by construction: the fetch can delete
+/// a local branch (a refspec writing under `refs/heads/` with
+/// `fetch.prune`), and re-deriving after it turned an accepted `alice/-M`
+/// into `-b -M` (reproduced: the source repo's checked-out branch was
+/// renamed).
+fn slot_for<'a>(
+    strategy: &'a BranchStrategy,
+    split: Option<(&'a str, &'a str)>,
+) -> Option<&'a str> {
     match strategy {
         BranchStrategy::NewBranch(name) => Some(name),
-        BranchStrategy::ExistingBranch(name) => Some(name.strip_prefix("origin/").unwrap_or(name)),
+        BranchStrategy::ExistingBranch(name) => {
+            Some(split.map_or(name.as_str(), |(_, local)| local))
+        }
         BranchStrategy::DetachedHead => None,
+    }
+}
+
+/// `split_remote_branch_in` for an `ExistingBranch` strategy, `None` for
+/// the others: the one derivation an attempt makes.
+fn existing_split<'a>(
+    repo_path: &Path,
+    strategy: &'a BranchStrategy,
+    remotes: &[String],
+) -> Option<(&'a str, &'a str)> {
+    match strategy {
+        BranchStrategy::ExistingBranch(name) => split_remote_branch_in(repo_path, name, remotes),
+        _ => None,
     }
 }
 
@@ -1937,7 +2064,15 @@ pub fn create_worktree_cancellable(
     // and path slots are protected by `--` in `add_worktree` instead. Same
     // sentence as git's so the caller sees one wording whichever layer
     // refused.
-    if let Some(branch) = branch_slot_name(strategy) {
+    // The split is derived exactly once, here, before the pre-create
+    // fetch, and the same value reaches the guard, the skip rule and the
+    // add (`slot_for`): the fetch can create or delete a local branch (a
+    // refspec writing into `refs/heads/*`, with `fetch.prune`), so a
+    // derivation on either side of it could disagree with this one and
+    // hand `-b` a name the guard never saw.
+    let remotes = remote_names(repo_path);
+    let split = existing_split(repo_path, strategy, &remotes);
+    if let Some(branch) = slot_for(strategy, split) {
         if branch.starts_with('-') {
             return WorktreeAttempt {
                 fetch: None,
@@ -1967,7 +2102,7 @@ pub fn create_worktree_cancellable(
     let fetch = match fetch {
         PreCreateFetch::Run(_) if cancel.load(Ordering::Relaxed) => None,
         PreCreateFetch::Skip => None,
-        PreCreateFetch::Run(_) if !strategy_reads_origin(repo_path, strategy) => None,
+        PreCreateFetch::Run(_) if !strategy_reads_origin(repo_path, strategy, split) => None,
         PreCreateFetch::Run(limit) => Some(fetch_origin_unattended(repo_path, limit)),
     };
 
@@ -1982,7 +2117,7 @@ pub fn create_worktree_cancellable(
 
     WorktreeAttempt {
         fetch,
-        created: add_worktree(repo_path, &wt_path, base_branch, strategy),
+        created: add_worktree(repo_path, &wt_path, base_branch, strategy, split),
     }
 }
 
@@ -1994,6 +2129,14 @@ pub fn create_worktree_cancellable(
 ///   `refs/remotes/origin/<base>`: always.
 /// - `ExistingBranch("origin/x")` adds `--track` from
 ///   `refs/remotes/origin/x`: always.
+/// - `ExistingBranch("<remote>/x")` for another configured remote
+///   (`split_remote_branch`) adds `--track -b x` from
+///   `refs/remotes/<remote>/x`, which `git fetch origin` never writes under
+///   the default refspec, and creates `refs/heads/x`, which it never writes
+///   either: reads origin iff origin's fetch refspec can write under
+///   `refs/remotes/<remote>/` or under `refs/heads/` (`fetch_writes_under`;
+///   the second because a fetch that creates `refs/heads/x` turns the add
+///   into git's `already exists` refusal).
 /// - `ExistingBranch("x")` runs `git worktree add <wt> x`. With a local
 ///   branch `x` git checks it out at its local tip and never looks at
 ///   `origin/x`. Without one, git's own DWIM resolves `x` to `origin/x`
@@ -2007,21 +2150,37 @@ pub fn create_worktree_cancellable(
 /// under the default refspec `git fetch origin` never creates or moves
 /// `refs/heads/*`; the sync stage is what fast-forwards local branches, and
 /// it has already run. A repo whose fetch refspec does write into
-/// `refs/heads/*` (`fetch_writes_local_branches`) has no such fixed point,
-/// so it fetches whatever the strategy. A repo git2 cannot open is treated
-/// as reading origin, the side that fetches.
-fn strategy_reads_origin(repo_path: &Path, strategy: &BranchStrategy) -> bool {
-    let local_name = match strategy {
+/// `refs/heads/*` (`fetch_writes_under`) has no such fixed point, so it
+/// fetches whatever the strategy; the other-remote arm asks the same guard
+/// about `refs/remotes/<remote>/` as well. A repo git2 cannot open is
+/// treated as reading origin, the side that fetches.
+fn strategy_reads_origin(
+    repo_path: &Path,
+    strategy: &BranchStrategy,
+    split: Option<(&str, &str)>,
+) -> bool {
+    // The remote-tracking namespace the add reads (the other-remote arm
+    // only), and the local branch whose presence keeps the add off origin
+    // (the plain-name arm only).
+    let (tracking_under, local_name): (Option<String>, Option<&str>) = match strategy {
         BranchStrategy::NewBranch(_) => return true,
-        BranchStrategy::ExistingBranch(name) if name.starts_with("origin/") => return true,
-        BranchStrategy::ExistingBranch(name) => Some(name.as_str()),
-        BranchStrategy::DetachedHead => None,
+        BranchStrategy::ExistingBranch(name) => match split {
+            Some((remote, _)) if remote == DEFAULT_REMOTE => return true,
+            Some((remote, _)) => (Some(format!("refs/remotes/{}/", remote)), None),
+            None => (None, Some(name.as_str())),
+        },
+        BranchStrategy::DetachedHead => (None, None),
     };
     let Ok(repo) = git2::Repository::open(repo_path) else {
         return true;
     };
-    if fetch_writes_local_branches(&repo) {
+    if fetch_writes_under(&repo, "refs/heads/") {
         return true;
+    }
+    if let Some(prefix) = tracking_under {
+        if fetch_writes_under(&repo, &prefix) {
+            return true;
+        }
     }
     match local_name {
         Some(name) => repo.find_branch(name, git2::BranchType::Local).is_err(),
@@ -2029,15 +2188,17 @@ fn strategy_reads_origin(repo_path: &Path, strategy: &BranchStrategy) -> bool {
     }
 }
 
-/// Whether a `git fetch origin` in this repo can move a local branch: true
-/// when any `remote.origin.fetch` entry has a destination under
-/// `refs/heads/`, or one git qualifies to it (a destination with no `refs/`
-/// prefix, as in `+refs/heads/feat:feat`, creates `refs/heads/feat`; git
-/// 2.50.1, reproduced). The default `+refs/heads/*:refs/remotes/origin/*`
-/// does not; an entry with no destination (`refs/heads/feat`) fetches into
-/// `FETCH_HEAD` only; a negative entry (`^refs/heads/main`) excludes rather
-/// than writes. A repo with no `origin` has nothing for the fetch to move;
-/// any other failure to read the config takes the side that fetches.
+/// Whether a `git fetch origin` in this repo can write a ref under
+/// `prefix` (`refs/heads/` for a local branch, `refs/remotes/<remote>/` for
+/// another remote's tracking branch): true when any `remote.origin.fetch`
+/// entry has a destination there, or one git qualifies to it (a destination
+/// with no `refs/` prefix, as in `+refs/heads/feat:feat`, creates
+/// `refs/heads/feat`; git 2.50.1, reproduced). The default
+/// `+refs/heads/*:refs/remotes/origin/*` writes under neither; an entry with
+/// no destination (`refs/heads/feat`) fetches into `FETCH_HEAD` only; a
+/// negative entry (`^refs/heads/main`) excludes rather than writes. A repo
+/// with no `origin` has nothing for the fetch to move; any other failure to
+/// read the config takes the side that fetches.
 ///
 /// Read as raw config text, not through git2's parsed refspecs: git2 0.19's
 /// `Refspec::dst` unwraps a null destination, so the destination-less form
@@ -2045,7 +2206,7 @@ fn strategy_reads_origin(repo_path: &Path, strategy: &BranchStrategy) -> bool {
 /// remote failed to load and the wildcard beside the negative entry went
 /// unseen. Both forms are legal to git and the second is how a mirror-style
 /// refspec is made to work in a repo with a checked-out branch.
-fn fetch_writes_local_branches(repo: &git2::Repository) -> bool {
+fn fetch_writes_under(repo: &git2::Repository, prefix: &str) -> bool {
     // Every failure to read falls on the side that fetches, the same
     // default `strategy_reads_origin` takes for a repo git2 cannot open. An
     // absent key (no `origin`, or one with no fetch refspec) is not a
@@ -2071,33 +2232,36 @@ fn fetch_writes_local_branches(repo: &git2::Repository) -> bool {
             // Not UTF-8: cannot parse.
             return true;
         };
-        if refspec_writes_local_branch(spec) {
+        if refspec_writes_under(spec, prefix) {
             return true;
         }
     }
     false
 }
 
-/// One configured fetch refspec: see `fetch_writes_local_branches`. A
-/// destination writes a local branch when it is under `refs/heads/`, when
-/// it has no `refs/` prefix (git qualifies `feat` to `refs/heads/feat`), or
-/// when it is a wildcard whose literal part is a prefix of `refs/heads/`
-/// (`refs/*`, the mirror form, expands to `refs/heads/*` among others). A
-/// negative refspec has no destination by git's own grammar (`^a:b` is
-/// `fatal: invalid refspec`), so the no-colon arm carries it and no
-/// separate guard is needed.
-fn refspec_writes_local_branch(spec: &str) -> bool {
+/// One configured fetch refspec: see `fetch_writes_under`. A destination
+/// writes under `prefix` when it starts with it, when it has no `refs/`
+/// prefix and `prefix` is `refs/heads/` (git qualifies `feat` to
+/// `refs/heads/feat`), or when it is a wildcard whose literal part is a
+/// prefix of `prefix` (`refs/*`, the mirror form, expands to `refs/heads/*`
+/// and `refs/remotes/upstream/*` among others). A negative refspec has no
+/// destination by git's own grammar (`^a:b` is `fatal: invalid refspec`),
+/// so the no-colon arm carries it and no separate guard is needed.
+fn refspec_writes_under(spec: &str, prefix: &str) -> bool {
     let spec = spec.trim();
     let spec = spec.strip_prefix('+').unwrap_or(spec);
     match spec.split_once(':') {
         None => false,
         Some((_, "")) => false,
         Some((_, dst)) => {
-            if !dst.starts_with("refs/") || dst.starts_with("refs/heads/") {
+            if !dst.starts_with("refs/") {
+                return prefix == "refs/heads/";
+            }
+            if dst.starts_with(prefix) {
                 return true;
             }
             match dst.split_once('*') {
-                Some((literal, _)) => "refs/heads/".starts_with(literal),
+                Some((literal, _)) => prefix.starts_with(literal),
                 None => false,
             }
         }
@@ -2114,11 +2278,15 @@ fn refspec_writes_local_branch(spec: &str) -> bool {
 /// the whole usage text). `--` does not protect the value of `-b`; that slot
 /// is guarded in `create_worktree_cancellable` before this runs, on the same
 /// derived name (`branch_slot_name`) the `ExistingBranch` arm strips here.
+/// `split` is the `ExistingBranch` name's settled split (`existing_split`),
+/// derived once by the caller before the fetch so the guard and this arm
+/// use one name; this function derives nothing itself.
 fn add_worktree(
     repo_path: &Path,
     wt_path: &Path,
     base_branch: String,
     strategy: &BranchStrategy,
+    split: Option<(&str, &str)>,
 ) -> Result<PathBuf> {
     let wt = wt_path.to_string_lossy();
 
@@ -2178,11 +2346,15 @@ fn add_worktree(
         }
 
         BranchStrategy::ExistingBranch(branch_name) => {
-            let local = branch_name.strip_prefix("origin/").unwrap_or(branch_name);
-            if branch_name.starts_with("origin/") {
-                // The remote-tracking ref itself, so a tag named
-                // `origin/<x>` cannot shadow it.
-                let remote_ref = remote_tracking_ref("origin", local);
+            if let Some((remote, local)) = split {
+                // A remote-tracking name from the picker, `origin/<x>` or
+                // any other configured remote's: a new local `<x>` tracking
+                // the remote-tracking ref itself, so a tag named
+                // `<remote>/<x>` cannot shadow it. A local `<x>` that
+                // already exists is git's refusal (`a branch named '<x>'
+                // already exists`), whatever it tracks: the picker lists the
+                // local name for whoever wants that one.
+                let remote_ref = remote_tracking_ref(remote, local);
                 git_worktree_add(
                     &[
                         "worktree",
@@ -2197,7 +2369,7 @@ fn add_worktree(
                     repo_path,
                 )?;
             } else {
-                git_worktree_add(&["worktree", "add", "--", &wt, local], repo_path)?;
+                git_worktree_add(&["worktree", "add", "--", &wt, branch_name], repo_path)?;
             }
         }
 
@@ -2237,8 +2409,8 @@ fn ref_exists(repo_path: &Path, refname: &str) -> bool {
 
 /// The remote-tracking ref for `<remote>/<name>`, fully qualified, for the
 /// commit-ish slot of `git worktree add` and the probes before it. The
-/// remote is a parameter so the `ExistingBranch` arm can name a remote
-/// other than `origin` (ticket 25) without touching this.
+/// remote is a parameter because the `ExistingBranch` arm names whichever
+/// remote the picked branch belongs to (ticket 25).
 fn remote_tracking_ref(remote: &str, name: &str) -> String {
     format!("refs/remotes/{}/{}", remote, name)
 }
@@ -5300,9 +5472,35 @@ mod tests {
         ];
         for (spec, expected) in cases {
             assert_eq!(
-                refspec_writes_local_branch(spec),
+                refspec_writes_under(spec, "refs/heads/"),
                 expected,
                 "refspec {:?}",
+                spec
+            );
+        }
+        // The same classifier asked about another remote's namespace
+        // (ticket 25): an unqualified destination is a local branch, never
+        // a remote-tracking ref, and a wildcard counts only when its
+        // literal part can reach the prefix.
+        let upstream_cases = [
+            ("+refs/heads/*:refs/remotes/upstream/*", true),
+            ("+refs/heads/main:refs/remotes/upstream/feat", true),
+            ("+refs/heads/*:refs/remotes/*", true),
+            ("+refs/heads/*:refs/remotes/up*", true),
+            ("+refs/*:refs/*", true),
+            ("+refs/heads/*:refs/remotes/upstream/rel-*", true),
+            ("+refs/heads/*:refs/remotes/origin/*", false),
+            ("+refs/heads/*:refs/heads/*", false),
+            ("+refs/heads/feat:feat", false),
+            ("+refs/heads/*:*", false),
+            ("+refs/heads/*:refs/remotes/upstreamer/*", false),
+            ("refs/heads/feat", false),
+        ];
+        for (spec, expected) in upstream_cases {
+            assert_eq!(
+                refspec_writes_under(spec, "refs/remotes/upstream/"),
+                expected,
+                "refspec {:?} under refs/remotes/upstream/",
                 spec
             );
         }
@@ -7297,29 +7495,64 @@ mod tests {
 
     /// Ticket 13. The guard and the entry checks must see the name git will
     /// put after `-b`, which for a remote-tracking form is the stripped one.
+    /// Ticket 25: the prefix is any configured remote, `origin` always, the
+    /// longest remote when one remote's name is a prefix of another's.
     #[test]
     fn branch_slot_name_is_the_stripped_local_name() {
+        let existing = |name: &str| BranchStrategy::ExistingBranch(name.to_string());
+        let remotes = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
         assert_eq!(
-            branch_slot_name(&BranchStrategy::NewBranch("-x".to_string())),
+            branch_slot_name(&BranchStrategy::NewBranch("-x".to_string()), &[], None),
             Some("-x")
         );
         assert_eq!(
-            branch_slot_name(&BranchStrategy::ExistingBranch("origin/-M".to_string())),
+            branch_slot_name(&existing("origin/-M"), &[], None),
             Some("-M"),
             "origin/-M passes git's check as a whole, but -M is what reaches -b"
         );
         assert_eq!(
-            branch_slot_name(&BranchStrategy::ExistingBranch("feature/x".to_string())),
+            branch_slot_name(&existing("origin/-M"), &remotes(&["upstream"]), None),
+            Some("-M"),
+            "origin counts whether or not it is configured"
+        );
+        assert_eq!(
+            branch_slot_name(&existing("feature/x"), &[], None),
             Some("feature/x")
         );
-        assert_eq!(branch_slot_name(&BranchStrategy::DetachedHead), None);
         assert_eq!(
-            branch_slot_name(&BranchStrategy::ExistingBranch(
-                "origin/origin/-x".to_string()
-            )),
+            branch_slot_name(&BranchStrategy::DetachedHead, &[], None),
+            None
+        );
+        assert_eq!(
+            branch_slot_name(&existing("origin/origin/-x"), &[], None),
             Some("origin/-x"),
             "one prefix is stripped, as add_worktree strips one, so the slot \
              name does not begin with a dash and needs no refusal"
+        );
+        assert_eq!(
+            branch_slot_name(&existing("upstream/-M"), &[], None),
+            Some("upstream/-M"),
+            "a prefix that names no remote is part of the branch name"
+        );
+        assert_eq!(
+            branch_slot_name(&existing("upstream/-M"), &remotes(&["upstream"]), None),
+            Some("-M"),
+            "a configured remote's prefix is stripped like origin's"
+        );
+        assert_eq!(
+            branch_slot_name(&existing("a/b/-M"), &remotes(&["a", "a/b"]), None),
+            Some("-M"),
+            "the longest configured remote wins"
+        );
+        assert_eq!(
+            branch_slot_name(&existing("a/b/-M"), &remotes(&["a"]), None),
+            Some("b/-M"),
+            "and a shorter one when the longer is not configured"
+        );
+        assert_eq!(
+            branch_slot_name(&existing("upstream/"), &remotes(&["upstream"]), None),
+            Some("upstream/"),
+            "an empty local part is not a split"
         );
     }
 
@@ -7343,14 +7576,19 @@ mod tests {
             let (_tmp, local) = origin_and_local();
             git(&["push", "origin", "main:feat"], &local);
             git(&["fetch", "origin"], &local);
-            let created =
-                add_worktree(&local, Path::new("-dashout"), "main".to_string(), &strategy)
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "{}: with -- before the path, -dashout is a path: {}",
-                            label, e
-                        )
-                    });
+            let created = add_worktree(
+                &local,
+                Path::new("-dashout"),
+                "main".to_string(),
+                &strategy,
+                existing_split(&local, &strategy, &[]),
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{}: with -- before the path, -dashout is a path: {}",
+                    label, e
+                )
+            });
             assert_eq!(created, Path::new("-dashout"), "{}", label);
             assert!(
                 local.join("-dashout").join(".git").exists(),
@@ -7394,6 +7632,7 @@ mod tests {
             Path::new("-dashdir"),
             "main".to_string(),
             &BranchStrategy::NewBranch("topic".to_string()),
+            None,
         )
         .expect("with -- before the path, -dashdir is a path");
         assert_eq!(created, Path::new("-dashdir"));
@@ -7440,7 +7679,7 @@ mod tests {
             ),
         ];
         for (label, base, strategy, expected) in cases {
-            let err = add_worktree(&repo, &wt_path, base, &strategy)
+            let err = add_worktree(&repo, &wt_path, base, &strategy, None)
                 .expect_err("a dash commit-ish cannot resolve");
             let text = err.to_string();
             assert!(
