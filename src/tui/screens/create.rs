@@ -303,20 +303,19 @@ impl CreateState {
                         slow_fetch_repos: self.report.slow_fetch_paths(),
                     })
                 } else if self.branch_strategy_idx == 0 {
-                    // New branch: open the branch name stage. A field left
-                    // reading the space name it was opened with, or nothing,
-                    // is not the user's and follows the space name, so going
-                    // back to rename the space renames the branch too;
-                    // anything else they typed is kept. It is read trimmed,
-                    // as Enter reads it, and replaced only when the name
-                    // changes, so the cursor stays where it was left.
-                    let ws_name = self.ws_name.value().to_string();
-                    let field = self.branch_name_input.value().trim();
-                    let follows = field.is_empty() || field == self.branch_name_default;
-                    if follows && field != ws_name {
-                        self.branch_name_input = Input::default().with_value(ws_name.clone());
+                    // New branch: open the branch name stage on
+                    // `new_branch_name`, the name the picker's row shows. A
+                    // field left reading the space name it was opened with,
+                    // or nothing, is not the user's and follows the space
+                    // name, so going back to rename the space renames the
+                    // branch too; anything else they typed is kept. The field
+                    // is replaced only when its trimmed value differs, so the
+                    // cursor stays where it was left.
+                    let opens_with = self.new_branch_name().to_string();
+                    if self.branch_name_input.value().trim() != opens_with {
+                        self.branch_name_input = Input::default().with_value(opens_with);
                     }
-                    self.branch_name_default = ws_name;
+                    self.branch_name_default = self.ws_name.value().to_string();
                     self.error = None;
                     self.stage = CreateStage::EnterBranchName;
                     ScreenAction::Continue
@@ -494,6 +493,29 @@ impl CreateState {
         }
     }
 
+    /// Whether the branch name field is still the one this flow filled in, or
+    /// nothing, rather than a name the user typed. Read trimmed, as Enter
+    /// reads it, against the space name the branch name stage was last opened
+    /// with (ticket 26).
+    fn branch_name_follows_space(&self) -> bool {
+        let field = self.branch_name_input.value().trim();
+        field.is_empty() || field == self.branch_name_default
+    }
+
+    /// The branch the "New branch" option creates: the live space name while
+    /// the field follows the space, and the user's name, trimmed, once they
+    /// have typed one. The strategy picker's row renders it and the branch
+    /// name stage opens on it, so the row names what Enter there creates;
+    /// Enter trims the field, which agrees with the row because
+    /// `handle_enter_name` writes the space name back trimmed (ticket 30).
+    pub fn new_branch_name(&self) -> &str {
+        if self.branch_name_follows_space() {
+            self.ws_name.value()
+        } else {
+            self.branch_name_input.value().trim()
+        }
+    }
+
     pub fn branch_strategy(&self) -> BranchStrategy {
         match self.branch_strategy_idx {
             1 => BranchStrategy::ExistingBranch(self.ws_name.value().to_string()),
@@ -503,17 +525,11 @@ impl CreateState {
                     .clone()
                     .unwrap_or_else(|| self.ws_name.value().to_string()),
             ),
-            // idx 0 — New Branch; name comes from the EnterBranchName stage input.
-            // Fall back to ws_name if branch_name_input is empty (direct callers,
-            // e.g. tests or future MCP tools, before the stage gate has run).
-            _ => {
-                let name = self.branch_name_input.value().trim().to_string();
-                BranchStrategy::NewBranch(if name.is_empty() {
-                    self.ws_name.value().to_string()
-                } else {
-                    name
-                })
-            }
+            // idx 0, New Branch: the name the picker's row shows and its
+            // stage opens on. The picker never asks for idx 0 here (Enter on
+            // that row opens the branch name stage instead), so only a
+            // direct caller reaches this arm.
+            _ => BranchStrategy::NewBranch(self.new_branch_name().to_string()),
         }
     }
 }

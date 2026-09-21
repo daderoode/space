@@ -660,6 +660,7 @@ fn render_create_overlay(
         CreateStage::PickBranchStrategy => render_branch_strategy_picker(
             frame,
             state.ws_name.value(),
+            state.new_branch_name(),
             state.branch_strategy_idx,
             state.error.as_deref(),
             &state.recent_branches,
@@ -800,9 +801,17 @@ fn render_name_input(
     );
 }
 
+/// The branch strategy picker (Stage 4 of create, Stage 3 of add).
+/// `workspace_name` is the live space name, which the Existing-branch row
+/// sends to git unchanged; `new_branch_name` is the branch the New-branch row
+/// creates, which is the space name until the user types one of their own in
+/// the stage that row opens (ticket 30). The Add flow keeps its branch field
+/// by a different rule and passes its space name for both until ticket 32
+/// gives `AddState` the same seam.
 fn render_branch_strategy_picker(
     frame: &mut Frame,
     workspace_name: &str,
+    new_branch_name: &str,
     strategy_idx: usize,
     error: Option<&str>,
     recent_branches: &[crate::core::git::BranchInfo],
@@ -847,7 +856,7 @@ fn render_branch_strategy_picker(
     // Truncate to fit the dialog inner width (minus 4 for the "> " or "  " prefix).
     let opt_max_w = dialog_w.saturating_sub(2 + 4) as usize;
     let fixed = [
-        truncate_for_width(&format!("New branch '{}'", workspace_name), opt_max_w),
+        truncate_for_width(&format!("New branch '{}'", new_branch_name), opt_max_w),
         truncate_for_width(
             &format!("Existing branch '{}' (if present)", workspace_name),
             opt_max_w,
@@ -1132,6 +1141,7 @@ fn render_add_overlay(
         }
         AddStage::PickBranchStrategy => render_branch_strategy_picker(
             frame,
+            &state.workspace_name,
             &state.workspace_name,
             state.branch_strategy_idx,
             state.error.as_deref(),
