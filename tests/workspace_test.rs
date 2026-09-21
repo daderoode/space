@@ -4549,3 +4549,69 @@ fn switch_splits_a_remote_named_with_a_slash_at_the_remote() {
     let head = git_ok(&wt, &["rev-parse", "HEAD"]).trim().to_string();
     assert_eq!(head, f.upstream_feat, "at upstream's tip");
 }
+
+/// T12, the remote probe where nothing else stands behind it. With a
+/// configured remote, `switch -c <x> --track <ref>` also refuses a tag as
+/// its start point (`not a branch`), so T2 alone cannot tell an exact probe
+/// from `rev-parse --verify`. A repo with no `origin` configured still reads
+/// `origin/<x>` as origin's (the default remote), gets no `--track`, and
+/// there only the exact probe keeps a tag of either name, or of both, from
+/// becoming the new branch.
+#[test]
+fn switch_finds_no_remote_branch_through_a_tag_without_an_origin_remote() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("plain");
+    assert_eq!(git_ok(&repo, &["remote"]).trim(), "", "fixture: no remotes");
+    let decoy = git_ok(
+        &repo,
+        &[
+            "commit-tree",
+            "HEAD^{tree}",
+            "-p",
+            "HEAD",
+            "-m",
+            "t41-decoy",
+        ],
+    )
+    .trim()
+    .to_string();
+    git_ok(&repo, &["tag", "origin/gone-bare", &decoy]);
+    git_ok(
+        &repo,
+        &["tag", "refs/remotes/origin/gone-qualified", &decoy],
+    );
+    // Both at once: a bare probe finds the first, and the qualified start
+    // point then resolves to the second.
+    git_ok(&repo, &["tag", "origin/gone-both", &decoy]);
+    git_ok(&repo, &["tag", "refs/remotes/origin/gone-both", &decoy]);
+    let wt = create_worktree(
+        &repo,
+        &env.workspaces_dir,
+        "t41-12",
+        &BranchStrategy::DetachedHead,
+    )
+    .unwrap();
+
+    for name in ["gone-bare", "gone-qualified", "gone-both"] {
+        let picked = format!("origin/{}", name);
+        let err = space::core::workspace::switch_worktree_branch(&wt, &picked, false)
+            .expect_err("no remote branch has this name")
+            .to_string();
+        assert!(
+            err.contains(name),
+            "git reports the name {}, got {:?}",
+            name,
+            err
+        );
+        assert!(
+            is_detached(&wt),
+            "the worktree has not moved for {}",
+            picked
+        );
+        assert!(
+            !has_ref(&repo, &format!("refs/heads/{}", name)),
+            "no local {} is created",
+            name
+        );
+    }
+}
