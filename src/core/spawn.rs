@@ -95,13 +95,21 @@ pub(crate) mod tests {
     /// A child that records that it started, then waits for the test to
     /// release it. It gives up on its own once the test cannot release it any
     /// more: the directory goes when the test's TempDir is dropped, and the pid
-    /// goes when the test binary exits.
+    /// goes when the test binary exits. The iteration cap is the backstop for
+    /// when neither happens (pid reuse, a drop that errored before reaching
+    /// the directory, a test that hangs on `join` because the release never
+    /// came). It sits well above `HOLD_LIMIT`, so the test's own bounds report
+    /// first; measured standalone it runs about 92 s, not the 60 s the
+    /// count suggests, because each iteration also pays a `sleep` process
+    /// (tickets 22 and 31).
     fn waiting_child(dir: &Path, started: &Path, release: &Path) -> Command {
         let mut child = Command::new("/bin/sh");
         child.arg("-c").arg(format!(
             ": > '{started}'\n\
-             while [ ! -e '{release}' ] && [ -d '{dir}' ] && kill -0 {pid} 2>/dev/null\n\
-             do sleep 0.01; done\n",
+             i=0\n\
+             while [ ! -e '{release}' ] && [ -d '{dir}' ] && kill -0 {pid} 2>/dev/null \\\n\
+             && [ $i -lt 6000 ]\n\
+             do i=$((i+1)); sleep 0.01; done\n",
             started = started.display(),
             release = release.display(),
             dir = dir.display(),

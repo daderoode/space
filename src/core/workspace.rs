@@ -311,6 +311,13 @@ pub fn workspace_detail(ws_dir: &Path, name: &str) -> Result<Workspace> {
 /// this message: a localized git would turn every checked-out refusal into
 /// the generic failure and the strategy-picker bounce would be dead again.
 /// The cost is that every `worktree add` refusal reaches the log in English.
+///
+/// No time limit and no `setsid` here, and a test depends on that:
+/// `creating_esc_stops_the_run_and_leaves_the_partial_space` in
+/// `tests/tui_test.rs` holds this very call open through a `post-checkout`
+/// hook until after its Esc, so bounding it the way `run_unattended` does
+/// (`setsid` plus `killpg`) would kill that hook and its receipt (ticket 22).
+/// Whoever bounds this call has to move that hold first.
 fn git_worktree_add(args: &[&str], cwd: &Path) -> Result<()> {
     let out = spawn::output(
         Command::new("git")
@@ -3493,14 +3500,22 @@ mod tests {
         // the test can no longer write `release`: `holding` is gone when the
         // test's TempDir is dropped (it returned or panicked), and its pid is
         // gone when it was killed. git runs in its own session, so nothing
-        // else would stop it.
+        // else would stop it. The iteration cap is the backstop for when both
+        // fail (pid reuse within a poll of a SIGKILL, a TempDir drop that
+        // errored before reaching `holding`). It sits well above the 20 s
+        // fetch limit below, so that fires first and says so; measured
+        // standalone it runs about 92 s, not the 60 s the count
+        // suggests, because each iteration also pays a `sleep` process
+        // (tickets 22 and 31).
         let script = tmp.path().join("held-failing-upload-pack.sh");
         std::fs::write(
             &script,
             format!(
                 ": > '{holding}'\n\
-                 while [ -e '{holding}' ] && [ ! -e '{release}' ] && kill -0 {pid} 2>/dev/null\n\
-                 do sleep 0.1; done\n\
+                 i=0\n\
+                 while [ -e '{holding}' ] && [ ! -e '{release}' ] && kill -0 {pid} 2>/dev/null \\\n\
+                 && [ $i -lt 6000 ]\n\
+                 do i=$((i+1)); sleep 0.01; done\n\
                  [ -e '{release}' ] && : > '{released}'\n\
                  exit 1\n",
                 holding = holding.display(),

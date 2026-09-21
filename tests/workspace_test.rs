@@ -676,15 +676,38 @@ fn create_worktree_cancellable_reads_the_flag_again_after_the_fetch() {
     git(&["push", "-q", "origin", "HEAD:refs/heads/main"]);
 
     // The gate. `sh` is fine here: the app documents macOS and Linux only.
+    // The upload-pack marks `STARTED`, waits for `RELEASE`, and records in
+    // `RELEASED` that it saw it before it serves the fetch. It gives up
+    // without that record once the test can no longer release it: `STARTED`
+    // goes with the TempDir (the test returned or panicked), and the pid with
+    // the test process. git runs in its own session, so a killed test binary
+    // leaves nothing else to stop it, and the fetch limit below dies with the
+    // test process (ticket 31). The iteration cap is the backstop for when
+    // both fail (pid reuse, a TempDir drop that errored before reaching
+    // `STARTED`). It sits well above every wall-clock bound in this test, so
+    // those fire first and say what happened; measured standalone it runs
+    // about 92 s, not the 60 s the count suggests, because each
+    // iteration also pays a `sleep` process (ticket 22).
     let started = tmp.path().join("STARTED");
     let release = tmp.path().join("RELEASE");
+    let released = tmp.path().join("RELEASED");
     let gate = tmp.path().join("gate.sh");
     std::fs::write(
         &gate,
         format!(
-            "#!/bin/sh\ntouch \"{}\"\nwhile [ ! -f \"{}\" ]; do sleep 0.01; done\nexec git upload-pack \"$@\"\n",
-            started.display(),
-            release.display()
+            "#!/bin/sh\n\
+             : > '{started}'\n\
+             i=0\n\
+             while [ -e '{started}' ] && [ ! -e '{release}' ] && kill -0 {pid} 2>/dev/null \\\n\
+             && [ $i -lt 6000 ]\n\
+             do i=$((i+1)); sleep 0.01; done\n\
+             [ -e '{release}' ] || exit 1\n\
+             : > '{released}'\n\
+             exec git upload-pack \"$@\"\n",
+            started = started.display(),
+            release = release.display(),
+            released = released.display(),
+            pid = std::process::id()
         ),
     )
     .unwrap();
@@ -730,6 +753,18 @@ fn create_worktree_cancellable_reads_the_flag_again_after_the_fetch() {
     );
     flipper.join().unwrap();
 
+    // Everything below rests on the fetch having been held until the flag was
+    // set. Checked from the upload-pack's side rather than by timing: it wrote
+    // `RELEASED` only after seeing `RELEASE`. A fetch that hit its limit above
+    // was killed with its upload-pack before it could write that, so a
+    // missing record names the timeout instead of reading as a cancellation
+    // regression.
+    assert!(
+        released.exists(),
+        "the gated upload-pack must hold until the release (no record means it \
+         gave up, or the fetch hit its 60 s limit and was killed): {:?}",
+        attempt.fetch
+    );
     assert!(
         attempt.fetch.is_some(),
         "checkpoint 1 saw a clear flag, so the fetch must have run: that is \
