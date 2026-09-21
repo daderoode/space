@@ -135,3 +135,13 @@ site that skips the gate shows up as one more clippy warning.
   rmcp's child-process transport and tokio's `process` module are not compiled
   in (their features are off). The remaining hits in the dependency tree are
   build scripts, test code, documentation, or `libc` declarations.
+
+## Status update, 2026-09-21
+
+`spawn::status` was removed with ticket 28. Its last production caller was the
+`git merge --abort` in `pull_repo`, which inherited the TUI's stderr; ticket 27
+had already moved the other one (`git worktree remove`). Every production
+spawn now goes through `spawn::output` (stdin null, both streams piped) or the
+unattended run's `spawn`, so no child writes to the terminal or the MCP stream.
+A caller that needs inherited streams adds the entry back behind the gate, with
+its reason, rather than calling `Command::status` directly.
