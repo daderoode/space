@@ -81,7 +81,12 @@ pub struct CommitInfo {
     pub subject: String,
 }
 
-/// Return the default branch name (main/master/etc.) by checking HEAD.
+/// Return the name of the repo's current `HEAD`: the checked-out branch's
+/// short name, `HEAD` itself when the repo is detached, or `main` when the
+/// repo cannot be opened or has no commit yet. Not the default branch: a
+/// repo left on `feat` gives `feat`. Callers that hand the name to git as a
+/// branch qualify it to `refs/heads/<name>` unless it is `HEAD`
+/// (`workspace::base_ref`).
 pub fn detect_base_branch(repo_path: &Path) -> String {
     let repo = match Repository::open(repo_path) {
         Ok(r) => r,

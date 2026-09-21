@@ -1983,16 +1983,18 @@ pub fn create_worktree_cancellable(
 /// so whether the pre-create fetch can change what it checks out. Read from
 /// what each arm of `add_worktree` runs, not from the strategy's name:
 ///
-/// - `NewBranch` probes `origin/<branch>` and `origin/<base>`: always.
-/// - `ExistingBranch("origin/x")` adds `--track` from that ref: always.
+/// - `NewBranch` probes `refs/remotes/origin/<branch>` and
+///   `refs/remotes/origin/<base>`: always.
+/// - `ExistingBranch("origin/x")` adds `--track` from
+///   `refs/remotes/origin/x`: always.
 /// - `ExistingBranch("x")` runs `git worktree add <wt> x`. With a local
 ///   branch `x` git checks it out at its local tip and never looks at
 ///   `origin/x`. Without one, git's own DWIM resolves `x` to `origin/x`
 ///   when exactly one remote has it and adds `--track -b x origin/x`
 ///   (git 2.50.1, and independent of `worktree.guessRemote`, which governs
 ///   the no-commit-ish form only). So: reads origin iff no local `x`.
-/// - `DetachedHead` adds `--detach` at the source repo's own `HEAD` name, a
-///   local ref; rev-parse never resolves a bare name to `origin/<name>`.
+/// - `DetachedHead` adds `--detach` at the source repo's own `HEAD` name as
+///   `refs/heads/<name>` (or `HEAD` when detached), a local ref.
 ///
 /// The local-branch test runs before the fetch, which is sound because
 /// under the default refspec `git fetch origin` never creates or moves
@@ -2115,26 +2117,21 @@ fn add_worktree(
 
     match strategy {
         BranchStrategy::NewBranch(branch_name) => {
-            // 1. Local branch exists?
-            let local_exists = spawn::output(
-                Command::new("git")
-                    .args(["rev-parse", "--verify", branch_name])
-                    .current_dir(repo_path),
-            )
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+            // 1. Local branch exists? Asked of `refs/heads/<name>`, never
+            // the bare name, which `rev-parse` resolves to a tag first.
+            let local_exists = ref_exists(repo_path, &format!("refs/heads/{}", branch_name));
 
-            // 2. Remote branch exists?
-            let remote_ref = format!("origin/{}", branch_name);
-            let remote_exists = spawn::output(
-                Command::new("git")
-                    .args(["rev-parse", "--verify", &remote_ref])
-                    .current_dir(repo_path),
-            )
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+            // 2. Remote branch exists? Same rule: a tag named `origin/x`
+            // is not a remote branch.
+            let remote_ref = remote_tracking_ref("origin", branch_name);
+            let remote_exists = ref_exists(repo_path, &remote_ref);
 
             if local_exists {
+                // The bare name, deliberately: `git worktree add <wt>
+                // <name>` checks out the branch iff `refs/heads/<name>`
+                // exists (which the probe just settled), while the
+                // qualified `refs/heads/<name>` in this slot is taken as a
+                // commit-ish and detaches (git 2.50.1).
                 git_worktree_add(&["worktree", "add", "--", &wt, branch_name], repo_path)?;
             } else if remote_exists {
                 git_worktree_add(
@@ -2156,18 +2153,15 @@ fn add_worktree(
                 // commits they are NOT included in the new worktree. That is intentional:
                 // the sync step guarantees origin/<base> is the freshest shared state.
                 // Fall back to local only if the remote ref doesn't exist (offline / no remote).
-                let origin_base = format!("origin/{}", base_branch);
-                let origin_base_exists = spawn::output(
-                    Command::new("git")
-                        .args(["rev-parse", "--verify", &origin_base])
-                        .current_dir(repo_path),
-                )
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-                let start_point: &str = if origin_base_exists {
+                // Both start points are fully qualified: a tag named like
+                // the base (or like `origin/<base>`) would otherwise make
+                // the name ambiguous and the add fail.
+                let origin_base = remote_tracking_ref("origin", &base_branch);
+                let local_base = base_ref(&base_branch);
+                let start_point: &str = if ref_exists(repo_path, &origin_base) {
                     &origin_base
                 } else {
-                    &base_branch
+                    &local_base
                 };
                 git_worktree_add(
                     &["worktree", "add", "-b", branch_name, "--", &wt, start_point],
@@ -2179,6 +2173,9 @@ fn add_worktree(
         BranchStrategy::ExistingBranch(branch_name) => {
             let local = branch_name.strip_prefix("origin/").unwrap_or(branch_name);
             if branch_name.starts_with("origin/") {
+                // The remote-tracking ref itself, so a tag named
+                // `origin/<x>` cannot shadow it.
+                let remote_ref = remote_tracking_ref("origin", local);
                 git_worktree_add(
                     &[
                         "worktree",
@@ -2188,7 +2185,7 @@ fn add_worktree(
                         local,
                         "--",
                         &wt,
-                        branch_name,
+                        &remote_ref,
                     ],
                     repo_path,
                 )?;
@@ -2198,14 +2195,51 @@ fn add_worktree(
         }
 
         BranchStrategy::DetachedHead => {
+            let start_point = base_ref(&base_branch);
             git_worktree_add(
-                &["worktree", "add", "--detach", "--", &wt, &base_branch],
+                &["worktree", "add", "--detach", "--", &wt, &start_point],
                 repo_path,
             )?;
         }
     }
 
     Ok(wt_path.to_path_buf())
+}
+
+/// Whether `refname` resolves in `repo_path`. Callers pass a fully qualified
+/// name (`refs/heads/x`, `refs/remotes/origin/x`): `rev-parse --verify` on a
+/// bare name resolves a tag before a branch, which is how a same-named tag
+/// used to be taken for a branch (ticket 24). `--quiet` only silences the
+/// "needed a single revision" line; the exit status is the answer either way.
+fn ref_exists(repo_path: &Path, refname: &str) -> bool {
+    spawn::output(
+        Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", refname])
+            .current_dir(repo_path),
+    )
+    .map(|o| o.status.success())
+    .unwrap_or(false)
+}
+
+/// The remote-tracking ref for `<remote>/<name>`, fully qualified, for the
+/// commit-ish slot of `git worktree add` and the probes before it. The
+/// remote is a parameter so the `ExistingBranch` arm can name a remote
+/// other than `origin` (ticket 25) without touching this.
+fn remote_tracking_ref(remote: &str, name: &str) -> String {
+    format!("refs/remotes/{}/{}", remote, name)
+}
+
+/// The fully qualified form of the base `git::detect_base_branch` returns:
+/// `refs/heads/<branch>` for a checked-out branch, and `HEAD` itself when
+/// the source repo is detached (`refs/heads/HEAD` is an invalid reference,
+/// and `HEAD` cannot be a branch name: `git check-ref-format --branch HEAD`
+/// refuses it, so the two cases cannot be confused).
+fn base_ref(base_branch: &str) -> String {
+    if base_branch == "HEAD" {
+        base_branch.to_string()
+    } else {
+        format!("refs/heads/{}", base_branch)
+    }
 }
 
 /// Remove a workspace: hand every repo worktree back to its source repo with
@@ -4467,6 +4501,279 @@ mod tests {
             new_branch_marker.exists(),
             "the contrast proves the gate: a strategy that reads origin/* reaches the remote"
         );
+    }
+
+    // Ticket 24: a tag that shares a name with a branch, or with a ref the
+    // app builds (`origin/<name>`), must never decide what a worktree is
+    // checked out at. Every strategy resolves its refs fully qualified
+    // except the plain existing-branch arm, which git decides. The tags in
+    // these tests sit at a commit no assertion expects, and each fixture
+    // asserts that difference so a same-second collision cannot make a
+    // test pass vacuously.
+
+    /// A commit no strategy should land on: a fresh parentless commit that
+    /// no branch points at, so it is neither the local `main` tip, nor
+    /// `origin/main`, nor `origin/feat` (origin's first commit would be:
+    /// two empty `init` commits in the same second are byte-identical).
+    fn decoy_sha(repo: &Path) -> String {
+        let out = Cmd::new("git")
+            .args(["commit-tree", "HEAD^{tree}", "-m", "decoy"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let decoy = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(
+            decoy.len(),
+            40,
+            "fixture: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        for tip in [
+            "refs/heads/main",
+            "refs/remotes/origin/main",
+            "refs/remotes/origin/feat",
+        ] {
+            assert_ne!(
+                decoy,
+                get_sha(repo, tip),
+                "fixture: decoy must differ from {tip}"
+            );
+        }
+        decoy
+    }
+
+    /// The configured upstream of a local branch, read by its qualified
+    /// name so a same-named tag cannot make the question ambiguous.
+    fn upstream_of(wt: &Path, branch: &str) -> String {
+        let out = Cmd::new("git")
+            .args([
+                "for-each-ref",
+                "--format=%(upstream)",
+                &format!("refs/heads/{}", branch),
+            ])
+            .current_dir(wt)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn attempt(repo: &Path, ws_dir: &Path, strategy: BranchStrategy) -> PathBuf {
+        create_worktree_with_fetch(repo, ws_dir, "ws", &strategy, PreCreateFetch::Skip)
+            .created
+            .expect("the worktree must be created")
+    }
+
+    /// T1: a New-branch name that is only a tag creates the branch from the
+    /// base; the probe reads `refs/heads/<name>`, never the bare name.
+    #[test]
+    fn new_branch_ignores_a_tag_of_that_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _) = gated_repo(tmp.path(), "repo");
+        let decoy = decoy_sha(&repo);
+        git(&["tag", "topic", &decoy], &repo);
+
+        let wt = attempt(
+            &repo,
+            &tmp.path().join("ws"),
+            BranchStrategy::NewBranch("topic".into()),
+        );
+
+        assert!(!head_is_detached(&wt), "a tag named topic is not a branch");
+        assert_eq!(git::current_branch(&wt).unwrap(), "topic");
+        assert_eq!(
+            get_sha(&wt, "HEAD"),
+            get_sha(&repo, "refs/remotes/origin/main")
+        );
+    }
+
+    /// T2: a tag beside a remote-only branch of the same name, plus a tag
+    /// named like the remote ref itself: the remote branch is tracked.
+    #[test]
+    fn new_branch_tracks_the_remote_branch_beside_a_tag_of_that_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _) = gated_repo(tmp.path(), "repo");
+        let decoy = decoy_sha(&repo);
+        git(&["tag", "feat", &decoy], &repo);
+        git(&["tag", "origin/feat", &decoy], &repo);
+
+        let wt = attempt(
+            &repo,
+            &tmp.path().join("ws"),
+            BranchStrategy::NewBranch("feat".into()),
+        );
+
+        assert!(!head_is_detached(&wt));
+        assert_eq!(git::current_branch(&wt).unwrap(), "feat");
+        assert_eq!(
+            get_sha(&wt, "HEAD"),
+            get_sha(&repo, "refs/remotes/origin/feat")
+        );
+        assert_eq!(
+            upstream_of(&wt, "feat"),
+            "refs/remotes/origin/feat",
+            "the local branch tracks origin/feat"
+        );
+    }
+
+    /// T2b: a tag named `origin/x` with no branch `x` anywhere is not a
+    /// remote branch; `x` is created from the base.
+    #[test]
+    fn new_branch_is_not_fooled_by_a_tag_named_like_a_remote_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _) = gated_repo(tmp.path(), "repo");
+        let decoy = decoy_sha(&repo);
+        git(&["tag", "origin/x", &decoy], &repo);
+
+        let wt = attempt(
+            &repo,
+            &tmp.path().join("ws"),
+            BranchStrategy::NewBranch("x".into()),
+        );
+
+        assert_eq!(git::current_branch(&wt).unwrap(), "x");
+        assert_eq!(
+            get_sha(&wt, "HEAD"),
+            get_sha(&repo, "refs/remotes/origin/main")
+        );
+    }
+
+    /// T3: tags named like the base and like `origin/<base>` do not shadow
+    /// the start point; the branch starts at `origin/main` and tracks it,
+    /// as it does with no tags (git sets upstream from a remote-tracking
+    /// start point).
+    #[test]
+    fn new_branch_starts_at_the_base_branch_not_a_tag_of_its_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _) = gated_repo(tmp.path(), "repo");
+        let decoy = decoy_sha(&repo);
+        git(&["tag", "main", &decoy], &repo);
+        git(&["tag", "origin/main", &decoy], &repo);
+
+        let wt = attempt(
+            &repo,
+            &tmp.path().join("ws"),
+            BranchStrategy::NewBranch("fresh".into()),
+        );
+
+        assert_eq!(git::current_branch(&wt).unwrap(), "fresh");
+        assert_eq!(
+            get_sha(&wt, "HEAD"),
+            get_sha(&repo, "refs/remotes/origin/main")
+        );
+        assert_eq!(
+            upstream_of(&wt, "fresh"),
+            "refs/remotes/origin/main",
+            "the local branch tracks origin/main"
+        );
+    }
+
+    /// T4: with no `origin/<base>` the start point is the local base branch,
+    /// `refs/heads/main`, not the tag of that name.
+    #[test]
+    fn new_branch_falls_back_to_the_local_base_branch_not_its_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = plain_repo(tmp.path(), "repo");
+        git(&["commit", "--allow-empty", "-m", "second"], &repo);
+        let decoy = get_sha(&repo, "refs/heads/main~1");
+        git(&["tag", "main", &decoy], &repo);
+
+        let wt = attempt(
+            &repo,
+            &tmp.path().join("ws"),
+            BranchStrategy::NewBranch("fresh".into()),
+        );
+
+        assert_eq!(git::current_branch(&wt).unwrap(), "fresh");
+        assert_eq!(get_sha(&wt, "HEAD"), get_sha(&repo, "refs/heads/main"));
+        assert_ne!(get_sha(&wt, "HEAD"), decoy);
+    }
+
+    /// T5: a detached worktree starts at the base branch's tip, not at the
+    /// tag of the same name.
+    #[test]
+    fn detached_head_starts_at_the_base_branch_not_a_tag_of_its_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = plain_repo(tmp.path(), "repo");
+        git(&["commit", "--allow-empty", "-m", "second"], &repo);
+        let decoy = get_sha(&repo, "refs/heads/main~1");
+        git(&["tag", "main", &decoy], &repo);
+
+        let wt = attempt(&repo, &tmp.path().join("ws"), BranchStrategy::DetachedHead);
+
+        assert!(head_is_detached(&wt));
+        assert_eq!(get_sha(&wt, "HEAD"), get_sha(&repo, "refs/heads/main"));
+        assert_ne!(get_sha(&wt, "HEAD"), decoy);
+    }
+
+    /// T6: a source repo that is itself detached has no base branch; the
+    /// base is `HEAD` and is not qualified (`refs/heads/HEAD` is no ref).
+    #[test]
+    fn detached_head_from_a_detached_source_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = plain_repo(tmp.path(), "repo");
+        git(&["commit", "--allow-empty", "-m", "second"], &repo);
+        git(&["checkout", "--detach", "refs/heads/main~1"], &repo);
+        let source_head = get_sha(&repo, "HEAD");
+        assert_ne!(source_head, get_sha(&repo, "refs/heads/main"), "fixture");
+
+        let wt = attempt(&repo, &tmp.path().join("ws"), BranchStrategy::DetachedHead);
+
+        assert!(head_is_detached(&wt));
+        assert_eq!(get_sha(&wt, "HEAD"), source_head);
+    }
+
+    /// T7: `origin/feat` is read as `refs/remotes/origin/feat`, so a tag
+    /// named `origin/feat` neither shadows it nor makes it ambiguous.
+    #[test]
+    fn existing_origin_branch_ignores_a_tag_named_like_the_remote_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _) = gated_repo(tmp.path(), "repo");
+        let decoy = decoy_sha(&repo);
+        git(&["tag", "origin/feat", &decoy], &repo);
+
+        let wt = attempt(
+            &repo,
+            &tmp.path().join("ws"),
+            BranchStrategy::ExistingBranch("origin/feat".into()),
+        );
+
+        assert_eq!(git::current_branch(&wt).unwrap(), "feat");
+        assert_eq!(
+            get_sha(&wt, "HEAD"),
+            get_sha(&repo, "refs/remotes/origin/feat")
+        );
+        assert_eq!(
+            upstream_of(&wt, "feat"),
+            "refs/remotes/origin/feat",
+            "the local branch tracks origin/feat"
+        );
+    }
+
+    /// T8: a local branch beside a tag of the same name is checked out as a
+    /// branch. The commit-ish slot of this form must stay the bare name:
+    /// `git worktree add <wt> refs/heads/feat` succeeds but detaches
+    /// (git 2.50.1), because git keys the branch form on the bare name.
+    #[test]
+    fn new_branch_checks_out_the_local_branch_beside_a_tag_of_its_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _) = gated_repo(tmp.path(), "repo");
+        git(&["branch", "feat", "refs/heads/main"], &repo);
+        let decoy = get_sha(&repo, "refs/remotes/origin/main");
+        assert_ne!(decoy, get_sha(&repo, "refs/heads/feat"), "fixture");
+        git(&["tag", "feat", &decoy], &repo);
+
+        let wt = attempt(
+            &repo,
+            &tmp.path().join("ws"),
+            BranchStrategy::NewBranch("feat".into()),
+        );
+
+        assert!(
+            !head_is_detached(&wt),
+            "the local branch, not the tag, and as a branch"
+        );
+        assert_eq!(git::current_branch(&wt).unwrap(), "feat");
+        assert_eq!(get_sha(&wt, "HEAD"), get_sha(&repo, "refs/heads/feat"));
     }
 
     /// An `origin/`-prefixed name is added with `--track` from that very
@@ -6985,7 +7292,10 @@ mod tests {
     /// by putting a dash in the commit-ish slot and reading git's answer, and
     /// `create_worktree_cancellable` refuses such a branch before git runs,
     /// so this calls `add_worktree` directly. Without `--` git says
-    /// `unknown switch 'o'` followed by its usage text.
+    /// `unknown switch 'o'` followed by its usage text. Since ticket 24 the
+    /// base reaches git as `refs/heads/-foo`, so only the plain
+    /// existing-branch form still puts a leading dash in that slot; the two
+    /// base forms pin that git sees a reference, whatever its spelling.
     #[test]
     fn a_dash_commit_ish_is_reported_as_an_invalid_reference() {
         let tmp = tempfile::tempdir().unwrap();
@@ -6994,29 +7304,32 @@ mod tests {
         std::fs::create_dir_all(spaces.join("ws")).unwrap();
         let wt_path = spaces.join("ws").join("repo");
 
-        let cases: [(&str, String, BranchStrategy); 3] = [
+        let cases: [(&str, String, BranchStrategy, &str); 3] = [
             (
                 "existing branch",
                 "main".to_string(),
                 BranchStrategy::ExistingBranch("-foo".to_string()),
+                "invalid reference: -foo",
             ),
             (
                 "detached at base",
                 "-foo".to_string(),
                 BranchStrategy::DetachedHead,
+                "invalid reference: refs/heads/-foo",
             ),
             (
                 "new branch off base",
                 "-foo".to_string(),
                 BranchStrategy::NewBranch("topic".to_string()),
+                "invalid reference: refs/heads/-foo",
             ),
         ];
-        for (label, base, strategy) in cases {
+        for (label, base, strategy, expected) in cases {
             let err = add_worktree(&repo, &wt_path, base, &strategy)
                 .expect_err("a dash commit-ish cannot resolve");
             let text = err.to_string();
             assert!(
-                text.contains("invalid reference: -foo"),
+                text.contains(expected),
                 "{}: git must see -foo as a reference, not an option, got {:?}",
                 label,
                 text
