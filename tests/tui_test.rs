@@ -644,50 +644,19 @@ fn creating_esc_stops_the_run_and_leaves_the_partial_space() {
     let repo_b = env.create_repo("cancel-repo-b");
 
     // The hold. `git worktree add` runs the repo's `post-checkout` hook after
-    // it has checked the worktree out and before it exits. This one marks
-    // `holding`, waits for `release`, and records in `released` that it saw
-    // it. It gives up without that record once the test can no longer release
-    // it: `holding` goes with the TestEnv (the test returned or panicked), and
-    // the pid with the test process. Both of those can outlive this test
-    // though: the pid is the whole test binary's, and `TempDir::drop` discards
-    // the error from a `remove_dir_all` that can fail before it reaches
-    // `holding`. So the loop also counts itself out after 6000 iterations.
-    // That is not 60 seconds: each iteration pays a `sleep` process on top of
-    // its 0.01 seconds, so the unmodified loop was measured standalone at
-    // 98 s on one machine and 103 s on another, and it only grows under load.
-    // Being well above the 60 second deadlines below is the point. Those are
-    // wall clock, so one of them always expires first and reports the failure
-    // in its own words; the cap is only the backstop that ends a hold nobody
-    // released. `sh` is fine: the app documents macOS and Linux only.
-    let holding = env.dir.path().join("hold-holding");
-    let release = env.dir.path().join("hold-release");
-    let released = env.dir.path().join("hold-released");
+    // it has checked the worktree out and before it exits. The hook is the
+    // shared helper (`common::hold`): it marks `holding`, waits for `release`,
+    // and records in `released` that it saw it, giving up without that record
+    // once the test can no longer release it (the TestEnv dropped, the test
+    // process gone) or after its cap. The cap is well above the 60 second
+    // deadlines below, which are wall clock, so one of them always expires
+    // first and reports the failure in its own words; the cap is only the
+    // backstop that ends a hold nobody released. A hook must exit 0 for the
+    // add to succeed, which only a released helper does.
+    let hold = common::hold::Hold::new(env.dir.path(), "hold");
     let hooks = env.dir.path().join("hold-hooks");
     std::fs::create_dir_all(&hooks).unwrap();
-    let hook = hooks.join("post-checkout");
-    std::fs::write(
-        &hook,
-        format!(
-            "#!/bin/sh\n\
-             : > '{holding}'\n\
-             i=0\n\
-             while [ -e '{holding}' ] && [ ! -e '{release}' ] && kill -0 {pid} 2>/dev/null \\\n\
-             && [ $i -lt 6000 ]\n\
-             do i=$((i+1)); sleep 0.01; done\n\
-             [ -e '{release}' ] && : > '{released}'\n\
-             exit 0\n",
-            holding = holding.display(),
-            release = release.display(),
-            released = released.display(),
-            pid = std::process::id()
-        ),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    hold.write_script(&hooks.join("post-checkout"), "exit 0");
     // Repo A only, set in its own config so that a global `core.hooksPath`
     // cannot send git to other hooks.
     let out = std::process::Command::new("git")
@@ -731,20 +700,18 @@ fn creating_esc_stops_the_run_and_leaves_the_partial_space() {
     // mean the worker got past repo A without the hold, which is said at once
     // rather than after the deadline.
     let space_dir = env.workspaces_dir.join("ws-cancel");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while !holding.exists() {
-        assert!(
-            !space_dir.join("cancel-repo-b").exists(),
-            "the worker got past the first repo without reaching its hold"
-        );
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the first repo never reached its hold: the hook did not run, or \
-             repo A's add ended before it (a refusal stops the worker at repo \
-             A, so repo B's worktree never appears either)"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
+    hold.wait_holding(
+        std::time::Duration::from_secs(60),
+        "the first repo never reached its hold: the hook did not run, or \
+         repo A's add ended before it (a refusal stops the worker at repo \
+         A, so repo B's worktree never appears either)",
+        || {
+            space_dir
+                .join("cancel-repo-b")
+                .exists()
+                .then(|| "the worker got past the first repo without reaching its hold".to_string())
+        },
+    );
 
     // The footer says what is happening rather than claiming the run is over.
     // In THIS frame, before the Esc, the count is 0 because it advances in
@@ -802,9 +769,9 @@ fn creating_esc_stops_the_run_and_leaves_the_partial_space() {
     // hook's side rather than assumed from timing. The count is asserted after
     // that record, because the record is what makes 0 mean "nothing finished
     // before the key" rather than "nothing finished yet".
-    std::fs::write(&release, "").unwrap();
+    hold.release();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while !released.exists() {
+    while !hold.saw_release() {
         assert!(
             std::time::Instant::now() < deadline,
             "the hold on the first repo ended before the test released it, so \

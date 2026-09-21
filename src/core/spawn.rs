@@ -68,13 +68,19 @@ pub(crate) fn hold() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
+/// The file-gated hold the integration tests share, compiled into the unit
+/// tests from the same file so there is one copy (ticket 31). The path is
+/// relative to this file's directory.
+#[cfg(test)]
+#[path = "../../tests/common/hold.rs"]
+pub(crate) mod hold;
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Read;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    use std::path::Path;
     use std::time::{Duration, Instant};
 
     /// How long the pipe is left without close-on-exec while `start` runs. An
@@ -93,28 +99,13 @@ pub(crate) mod tests {
     const HOLD_LIMIT: Duration = Duration::from_secs(5);
 
     /// A child that records that it started, then waits for the test to
-    /// release it. It gives up on its own once the test cannot release it any
-    /// more: the directory goes when the test's TempDir is dropped, and the pid
-    /// goes when the test binary exits. The iteration cap is the backstop for
-    /// when neither happens (pid reuse, a drop that errored before reaching
-    /// the directory, a test that hangs on `join` because the release never
-    /// came). It sits well above `HOLD_LIMIT`, so the test's own bounds report
-    /// first; measured standalone it runs about 92 s, not the 60 s the
-    /// count suggests, because each iteration also pays a `sleep` process
-    /// (tickets 22 and 31).
-    fn waiting_child(dir: &Path, started: &Path, release: &Path) -> Command {
+    /// release it: the shared hold as a `sh -c` script, with no tail. Its
+    /// module doc says how it gives up once the test cannot release it; its
+    /// cap sits well above `HOLD_LIMIT`, so the tests' own bounds report
+    /// first.
+    fn waiting_child(hold: &hold::Hold) -> Command {
         let mut child = Command::new("/bin/sh");
-        child.arg("-c").arg(format!(
-            ": > '{started}'\n\
-             i=0\n\
-             while [ ! -e '{release}' ] && [ -d '{dir}' ] && kill -0 {pid} 2>/dev/null \\\n\
-             && [ $i -lt 6000 ]\n\
-             do i=$((i+1)); sleep 0.01; done\n",
-            started = started.display(),
-            release = release.display(),
-            dir = dir.display(),
-            pid = std::process::id()
-        ));
+        child.arg("-c").arg(hold.script(""));
         child
     }
 
@@ -136,9 +127,8 @@ pub(crate) mod tests {
         start: impl FnOnce(Command) + Send + 'static,
     ) -> bool {
         let tmp = tempfile::tempdir().unwrap();
-        let started = tmp.path().join("started");
-        let release = tmp.path().join("release");
-        let child = waiting_child(tmp.path(), &started, &release);
+        let waiting = hold::Hold::new(tmp.path(), "gap");
+        let child = waiting_child(&waiting);
 
         let gate = hold();
         let mut fds = [0 as libc::c_int; 2];
@@ -152,7 +142,7 @@ pub(crate) mod tests {
 
         let starter = std::thread::spawn(move || start(child));
         let gap_ends = Instant::now() + gap;
-        while !started.exists() && Instant::now() < gap_ends {
+        while !waiting.is_holding() && Instant::now() < gap_ends {
             std::thread::sleep(Duration::from_millis(2));
         }
         for fd in [&read_end, &write_end] {
@@ -173,7 +163,7 @@ pub(crate) mod tests {
         assert!(polled >= 0, "poll: {}", io::Error::last_os_error());
         let held = polled == 0;
 
-        std::fs::write(&release, "").unwrap();
+        waiting.release();
         let mut rest = Vec::new();
         File::from(read_end).read_to_end(&mut rest).unwrap();
         starter.join().unwrap();
@@ -288,22 +278,14 @@ pub(crate) mod tests {
     #[test]
     fn waits_happen_outside_the_gate() {
         let tmp = tempfile::tempdir().unwrap();
-        let started = tmp.path().join("started");
-        let release = tmp.path().join("release");
-        let mut first = waiting_child(tmp.path(), &started, &release);
+        let waiting = hold::Hold::new(tmp.path(), "first");
+        let mut first = waiting_child(&waiting);
         let first = std::thread::spawn(move || output(&mut first).unwrap());
-        let backstop = Instant::now() + HOLD_LIMIT;
-        while !started.exists() {
-            assert!(
-                !first.is_finished(),
-                "the first child ended before it started"
-            );
-            assert!(
-                Instant::now() < backstop,
-                "the first child did not start within {HOLD_LIMIT:?}"
-            );
-            std::thread::sleep(Duration::from_millis(2));
-        }
+        waiting.wait_holding(HOLD_LIMIT, "the first child did not start", || {
+            first
+                .is_finished()
+                .then(|| "the first child ended before it started".to_string())
+        });
 
         let second = std::thread::spawn(|| output(&mut Command::new("/usr/bin/true")).unwrap());
         let backstop = Instant::now() + HOLD_LIMIT;
@@ -311,7 +293,7 @@ pub(crate) mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         let second_returned = second.is_finished();
-        std::fs::write(&release, "").unwrap();
+        waiting.release();
         first.join().unwrap();
         second.join().unwrap();
         assert!(

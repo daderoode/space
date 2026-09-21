@@ -645,7 +645,7 @@ fn create_worktree_cancellable_reads_the_flag_again_after_the_fetch() {
     use space::core::workspace::{create_worktree_cancellable, PreCreateFetch};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     let tmp = TempDir::new().unwrap();
     let origin = tmp.path().join("origin.git");
@@ -675,47 +675,16 @@ fn create_worktree_cancellable_reads_the_flag_again_after_the_fetch() {
     git(&["remote", "add", "origin", &url]);
     git(&["push", "-q", "origin", "HEAD:refs/heads/main"]);
 
-    // The gate. `sh` is fine here: the app documents macOS and Linux only.
-    // The upload-pack marks `STARTED`, waits for `RELEASE`, and records in
-    // `RELEASED` that it saw it before it serves the fetch. It gives up
-    // without that record once the test can no longer release it: `STARTED`
-    // goes with the TempDir (the test returned or panicked), and the pid with
-    // the test process. git runs in its own session, so a killed test binary
-    // leaves nothing else to stop it, and the fetch limit below dies with the
-    // test process (ticket 31). The iteration cap is the backstop for when
-    // both fail (pid reuse, a TempDir drop that errored before reaching
-    // `STARTED`). It sits well above every wall-clock bound in this test, so
-    // those fire first and say what happened; measured standalone it runs
-    // about 92 s, not the 60 s the count suggests, because each
-    // iteration also pays a `sleep` process (ticket 22).
-    let started = tmp.path().join("STARTED");
-    let release = tmp.path().join("RELEASE");
-    let released = tmp.path().join("RELEASED");
+    // The gate is the shared hold (`common::hold`) in front of the real
+    // upload-pack: it marks that it is holding, waits for the release, records
+    // that it saw it, and only then serves the fetch. It gives up without that
+    // record once the test can no longer release it or after its cap. git
+    // runs in its own session, so a killed test binary leaves nothing else to
+    // stop it, and the fetch limit below dies with the test process; the pid
+    // guard is what ends it then (ticket 31).
+    let hold = Arc::new(common::hold::Hold::new(tmp.path(), "gate"));
     let gate = tmp.path().join("gate.sh");
-    std::fs::write(
-        &gate,
-        format!(
-            "#!/bin/sh\n\
-             : > '{started}'\n\
-             i=0\n\
-             while [ -e '{started}' ] && [ ! -e '{release}' ] && kill -0 {pid} 2>/dev/null \\\n\
-             && [ $i -lt 6000 ]\n\
-             do i=$((i+1)); sleep 0.01; done\n\
-             [ -e '{release}' ] || exit 1\n\
-             : > '{released}'\n\
-             exec git upload-pack \"$@\"\n",
-            started = started.display(),
-            release = release.display(),
-            released = released.display(),
-            pid = std::process::id()
-        ),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&gate, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    hold.write_script(&gate, "exec git upload-pack \"$@\"");
     let gate_path = gate.display().to_string();
     git(&["config", "remote.origin.uploadpack", &gate_path]);
 
@@ -724,20 +693,17 @@ fn create_worktree_cancellable_reads_the_flag_again_after_the_fetch() {
 
     let flipper = {
         let cancel = Arc::clone(&cancel);
+        let hold = Arc::clone(&hold);
         std::thread::spawn(move || {
             // Comfortably shorter than the fetch's own limit below. If the
             // gate never starts, this fires first and says so, instead of
             // expiring together with the timeout it exists to test around and
             // leaving the failure ambiguous.
-            let deadline = Instant::now() + Duration::from_secs(20);
-            while !started.exists() {
-                assert!(Instant::now() < deadline, "the gated fetch never started");
-                std::thread::sleep(Duration::from_millis(2));
-            }
+            hold.wait_holding(Duration::from_secs(20), "the gated fetch", || None);
             // Strictly ordered: the flag is set before the fetch is released,
             // so checkpoint 1 cannot have seen it and checkpoint 2 must.
             cancel.store(true, Ordering::Relaxed);
-            std::fs::write(&release, b"go").unwrap();
+            hold.release();
         })
     };
 
@@ -760,7 +726,7 @@ fn create_worktree_cancellable_reads_the_flag_again_after_the_fetch() {
     // missing record names the timeout instead of reading as a cancellation
     // regression.
     assert!(
-        released.exists(),
+        hold.saw_release(),
         "the gated upload-pack must hold until the release (no record means it \
          gave up, or the fetch hit its 60 s limit and was killed): {:?}",
         attempt.fetch
@@ -2711,4 +2677,123 @@ fn remove_workspace_never_tells_copies_of_an_outside_worktree_to_repair() {
         "true",
         "and the outside worktree still works"
     );
+}
+
+/// The shared hold's give-up guards, each run directly under `sh` so the
+/// suite itself can fail a guard that was dropped (ticket 31). Every fixture
+/// that uses the hold relies on these and cannot prove them: in a healthy run
+/// the release always arrives, so a helper with no give-up path passes every
+/// fixture. Ticket 22 recorded that gap as a residual; this closes it.
+mod hold_guards {
+    use super::common::hold::Hold;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+    use tempfile::TempDir;
+
+    /// Start the hold's script under `sh`, in the test binary's own process
+    /// group, and wait until it is holding.
+    fn start(hold: &Hold, tmp: &TempDir, tail: &str) -> Child {
+        let script = tmp.path().join("hold.sh");
+        hold.write_script(&script, tail);
+        let child = Command::new("/bin/sh")
+            .arg(&script)
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        hold.wait_holding(Duration::from_secs(10), "the guard probe", || None);
+        child
+    }
+
+    /// The helper's exit status, if it exits within `limit`; `None` if it is
+    /// still running, in which case it is killed so it cannot outlive the test.
+    fn exit_within(child: &mut Child, limit: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = Instant::now() + limit;
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                return Some(status);
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn gives_up_without_a_record_when_its_marker_is_gone() {
+        let tmp = TempDir::new().unwrap();
+        let hold = Hold::new(tmp.path(), "marker");
+        let mut child = start(&hold, &tmp, "");
+        std::fs::remove_file(&hold.holding).unwrap();
+        let status = exit_within(&mut child, Duration::from_secs(5))
+            .expect("the helper must exit once its marker is gone");
+        assert!(!status.success(), "a helper that gave up must not exit 0");
+        assert!(
+            !hold.saw_release(),
+            "no release was written, so none may be recorded"
+        );
+    }
+
+    #[test]
+    fn gives_up_without_a_record_when_the_test_pid_is_gone() {
+        let tmp = TempDir::new().unwrap();
+        // A pid no process can have: above the platform's maximum, so
+        // `kill -0` fails at once and stays failed.
+        let hold = Hold::new(tmp.path(), "pid").watching_pid(i32::MAX as u32);
+        let script = tmp.path().join("hold.sh");
+        hold.write_script(&script, "");
+        let mut child = Command::new("/bin/sh")
+            .arg(&script)
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        let status = exit_within(&mut child, Duration::from_secs(5))
+            .expect("the helper must exit once the pid it watches is gone");
+        assert!(!status.success(), "a helper that gave up must not exit 0");
+        assert!(
+            !hold.saw_release(),
+            "no release was written, so none may be recorded"
+        );
+    }
+
+    #[test]
+    fn gives_up_without_a_record_at_its_cap() {
+        let tmp = TempDir::new().unwrap();
+        let hold = Hold::new(tmp.path(), "cap").with_cap(3);
+        let mut child = start(&hold, &tmp, "");
+        let status = exit_within(&mut child, Duration::from_secs(5))
+            .expect("the helper must exit once its cap is reached");
+        assert!(!status.success(), "a helper that gave up must not exit 0");
+        assert!(
+            !hold.saw_release(),
+            "no release was written, so none may be recorded"
+        );
+    }
+
+    #[test]
+    fn a_released_helper_records_it_and_runs_its_tail() {
+        let tmp = TempDir::new().unwrap();
+        let hold = Hold::new(tmp.path(), "released");
+        let done = tmp.path().join("tail-ran");
+        let mut child = start(&hold, &tmp, &format!(": > '{}'", done.display()));
+        assert!(
+            exit_within(&mut child, Duration::from_millis(300)).is_none(),
+            "a helper nobody released must still be holding"
+        );
+        let mut child = start(&hold, &tmp, &format!(": > '{}'", done.display()));
+        hold.release();
+        let status = exit_within(&mut child, Duration::from_secs(5))
+            .expect("the helper must exit once released");
+        assert!(
+            status.success(),
+            "a released helper runs its tail and exits 0"
+        );
+        assert!(
+            hold.saw_release(),
+            "the helper must record that it saw the release"
+        );
+        assert!(done.exists(), "the tail must have run");
+    }
 }
