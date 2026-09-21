@@ -271,50 +271,59 @@ fn a_hostile_invoking_environment_is_cleared_before_main() {
     );
 }
 
-/// Isolation reaches an integration test binary through two links: the
-/// binary's root declares `mod common`, and `tests/common/mod.rs` declares
-/// this module. Every test binary root (`tests/*.rs` and `tests/*/main.rs`,
-/// the two forms Cargo builds) is checked, the ones that run no git
-/// included, and so is the second link, which nothing else names. The lib
-/// and bin unit-test binaries run this too, and they include this file
-/// without either link, so it still fails there if the second link goes.
+/// Every test binary reaches `isolate` through lines nothing else names, so
+/// this checks each link:
+///
+/// - each integration test root declares `mod common;`: a `tests/*.rs` as
+///   is, a `tests/*/main.rs` under `#[path = "../common/mod.rs"]`, since
+///   there a bare `mod common;` loads a `common` beside it instead;
+/// - `tests/common/mod.rs` declares `mod git_isolation;`;
+/// - the library and binary roots, `src/lib.rs` and `src/main.rs` (the paths
+///   `Cargo.toml` gives), include this file under its `#[path]`.
+///
+/// The roots that run no git are checked too. The lib, the bin and every
+/// integration binary run this, so the loss of any one link fails in the
+/// binaries that keep theirs.
 #[test]
 fn every_test_binary_reaches_git_isolation() {
-    let declares = |path: &std::path::Path, line: &str| {
-        std::fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .any(|l| l.trim() == line)
+    // Whether `path` holds `lines` as consecutive lines, indentation aside.
+    let declares = |path: &std::path::Path, lines: &[&str]| {
+        let text = std::fs::read_to_string(path).unwrap();
+        let have: Vec<&str> = text.lines().map(str::trim).collect();
+        have.windows(lines.len()).any(|w| w == lines)
     };
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
-    let mut roots = Vec::new();
-    for entry in std::fs::read_dir(&dir).unwrap() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tests = manifest.join("tests");
+    let include = [
+        "#[path = \"../tests/common/git_isolation.rs\"]",
+        "mod git_isolation;",
+    ];
+    let mut required = vec![
+        (tests.join("common/mod.rs"), vec!["mod git_isolation;"]),
+        (manifest.join("src/lib.rs"), include.to_vec()),
+        (manifest.join("src/main.rs"), include.to_vec()),
+    ];
+    let mut test_roots = 0;
+    for entry in std::fs::read_dir(&tests).unwrap() {
         let path = entry.unwrap().path();
-        if path.is_dir() {
-            if path.join("main.rs").is_file() {
-                roots.push(path.join("main.rs"));
-            }
+        if path.join("main.rs").is_file() {
+            let main = path.join("main.rs");
+            required.push((main, vec!["#[path = \"../common/mod.rs\"]", "mod common;"]));
+            test_roots += 1;
         } else if path.extension().is_some_and(|e| e == "rs") {
-            roots.push(path);
+            required.push((path, vec!["mod common;"]));
+            test_roots += 1;
         }
     }
-    assert!(
-        !roots.is_empty(),
-        "no test binaries under {}",
-        dir.display()
-    );
-    let missing: Vec<_> = roots
+    assert!(test_roots > 0, "no test binaries under {}", tests.display());
+    let missing: Vec<String> = required
         .iter()
-        .filter(|root| !declares(root, "mod common;"))
-        .map(|root| root.display().to_string())
+        .filter(|(path, lines)| !declares(path, lines))
+        .map(|(path, lines)| format!("{} lacks {:?}", path.display(), lines))
         .collect();
     assert!(
         missing.is_empty(),
-        "these test binaries do not declare `mod common;`, so git_isolation never runs in them: {:?}",
-        missing
-    );
-    assert!(
-        declares(&dir.join("common/mod.rs"), "mod git_isolation;"),
-        "tests/common/mod.rs no longer declares `mod git_isolation;`, so no integration test binary is isolated"
+        "git_isolation does not reach every test binary:\n{}",
+        missing.join("\n")
     );
 }
