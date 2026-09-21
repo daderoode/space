@@ -4363,8 +4363,8 @@ mod tests {
     }
 
     /// Ticket 20. A worktree of the repo that git never finished (its admin
-    /// directory still locked `initializing`, which a `kill -9` of
-    /// `git worktree add` leaves) is neither adopted, which would report a
+    /// directory still locked from the add, with the checkout's `index.lock`
+    /// and no `index`, which a killed `git worktree add` leaves) is neither adopted, which would report a
     /// tree that may be missing files as complete, nor attempted, which
     /// would fail on `already exists` with nothing said about why. The row
     /// fails with the reason, nothing on disk is touched, the run goes on to
@@ -4387,6 +4387,8 @@ mod tests {
         .expect("the fixture's worktree must be created");
         let admin = admin_dir_of(&wt);
         std::fs::write(admin.join("locked"), "initializing\n").unwrap();
+        std::fs::remove_file(admin.join("index")).unwrap();
+        std::fs::write(admin.join("index.lock"), "").unwrap();
         std::fs::write(wt.join("half.txt"), "partial\n").unwrap();
 
         let mut params = create_params(&ws_dir, "ws-a", vec![repo_a.clone(), repo_b.clone()]);
@@ -4436,10 +4438,9 @@ mod tests {
         }
         assert!(matches!(rx.recv().unwrap(), CreateProgress::Done));
 
-        assert_eq!(
-            std::fs::read_to_string(admin.join("locked")).unwrap(),
-            "initializing\n",
-            "the create side deletes nothing: the lock is as it was"
+        assert!(
+            admin.join("locked").is_file() && admin.join("index.lock").is_file(),
+            "the create side deletes nothing: the admin directory is as it was"
         );
         assert!(
             wt.join("half.txt").is_file(),

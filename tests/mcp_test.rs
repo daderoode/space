@@ -1011,8 +1011,8 @@ fn admin_dir_of(wt: &std::path::Path) -> PathBuf {
 }
 
 /// Ticket 20. A worktree of the repo that git never finished (its admin
-/// directory still locked `initializing`, which a `kill -9` of
-/// `git worktree add` leaves) is refused rather than listed as already
+/// directory still locked from the add, with the checkout's `index.lock` and
+/// no `index`, which a killed `git worktree add` leaves) is refused rather than listed as already
 /// created: the call fails at that repo like any other failure, naming it
 /// and the way out, the repos before it stay, the one after it is not
 /// attempted, and nothing on disk is touched.
@@ -1028,6 +1028,8 @@ fn create_workspace_refuses_a_half_built_worktree() {
         parsed(&create_ws(server, "ws", &["alpha", "bravo"], "new", None).unwrap());
         let admin = admin_dir_of(&space.join("bravo"));
         std::fs::write(admin.join("locked"), "initializing\n").unwrap();
+        std::fs::remove_file(admin.join("index")).unwrap();
+        std::fs::write(admin.join("index.lock"), "").unwrap();
 
         let err = create_ws(server, "ws", &["alpha", "bravo", "charlie"], "new", None)
             .expect_err("bravo was never finished by git, so the call stops there");
@@ -1045,8 +1047,9 @@ fn create_workspace_refuses_a_half_built_worktree() {
         );
         assert!(
             git_lists_worktree(&bravo, &space.join("bravo"))
-                && std::fs::read_to_string(admin.join("locked")).unwrap() == "initializing\n",
-            "the create side deletes nothing: git still lists bravo and the lock is as it was"
+                && admin.join("locked").is_file()
+                && admin.join("index.lock").is_file(),
+            "the create side deletes nothing: git still lists bravo and the admin directory is as it was"
         );
     });
 }

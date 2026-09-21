@@ -1629,15 +1629,16 @@ pub fn placement_of(wt_path: &Path, repo_path: &Path) -> Placement {
     if !admin_belongs_to(&admin, repo_path) {
         return Placement::Attempt;
     }
-    match half_built(&admin) {
-        None => Placement::Adopted,
-        Some(sign) => Placement::HalfBuilt(format!(
-            "{:?} holds a worktree of this repo whose `git worktree add` never finished: \
-             its admin directory {:?} {}; nothing was attempted. Remove the space and \
-             create it again, or run `git worktree remove -f -f {:?}` in {:?}, then retry",
-            wt_path, admin, sign, wt_path, repo_path
-        )),
+    if !half_built(&admin) {
+        return Placement::Adopted;
     }
+    Placement::HalfBuilt(format!(
+        "{:?} holds a worktree of this repo whose `git worktree add` never finished: its \
+         admin directory {:?} is still locked from the add and holds the checkout's \
+         index.lock and no index; nothing was attempted. Remove the space and create it \
+         again, or run `git worktree remove -f -f {:?}` in {:?}, then retry",
+        wt_path, admin, wt_path, repo_path
+    ))
 }
 
 /// Whether the admin directory's `commondir` leads to `repo_path`'s `.git`.
@@ -1658,60 +1659,47 @@ fn admin_belongs_to(admin: &Path, repo_path: &Path) -> bool {
     }
 }
 
-/// What in a worktree's admin directory says its `git worktree add` never
-/// finished, or `None` for a finished one, locked or not.
+/// Whether a worktree's admin directory says its `git worktree add` never
+/// finished its checkout: `locked` present, `index.lock` present, no `index`.
 ///
-/// `add_worktree` (`builtin/worktree.c`) writes `locked` reading
-/// `_("initializing")` before anything else of the new worktree and unlinks
-/// it after the checkout child returns, on success and on failure alike; a
-/// failure or a caught signal also removes the admin directory and the
-/// tree. Only `kill -9`, a crash or power loss leaves the file. So the
-/// marker is git's own word that the add never finished, and it is exactly
-/// that: `git worktree list` prints `locked initializing` and
-/// `git worktree remove --force` refuses on it. Compared trimmed, as git
-/// reads it (`worktree_lock_reason`).
+/// `add_worktree` (`builtin/worktree.c`) writes `locked` before anything
+/// else of the new worktree and unlinks it after the checkout child
+/// returns, on success and on failure alike; a failure or a caught signal
+/// also removes the admin directory and the tree. Only `kill -9`, a crash
+/// or power loss leaves the lock. The checkout, a child `reset --hard`,
+/// takes `index.lock`, writes every file, and commits `index` last by
+/// rename, so a locked worktree whose `index.lock` is there and whose
+/// `index` is not is one whose checkout was killed with files missing.
+/// Probed three times on git 2.50.1 with parent and child killed together:
+/// that shape every time.
 ///
-/// The marker is translated (`initialisiere` in de.po, `initialisation` in
-/// fr.po at v2.50.1; Apple Git is built without gettext, Homebrew git is
-/// not). The app's own add runs under `LC_ALL=C` (`git_worktree_add`), so
-/// its debris always carries the English word; the second reading is for a
-/// worktree a user added by hand at a space path with a localised git, and
-/// it is the one that means files are missing: `reset --hard` takes `index.lock`, writes
-/// every file, and commits `index` last, so a lock with `index.lock` and no
-/// `index` is a checkout that never finished. Probed three times on git
-/// 2.50.1 with parent and child killed together: that shape every time.
+/// The content of `locked` is deliberately not read. git writes
+/// `_("initializing")` there while adding, but a user is free to type that
+/// reason into `git worktree lock`, and the remove side deletes on this
+/// answer; a rule that read the word would force-delete a finished tree on
+/// a string. This rule cannot match a tree that ever finished a checkout:
+/// git writes the index lock-then-rename, so a killed index writer in a
+/// finished worktree leaves the old `index` in place (probed with a `git
+/// add` killed mid-write). Nor can it match a `--no-checkout` worktree the
+/// user locked, which has no `index` but no `index.lock` either, and may
+/// hold files put there by hand.
 ///
-/// Not read as half-built, on purpose, because the remove side deletes on
-/// this answer and must match only the app's own crash debris: a user's
-/// `git worktree lock` (an empty file with no reason, the reason otherwise)
-/// on a finished tree, which has an `index`; and a `--no-checkout` worktree
-/// the user locked, which has no `index` but no `index.lock` either, since
-/// no checkout ran, and may hold files put there by hand. Two accepted
-/// misses, decided with the coordinator: a user lock whose reason is
-/// literally `initializing` cannot be told from git's marker, so it is
-/// refused on the create side and, on a forced removal, removed with the
-/// second force like the crash debris it looks like; and a localised git
-/// whose killed parent's checkout child finished (a complete tree, `index`
-/// present) is adopted, where the lock then meets ticket 27's unlock hint
-/// at removal. An add still running in another process looks the same as a
-/// dead one for as long as it runs; a forced removal of its space then
-/// removes the tree under it, where git alone would have refused on the
-/// lock. The tree being built holds nothing of the user's, and the next
-/// removal deletes what is left as an orphan. The running add then still
-/// exits 0 (its final unlink of `locked` tolerates a file already gone),
-/// so the process that started it shows that repo as created; that row is
-/// this race, not a worker bug.
-fn half_built(admin: &Path) -> Option<&'static str> {
-    let locked = std::fs::read_to_string(admin.join("locked")).ok()?;
-    if locked.trim() == "initializing" {
-        return Some("is locked \"initializing\", git's own mark on an add in progress");
-    }
-    if admin.join("index.lock").is_file() && !admin.join("index").exists() {
-        return Some(
-            "holds the checkout's index.lock and no index, so the checkout never finished",
-        );
-    }
-    None
+/// Accepted, decided with the coordinator: a `git worktree add` whose
+/// parent alone was killed leaves its checkout child to finish, so the tree
+/// is complete and has an `index` under a stale `initializing` lock; that
+/// tree is adopted as the complete tree it is, and the lock meets ticket
+/// 27's unlock hint at removal, which is friction, not loss. An add still
+/// running in another process looks half-built for as long as its checkout
+/// runs; a forced removal of its space then removes the tree under it,
+/// where git alone would have refused on the lock. The tree being built
+/// holds nothing of the user's, and the next removal deletes what is left
+/// as an orphan. When the checkout child finished before the admin
+/// directory went, the add exits 0 and the process that started it shows
+/// that repo as created; that row is this race, not a worker bug.
+fn half_built(admin: &Path) -> bool {
+    admin.join("locked").exists()
+        && admin.join("index.lock").is_file()
+        && !admin.join("index").exists()
 }
 
 /// The branch name a strategy hands to the `-b` slot of `git worktree add`,
@@ -2497,9 +2485,8 @@ fn recorded_at(admin: &Path, dir: &Path) -> RecordedAt {
 /// tracing the `.git` file back by hand does not.
 ///
 /// `--force` is never doubled for a lock, with one exception: a worktree
-/// git never finished (`half_built`), whose lock is git's own `initializing`
-/// marker or whose checkout never wrote its index. That lock is not the
-/// user's, the tree holds nothing git handed over, and `force` has already
+/// git never finished (`half_built`), still locked from its add with the
+/// checkout's `index.lock` and no `index`. That lock is not the user's, the tree holds nothing git handed over, and `force` has already
 /// consented to losing whatever the tree holds, so a forced removal passes
 /// `--force --force` for that worktree alone. It is what lets a user who
 /// lost power mid-create remove the space and create it again with no git
@@ -2509,7 +2496,7 @@ fn unregister_worktree(dir: &Path, force: bool, admin: &Path) -> std::result::Re
     let target = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let target = target.to_string_lossy().into_owned();
     let mut args = vec!["worktree", "remove"];
-    let overriding = force && half_built(admin).is_some();
+    let overriding = force && half_built(admin);
     if force {
         args.push("--force");
     }
@@ -4692,16 +4679,15 @@ mod tests {
         );
     }
 
-    /// git writes `locked` reading `initializing` before anything else of a
-    /// new worktree and unlinks it after the checkout child returns
-    /// (`builtin/worktree.c`, `add_worktree`), so a worktree still carrying
-    /// it is one git never finished. A `kill -9` of `git worktree add` alone
-    /// leaves exactly this: the checkout child is not killed with its
-    /// parent and completes, so the tree is whole and the index written,
-    /// and the lock stays. Built by hand from a finished add, since that is
-    /// the state and a kill in the suite would race the child.
+    /// A `kill -9` of `git worktree add` alone leaves its checkout child
+    /// running, and the child finishes: the tree is whole, the index
+    /// written, and only the `initializing` lock stays (probed on git 2.50.1,
+    /// 24,000 of 24,000 files). That tree is adopted as the complete tree it
+    /// is; the lock meets ticket 27's unlock hint at removal. The content of
+    /// `locked` is not what decides, which is also what keeps a user's lock
+    /// reasoned `initializing` out of the second force.
     #[test]
-    fn placement_of_refuses_a_worktree_whose_add_never_finished() {
+    fn placement_of_adopts_a_finished_tree_under_a_stale_initializing_lock() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = plain_repo(tmp.path(), "repo");
         let wt = worktree_in(&repo, &tmp.path().join("spaces"), "ws-a");
@@ -4712,10 +4698,34 @@ mod tests {
         );
         std::fs::write(admin.join("locked"), "initializing\n").unwrap();
 
+        assert_eq!(
+            placement_of(&wt, &repo),
+            Placement::Adopted,
+            "a complete tree is adopted whatever its lock says"
+        );
+    }
+
+    /// The state a killed checkout leaves: the lock git took for the add,
+    /// the lock the checkout took on the index, and no index, because
+    /// `reset --hard` writes every file first and commits the index last.
+    /// Probed three times on git 2.50.1 with parent and child killed
+    /// together: `locked`, `index.lock`, no `index`, every time. Built by
+    /// hand from a finished add, since a kill in the suite would race the
+    /// child. The lock's content is git's marker here and is not read.
+    #[test]
+    fn placement_of_refuses_a_locked_worktree_whose_checkout_never_wrote_its_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = plain_repo(tmp.path(), "repo");
+        let wt = worktree_in(&repo, &tmp.path().join("spaces"), "ws-a");
+        let admin = admin_dir_of(&wt);
+        std::fs::write(admin.join("locked"), "initializing\n").unwrap();
+        std::fs::remove_file(admin.join("index")).unwrap();
+        std::fs::write(admin.join("index.lock"), "").unwrap();
+
         match placement_of(&wt, &repo) {
             Placement::HalfBuilt(why) => {
                 assert!(
-                    why.contains("never finished") && why.contains("initializing"),
+                    why.contains("never finished") && why.contains("index.lock"),
                     "the reason says what it is, got {:?}",
                     why
                 );
@@ -4725,36 +4735,6 @@ mod tests {
                     why
                 );
             }
-            other => panic!(
-                "a worktree git never finished must be refused, got {:?}",
-                other
-            ),
-        }
-    }
-
-    /// The same state as a localised git writes it (`initializing` is
-    /// `_("initializing")`: `initialisiere` in de.po, `initialisation` in
-    /// fr.po at v2.50.1), and the one that means files are missing: a
-    /// killed checkout leaves the index lock it took and never writes the
-    /// index, because `reset --hard` writes every file first and commits the
-    /// index last. Probed three times on git 2.50.1 with parent and child
-    /// killed together: `locked`, `index.lock`, no `index`, every time.
-    #[test]
-    fn placement_of_refuses_a_locked_worktree_whose_checkout_never_wrote_its_index() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = plain_repo(tmp.path(), "repo");
-        let wt = worktree_in(&repo, &tmp.path().join("spaces"), "ws-a");
-        let admin = admin_dir_of(&wt);
-        std::fs::write(admin.join("locked"), "initialisiere\n").unwrap();
-        std::fs::remove_file(admin.join("index")).unwrap();
-        std::fs::write(admin.join("index.lock"), "").unwrap();
-
-        match placement_of(&wt, &repo) {
-            Placement::HalfBuilt(why) => assert!(
-                why.contains("never finished") && why.contains("index.lock"),
-                "the reason says what it is, got {:?}",
-                why
-            ),
             other => panic!(
                 "a checkout that never wrote its index must be refused, got {:?}",
                 other
@@ -4768,7 +4748,8 @@ mod tests {
     /// index). A `--no-checkout` worktree the user then locked has no index
     /// but no `index.lock` either, since no checkout ever ran: it is adopted
     /// too, because refusing it would let the remove side delete files the
-    /// user put there by hand.
+    /// user put there by hand. And the add's lock is required: a stale
+    /// `index.lock` with no index in an unlocked worktree is not an add.
     #[test]
     fn placement_of_adopts_a_worktree_the_user_locked() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4796,6 +4777,37 @@ mod tests {
             &repo,
         );
         assert_eq!(placement_of(&reason, &repo), Placement::Adopted);
+
+        // git's own marker word, typed by the user, on a finished tree.
+        let marker_word = worktree_in(&repo, &spaces, "ws-d");
+        git(
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "initializing",
+                marker_word.to_str().unwrap(),
+            ],
+            &repo,
+        );
+        assert_eq!(
+            placement_of(&marker_word, &repo),
+            Placement::Adopted,
+            "a finished tree the user locked with git's own word is theirs"
+        );
+
+        // No lock at all: the add finished (git unlinks the lock last), so
+        // a missing index with a stale index.lock is a worktree the user
+        // made without a checkout and whose index writer died. Theirs.
+        let unlocked = worktree_in(&repo, &spaces, "ws-e");
+        let unlocked_admin = admin_dir_of(&unlocked);
+        std::fs::remove_file(unlocked_admin.join("index")).unwrap();
+        std::fs::write(unlocked_admin.join("index.lock"), "").unwrap();
+        assert_eq!(
+            placement_of(&unlocked, &repo),
+            Placement::Adopted,
+            "without the add's lock there is no add in progress to refuse"
+        );
 
         let no_checkout = spaces.join("ws-c").join("repo");
         std::fs::create_dir_all(no_checkout.parent().unwrap()).unwrap();

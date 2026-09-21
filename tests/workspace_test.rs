@@ -1081,19 +1081,19 @@ fn admin_dir_of(wt: &Path) -> PathBuf {
     }
 }
 
-/// Ticket 20. The one lock `space` does override: git's own `initializing`,
-/// which `git worktree add` writes first and unlinks last, so a worktree
-/// still carrying it (a `kill -9` of the add, or power loss) is one git never
-/// handed over, and its tree holds nothing of the user's. `--force` has
-/// already consented to losing whatever the tree holds, so a forced removal
-/// runs `git worktree remove --force --force` for that worktree alone: the
-/// space a user lost power creating is removed and can be created again with
-/// no git command. Both shapes of the state are covered (the marker, and a
-/// locked tree whose checkout left `index.lock` and no `index`), and a user's
-/// own lock beside them is still kept with ticket 27's unlock hint, which
-/// pins that the second force is not applied to any lock.
+/// Ticket 20. The one lock `space` does override: the lock git itself took
+/// for a `git worktree add` whose checkout was killed, read from the
+/// checkout's `index.lock` still there and no `index`. Such a tree holds
+/// nothing of the user's and `--force` has already consented to losing
+/// whatever it holds, so a forced removal runs `git worktree remove --force
+/// --force` for that worktree alone: the space a user lost power creating
+/// is removed and can be created again with no git command. The content of
+/// the lock decides nothing: a finished tree under git's own `initializing`
+/// word (a killed add whose checkout child finished, or a user who typed
+/// the word) is kept with ticket 27's unlock hint, never escalated, and so
+/// is a user's own lock.
 #[test]
-fn remove_workspace_removes_a_half_built_worktree_and_keeps_a_user_locked_one() {
+fn remove_workspace_removes_a_half_built_worktree_and_keeps_every_finished_lock() {
     let env = common::TestEnv::new();
     let marker_repo = env.create_repo("a-marker");
     let index_repo = env.create_repo("b-no-index");
@@ -1102,9 +1102,15 @@ fn remove_workspace_removes_a_half_built_worktree_and_keeps_a_user_locked_one() 
     let index_wt = worktree_in_space(&env, &index_repo, "test-ws");
     let user_wt = worktree_in_space(&env, &user_repo, "test-ws");
 
-    std::fs::write(admin_dir_of(&marker_wt).join("locked"), "initializing\n").unwrap();
+    let marker_admin = admin_dir_of(&marker_wt);
+    std::fs::write(marker_admin.join("locked"), "initializing\n").unwrap();
+    assert!(
+        marker_admin.join("index").is_file(),
+        "fixture: a finished tree"
+    );
+    std::fs::write(marker_wt.join("WIP"), "mine\n").unwrap();
     let index_admin = admin_dir_of(&index_wt);
-    std::fs::write(index_admin.join("locked"), "initialisiere\n").unwrap();
+    std::fs::write(index_admin.join("locked"), "initializing\n").unwrap();
     std::fs::remove_file(index_admin.join("index")).unwrap();
     std::fs::write(index_admin.join("index.lock"), "").unwrap();
     git_ok(
@@ -1119,36 +1125,42 @@ fn remove_workspace_removes_a_half_built_worktree_and_keeps_a_user_locked_one() 
     );
 
     let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "test-ws", true)
-        .expect_err("the user's lock is still refused");
+        .expect_err("two finished locks are still refused");
     let text = err.to_string();
-    assert!(
-        text.contains("c-user-lock") && text.contains("git worktree unlock"),
-        "the user's lock keeps ticket 27's hint, got {:?}",
-        text
-    );
     let kept_part = text.split("removed:").next().unwrap();
-    assert!(
-        !kept_part.contains("a-marker") && !kept_part.contains("b-no-index"),
-        "neither half-built worktree is reported as kept, got {:?}",
+    for name in ["a-marker", "c-user-lock"] {
+        assert!(kept_part.contains(name), "{} is kept, got {:?}", name, text);
+    }
+    assert_eq!(
+        text.matches("git worktree unlock").count(),
+        2,
+        "both finished locks get ticket 27's hint, got {:?}",
         text
     );
     assert!(
-        text.contains("removed: \"a-marker\", \"b-no-index\""),
-        "both are reported as removed, got {:?}",
+        !kept_part.contains("b-no-index"),
+        "the half-built worktree is not reported as kept, got {:?}",
         text
     );
     assert!(
-        !marker_wt.exists() && !index_wt.exists(),
-        "both half-built worktrees are gone from the space"
+        text.contains("removed: \"b-no-index\""),
+        "it is reported as removed, got {:?}",
+        text
     );
     assert!(
-        !registered_worktrees(&marker_repo).contains("test-ws")
-            && !registered_worktrees(&index_repo).contains("test-ws"),
-        "and their source repos no longer register them"
+        !index_wt.exists() && !registered_worktrees(&index_repo).contains("test-ws"),
+        "the half-built worktree is gone from the space and unregistered"
+    );
+    assert_eq!(
+        std::fs::read_to_string(marker_wt.join("WIP")).unwrap(),
+        "mine\n",
+        "the finished tree under git's own word survives with its work"
     );
     assert!(
-        user_wt.join(".git").exists() && registered_worktrees(&user_repo).contains("test-ws"),
-        "the user-locked worktree survives, still registered"
+        registered_worktrees(&marker_repo).contains("test-ws")
+            && user_wt.join(".git").exists()
+            && registered_worktrees(&user_repo).contains("test-ws"),
+        "both finished locks survive, still registered"
     );
 }
 
