@@ -1617,7 +1617,10 @@ fn tools_over_stdio(env: &TestEnv) -> std::collections::BTreeMap<String, serde_j
 /// review falsified and no test caught), the call stops at the first repo
 /// that fails, an empty `repos_already_created` does not mean the name was
 /// free, and the branch rule of each strategy. `branch` stays optional in
-/// the schema because `new` defaults it.
+/// the schema because `new` defaults it. Presence is not enough: the old
+/// schema sentence claimed `branch` was required for `new` too, so both
+/// tools are also checked not to say it, or a contradicting sentence added
+/// beside the pinned one would pass.
 #[test]
 fn tools_list_carries_the_adopt_stop_and_branch_rules() {
     let env = TestEnv::new();
@@ -1637,8 +1640,16 @@ fn tools_list_carries_the_adopt_stop_and_branch_rules() {
             "{rule}: {sentence:?} not in {text:?}"
         );
     };
+    let lacks = |text: &str, sentence: &str, rule: &str| {
+        assert!(
+            !text.contains(sentence),
+            "{rule}: {sentence:?} still in {text:?}"
+        );
+    };
     let branch_rule =
         "Branch name. Defaults to the workspace name for \"new\". Required for \"existing\".";
+    // The sentence both schemas served before ticket 21.
+    let old_branch_rule = "Required when strategy is";
 
     let (desc, schema) = served("create_workspace");
     has(
@@ -1658,15 +1669,21 @@ fn tools_list_carries_the_adopt_stop_and_branch_rules() {
     );
     has(
         &desc,
-        "'existing' (checkout existing branch)",
+        "'existing' (checkout existing branch",
         "create: the strategies",
     );
+    let branch_doc = schema["properties"]["branch"]["description"]
+        .as_str()
+        .unwrap();
     has(
-        schema["properties"]["branch"]["description"]
-            .as_str()
-            .unwrap(),
+        branch_doc,
         branch_rule,
         "create: the branch rule in the schema",
+    );
+    lacks(
+        branch_doc,
+        old_branch_rule,
+        "create: the old branch sentence is gone",
     );
     assert_eq!(schema["required"], serde_json::json!(["name", "repos"]));
 
@@ -1686,12 +1703,18 @@ fn tools_list_carries_the_adopt_stop_and_branch_rules() {
         "Strategy: 'new' (create branch named after the workspace unless branch is given, default), 'existing' (checkout existing branch; branch is required), or 'detached' (detached HEAD).",
         "add: the strategies and the branch rule",
     );
+    let branch_doc = schema["properties"]["branch"]["description"]
+        .as_str()
+        .unwrap();
     has(
-        schema["properties"]["branch"]["description"]
-            .as_str()
-            .unwrap(),
+        branch_doc,
         branch_rule,
         "add: the branch rule in the schema",
+    );
+    lacks(
+        branch_doc,
+        old_branch_rule,
+        "add: the old branch sentence is gone",
     );
     assert_eq!(
         schema["required"],
