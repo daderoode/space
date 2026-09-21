@@ -9730,11 +9730,12 @@ mod dialog_size_tests {
             total_lines: 1,
         });
 
-        // Twenty log lines plus borders and footer want 23 rows, so the cap
-        // rather than the floor decides the height on a small frame.
-        let mut creating_20 = create_app(CreateStage::Creating);
-        if let Screen::CreateWorkspace(st) = &mut creating_20.screen {
-            st.progress = (1..=20).map(|i| format!("line {}", i)).collect();
+        // 1700 log lines plus borders and footer want 1703 rows, so the 80%
+        // cap rather than the floor decides the height at every frame size,
+        // 2000 rows included (1600, where 81% would give 1620).
+        let mut creating_long = create_app(CreateStage::Creating);
+        if let Screen::CreateWorkspace(st) = &mut creating_long.screen {
+            st.progress = (1..=1700).map(|i| format!("line {}", i)).collect();
         }
 
         let git = " Git: repo-a (?) ";
@@ -9849,10 +9850,10 @@ mod dialog_size_tests {
                 at_64_by_8: Rect::new(2, 0, 60, 8),
             },
             SizedDialog {
-                name: "creating log, 20 lines (height capped at 80%, cap at least 10)",
-                app: creating_20,
+                name: "creating log, 1700 lines (height capped at 80%, cap at least 10)",
+                app: creating_long,
                 title: " Creating Workspace ".into(),
-                at_2000_by_2000: Rect::new(300, 988, 1400, 23),
+                at_2000_by_2000: Rect::new(300, 200, 1400, 1600),
                 at_64_by_14: Rect::new(2, 1, 60, 11),
                 at_64_by_11: Rect::new(2, 0, 60, 10),
                 at_64_by_8: Rect::new(2, 0, 60, 8),
@@ -9869,90 +9870,101 @@ mod dialog_size_tests {
         ]
     }
 
-    /// The rounded border around the first occurrence of `title`, read back
-    /// from the rendered cells.
+    /// The rounded border around `title`, read back from the rendered cells:
+    /// the first occurrence of the title that sits in the top edge of a whole
+    /// box. Any occurrence that does not is reported if no other one does.
     fn find_dialog(buffer: &Buffer, title: &str) -> Result<Rect, String> {
         let title: Vec<String> = title.chars().map(String::from).collect();
         let len = title.len() as u16;
         let (width, height) = (buffer.area.width, buffer.area.height);
         let sym = |x: u16, y: u16| buffer[(x, y)].symbol();
-        for y in 0..height {
-            let Some(start) = (0..width.saturating_sub(len)).find(|&x| {
-                title
+        let mut misses = Vec::new();
+        for y in 0..height.saturating_sub(1) {
+            for start in 1..width.saturating_sub(len) {
+                let here = title
                     .iter()
                     .enumerate()
-                    .all(|(i, c)| sym(x + i as u16, y) == c)
-            }) else {
-                continue;
-            };
-            let mut left = start.checked_sub(1).ok_or("title at the left edge")?;
-            while sym(left, y) == "─" && left > 0 {
-                left -= 1;
-            }
-            let mut right = start + len;
-            while right + 1 < width && sym(right, y) == "─" {
-                right += 1;
-            }
-            let mut bottom = y + 1;
-            while bottom + 1 < height && sym(left, bottom) == "│" {
-                bottom += 1;
-            }
-            let corners = [
-                sym(left, y),
-                sym(right, y),
-                sym(left, bottom),
-                sym(right, bottom),
-            ];
-            if corners != ["╭", "╮", "╰", "╯"] {
-                return Err(format!(
-                    "title on row {} but corners {:?} at x {} and {}, y {} and {}",
-                    y, corners, left, right, y, bottom
+                    .all(|(i, c)| sym(start + i as u16, y) == c);
+                if !here {
+                    continue;
+                }
+                let mut left = start - 1;
+                while sym(left, y) == "─" && left > 0 {
+                    left -= 1;
+                }
+                let mut right = start + len;
+                while right + 1 < width && sym(right, y) == "─" {
+                    right += 1;
+                }
+                let mut bottom = y + 1;
+                while bottom + 1 < height && sym(left, bottom) == "│" {
+                    bottom += 1;
+                }
+                let corners = [
+                    sym(left, y),
+                    sym(right, y),
+                    sym(left, bottom),
+                    sym(right, bottom),
+                ];
+                if corners == ["╭", "╮", "╰", "╯"] {
+                    return Ok(Rect::new(left, y, right - left + 1, bottom - y + 1));
+                }
+                misses.push(format!(
+                    "title at ({}, {}) but corners {:?} at x {} and {}, y {} and {}",
+                    start, y, corners, left, right, y, bottom
                 ));
             }
-            return Ok(Rect::new(left, y, right - left + 1, bottom - y + 1));
         }
-        Err("title not found".to_string())
+        if misses.is_empty() {
+            Err("title not found".to_string())
+        } else {
+            Err(misses.join("; "))
+        }
     }
 
-    /// Render `dialog` on a fresh `width` x `height` terminal and compare its
-    /// border with `expected`. A panic is caught and reported, so one run
-    /// names every dialog that breaks rather than stopping at the first.
-    fn check(dialog: &SizedDialog, width: u16, height: u16, expected: Rect) -> Option<String> {
-        let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            terminal
-                .draw(|frame| space::tui::ui::view(&dialog.app, frame))
-                .unwrap();
-            find_dialog(terminal.backend().buffer(), &dialog.title)
-        }));
-        let problem = match found {
-            Ok(Ok(rect)) if rect == expected => return None,
-            Ok(Ok(rect)) => format!("drawn at {:?}, expected {:?}", rect, expected),
-            Ok(Err(e)) => e,
-            Err(payload) => {
-                let msg = payload
-                    .downcast_ref::<&str>()
-                    .map(|s| s.to_string())
-                    .or_else(|| payload.downcast_ref::<String>().cloned())
-                    .unwrap_or_default();
-                format!("panicked: {}", msg)
-            }
-        };
-        Some(format!(
-            "{} at {}x{}: {}",
-            dialog.name, width, height, problem
-        ))
+    /// Render every dialog on its own `width` x `height` terminal and compare
+    /// its border with the rect `expected` picks. A panic is caught and
+    /// reported, so one run names every dialog that breaks rather than
+    /// stopping at the first. The terminals are made one at a time: a
+    /// 2000 x 2000 one holds three 4-million-cell buffers.
+    fn check_all(width: u16, height: u16, expected: fn(&SizedDialog) -> Rect) -> Vec<String> {
+        let mut failures = Vec::new();
+        for dialog in sized_dialogs() {
+            let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| space::tui::ui::view(&dialog.app, frame))
+                    .unwrap();
+                find_dialog(terminal.backend().buffer(), &dialog.title)
+            }));
+            let problem = match found {
+                Ok(Ok(rect)) if rect == expected(&dialog) => continue,
+                Ok(Ok(rect)) => format!("drawn at {:?}, expected {:?}", rect, expected(&dialog)),
+                Ok(Err(e)) => e,
+                Err(payload) => {
+                    let msg = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_default();
+                    format!("panicked: {}", msg)
+                }
+            };
+            failures.push(format!(
+                "{} at {}x{}: {}",
+                dialog.name, width, height, problem
+            ));
+        }
+        failures
     }
 
-    /// Every percentage overflowed `u16` at 2000 (70% from 937, 60% from 1093,
-    /// 50% from 1311). The terminals are made one at a time: each 2000 x 2000
-    /// one holds three 4-million-cell buffers.
+    /// On master the first 11 dialogs overflowed `u16` here and panicked in a
+    /// debug build (70% from 937 cells, 60% from 1093, 50% from 1311). The
+    /// Creating logs and the diff viewer did not overflow on master; they are
+    /// here because their sizes moved onto the same helper.
     #[test]
     fn every_percent_sized_dialog_keeps_its_size_on_a_2000_by_2000_frame() {
-        let failures: Vec<String> = sized_dialogs()
-            .iter()
-            .filter_map(|d| check(d, 2000, 2000, d.at_2000_by_2000))
-            .collect();
+        let failures = check_all(2000, 2000, |d| d.at_2000_by_2000);
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     }
 
@@ -9963,17 +9975,9 @@ mod dialog_size_tests {
     /// meets its floor of 10. At 64 x 8 every height is cut to the frame.
     #[test]
     fn every_percent_sized_dialog_keeps_its_minimum_on_a_small_frame() {
-        let failures: Vec<String> = sized_dialogs()
-            .iter()
-            .flat_map(|d| {
-                [
-                    check(d, 64, 14, d.at_64_by_14),
-                    check(d, 64, 11, d.at_64_by_11),
-                    check(d, 64, 8, d.at_64_by_8),
-                ]
-            })
-            .flatten()
-            .collect();
+        let mut failures = check_all(64, 14, |d| d.at_64_by_14);
+        failures.extend(check_all(64, 11, |d| d.at_64_by_11));
+        failures.extend(check_all(64, 8, |d| d.at_64_by_8));
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     }
 

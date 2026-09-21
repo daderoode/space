@@ -924,9 +924,9 @@ fn render_branch_strategy_picker(
 }
 
 /// `pct` percent of `dim`, at least `min`, never more than `dim`: the size of
-/// a dialog that takes a share of the frame. Every such size goes through
-/// here. Computed in `u32`, where `u16 * u16` cannot overflow, so a very wide
-/// or tall frame cannot either.
+/// a dialog that takes a share of the frame. Every such size in this file
+/// goes through here. Computed in `u32`, where `u16 * u16` cannot overflow,
+/// so a very wide or tall frame cannot either.
 fn percent_of(dim: u16, pct: u16, min: u16) -> u16 {
     let share = u32::from(dim) * u32::from(pct) / 100;
     share.max(u32::from(min)).min(u32::from(dim)) as u16
@@ -1540,9 +1540,11 @@ fn render_help_overlay(help: &crate::tui::screens::help::HelpState, frame: &mut 
     // registry is far taller than any terminal, so in practice it is capped
     // and the list scrolls: `height` is the cap, not a promise to fit.
     let height = (total as u16 + 3).min(frame.area().height); // +2 border, +1 footer
-                                                              // Floor of 56 rather than 50: 56 leaves the 54-column interior that the
-                                                              // registry test asserts every row fits, so that budget is now true at
-                                                              // every width where the dialog is drawn, not only at 80 columns.
+
+    // Floor of 56 rather than 50: 56 leaves the 54-column interior that the
+    // registry test asserts every row fits, so that budget holds on every
+    // frame at least 56 columns wide, not only at 80. A narrower frame gets
+    // a dialog as wide as itself, and rows past its interior are clipped.
     let dialog_w = percent_of(frame.area().width, 70, 56);
     let area = centered_rect_fixed(dialog_w, height, frame.area());
     frame.render_widget(Clear, area);
