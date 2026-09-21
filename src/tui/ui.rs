@@ -792,8 +792,8 @@ fn render_text_input_dialog(
 /// from the row's first cell. The scroll is tui-input's, in columns, which
 /// keeps the cursor in the row; when it does, the cursor is asked for one
 /// cell past the row, and `cursor_cell` pulls it onto the last cell. Shared
-/// by the text input dialog, the config editor's value row and the fuzzy
-/// picker's query row.
+/// by the text input dialog, the config editor's value row, the fuzzy
+/// picker's query row and the git-ops Committing dialog's message row.
 ///
 /// Two limits, both older than the sharing. tui-input's scroll walks
 /// chars and can stop inside a cluster; the cut keeps that cluster whole
