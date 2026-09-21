@@ -22,6 +22,38 @@ fn detects_base_branch() {
 }
 
 #[test]
+fn base_branch_of_a_detached_repo_is_head() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    let out = Command::new("git")
+        .args(["checkout", "--detach"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(space::core::git::detect_base_branch(tmp.path()), "HEAD");
+}
+
+#[test]
+fn base_branch_of_a_repo_whose_head_is_not_a_local_branch_is_head() {
+    let tmp = TempDir::new().unwrap();
+    common::init_repo(tmp.path());
+    let out = Command::new("git")
+        .args(["update-ref", "refs/remotes/origin/main", "HEAD"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let out = Command::new("git")
+        .args(["symbolic-ref", "HEAD", "refs/remotes/origin/main"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(space::core::git::detect_base_branch(tmp.path()), "HEAD");
+}
+
+#[test]
 fn clean_repo_status_is_zero() {
     let tmp = TempDir::new().unwrap();
     common::init_repo(tmp.path());
