@@ -1012,8 +1012,9 @@ fn admin_dir_of(wt: &std::path::Path) -> PathBuf {
 
 /// Ticket 20. A worktree of the repo that git never finished (its admin
 /// directory still locked from the add, with the checkout's `index.lock` and
-/// no `index`, which a killed `git worktree add` leaves) is refused rather than listed as already
-/// created: the call fails at that repo like any other failure, naming it
+/// no `index`, which a killed `git worktree add` leaves) is refused rather
+/// than listed as already created: the call fails at that repo like any
+/// other failure, naming it
 /// and the way out, the repos before it stay, the one after it is not
 /// attempted, and nothing on disk is touched.
 #[test]

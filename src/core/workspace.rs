@@ -1682,7 +1682,12 @@ fn admin_belongs_to(admin: &Path, repo_path: &Path) -> bool {
 /// finished worktree leaves the old `index` in place (probed with a `git
 /// add` killed mid-write). Nor can it match a `--no-checkout` worktree the
 /// user locked, which has no `index` but no `index.lock` either, and may
-/// hold files put there by hand.
+/// hold files put there by hand. The one hand-made shape that does match
+/// is that same locked `--no-checkout` worktree after a `git add` in it
+/// was killed before its first index was ever written; that leaves the
+/// three signs with no add in progress, and a forced removal of its space
+/// then deletes it. Accepted: it takes a worktree shape the app never
+/// makes, a lock, and a kill.
 ///
 /// Accepted, decided with the coordinator: a `git worktree add` whose
 /// parent alone was killed leaves its checkout child to finish, so the tree
@@ -2486,7 +2491,8 @@ fn recorded_at(admin: &Path, dir: &Path) -> RecordedAt {
 ///
 /// `--force` is never doubled for a lock, with one exception: a worktree
 /// git never finished (`half_built`), still locked from its add with the
-/// checkout's `index.lock` and no `index`. That lock is not the user's, the tree holds nothing git handed over, and `force` has already
+/// checkout's `index.lock` and no `index`. That lock is not the user's,
+/// the tree holds nothing git handed over, and `force` has already
 /// consented to losing whatever the tree holds, so a forced removal passes
 /// `--force --force` for that worktree alone. It is what lets a user who
 /// lost power mid-create remove the space and create it again with no git

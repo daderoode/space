@@ -4364,8 +4364,9 @@ mod tests {
 
     /// Ticket 20. A worktree of the repo that git never finished (its admin
     /// directory still locked from the add, with the checkout's `index.lock`
-    /// and no `index`, which a killed `git worktree add` leaves) is neither adopted, which would report a
-    /// tree that may be missing files as complete, nor attempted, which
+    /// and no `index`, which a killed `git worktree add` leaves) is neither
+    /// adopted, which would report a tree that may be missing files as
+    /// complete, nor attempted, which
     /// would fail on `already exists` with nothing said about why. The row
     /// fails with the reason, nothing on disk is touched, the run goes on to
     /// the next repo, and it is not the checked-out stop.
