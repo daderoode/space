@@ -2848,15 +2848,14 @@ mod hold_guards {
 // only in git's own shape (`<common>/worktrees/<id>`) with `<common>` gone.
 // ---------------------------------------------------------------------------
 
-/// The admin directory a worktree's `.git` file names, as git wrote it.
-fn admin_named_by(worktree: &Path) -> PathBuf {
-    let gitfile = std::fs::read_to_string(worktree.join(".git")).unwrap();
-    PathBuf::from(
-        gitfile
-            .strip_prefix("gitdir: ")
-            .expect("fixture: a gitfile")
-            .trim_end_matches(['\n', '\r']),
-    )
+/// A source repo whose worktrees get absolute gitdirs, whatever the running
+/// user's global config says: `worktree.useRelativePaths` makes them relative,
+/// and a relative gitdir that names nothing is kept by another rule
+/// (`Unresolved`), which these tests would then pass or fail on instead.
+fn absolute_repo(env: &TestEnv, name: &str) -> PathBuf {
+    let repo = env.create_repo(name);
+    git_ok(&repo, &["config", "worktree.useRelativePaths", "false"]);
+    repo
 }
 
 /// `cp -R`, as a user duplicating a space runs it.
@@ -2890,7 +2889,7 @@ fn registered_count(repo: &Path) -> usize {
 #[test]
 fn a_cp_r_copy_is_kept_once_its_original_space_is_removed() {
     let env = TestEnv::new();
-    let repo = env.create_repo("alpha");
+    let repo = absolute_repo(&env, "alpha");
     worktree_in_space(&env, &repo, "feat");
     cp_r(
         &env.workspaces_dir.join("feat"),
@@ -2932,7 +2931,7 @@ fn a_cp_r_copy_is_kept_once_its_original_space_is_removed() {
 #[test]
 fn a_cp_r_copy_removed_first_is_told_the_truth_about_later_removals() {
     let env = TestEnv::new();
-    let repo = env.create_repo("alpha");
+    let repo = absolute_repo(&env, "alpha");
     worktree_in_space(&env, &repo, "feat");
     cp_r(
         &env.workspaces_dir.join("feat"),
@@ -2967,11 +2966,11 @@ fn a_cp_r_copy_removed_first_is_told_the_truth_about_later_removals() {
 #[test]
 fn a_copy_edited_to_an_unregistered_admin_id_is_kept() {
     let env = TestEnv::new();
-    let repo = env.create_repo("alpha");
+    let repo = absolute_repo(&env, "alpha");
     let original = worktree_in_space(&env, &repo, "ws");
     let copy = env.workspaces_dir.join("ws").join("alpha-copy");
     cp_r(&original, &copy);
-    let common = admin_named_by(&original)
+    let common = admin_dir_of(&original)
         .parent()
         .and_then(Path::parent)
         .unwrap()
@@ -3009,13 +3008,13 @@ fn a_copy_edited_to_an_unregistered_admin_id_is_kept() {
 #[test]
 fn a_near_miss_copy_is_kept_on_the_retry_after_its_original_goes() {
     let env = TestEnv::new();
-    let repo = env.create_repo("alpha");
+    let repo = absolute_repo(&env, "alpha");
     let original = worktree_in_space(&env, &repo, "ws");
     let copy = env.workspaces_dir.join("ws").join("alpha-copy");
     cp_r(&original, &copy);
     std::fs::write(
         copy.join(".git"),
-        format!("gitdir: {}  \n", admin_named_by(&original).display()),
+        format!("gitdir: {}  \n", admin_dir_of(&original).display()),
     )
     .unwrap();
     std::fs::write(copy.join("mine.txt"), "a day of work").unwrap();
@@ -3044,19 +3043,23 @@ fn a_near_miss_copy_is_kept_on_the_retry_after_its_original_goes() {
     );
 }
 
-/// git writes a worktree's gitdir as `<common>/worktrees/<id>`, absolute and
-/// with no `..`. A `.git` naming anything else was written by hand (or is a
-/// `--separate-git-dir` checkout, which space never makes), so where its
-/// source repo would be cannot be read from it, and a `NotFound` on it is not
-/// proof the source repo is gone. Both are kept even when nothing on the
-/// path exists: one under a directory that is not `worktrees`, one whose
-/// `..` walks through the `worktrees` directory git has already removed.
-/// Each sits alone in its own space: an orphan is deleted only with its
-/// space, which a kept neighbour would hold back.
+/// git writes a worktree's gitdir as `<common>/worktrees/<id>`, absolute,
+/// with no `..` and no line break. A `.git` naming anything else was written
+/// by hand (or is a `--separate-git-dir` checkout, which space never makes),
+/// so where its source repo would be cannot be read from it, and a
+/// `NotFound` on it is not proof the source repo is gone. Each is kept even
+/// when nothing on the path exists: one under a directory that is not
+/// `worktrees`, one whose `..` walks through the `worktrees` directory git
+/// has already removed, and one whose second line (git reads a gitfile's
+/// interior newline as part of the path) ends in `worktrees/<id>`, which the
+/// code review of PR #61 found deleted. Each sits alone in its own space: an
+/// orphan is deleted only with its space, which a kept neighbour would hold
+/// back. The reason leads with what is wrong, and the path, which may be
+/// long, stays off the summary line.
 #[test]
 fn a_gitdir_not_in_gits_own_shape_is_kept_when_it_names_nothing() {
     let env = TestEnv::new();
-    let repo = env.create_repo("alpha");
+    let repo = absolute_repo(&env, "alpha");
     let shapes = [
         (
             "not-worktrees",
@@ -3069,6 +3072,20 @@ fn a_gitdir_not_in_gits_own_shape_is_kept_when_it_names_nothing() {
                 .join("..")
                 .join("worktrees")
                 .join("alpha"),
+        ),
+        (
+            "two-lines",
+            PathBuf::from(format!(
+                "{}\n# was {}",
+                repo.join(".git").join("worktrees").join("alpha").display(),
+                env.dir
+                    .path()
+                    .join("old")
+                    .join(".git")
+                    .join("worktrees")
+                    .join("alpha")
+                    .display()
+            )),
         ),
     ];
     assert!(
@@ -3091,6 +3108,14 @@ fn a_gitdir_not_in_gits_own_shape_is_kept_when_it_names_nothing() {
             name,
             text
         );
+        let summary = text.lines().next().unwrap_or_default();
+        assert!(
+            summary.contains("in a form git does not write")
+                && !summary.contains(&env.dir.path().display().to_string()),
+            "{}: the summary says what is wrong and leaves the path off, got {:?}",
+            name,
+            summary
+        );
         assert!(
             dir.join("mine.txt").exists(),
             "{}: and its work is still there",
@@ -3106,7 +3131,7 @@ fn a_gitdir_not_in_gits_own_shape_is_kept_when_it_names_nothing() {
 #[test]
 fn a_copy_in_another_space_does_not_keep_the_original() {
     let env = TestEnv::new();
-    let repo = env.create_repo("alpha");
+    let repo = absolute_repo(&env, "alpha");
     let original = worktree_in_space(&env, &repo, "feat");
     cp_r(
         &env.workspaces_dir.join("feat"),
@@ -3136,7 +3161,7 @@ fn a_copy_in_another_space_does_not_keep_the_original() {
 #[test]
 fn a_copy_with_no_record_is_told_git_has_none() {
     let env = TestEnv::new();
-    let repo = env.create_repo("alpha");
+    let repo = absolute_repo(&env, "alpha");
     worktree_in_space(&env, &repo, "feat");
     cp_r(
         &env.workspaces_dir.join("feat"),
@@ -3171,4 +3196,36 @@ fn a_copy_with_no_record_is_told_git_has_none() {
             text
         );
     }
+}
+
+/// "Its source repo is still there" is said only of a repository. A gitdir in
+/// git's shape whose `<common>` is a directory that is not a repository is
+/// kept too, since nothing proves a repo is gone, but it is not told that a
+/// repo is there (code review of PR #61).
+#[test]
+fn a_gitdir_under_a_directory_that_is_no_repository_is_not_called_one() {
+    let env = TestEnv::new();
+    let plain = env.dir.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    let dir = env.workspaces_dir.join("ws").join("alpha");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(".git"),
+        format!(
+            "gitdir: {}\n",
+            plain.join("worktrees").join("alpha").display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.join("mine.txt"), "a day of work").unwrap();
+
+    let text = remove_forced(&env, "ws")
+        .expect_err("kept: nothing proves a repo is gone")
+        .to_string();
+    assert!(
+        !text.contains("source repo is still there") && text.contains("not a git repository"),
+        "it is not told a repo is there, got {:?}",
+        text
+    );
+    assert!(dir.join("mine.txt").exists(), "and its work is still there");
 }

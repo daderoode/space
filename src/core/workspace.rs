@@ -2302,8 +2302,10 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
     // Classified in one pass, acted on in the next. Removing a worktree
     // destroys its admin directory, and a second directory pointing at the
     // same one (a worktree copied beside its original) would classify as a
-    // worktree before that and as an orphan after it, which is the
-    // difference between being handed to git and being deleted.
+    // worktree before that and as something else after it: an orphan, which
+    // was deleted, before ticket 36, and a directory git has no record of,
+    // kept with a different reason, since. What a directory is has to be
+    // read from the space as it was found.
     let mut classified: Vec<(PathBuf, SpaceEntry)> = dirs
         .into_iter()
         .map(|dir| {
@@ -2580,37 +2582,67 @@ fn classify_space_entry(dir: &Path) -> SpaceEntry {
 /// deleted, is that its source repo is gone too, so that is what is checked.
 ///
 /// git writes a linked worktree's gitdir as `<common>/worktrees/<id>`, from
-/// the real path of the common dir, so absolute and with no `..`. Only that
-/// shape says where the source repo is, and only a `NotFound` for `<common>`
+/// the real path of the common dir: absolute, every component a plain name,
+/// no line break in any of them. Only that shape says where the source repo
+/// is (`common_dir_in_gits_shape`), and only a `NotFound` for `<common>`
 /// itself proves it is gone. `<common>/worktrees` is no evidence: git deletes
 /// it with the repo's last worktree. A path in any other shape was written by
-/// hand, and where its repo would be cannot be read from it; a `..` in
-/// particular walks through a `worktrees` directory that may have gone, so
-/// the kernel reports `NotFound` for a `<common>` that is there.
+/// hand, and where its repo would be cannot be read from it: a `..` walks
+/// through a `worktrees` directory that may have gone, so the kernel reports
+/// `NotFound` for a `<common>` that is there, and a gitfile's second line,
+/// which git reads as part of the path, can end in `worktrees/<id>` under a
+/// made-up `<common>` (the code review of PR #61 found such a copy deleted).
+/// Both are kept.
 ///
-/// After the admin directory itself answered `NotFound`, every directory on
-/// its path down to the missing one was searchable, so `<common>` answers
-/// `Ok` or `NotFound` but for a race; any other error keeps, as everywhere a
-/// deletion is decided.
+/// A `<common>` that is there is said to be the source repo only when it is
+/// a repository; anything else there is kept with what it is. After the
+/// admin directory itself answered `NotFound`, every directory on its path
+/// down to the missing one was searchable, so `<common>` answers `Ok` or
+/// `NotFound` but for a race; any other error keeps, as everywhere a
+/// deletion is decided. Paths stay off each reason's first line, which may
+/// become the summary the TUI shows.
 fn absent_admin(admin: PathBuf) -> SpaceEntry {
-    let in_gits_shape = !admin
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir));
-    let common = admin
-        .parent()
-        .filter(|worktrees| in_gits_shape && worktrees.file_name() == Some("worktrees".as_ref()))
-        .and_then(Path::parent);
-    match common {
-        Some(common) => match std::fs::symlink_metadata(common) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => SpaceEntry::Orphan,
-            _ => SpaceEntry::Unregistered { admin },
-        },
-        None => SpaceEntry::Unreadable(format!(
-            "its .git file names {:?}, which does not exist and is not where git keeps a \
-             worktree's admin directory",
+    let Some(common) = common_dir_in_gits_shape(&admin) else {
+        return SpaceEntry::Unreadable(format!(
+            "its .git file names a path that does not exist, in a form git does not write \
+             for a worktree\nthe path is {:?}",
+            admin
+        ));
+    };
+    match std::fs::symlink_metadata(common) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SpaceEntry::Orphan,
+        Ok(_) if is_repository_dir(common) => SpaceEntry::Unregistered { admin },
+        Ok(_) => SpaceEntry::Unreadable(format!(
+            "its .git file names a worktree of a directory that is not a git repository\n\
+             the path is {:?}",
             admin
         )),
+        Err(e) => SpaceEntry::Unreadable(format!(
+            "its .git file names a worktree of a directory that cannot be read ({})\n\
+             the path is {:?}",
+            e, admin
+        )),
     }
+}
+
+/// `<common>` in an admin path of the form git writes for a linked worktree,
+/// `<common>/worktrees/<id>`, or `None` when the path is not of that form: an
+/// allow-list (the root, then plain names with no `\n` or `\r`), since what
+/// a hand edit can put in a gitfile is not a list anyone can finish.
+fn common_dir_in_gits_shape(admin: &Path) -> Option<&Path> {
+    let plain = admin.components().all(|c| match c {
+        std::path::Component::RootDir => true,
+        std::path::Component::Normal(name) => !name
+            .as_encoded_bytes()
+            .iter()
+            .any(|b| matches!(b, b'\n' | b'\r')),
+        _ => false,
+    });
+    let worktrees = admin.parent()?;
+    if !plain || worktrees.file_name() != Some("worktrees".as_ref()) {
+        return None;
+    }
+    worktrees.parent()
 }
 
 /// Whether `dir` is itself a repository, by what every repository has
