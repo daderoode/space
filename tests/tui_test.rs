@@ -4134,6 +4134,225 @@ fn add_new_branch_custom_name_creates_worktree() {
 }
 
 // ---------------------------------------------------------------------------
+// The Add flow's "New branch" label and field (ticket 32)
+// ---------------------------------------------------------------------------
+
+/// An add screen for `space_name` parked on the branch strategy picker with
+/// one repo picked and no recent branches: where
+/// `App::advance_to_branch_strategy` leaves it once the sync report is done.
+fn add_at_branch_strategy(space_name: &str) -> App {
+    let workspaces = vec![Workspace {
+        name: space_name.to_string(),
+        path: PathBuf::from("/tmp").join(space_name),
+        repos: vec![],
+    }];
+    let mut app = test_app(workspaces, vec![PathBuf::from("/tmp/repos/foo")]);
+    app.handle_key(key(KeyCode::Char('a')));
+    if let Screen::AddRepos(ref mut st) = app.screen {
+        st.selected_repos = vec![PathBuf::from("/tmp/repos/foo")];
+        st.recent_branches = vec![];
+        st.branch_strategy_idx = 0;
+        st.stage = space::tui::screens::add::AddStage::PickBranchStrategy;
+    } else {
+        panic!("expected AddRepos screen");
+    }
+    app
+}
+
+/// The Add flow's `type_branch_name_and_go_back`: the picker to the branch
+/// name stage, replace the name the stage filled in with `typed`, and Esc
+/// back. Asserts what the field held at each step, so a screen that never
+/// filled it in, or that dropped the typed name on the way back, fails here
+/// rather than passing the label assertion by luck.
+fn add_type_branch_name_and_go_back(app: &mut App, filled_in: &str, typed: &str) {
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+    use space::tui::screens::add::AddStage;
+
+    app.handle_key(key(KeyCode::Enter));
+    if let Screen::AddRepos(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            AddStage::EnterBranchName,
+            "New branch must open the branch name stage"
+        );
+        assert_eq!(
+            st.branch_name_input.value(),
+            filled_in,
+            "the stage fills the field in with the space name"
+        );
+    } else {
+        panic!("expected AddRepos screen");
+    }
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    type_text(app, typed);
+    app.handle_key(key(KeyCode::Esc));
+
+    if let Screen::AddRepos(ref st) = app.screen {
+        assert_eq!(
+            st.stage,
+            AddStage::PickBranchStrategy,
+            "Esc returns to the strategy picker"
+        );
+        assert_eq!(
+            st.branch_name_input.value(),
+            typed,
+            "the typed name is what the field holds on the way back"
+        );
+    } else {
+        panic!("expected AddRepos screen");
+    }
+}
+
+#[test]
+fn add_strategy_label_names_the_typed_branch_not_the_space() {
+    let mut app = add_at_branch_strategy("existing-ws");
+    add_type_branch_name_and_go_back(&mut app, "existing-ws", "feature/DEV-9999");
+
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("New branch 'feature/DEV-9999'"),
+        "the picker must name the branch its stage will open with, rendered:\n{}",
+        rendered
+    );
+    assert!(
+        !rendered.contains("New branch 'existing-ws'"),
+        "the space name is no longer what this option creates, rendered:\n{}",
+        rendered
+    );
+    assert!(
+        rendered.contains("Existing branch 'existing-ws' (if present)"),
+        "the Existing row reads the space name and is unchanged, rendered:\n{}",
+        rendered
+    );
+}
+
+#[test]
+fn add_strategy_label_returns_to_the_space_name_when_the_field_is_emptied() {
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+
+    let mut app = add_at_branch_strategy("existing-ws");
+    add_type_branch_name_and_go_back(&mut app, "existing-ws", "feature/DEV-9999");
+    assert!(render_text(&app, 80, 24).contains("New branch 'feature/DEV-9999'"));
+
+    // Back in, empty the field, and out again.
+    app.handle_key(key(KeyCode::Enter));
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    app.handle_key(key(KeyCode::Esc));
+    if let Screen::AddRepos(ref st) = app.screen {
+        assert_eq!(st.branch_name_input.value(), "", "the field was emptied");
+    } else {
+        panic!("expected AddRepos screen");
+    }
+
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("New branch 'existing-ws'"),
+        "an emptied field names no branch, so the row names the space, rendered:\n{}",
+        rendered
+    );
+    assert!(
+        !rendered.contains("New branch 'feature/DEV-9999'"),
+        "the typed name is gone, rendered:\n{}",
+        rendered
+    );
+}
+
+#[test]
+fn the_add_row_names_the_branch_enter_creates() {
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+    use space::core::workspace::BranchStrategy;
+    use space::tui::actions::{ScreenAction, ScreenContext};
+    use space::tui::screens::add::AddStage;
+
+    // The Add flow's `the_row_names_the_branch_enter_creates`: for each way
+    // the branch name field can be left, the row names the branch that Enter
+    // in the stage it opens asks the add to make, and `branch_strategy()`
+    // reports that same name. Add's space name is fixed for the whole flow,
+    // so there is no rename column.
+    let cases: [Option<&str>; 8] = [
+        None,
+        Some(""),
+        Some("   "),
+        Some("feat"),
+        Some(" feat "),
+        Some("ws"),
+        Some(" ws "),
+        Some("feature/DEV-9999"),
+    ];
+    let config = SpaceConfig::default();
+    let ctx = ScreenContext {
+        config: &config,
+        creating_in_flight: false,
+    };
+
+    for left_holding in cases {
+        let mut app = add_at_branch_strategy("ws");
+        app.handle_key(key(KeyCode::Enter));
+        if let Some(text) = left_holding {
+            app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+            type_text(&mut app, text);
+        }
+        app.handle_key(key(KeyCode::Esc));
+        if let Screen::AddRepos(ref st) = app.screen {
+            assert_eq!(
+                st.stage,
+                AddStage::PickBranchStrategy,
+                "case {:?}: Esc returns to the picker",
+                left_holding
+            );
+        } else {
+            panic!("case {:?}: expected AddRepos screen", left_holding);
+        }
+
+        let label = new_branch_label(&render_text(&app, 120, 24));
+
+        let Screen::AddRepos(ref mut st) = app.screen else {
+            panic!("case {:?}: expected AddRepos screen", left_holding);
+        };
+        match st.branch_strategy() {
+            BranchStrategy::NewBranch(name) => assert_eq!(
+                name, label,
+                "case {:?}: branch_strategy() names another branch than the row",
+                left_holding
+            ),
+            other => panic!(
+                "case {:?}: expected a new branch, got {:?}",
+                left_holding, other
+            ),
+        }
+
+        // Enter on the row, then Enter in the stage it opens, on the screen
+        // itself so the add it asks for is read rather than run.
+        st.handle_key(key(KeyCode::Enter), &ctx);
+        assert_eq!(
+            st.stage,
+            AddStage::EnterBranchName,
+            "case {:?}: the row opens the branch name stage",
+            left_holding
+        );
+        let field = st.branch_name_input.value().to_string();
+        match st.handle_key(key(KeyCode::Enter), &ctx) {
+            ScreenAction::ExecuteWorktreeFlow(p) => match p.branch_strategy {
+                BranchStrategy::NewBranch(created) => assert_eq!(
+                    label, created,
+                    "case {:?}: the row said {:?} but Enter created {:?} (field {:?})",
+                    left_holding, label, created, field
+                ),
+                other => panic!(
+                    "case {:?}: expected a new branch, got {:?}",
+                    left_holding, other
+                ),
+            },
+            _ => panic!(
+                "case {:?}: Enter did not start the add (field {:?}, error {:?})",
+                left_holding, field, st.error
+            ),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // git::remote_url tests
 // ---------------------------------------------------------------------------
 

@@ -879,9 +879,9 @@ fn render_name_input(
 /// `workspace_name` is the live space name, which the Existing-branch row
 /// sends to git unchanged; `new_branch_name` is the branch the New-branch row
 /// creates, which is the space name until the user types one of their own in
-/// the stage that row opens (ticket 30). The Add flow keeps its branch field
-/// by a different rule and passes its space name for both until ticket 32
-/// gives `AddState` the same seam.
+/// the stage that row opens (ticket 30). Both flows read that name from
+/// their state's `new_branch_name()`; the Add flow's has no rename clause
+/// because its space name is fixed for the whole flow (ticket 32).
 fn render_branch_strategy_picker(
     frame: &mut Frame,
     workspace_name: &str,
@@ -1244,7 +1244,7 @@ fn render_add_overlay(
         AddStage::PickBranchStrategy => render_branch_strategy_picker(
             frame,
             &state.workspace_name,
-            &state.workspace_name,
+            state.new_branch_name(),
             state.branch_strategy_idx,
             state.error.as_deref(),
             &state.recent_branches,
