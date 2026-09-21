@@ -11439,7 +11439,12 @@ mod push_remote_confirmation_tests {
 
     #[test]
     fn n_esc_and_enter_push_nothing() {
-        for code in [KeyCode::Char('n'), KeyCode::Esc, KeyCode::Enter] {
+        for code in [
+            KeyCode::Char('n'),
+            KeyCode::Char('q'),
+            KeyCode::Esc,
+            KeyCode::Enter,
+        ] {
             let mut app = menu_app("upstream");
             app.handle_key(key(KeyCode::Char('P')));
             app.handle_key(key(code));
@@ -11483,6 +11488,49 @@ mod push_remote_confirmation_tests {
             "the prompt says the destination is unknown, got:\n{}",
             flat
         );
+    }
+
+    /// `?` opens the help overlay over the stage and closing it returns
+    /// there, as on every other git-ops stage (ADR 0001).
+    #[test]
+    fn question_mark_opens_help_over_the_confirmation_and_returns_to_it() {
+        let mut app = menu_app("upstream");
+        app.handle_key(key(KeyCode::Char('P')));
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.help.is_some(), "? opens help on the confirmation stage");
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::ConfirmPushRemote,
+            "the stage waits underneath"
+        );
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.help.is_none(), "Esc closes the help overlay");
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::ConfirmPushRemote,
+            "and returns to the prompt"
+        );
+        assert!(app.gitop_rx.is_none(), "help never starts a push");
+    }
+
+    /// The dialog is seven rows at 80x24, the same shape as the no-upstream
+    /// confirmation: the title row, the prompt's rows, and the bottom border.
+    #[test]
+    fn the_confirmation_dialog_is_seven_rows_at_80_by_24() {
+        let mut app = menu_app("upstream");
+        app.handle_key(key(KeyCode::Char('P')));
+        let text = render_text(&app, 80, 24);
+        let lines: Vec<&str> = text.lines().collect();
+        let top = lines
+            .iter()
+            .position(|l| l.contains("Git: repo-a (feat)"))
+            .expect("the dialog title row");
+        let bottom = lines[top..]
+            .iter()
+            .position(|l| l.contains("\u{2570}"))
+            .map(|i| top + i)
+            .expect("the dialog's bottom border");
+        assert_eq!(bottom - top + 1, 7, "dialog rows, got:\n{}", text);
     }
 
     #[test]
