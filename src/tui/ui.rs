@@ -753,7 +753,7 @@ fn render_text_input_dialog(
     let scroll = input.visual_scroll(text_area_cols);
     let cursor_col = input.visual_cursor();
     let value_vis_w = UnicodeWidthStr::width(input.value());
-    let visible = after_scroll(input.value(), scroll);
+    let visible = after_scroll(input.value(), scroll, text_area_cols);
 
     // Left indicator: ‹ when text is scrolled (content hidden on left)
     let left_text = if scroll > 0 { "\u{2039}" } else { " " }; // ‹
@@ -795,17 +795,23 @@ fn render_text_input_dialog(
 }
 
 /// `value` from `scroll` columns in, cut the way ratatui's line truncator
-/// cuts a Paragraph scrolled by `scroll` columns: whole grapheme clusters
-/// are dropped while their widths fit in `scroll`, and a cluster the scroll
-/// lands inside is kept whole. Not `skip_display_width`: that walks chars,
-/// and a flag or an emoji sequence is several chars that ratatui draws as
-/// one cluster, so a cut between them would draw a different glyph than the
-/// scrolled Paragraph did.
-fn after_scroll(value: &str, scroll: usize) -> &str {
+/// cuts a left-aligned Paragraph scrolled by `scroll` columns into an area
+/// `area_cols` wide: a cluster wider than the area is dropped without
+/// counting against the scroll (the truncator never draws one), whole
+/// clusters are dropped while their widths fit in `scroll`, and a cluster
+/// the scroll lands inside is kept whole. Not `skip_display_width`: that
+/// walks chars, and a flag or an emoji sequence is several chars that
+/// ratatui draws as one cluster, so a cut between them would draw a
+/// different glyph than the scrolled Paragraph did.
+fn after_scroll(value: &str, scroll: usize, area_cols: usize) -> &str {
     let mut left = scroll;
     let mut start = 0;
     for cluster in UnicodeSegmentation::graphemes(value, true) {
         let width = UnicodeWidthStr::width(cluster);
+        if width > area_cols {
+            start += cluster.len();
+            continue;
+        }
         if width > left {
             break;
         }
@@ -1405,22 +1411,36 @@ mod tests {
     /// flag is two regional indicators) is never split.
     #[test]
     fn after_scroll_cuts_on_grapheme_clusters_and_keeps_a_straddled_one() {
-        assert_eq!(after_scroll("abcdef", 0), "abcdef");
-        assert_eq!(after_scroll("abcdef", 3), "def");
-        assert_eq!(after_scroll("abcdef", 6), "");
-        assert_eq!(after_scroll("abcdef", 40), "");
+        assert_eq!(after_scroll("abcdef", 0, 52), "abcdef");
+        assert_eq!(after_scroll("abcdef", 3, 52), "def");
+        assert_eq!(after_scroll("abcdef", 6, 52), "");
+        assert_eq!(after_scroll("abcdef", 40, 52), "");
         // A wide character the scroll lands inside is kept whole, where
         // `skip_display_width` would snap past it.
-        assert_eq!(after_scroll("\u{65e5}bc", 1), "\u{65e5}bc");
-        assert_eq!(after_scroll("\u{65e5}bc", 2), "bc");
+        assert_eq!(after_scroll("\u{65e5}bc", 1, 52), "\u{65e5}bc");
+        assert_eq!(after_scroll("\u{65e5}bc", 2, 52), "bc");
         // Two flags: four regional indicators, two clusters of width 2.
         let flags = "\u{1f1fa}\u{1f1f8}\u{1f1ec}\u{1f1e7}y";
-        assert_eq!(after_scroll(flags, 1), flags);
-        assert_eq!(after_scroll(flags, 2), "\u{1f1ec}\u{1f1e7}y");
-        assert_eq!(after_scroll(flags, 3), "\u{1f1ec}\u{1f1e7}y");
-        assert_eq!(after_scroll(flags, 4), "y");
+        assert_eq!(after_scroll(flags, 1, 52), flags);
+        assert_eq!(after_scroll(flags, 2, 52), "\u{1f1ec}\u{1f1e7}y");
+        assert_eq!(after_scroll(flags, 3, 52), "\u{1f1ec}\u{1f1e7}y");
+        assert_eq!(after_scroll(flags, 4, 52), "y");
         // A combining mark goes with its base character.
-        assert_eq!(after_scroll("e\u{301}x", 1), "x");
+        assert_eq!(after_scroll("e\u{301}x", 1, 52), "x");
+    }
+
+    /// The truncator skips a cluster wider than the area before it counts
+    /// the scroll, so such a cluster is dropped and the scroll still applies
+    /// in full to what follows. A one-column area makes every wide
+    /// character over-wide; a zero-column area makes everything over-wide.
+    #[test]
+    fn after_scroll_drops_an_over_wide_cluster_without_spending_the_scroll() {
+        assert_eq!(after_scroll("\u{65e5}abc", 2, 1), "c");
+        assert_eq!(after_scroll("\u{65e5}abc", 0, 1), "abc");
+        assert_eq!(after_scroll("ab\u{65e5}cd", 3, 1), "d");
+        assert_eq!(after_scroll("\u{65e5}abc", 1, 0), "");
+        // At the ordinary width a wide character is not over-wide.
+        assert_eq!(after_scroll("\u{65e5}abc", 2, 52), "abc");
     }
 
     /// Past `u16::MAX` a count saturates; below it, it is the count.
@@ -1510,10 +1530,11 @@ fn render_config_editor(
             );
             // Set terminal cursor position, unless help is drawn over us.
             if show_cursor {
-                // The value row has no horizontal scroll, so a long value
-                // asks for a cursor past the frame and the terminal clamps
-                // it; past `u16::MAX` the column saturates rather than
-                // wrapping back to the start of the row.
+                // Known limitation: the value row has no horizontal scroll,
+                // so a value longer than the row asks for a cursor past the
+                // frame and the terminal clamps it. Past `u16::MAX` the
+                // column saturates rather than wrapping back to the start
+                // of the row (ticket 35); scrolling the row is a follow-up.
                 let cursor_x = value_area
                     .x
                     .saturating_add(fit_u16(state.input.visual_cursor()));

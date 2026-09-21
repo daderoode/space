@@ -410,9 +410,11 @@ pub fn render(picker: &FuzzyPicker, show_cursor: bool, frame: &mut Frame) {
     frame.render_widget(Paragraph::new(input_text).style(theme::text()), sections[0]);
     // Show cursor at correct position (offset +2 for "> " prefix)
     if show_cursor {
-        // A query longer than the row already puts the cursor past the frame
-        // for the terminal to clamp; past `u16::MAX` it saturates rather
-        // than wrapping back to the start of the row.
+        // Known limitation: the query row has no horizontal scroll, so a
+        // query longer than the row asks for a cursor past the frame and the
+        // terminal clamps it. Past `u16::MAX` the column saturates rather
+        // than wrapping back to the start of the row (ticket 35); scrolling
+        // the row is a follow-up.
         let cursor_x = sections[0]
             .x
             .saturating_add(2)

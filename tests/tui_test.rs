@@ -10308,10 +10308,10 @@ mod content_length_tests {
     }
 
     /// The cells a Paragraph scrolled by `scroll` columns draws for `value`
-    /// on a 52-cell row: the mechanism the dialog used before the fix, and
-    /// the oracle for what it must still draw.
-    fn scrolled_paragraph_row(value: &str, scroll: u16) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(52, 1)).unwrap();
+    /// on a `width`-cell row: the mechanism the dialog used before the fix,
+    /// and the oracle for what it must still draw.
+    fn scrolled_paragraph_row(value: &str, scroll: u16, width: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
         terminal
             .draw(|frame| {
                 frame.render_widget(
@@ -10321,9 +10321,37 @@ mod content_length_tests {
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        (0..52)
+        (0..width)
             .map(|x| buffer[(x, 0)].symbol().to_string())
             .collect()
+    }
+
+    /// Render `app` on a `width` x 24 frame and return the name dialog's
+    /// text row. On the 80-column frame the dialog is found by its border;
+    /// on a frame narrower than its 50-column minimum the dialog is the
+    /// frame's width, at column 0, so the row is worked out from that: the
+    /// border and the left indicator take two cells, the right indicator
+    /// and the border two more, and the input row is the dialog's third,
+    /// with the 7-row dialog centred at row 8.
+    fn name_dialog_text_row_at(app: &App, width: u16) -> Result<(Vec<String>, u16), String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, FRAME_H)).unwrap();
+        terminal
+            .draw(|frame| space::tui::ui::view(app, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        if width >= 50 {
+            let row = name_dialog_text_row(buffer)?;
+            let text_w = u16::try_from(row.len()).unwrap();
+            return Ok((row, text_w));
+        }
+        let text_w = width - 4;
+        let y = 8 + 2;
+        Ok((
+            (2..2 + text_w)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect(),
+            text_w,
+        ))
     }
 
     /// The independent reviewer's case: two flags (each two regional
@@ -10354,10 +10382,14 @@ mod content_length_tests {
     /// At every ordinary length the dialog must draw exactly the cells a
     /// Paragraph scrolled by tui-input's scroll drew before the fix. Each
     /// value opens with the clusters (single wide characters, flags, an
-    /// emoji sequence joined with zero-width joiners, combining marks) and
-    /// ends with enough filler that, as the cursor walks the whole value,
-    /// the scroll lands on every boundary inside them. A value whose
-    /// clusters sit past the reachable scroll would test nothing.
+    /// emoji sequence joined with zero-width joiners, combining marks, and
+    /// one cluster of 56 columns, a consonant with 55 spacing vowel signs,
+    /// wider than the 52-column text area) and ends with enough filler
+    /// that, as the cursor walks the whole value, the scroll lands on every
+    /// boundary inside them. A value whose clusters sit past the reachable
+    /// scroll would test nothing. The walk runs on the 80-column frame
+    /// (52-column text area) and on a 5-column frame, where the text area
+    /// is one cell and every wide character is wider than it.
     #[test]
     fn text_input_draws_what_a_scrolled_paragraph_drew_at_every_cursor() {
         let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
@@ -10369,25 +10401,38 @@ mod content_length_tests {
             ),
             format!("{}{}{}", family, family, "r".repeat(60)),
             format!("e\u{301}e\u{301}\u{65e5}{}", "n".repeat(60)),
+            format!("\u{915}{}{}", "\u{93e}".repeat(55), "w".repeat(60)),
         ];
         let mut failures = Vec::new();
-        for value in &values {
-            let chars = value.chars().count();
-            for cursor in 0..=chars {
-                let input = Input::default()
-                    .with_value(value.clone())
-                    .with_cursor(cursor);
-                let scroll = input.visual_scroll(52);
-                let want = scrolled_paragraph_row(value, u16::try_from(scroll).unwrap());
-                let app = name_input_with_cursor(value, cursor);
-                let name = format!("value {:?} at cursor {}", value, cursor);
-                failures.extend(render_and_check(&name, &app, |buffer, _| {
-                    let shown = name_dialog_text_row(buffer)?;
-                    if shown != want {
-                        return Err(format!("row is {:?}, expected {:?}", shown, want));
-                    }
-                    Ok(())
-                }));
+        for frame_w in [FRAME_W, 5u16] {
+            let text_w = if frame_w >= 50 { 52 } else { frame_w - 4 };
+            for value in &values {
+                let chars = value.chars().count();
+                for cursor in 0..=chars {
+                    let input = Input::default()
+                        .with_value(value.clone())
+                        .with_cursor(cursor);
+                    let scroll = input.visual_scroll(usize::from(text_w));
+                    let want =
+                        scrolled_paragraph_row(value, u16::try_from(scroll).unwrap(), text_w);
+                    let app = name_input_with_cursor(value, cursor);
+                    let name = format!(
+                        "frame {} wide, value {:?} at cursor {}",
+                        frame_w, value, cursor
+                    );
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        name_dialog_text_row_at(&app, frame_w)
+                    }));
+                    let problem = match outcome {
+                        Ok(Ok((shown, w))) if w == text_w && shown == want => continue,
+                        Ok(Ok((shown, w))) => {
+                            format!("row ({} wide) is {:?}, expected {:?}", w, shown, want)
+                        }
+                        Ok(Err(e)) => e,
+                        Err(_) => "panicked".to_string(),
+                    };
+                    failures.push(format!("{}: {}", name, problem));
+                }
             }
         }
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
