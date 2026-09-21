@@ -6269,7 +6269,8 @@ mod tests {
         use ratatui::Terminal;
 
         let tmp = tempfile::tempdir().unwrap();
-        let repo = make_repo(tmp.path(), "a");
+        // Ordinary names, the length that pushed a trailing count to column 79.
+        let repo = make_repo(tmp.path(), "frontend-service");
         let ws_dir = tmp.path().join("spaces");
         let original = create_worktree(
             &repo,
@@ -6278,7 +6279,7 @@ mod tests {
             &BranchStrategy::NewBranch("ws".to_string()),
         )
         .unwrap();
-        let copy = ws_dir.join("ws").join("b");
+        let copy = ws_dir.join("ws").join("frontend-service-copy");
         std::fs::create_dir_all(&copy).unwrap();
         std::fs::copy(original.join(".git"), copy.join(".git")).unwrap();
 

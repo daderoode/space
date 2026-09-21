@@ -1775,12 +1775,37 @@ fn remove_workspace_keeps_a_worktree_and_its_copy_across_retries() {
         "the original is still registered, so nothing was unregistered under it: {}",
         still
     );
+
+    // Each half is told the truth about itself: the original that it has a
+    // copy, the copy that it is one. Swapping them would tell a user to
+    // delete the original by hand.
+    let text = space::core::workspace::remove_workspace(&env.workspaces_dir, "copy-ws", true)
+        .expect_err("kept")
+        .to_string();
+    let entry = |name: &str| {
+        text.lines()
+            .find(|l| l.trim_start().starts_with(&format!("{:?}:", name)))
+            .unwrap_or_else(|| panic!("an entry for {}, in {:?}", name, text))
+            .to_string()
+    };
+    assert!(
+        entry("a-repo").contains("a copy of it") && !entry("a-repo").contains("it is a copy"),
+        "the original is told it has a copy, got {:?}",
+        entry("a-repo")
+    );
+    assert!(
+        entry("z-copy").contains("it is a copy of \"a-repo\""),
+        "the copy is told it is one, and of which, got {:?}",
+        entry("z-copy")
+    );
 }
 
-/// The count of a kept pair sits in the summary right after the names and
-/// before the first reason, since the summary is all the TUI status shows.
+/// The count of a kept pair leads the summary. It was placed after the
+/// names at first, and with ordinary names ("frontend-service",
+/// "frontend-service-copy") that put it at column 79 of an 80-column status
+/// row, behind the `Delete failed: ` prefix. Leading, no name can push it off.
 #[test]
-fn remove_workspace_summary_counts_a_kept_pair_before_the_reason() {
+fn remove_workspace_summary_leads_with_a_kept_pair_count() {
     let env = common::TestEnv::new();
     let repo = env.create_repo("a-repo");
     let original = worktree_in_space(&env, &repo, "pair-ws");
@@ -1795,14 +1820,16 @@ fn remove_workspace_summary_counts_a_kept_pair_before_the_reason() {
         .next()
         .unwrap()
         .to_string();
-    let count_at = summary
-        .find("2 share one worktree")
-        .expect("the summary counts the pair");
-    let names_end = summary.find("z-copy").expect("and names both halves");
+    assert!(
+        summary.starts_with("2 share one worktree; "),
+        "the count comes first, got {:?}",
+        summary
+    );
+    let names_at = summary.find("a-repo").expect("then the names");
     let reason_at = summary.find("first reason:").expect("then the reason");
     assert!(
-        names_end < count_at && count_at < reason_at,
-        "names, then the count, then the reason, got {:?}",
+        names_at < reason_at,
+        "names before the reason, got {:?}",
         summary
     );
 }
@@ -2196,7 +2223,8 @@ fn remove_workspace_does_not_tell_a_copy_to_repair() {
         text
     );
     assert!(
-        text.contains("copy of the worktree at") && text.contains("deletes this copy"),
+        text.contains("it is a copy of a worktree git still knows")
+            && text.contains("deletes this copy"),
         "it is told what it is and what removing the space again would do, got {:?}",
         text
     );
@@ -2325,5 +2353,138 @@ fn remove_workspace_keeps_a_relative_worktree_whose_space_moved_deeper() {
         !left.contains("moved-ws"),
         "after the repair the removal unregisters it, got {}",
         left
+    );
+}
+
+/// A pair in a space renamed by hand: the admin directory's record names
+/// where the original used to be, so neither half is the original here.
+/// Claiming one was told the real original to delete itself by hand. With
+/// no half at the recorded place, both are told the same thing, which is
+/// what git has recorded and the repair that fixes it.
+#[test]
+fn remove_workspace_tells_a_moved_pair_to_repair_not_to_delete_the_original() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let original = worktree_in_space(&env, &repo, "pair-ws");
+    let copy = env.workspaces_dir.join("pair-ws").join("z-copy");
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::copy(original.join(".git"), copy.join(".git")).unwrap();
+    std::fs::rename(
+        env.workspaces_dir.join("pair-ws"),
+        env.workspaces_dir.join("renamed-ws"),
+    )
+    .unwrap();
+
+    let text = space::core::workspace::remove_workspace(&env.workspaces_dir, "renamed-ws", true)
+        .expect_err("the pair is kept")
+        .to_string();
+    for name in ["alpha", "z-copy"] {
+        let entry: String = text
+            .lines()
+            .skip_while(|l| !l.trim_start().starts_with(&format!("{:?}:", name)))
+            .take(2)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !entry.contains("it is a copy of") && !entry.contains("a copy of it"),
+            "{}: neither half is claimed to be the original, got {:?}",
+            name,
+            entry
+        );
+        assert!(
+            entry.contains("git worktree repair"),
+            "{}: both are told the repair that fixes a move, got {:?}",
+            name,
+            entry
+        );
+    }
+}
+
+/// Grouping compares canonical admin paths. A relative gitdir reaches the
+/// same admin directory through different text from each half of a pair,
+/// so without the canonical form the pair was not grouped, the original was
+/// removed, and the copy was left with nothing registered.
+#[test]
+fn remove_workspace_keeps_a_relative_pair_together() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("a-repo");
+    git_ok(&repo, &["config", "worktree.useRelativePaths", "true"]);
+    let original = env.workspaces_dir.join("relpair-ws").join("a-repo");
+    git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "relpair-ws",
+            original.to_str().unwrap(),
+        ],
+    );
+    if !std::fs::read_to_string(original.join(".git"))
+        .unwrap()
+        .starts_with("gitdir: ..")
+    {
+        eprintln!("skipped: this git writes absolute gitdirs");
+        return;
+    }
+    let copy = env.workspaces_dir.join("relpair-ws").join("z-copy");
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::copy(original.join(".git"), copy.join(".git")).unwrap();
+    std::fs::write(copy.join("work.txt"), "mine").unwrap();
+
+    for run in 1..=2 {
+        space::core::workspace::remove_workspace(&env.workspaces_dir, "relpair-ws", true)
+            .expect_err("the relative pair is kept together");
+        assert!(original.join(".git").exists(), "run {}: original kept", run);
+        assert!(copy.join("work.txt").exists(), "run {}: copy kept", run);
+    }
+}
+
+/// A relative gitdir that does not resolve names the directory in its advice,
+/// and that line must not carry a hostile name onto the summary, which is the
+/// line the TUI shows.
+#[test]
+fn remove_workspace_unresolved_advice_keeps_the_summary_clean() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    git_ok(&repo, &["config", "worktree.useRelativePaths", "true"]);
+    let hostile = "z-\u{1b}[2Jwiped";
+    let before = env.workspaces_dir.join("hmove-ws").join(hostile);
+    git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "hmove-ws",
+            before.to_str().unwrap(),
+        ],
+    );
+    if !std::fs::read_to_string(before.join(".git"))
+        .unwrap()
+        .starts_with("gitdir: ..")
+    {
+        eprintln!("skipped: this git writes absolute gitdirs");
+        return;
+    }
+    let deeper = env.workspaces_dir.join("nested");
+    std::fs::create_dir_all(&deeper).unwrap();
+    std::fs::rename(env.workspaces_dir.join("hmove-ws"), deeper.join("hmove-ws")).unwrap();
+
+    let text = space::core::workspace::remove_workspace(&deeper, "hmove-ws", true)
+        .expect_err("kept")
+        .to_string();
+    let summary = text.lines().next().unwrap();
+    assert!(
+        !summary.contains('\u{1b}'),
+        "no escape byte in the summary, got {:?}",
+        summary
+    );
+    assert!(
+        text.contains("delete this directory by hand"),
+        "the manual step says which directory, got {:?}",
+        text
     );
 }

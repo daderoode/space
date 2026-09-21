@@ -2036,32 +2036,49 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
     // orphan, every such copy at once, with a clean success. So neither is
     // handed to git. Both are kept and reported as a pair, and the space is
     // left exactly as it was found, which a retry then finds again.
-    let mut sharing: std::collections::HashMap<PathBuf, Vec<String>> =
-        std::collections::HashMap::new();
-    for (dir, kind) in &classified {
-        if let SpaceEntry::Worktree { admin } = kind {
-            let key = std::fs::canonicalize(admin).unwrap_or_else(|_| admin.clone());
-            sharing.entry(key).or_default().push(name_of(dir));
-        }
-    }
-    for (dir, kind) in classified.iter_mut() {
-        if let SpaceEntry::Worktree { admin } = kind {
-            let key = std::fs::canonicalize(&*admin).unwrap_or_else(|_| admin.clone());
-            if let Some(group) = sharing.get(&key).filter(|group| group.len() > 1) {
-                let here = name_of(dir);
-                let others: Vec<&String> = group.iter().filter(|n| **n != here).collect();
-                *kind = SpaceEntry::Shared {
-                    admin: admin.clone(),
-                    others: others.into_iter().cloned().collect(),
-                };
-            }
-        }
-    }
-    let shared_count = classified
+    //
+    // The key is the canonical admin path, computed once per entry: a relative
+    // gitdir reaches the same admin directory through different text from
+    // each half of a pair. Members are compared by index, not by name.
+    let keys: Vec<Option<PathBuf>> = classified
         .iter()
-        .filter(|(_, kind)| matches!(kind, SpaceEntry::Shared { .. }))
-        .count();
-    let shared_groups = sharing.values().filter(|group| group.len() > 1).count();
+        .map(|(_, kind)| match kind {
+            SpaceEntry::Worktree { admin } => {
+                Some(std::fs::canonicalize(admin).unwrap_or_else(|_| admin.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut groups: std::collections::HashMap<&PathBuf, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (index, key) in keys.iter().enumerate() {
+        if let Some(key) = key {
+            groups.entry(key).or_default().push(index);
+        }
+    }
+    let shared: Vec<Vec<usize>> = groups
+        .into_values()
+        .filter(|members| members.len() > 1)
+        .collect();
+    let shared_groups = shared.len();
+    let shared_count: usize = shared.iter().map(Vec::len).sum();
+    for members in &shared {
+        let admin = match &classified[members[0]].1 {
+            SpaceEntry::Worktree { admin } => admin.clone(),
+            _ => continue,
+        };
+        let names: Vec<String> = members.iter().map(|&i| name_of(&classified[i].0)).collect();
+        let recorded: Vec<RecordedAt> = members
+            .iter()
+            .map(|&i| recorded_at(&admin, &classified[i].0))
+            .collect();
+        let original = recorded.iter().position(|r| matches!(r, RecordedAt::Here));
+        for (me, &index) in members.iter().enumerate() {
+            classified[index].1 = SpaceEntry::Shared {
+                reason: pair_reason(me, original, &names, &recorded[me]),
+            };
+        }
+    }
 
     let mut removed: Vec<String> = Vec::new();
     let mut orphaned: Vec<String> = Vec::new();
@@ -2069,29 +2086,7 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
     for (dir, kind) in classified {
         let repo = name_of(&dir);
         match kind {
-            SpaceEntry::Shared { admin, others } => {
-                let others = quoted(&others);
-                kept.push((
-                    repo,
-                    match recorded_at(&admin, &dir) {
-                        RecordedAt::Here => format!(
-                            "a copy of it in this space ({}) shares its admin directory, \
-                             so neither is removed: removing this one would leave the \
-                             copy with nothing registered, and removing the space again \
-                             would then delete the copy; keep what you need from the \
-                             copy, delete the copy by hand, then remove the space again",
-                            others
-                        ),
-                        _ => format!(
-                            "it is a copy of a worktree in this space ({}), sharing its \
-                             admin directory, and git does not know it, so it is kept \
-                             with its original; keep what you need from it, delete it by \
-                             hand, then remove the space again",
-                            others
-                        ),
-                    },
-                ));
-            }
+            SpaceEntry::Shared { reason } => kept.push((repo, reason)),
             // Not a repository of any kind: ordinary content of the space,
             // which goes when the space does, as it always has.
             SpaceEntry::Plain => {}
@@ -2172,8 +2167,9 @@ enum SpaceEntry {
     /// is would be a guess, and the guess that deletes is the wrong one.
     Unreadable(String),
     /// A worktree that names the same admin directory as another directory in
-    /// the space: a worktree and its copy. Neither is handed to git.
-    Shared { admin: PathBuf, others: Vec<String> },
+    /// the space: a worktree and its copy. Neither is handed to git; the
+    /// reason is decided for the whole group at once (`pair_reason`).
+    Shared { reason: String },
     /// A relative gitdir that does not resolve: a moved space or a deleted
     /// source repo, which nothing on disk tells apart. Kept, with a reason
     /// that already says what to do in each case.
@@ -2213,24 +2209,26 @@ fn classify_space_entry(dir: &Path) -> SpaceEntry {
             // space was moved". An absolute gitdir survives a move of the
             // worktree, which is why only its `NotFound` is read as an orphan.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && relative => {
+                // The path stays off the first line, which may become the
+                // summary the TUI shows.
                 SpaceEntry::Unresolved(format!(
                     "its .git file names a relative gitdir that does not resolve from \
-                     where it is now, which moving the space leaves behind as well as \
-                     deleting the source repo; if the space was moved, run \
-                     `git worktree repair {}` from the source repo, and if the source \
-                     repo is gone, delete it by hand; then remove the space again",
-                    dir.display()
+                     here, which moving the space or its source repo leaves behind as \
+                     well as deleting the source repo, so it is kept\nit resolves to \
+                     {:?}; if the space or the source repo was moved, run `git worktree \
+                     repair {:?}` from the source repo; if the source repo is gone, delete \
+                     this directory by hand; then remove the space again",
+                    admin, dir
                 ))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => SpaceEntry::Orphan,
             Err(e) => SpaceEntry::Unreadable(format!(
-                "its .git file names {}, which cannot be read ({})",
-                admin.display(),
-                e
+                "its .git file names {:?}, which cannot be read ({})",
+                admin, e
             )),
             Ok(meta) if !meta.is_dir() => SpaceEntry::Unreadable(format!(
-                "its .git file names {}, which is not a directory",
-                admin.display()
+                "its .git file names {:?}, which is not a directory",
+                admin
             )),
             // A linked worktree's admin directory holds `commondir` and
             // `gitdir` and keeps its objects in the repo it belongs to. A
@@ -2248,13 +2246,12 @@ fn classify_space_entry(dir: &Path) -> SpaceEntry {
                 Ok(meta) if meta.is_file() => SpaceEntry::Worktree { admin },
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => SpaceEntry::Repository,
                 Err(e) => SpaceEntry::Unreadable(format!(
-                    "its .git file names {}, which cannot be read ({})",
-                    admin.display(),
-                    e
+                    "its .git file names {:?}, which cannot be read ({})",
+                    admin, e
                 )),
                 Ok(_) => SpaceEntry::Unreadable(format!(
-                    "its .git file names {}, whose commondir is not a file",
-                    admin.display()
+                    "its .git file names {:?}, whose commondir is not a file",
+                    admin
                 )),
             },
         };
@@ -2370,12 +2367,14 @@ fn resolve_against(dir: &Path, target: &str) -> PathBuf {
 /// the path of the worktree's own `.git` file, so this answers without
 /// reading git's sentence.
 enum RecordedAt {
-    /// The record names this directory, or cannot be read or resolved, which
-    /// is not evidence of anything: git's reason stands as git gave it.
+    /// The record names this directory.
     Here,
+    /// The record cannot be read or resolved, which is not evidence of
+    /// anything: git's reason stands as git gave it.
+    Unknown,
     /// The record names a place that is not there at all. That is what moving
     /// or renaming the space leaves behind, and `git worktree repair` fixes.
-    Gone,
+    Gone(PathBuf),
     /// The record names another directory that exists. That is not a move:
     /// the worktree git knows is still there, and this is a copy of it, for
     /// instance a space duplicated with `cp -R`. `git worktree repair` here
@@ -2387,7 +2386,7 @@ enum RecordedAt {
 fn recorded_at(admin: &Path, dir: &Path) -> RecordedAt {
     let recorded = match std::fs::read_to_string(admin.join("gitdir")) {
         Ok(recorded) => PathBuf::from(recorded.trim_end_matches(['\n', '\r'])),
-        Err(_) => return RecordedAt::Here,
+        Err(_) => return RecordedAt::Unknown,
     };
     let recorded = if recorded.is_absolute() {
         recorded
@@ -2396,14 +2395,14 @@ fn recorded_at(admin: &Path, dir: &Path) -> RecordedAt {
     };
     let here = match std::fs::canonicalize(dir) {
         Ok(here) => here,
-        Err(_) => return RecordedAt::Here,
+        Err(_) => return RecordedAt::Unknown,
     };
     let recorded_dir = recorded.parent().unwrap_or(&recorded).to_path_buf();
     match std::fs::canonicalize(&recorded_dir) {
         Ok(there) if there == here => RecordedAt::Here,
         Ok(there) => RecordedAt::Elsewhere(there),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => RecordedAt::Gone,
-        Err(_) => RecordedAt::Here,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => RecordedAt::Gone(recorded_dir),
+        Err(_) => RecordedAt::Unknown,
     }
 }
 
@@ -2448,29 +2447,26 @@ fn unregister_worktree(dir: &Path, force: bool, admin: &Path) -> std::result::Re
                 // since the lock is the user's. Two instructions for one
                 // problem, one of them unreachable, is worse than one.
                 format!(
-                    "{}\nspace does not override a lock: run `git worktree unlock {}`, \
+                    "{}\nspace does not override a lock: run `git worktree unlock {:?}`, \
                      then remove the space again",
-                    first,
-                    dir.display()
+                    first, dir
                 )
             } else {
                 match recorded_at(admin, dir) {
-                    RecordedAt::Gone => format!(
+                    RecordedAt::Gone(_) => format!(
                         "{}\nits source repo still points at where it used to be: run \
-                         `git worktree repair {}`, then remove the space again",
-                        first,
-                        dir.display()
+                         `git worktree repair {:?}`, then remove the space again",
+                        first, dir
                     ),
                     // No repair hint: see `RecordedAt::Elsewhere`.
                     RecordedAt::Elsewhere(there) => format!(
-                        "it is a copy of the worktree at {}, which git still knows and \
-                         this is not; keep what you need from it, then delete it by hand \
-                         and remove the space again (removing the space again as it is \
-                         deletes this copy once that worktree is gone)\n{}",
-                        there.display(),
-                        first
+                        "it is a copy of a worktree git still knows, and this is not\nthat \
+                         worktree is at {:?}; keep what you need from this copy, then \
+                         delete it by hand and remove the space again (removing the space \
+                         again as it is deletes this copy once that worktree is gone)\n{}",
+                        there, first
                     ),
-                    RecordedAt::Here => reason.to_string(),
+                    RecordedAt::Here | RecordedAt::Unknown => reason.to_string(),
                 }
             })
         }
@@ -2513,17 +2509,17 @@ fn removal_report(
         0..=2 => names.join(", "),
         n => format!("{} and {} more", names[..2].join(", "), n - 2),
     };
-    // A kept pair is the one thing in a report whose consequence reaches
-    // past this run, so its count comes straight after the names, where the
-    // clipped status row still shows it, and leads with the number.
+    // A kept pair is the one thing in a report whose consequence reaches past
+    // this run, so its count leads the line. After the names it sat at column
+    // 79 of an 80-column status row once the names were ordinary ones.
     let pairs = match (shared, groups) {
         (0, _) => String::new(),
-        (n, 1) => format!(" ({} share one worktree)", n),
-        (n, g) => format!(" ({} share {} worktrees)", n, g),
+        (n, 1) => format!("{} share one worktree; ", n),
+        (n, g) => format!("{} share {} worktrees; ", n, g),
     };
     let mut report = format!(
-        "could not remove {}{} from space '{}'; first reason: {}",
-        listed, pairs, name, first_reason
+        "{}could not remove {} from space '{}'; first reason: {}",
+        pairs, listed, name, first_reason
     );
     report.push_str(&format!(
         "\n  {} of {} repos in the space were kept",
@@ -2548,6 +2544,73 @@ fn removal_report(
         ));
     }
     report
+}
+
+/// What one member of a group sharing an admin directory is told. Which
+/// member is the original is not assumed: it is the one at the place the
+/// admin directory's record names, if any is. With none there, the space was
+/// moved (the record names nowhere) or every member is a copy of a worktree
+/// outside the space (the record names that), and all of them are told the
+/// same thing. Paths stay off the first line, which may become the summary
+/// the TUI shows, and print with `{:?}`, as names do.
+fn pair_reason(
+    me: usize,
+    original: Option<usize>,
+    names: &[String],
+    recorded: &RecordedAt,
+) -> String {
+    let others: Vec<String> = names
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != me)
+        .map(|(_, n)| n.clone())
+        .collect();
+    let listed = quoted(&others);
+    let one = others.len() == 1;
+    match original {
+        Some(o) if o == me => {
+            let (copies, share, them) = if one {
+                ("a copy of it", "shares", "the copy")
+            } else {
+                ("copies of it", "share", "the copies")
+            };
+            format!(
+                "{} in this space ({}) {} its admin directory, so none of them is removed\n\
+                 removing it would leave {} with nothing registered, and removing the space \
+                 again would then delete {}; keep what you need from {}, delete {} by hand, \
+                 then remove the space again",
+                copies, listed, share, them, them, them, them
+            )
+        }
+        Some(o) => format!(
+            "it is a copy of {:?} in this space, sharing its admin directory, and git does \
+             not know it\nkeep what you need from it, delete it by hand, then remove the \
+             space again",
+            names[o]
+        ),
+        None => match recorded {
+            RecordedAt::Gone(was) => format!(
+                "it and {} share one admin directory whose worktree is no longer where git \
+                 recorded it, so none of them is removed\ngit recorded it at {:?}: run \
+                 `git worktree repair <path>` from the source repo for the one that is the \
+                 real worktree, delete the others by hand, then remove the space again",
+                listed, was
+            ),
+            RecordedAt::Elsewhere(there) => format!(
+                "it and {} are copies of one worktree outside this space and share its \
+                 admin directory, so none of them is removed\nthe worktree git knows is at \
+                 {:?}; keep what you need from these copies, delete them by hand, then remove \
+                 the space again",
+                listed, there
+            ),
+            RecordedAt::Here | RecordedAt::Unknown => format!(
+                "it and {} share one admin directory, and which of them git knows cannot be \
+                 read, so none of them is removed\nkeep what you need, delete all but the \
+                 real worktree by hand, then remove the space again",
+                listed
+            ),
+        },
+    }
 }
 
 fn name_of(dir: &Path) -> String {
