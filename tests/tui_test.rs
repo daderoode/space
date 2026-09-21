@@ -11067,3 +11067,84 @@ mod cursor_row_scroll_tests {
         assert!(failure.is_none(), "{}", failure.unwrap_or_default());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Repo names on the command line pre-select repos (ticket 23)
+// ---------------------------------------------------------------------------
+
+/// `space create api web`: the names are a selection, not a query. The picker
+/// opens with both toggled, the query row empty and every repo listed.
+#[test]
+fn create_two_exact_names_preselects_both() {
+    let cache = vec![
+        PathBuf::from("/r/api"),
+        PathBuf::from("/r/web"),
+        PathBuf::from("/r/other"),
+    ];
+    let mut app = test_app(vec![], cache.clone());
+    app.screen = Screen::CreateWorkspace(space::tui::screens::create::CreateState::new(
+        cache.clone(),
+        vec![cache[0].clone(), cache[1].clone()],
+    ));
+    app.handle_key(key(KeyCode::Char('x')));
+    app.handle_key(key(KeyCode::Enter));
+
+    let Screen::CreateWorkspace(ref st) = app.screen else {
+        panic!("expected CreateWorkspace screen");
+    };
+    assert_eq!(
+        st.stage,
+        space::tui::screens::create::CreateStage::PickRepos
+    );
+    assert_eq!(
+        st.picker.input.value(),
+        "",
+        "the names must not become a query"
+    );
+    let names: Vec<&str> = st
+        .picker
+        .confirmed_items()
+        .iter()
+        .map(|i| i.name.as_str())
+        .collect();
+    assert_eq!(names, ["api", "web"]);
+
+    let text = render_text(&app, 80, 24);
+    assert!(text.contains("2 selected  3/3 matched"), "{text}");
+}
+
+/// `space add ws api web`: the same, on the Add picker.
+#[test]
+fn add_two_exact_names_preselects_both() {
+    let cache = vec![
+        PathBuf::from("/r/api"),
+        PathBuf::from("/r/web"),
+        PathBuf::from("/r/other"),
+    ];
+    let mut app = test_app(vec![common::workspace_with_repos(&["held"])], cache.clone());
+    app.screen = Screen::AddRepos(space::tui::screens::add::AddState::new(
+        "ws".to_string(),
+        cache.clone(),
+        vec![cache[1].clone(), cache[0].clone()],
+    ));
+
+    let Screen::AddRepos(ref st) = app.screen else {
+        panic!("expected AddRepos screen");
+    };
+    assert_eq!(st.stage, space::tui::screens::add::AddStage::PickRepos);
+    assert_eq!(
+        st.picker.input.value(),
+        "",
+        "the names must not become a query"
+    );
+    let names: Vec<&str> = st
+        .picker
+        .confirmed_items()
+        .iter()
+        .map(|i| i.name.as_str())
+        .collect();
+    assert_eq!(names, ["api", "web"]);
+
+    let text = render_text(&app, 80, 24);
+    assert!(text.contains("2 selected  3/3 matched"), "{text}");
+}

@@ -284,6 +284,18 @@ impl FuzzyPicker {
         self.refilter();
     }
 
+    /// Toggle on every item whose `full_path` is in `paths`: the repos named
+    /// on the command line, already resolved to exact cached paths by
+    /// `cli::resolve_repo_names`. A path not in the list is ignored. The query
+    /// is left empty, so the list shows every repo with these marked.
+    pub fn toggle_paths(&mut self, paths: &[PathBuf]) {
+        for (i, item) in self.all_items.iter().enumerate() {
+            if paths.contains(&item.full_path) {
+                self.toggled.insert(i);
+            }
+        }
+    }
+
     pub fn toggle_highlighted(&mut self) {
         if let Some(&item_idx) = self.filtered.get(self.highlighted) {
             if self.toggled.contains(&item_idx) {
@@ -649,6 +661,16 @@ mod tests {
             picker.all_items[picker.filtered[0]].parent == "acme"
                 || picker.all_items[picker.filtered[1]].parent == "acme"
         );
+    }
+
+    /// Two roots holding a repo of the same name: the command line named
+    /// one path, and only that one is toggled.
+    #[test]
+    fn toggle_paths_matches_the_full_path_not_the_name() {
+        let items = make_items(&["/a/api", "/b/api", "/a/web"]);
+        let mut picker = FuzzyPicker::new("test", items, true);
+        picker.toggle_paths(&[PathBuf::from("/b/api"), PathBuf::from("/nowhere/web")]);
+        assert_eq!(toggled_paths(&picker), vec!["/b/api".to_string()]);
     }
 
     #[test]
