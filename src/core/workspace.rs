@@ -1024,16 +1024,28 @@ impl PullResult {
     }
 }
 
-/// Whether `repo_path` has a merge in progress, asked through git so a linked
-/// worktree's private git dir (where its MERGE_HEAD lives) is honoured.
-fn merge_in_progress(repo_path: &Path) -> bool {
-    spawn::output(
+/// Whether `repo_path` has a merge in progress: the `MERGE_HEAD` file exists
+/// in its git dir, which is git's own test. The path comes from `git rev-parse
+/// --git-path`, so a linked worktree's private git dir is honoured (a relative
+/// answer is relative to the worktree). Not `rev-parse --verify MERGE_HEAD`,
+/// which also resolves a branch or tag of that name, so a tag named
+/// `MERGE_HEAD` on origin would read as a merge in progress after every fetch.
+/// An error means git could not be asked; callers treat that as unknown and
+/// act on nothing.
+fn merge_in_progress(repo_path: &Path) -> std::io::Result<bool> {
+    let out = spawn::output(
         Command::new("git")
-            .args(["rev-parse", "--quiet", "--verify", "MERGE_HEAD"])
+            .args(["rev-parse", "--git-path", "MERGE_HEAD"])
+            .env("LC_ALL", "C")
             .current_dir(repo_path),
-    )
-    .map(|o| o.status.success())
-    .unwrap_or(false)
+    )?;
+    if !out.status.success() {
+        return Err(std::io::Error::other(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok(repo_path.join(path).exists())
 }
 
 /// Pull the current branch of `repo_path` from its `origin/<branch>` upstream.
@@ -1160,19 +1172,35 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
         // progress is refused before anything runs: git would refuse the merge
         // anyway ("unmerged files"), and a blanket abort after that would throw
         // the user's own merge away and report a clean restore.
-        if merge_in_progress(repo_path) {
-            return PullResult {
-                outcome: PullOutcome::Failed,
-                message: format!(
-                    "{} is mid-merge (MERGE_HEAD present); run 'git merge --continue' \
-                     or 'git merge --abort' in that repo before pulling.",
-                    branch
-                ),
-            };
+        match merge_in_progress(repo_path) {
+            Ok(false) => {}
+            Ok(true) => {
+                return PullResult {
+                    outcome: PullOutcome::Failed,
+                    message: format!(
+                        "{} is mid-merge (MERGE_HEAD present); run 'git merge --continue' \
+                         or 'git merge --abort' in that repo before pulling.",
+                        branch
+                    ),
+                };
+            }
+            Err(err) => {
+                return PullResult {
+                    outcome: PullOutcome::Failed,
+                    message: format!(
+                        "Could not tell whether {} is mid-merge ({}); nothing was pulled.",
+                        branch, err
+                    ),
+                };
+            }
         }
+        // `LC_ALL=C` keeps git's text English for the readers of the merge's
+        // and the abort's stderr: the report shown in the overlay, and the
+        // tests that assert on its wording.
         let merge = spawn::output(
             Command::new("git")
                 .args(["merge", "--no-edit", &remote_ref])
+                .env("LC_ALL", "C")
                 .current_dir(repo_path),
         );
         let merge = match merge {
@@ -1197,7 +1225,8 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
         // tree 2, a locked index 128); MERGE_HEAD does. Absent, the merge never
         // started and there is nothing to abort: the tree is as the user left
         // it, and git's text says why.
-        if !merge_in_progress(repo_path) {
+        let in_progress = merge_in_progress(repo_path);
+        if !matches!(in_progress, Ok(true)) {
             let stderr = String::from_utf8_lossy(&merge.stderr);
             let detail = stderr.trim();
             let detail = if detail.is_empty() {
@@ -1205,9 +1234,22 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
             } else {
                 detail
             };
+            // Unknown is not "not started": say so, and abort nothing, since
+            // an abort only ever runs on a merge this call is sure it began.
+            let unknown = match in_progress {
+                Err(err) => format!(
+                    "\ngit could not say whether a merge was left in progress ({}); \
+                     check 'git status' in that repo before pulling again.",
+                    err
+                ),
+                Ok(_) => String::new(),
+            };
             return PullResult {
                 outcome: PullOutcome::Failed,
-                message: format!("Merge of {} into {} failed: {}", remote_ref, branch, detail),
+                message: format!(
+                    "Merge of {} into {} failed: {}{}",
+                    remote_ref, branch, detail, unknown
+                ),
             };
         }
         // The merge conflicted: restore the pre-merge worktree so `space` never
@@ -1216,6 +1258,7 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
         let abort = spawn::output(
             Command::new("git")
                 .args(["merge", "--abort"])
+                .env("LC_ALL", "C")
                 .current_dir(repo_path),
         );
         let abort_failure = match abort {
@@ -5669,17 +5712,19 @@ mod tests {
         );
     }
 
-    /// Whether `dir` (a clone or a linked worktree) has a merge in progress,
-    /// asked the way `pull_repo` asks it, so a linked worktree's private git
-    /// dir is honoured.
+    /// Whether `dir` (a clone or a linked worktree) has a merge in progress:
+    /// the `MERGE_HEAD` file in its git dir, the way git and `pull_repo` test
+    /// it, so a linked worktree's private git dir is honoured and a ref named
+    /// `MERGE_HEAD` does not count.
     fn merge_head_present(dir: &Path) -> bool {
-        Cmd::new("git")
-            .args(["rev-parse", "--quiet", "--verify", "MERGE_HEAD"])
+        let out = Cmd::new("git")
+            .args(["rev-parse", "--git-path", "MERGE_HEAD"])
             .current_dir(dir)
             .output()
-            .unwrap()
-            .status
-            .success()
+            .unwrap();
+        assert!(out.status.success(), "git rev-parse --git-path failed");
+        dir.join(String::from_utf8_lossy(&out.stdout).trim())
+            .exists()
     }
 
     /// Diverge `local` from origin so that a merge conflicts on `base.txt` and
@@ -5901,6 +5946,100 @@ mod tests {
             std::fs::read_to_string(local.join("base.txt")).unwrap(),
             markers_before,
             "the user's conflict must be untouched"
+        );
+    }
+
+    /// A ref named `MERGE_HEAD` (here a tag the fetch brings in) must not read
+    /// as a merge in progress: git decides that by the file in the git dir,
+    /// and so does `pull_repo`. A ref-name lookup would refuse every pull of
+    /// a repo whose origin carries such a tag.
+    #[test]
+    fn pull_repo_ignores_a_ref_named_merge_head() {
+        let (tmp, local) = origin_and_local();
+        advance_origin(tmp.path(), |helper| {
+            std::fs::write(helper.join("remote.txt"), "remote\n").unwrap();
+            git(&["add", "."], helper);
+            git(&["commit", "-m", "remote-edit"], helper);
+            git(&["tag", "MERGE_HEAD"], helper);
+            git(&["push", "origin", "MERGE_HEAD"], helper);
+        });
+        std::fs::write(local.join("local.txt"), "local\n").unwrap();
+        git(&["add", "."], &local);
+        git(&["commit", "-m", "local-edit"], &local);
+
+        let result = pull_repo(&local);
+
+        assert!(
+            matches!(result.outcome, PullOutcome::Merged),
+            "a tag named MERGE_HEAD is not a merge in progress, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(!merge_head_present(&local), "the merge was committed");
+    }
+
+    /// The behind-only arm has no MERGE_HEAD check of its own: git's
+    /// `merge --ff-only` refuses while unmerged entries exist, and this pins
+    /// that it leaves the user's merge alone (probed on git 2.50.1, exit 128).
+    #[test]
+    fn pull_repo_fast_forward_arm_leaves_a_pre_existing_merge_alone() {
+        let (tmp, local) = origin_and_local();
+        let base_sha = get_sha(&local, "main");
+        // origin: base -> B (edits base.txt) -> C (adds remote.txt). Local
+        // main moves to B only, so it is strictly behind (0 ahead, 1 behind).
+        advance_origin(tmp.path(), |helper| {
+            std::fs::write(helper.join("base.txt"), "b-version\n").unwrap();
+            git(&["add", "."], helper);
+            git(&["commit", "-m", "b-edit"], helper);
+            std::fs::write(helper.join("remote.txt"), "remote\n").unwrap();
+            git(&["add", "."], helper);
+            git(&["commit", "-m", "c-edit"], helper);
+        });
+        git(&["fetch", "origin"], &local);
+        git(&["merge", "--ff-only", "origin/main~1"], &local);
+        // A side branch from the base edits base.txt too, so merging it into
+        // main (at B) conflicts without moving main.
+        git(&["checkout", "-b", "side", &base_sha], &local);
+        std::fs::write(local.join("base.txt"), "side-version\n").unwrap();
+        git(&["add", "."], &local);
+        git(&["commit", "-m", "side-edit"], &local);
+        git(&["checkout", "main"], &local);
+        let merge = Cmd::new("git")
+            .args(["merge", "--no-edit", "side"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        assert!(!merge.status.success(), "the fixture merge must conflict");
+        assert!(
+            merge_head_present(&local),
+            "the fixture leaves a merge in progress"
+        );
+        assert_eq!(
+            git::ahead_behind(&local).unwrap(),
+            (0, 1),
+            "main is behind only"
+        );
+        let markers_before = std::fs::read_to_string(local.join("base.txt")).unwrap();
+        assert!(markers_before.contains("<<<<<<<"));
+        let sha_before = get_sha(&local, "main");
+
+        let result = pull_repo(&local);
+
+        assert!(
+            matches!(result.outcome, PullOutcome::Failed),
+            "git refuses the fast-forward, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(
+            merge_head_present(&local),
+            "the user's merge is still in progress"
+        );
+        assert_eq!(sha_before, get_sha(&local, "main"), "main did not move");
+        assert_eq!(
+            std::fs::read_to_string(local.join("base.txt")).unwrap(),
+            markers_before,
+            "the user's conflict is untouched"
         );
     }
 
