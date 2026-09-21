@@ -826,7 +826,7 @@ fn add_repos_detached_runs_no_fetch() {
 
 // ---------------------------------------------------------------------------
 // Ticket 15: a repo already in the space. The tools skip a repo whose place
-// in the space is already a worktree of that repo (`workspace::is_worktree_of`,
+// in the space is already a worktree of that repo (`workspace::placement_of`,
 // the Creating stage's predicate) and list it apart from the repos this call
 // created, so a client retrying after a partial failure converges on a
 // complete space. Evidence of what is on disk comes from git itself
@@ -990,6 +990,67 @@ fn create_workspace_retry_after_a_partial_failure_completes_the_space() {
             status["repos"].as_array().unwrap().len(),
             3,
             "workspace_status sees the complete space"
+        );
+    });
+}
+
+/// The admin directory a worktree's `.git` file names, resolved against
+/// the worktree when git wrote it relative (`worktree.useRelativePaths`,
+/// which a developer's global config may set).
+fn admin_dir_of(wt: &std::path::Path) -> PathBuf {
+    let content = std::fs::read_to_string(wt.join(".git")).unwrap();
+    let target = content
+        .strip_prefix("gitdir: ")
+        .unwrap()
+        .trim_end_matches(['\n', '\r']);
+    if std::path::Path::new(target).is_absolute() {
+        PathBuf::from(target)
+    } else {
+        wt.join(target)
+    }
+}
+
+/// Ticket 20. A worktree of the repo that git never finished (its admin
+/// directory still locked from the add, with the checkout's `index.lock` and
+/// no `index`, which a killed `git worktree add` leaves) is refused rather
+/// than listed as already created: the call fails at that repo like any
+/// other failure, naming it
+/// and the way out, the repos before it stay, the one after it is not
+/// attempted, and nothing on disk is touched.
+#[test]
+fn create_workspace_refuses_a_half_built_worktree() {
+    with_test_env(|env, server| {
+        let alpha = env.create_repo("alpha");
+        let bravo = env.create_repo("bravo");
+        let charlie = env.create_repo("charlie");
+        env.write_cache(&[alpha.clone(), bravo.clone(), charlie.clone()]);
+        let space = env.workspaces_dir.join("ws");
+
+        parsed(&create_ws(server, "ws", &["alpha", "bravo"], "new", None).unwrap());
+        let admin = admin_dir_of(&space.join("bravo"));
+        std::fs::write(admin.join("locked"), "initializing\n").unwrap();
+        std::fs::remove_file(admin.join("index")).unwrap();
+        std::fs::write(admin.join("index.lock"), "").unwrap();
+
+        let err = create_ws(server, "ws", &["alpha", "bravo", "charlie"], "new", None)
+            .expect_err("bravo was never finished by git, so the call stops there");
+        assert_eq!(err.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert!(
+            err.message.contains(&bravo.display().to_string())
+                && err.message.contains("never finished")
+                && err.message.contains("git worktree remove -f -f"),
+            "the error names the repo, what it is and the way out: {}",
+            err.message
+        );
+        assert!(
+            !space.join("charlie").exists(),
+            "charlie, after the failure, was never attempted"
+        );
+        assert!(
+            git_lists_worktree(&bravo, &space.join("bravo"))
+                && admin.join("locked").is_file()
+                && admin.join("index.lock").is_file(),
+            "the create side deletes nothing: git still lists bravo and the admin directory is as it was"
         );
     });
 }

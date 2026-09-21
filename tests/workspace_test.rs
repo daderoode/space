@@ -1065,6 +1065,109 @@ fn remove_workspace_keeps_a_locked_worktree_and_removes_the_others() {
     );
 }
 
+/// The admin directory a worktree's `.git` file names, resolved against
+/// the worktree when git wrote it relative (`worktree.useRelativePaths`,
+/// which a developer's global config may set).
+fn admin_dir_of(wt: &Path) -> PathBuf {
+    let content = std::fs::read_to_string(wt.join(".git")).unwrap();
+    let target = content
+        .strip_prefix("gitdir: ")
+        .unwrap()
+        .trim_end_matches(['\n', '\r']);
+    if Path::new(target).is_absolute() {
+        PathBuf::from(target)
+    } else {
+        wt.join(target)
+    }
+}
+
+/// Ticket 20. The one lock `space` does override: the lock git itself took
+/// for a `git worktree add` whose checkout was killed, read from the
+/// checkout's `index.lock` still there and no `index`. Such a tree holds
+/// nothing of the user's and `--force` has already consented to losing
+/// whatever it holds, so a forced removal runs `git worktree remove --force
+/// --force` for that worktree alone: the space a user lost power creating
+/// is removed and can be created again with no git command. The content of
+/// the lock decides nothing: a finished tree under git's own `initializing`
+/// word (a killed add whose checkout child finished, or a user who typed
+/// the word), even with a stale `index.lock` beside its surviving index, is
+/// kept with ticket 27's unlock hint, never escalated, and so is a user's
+/// own lock.
+#[test]
+fn remove_workspace_removes_a_half_built_worktree_and_keeps_every_finished_lock() {
+    let env = common::TestEnv::new();
+    let marker_repo = env.create_repo("a-marker");
+    let index_repo = env.create_repo("b-no-index");
+    let user_repo = env.create_repo("c-user-lock");
+    let marker_wt = worktree_in_space(&env, &marker_repo, "test-ws");
+    let index_wt = worktree_in_space(&env, &index_repo, "test-ws");
+    let user_wt = worktree_in_space(&env, &user_repo, "test-ws");
+
+    let marker_admin = admin_dir_of(&marker_wt);
+    std::fs::write(marker_admin.join("locked"), "initializing\n").unwrap();
+    assert!(
+        marker_admin.join("index").is_file(),
+        "fixture: a finished tree"
+    );
+    // And a stale index.lock beside the surviving index (a killed index
+    // writer): still a finished tree, still never escalated.
+    std::fs::write(marker_admin.join("index.lock"), "").unwrap();
+    std::fs::write(marker_wt.join("WIP"), "mine\n").unwrap();
+    let index_admin = admin_dir_of(&index_wt);
+    std::fs::write(index_admin.join("locked"), "initializing\n").unwrap();
+    std::fs::remove_file(index_admin.join("index")).unwrap();
+    std::fs::write(index_admin.join("index.lock"), "").unwrap();
+    git_ok(
+        &user_repo,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "on usb",
+            user_wt.to_str().unwrap(),
+        ],
+    );
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "test-ws", true)
+        .expect_err("two finished locks are still refused");
+    let text = err.to_string();
+    let kept_part = text.split("removed:").next().unwrap();
+    for name in ["a-marker", "c-user-lock"] {
+        assert!(kept_part.contains(name), "{} is kept, got {:?}", name, text);
+    }
+    assert_eq!(
+        text.matches("git worktree unlock").count(),
+        2,
+        "both finished locks get ticket 27's hint, got {:?}",
+        text
+    );
+    assert!(
+        !kept_part.contains("b-no-index"),
+        "the half-built worktree is not reported as kept, got {:?}",
+        text
+    );
+    assert!(
+        text.contains("removed: \"b-no-index\""),
+        "it is reported as removed, got {:?}",
+        text
+    );
+    assert!(
+        !index_wt.exists() && !registered_worktrees(&index_repo).contains("test-ws"),
+        "the half-built worktree is gone from the space and unregistered"
+    );
+    assert_eq!(
+        std::fs::read_to_string(marker_wt.join("WIP")).unwrap(),
+        "mine\n",
+        "the finished tree under git's own word survives with its work"
+    );
+    assert!(
+        registered_worktrees(&marker_repo).contains("test-ws")
+            && user_wt.join(".git").exists()
+            && registered_worktrees(&user_repo).contains("test-ws"),
+        "both finished locks survive, still registered"
+    );
+}
+
 /// `git worktree add` writes a relative `gitdir:` when the user sets
 /// `worktree.useRelativePaths` (git 2.48 and later). The old code resolved
 /// that against the process's own working directory, found no repo, and ran
@@ -1266,7 +1369,7 @@ fn remove_workspace_keeps_a_bare_repo_in_the_space() {
 /// Review of the first commit: a submodule checkout's `.git` file points at
 /// `<host>/.git/modules/<name>`, which exists, so reading the gitfile alone
 /// called it a worktree and left git to refuse it with `is not a working
-/// tree`. git2's `is_worktree` is what `is_worktree_of` uses for this exact
+/// tree`. the layout reader (`commondir`) is what `placement_of` uses for this exact
 /// trap, and it gives the honest reason instead.
 #[test]
 fn remove_workspace_keeps_a_submodule_checkout() {

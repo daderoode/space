@@ -208,7 +208,7 @@ struct Placed {
 
 /// Add a worktree in workspace `ws_name` for each repo in order, skipping a
 /// repo whose place already holds a worktree of that repo: the Creating
-/// worker's rule (`workspace::is_worktree_of` on `workspace::worktree_path`).
+/// worker's rule (`workspace::placement_of` on `workspace::worktree_path`).
 /// A skipped repo runs no fetch and no add and is listed as already created,
 /// so a client retrying a call that failed part-way converges on a complete
 /// workspace instead of failing on `already exists` at the first repo the
@@ -250,9 +250,26 @@ fn place_repos(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let wt_path = workspace::worktree_path(ws_dir, ws_name, repo_path);
-        if workspace::is_worktree_of(&wt_path, repo_path) {
-            placed.already_created.push(name);
-            continue;
+        match workspace::placement_of(&wt_path, repo_path) {
+            workspace::Placement::Adopted => {
+                placed.already_created.push(name);
+                continue;
+            }
+            // Refused without running the add, as the worker does: the
+            // reason names the way out, and the call ends here like any
+            // other failure.
+            workspace::Placement::HalfBuilt(why) => {
+                return Err(McpError::internal_error(
+                    format!(
+                        "failed to {} worktree for {}: {}",
+                        verb,
+                        repo_path.display(),
+                        why
+                    ),
+                    None,
+                ));
+            }
+            workspace::Placement::Attempt => {}
         }
         workspace::create_worktree(repo_path, ws_dir, ws_name, strategy).map_err(|e| {
             McpError::internal_error(
