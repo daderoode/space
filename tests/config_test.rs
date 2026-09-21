@@ -15,6 +15,16 @@ use tempfile::TempDir;
 /// The lock guards no data, only the order of the tests.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+/// Removes `SPACE_CONFIG_DIR` when dropped, so a panic between `set_var` and
+/// the removal (an unwind under `ENV_LOCK`) cannot leak the temp path into
+/// the next holder's `config_path_is_under_config_dir` assertion.
+struct EnvGuard;
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        std::env::remove_var("SPACE_CONFIG_DIR");
+    }
+}
+
 #[test]
 fn default_config_has_reasonable_values() {
     let cfg = SpaceConfig::default();
@@ -59,8 +69,8 @@ fn config_dir_respects_space_config_dir_env() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = TempDir::new().unwrap();
     std::env::set_var("SPACE_CONFIG_DIR", tmp.path());
+    let _env_guard = EnvGuard;
     let dir = SpaceConfig::config_dir();
-    std::env::remove_var("SPACE_CONFIG_DIR");
     assert_eq!(dir, tmp.path());
 }
 
