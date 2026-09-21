@@ -3157,3 +3157,35 @@ fn push_target_resolves_the_destination_as_git_does() {
         "a branch with no upstream has no target: that case has its own prompt"
     );
 }
+
+/// T14 (security pass). A push-destination key that is present but cannot
+/// be read is not skipped in favour of a lower-priority key, which git
+/// would not do either: the destination is unknown, and the caller asks.
+#[test]
+fn push_target_is_unknown_when_a_higher_priority_key_cannot_be_read() {
+    use space::core::git::push_target;
+    use std::io::Write;
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t14",
+        &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+    )
+    .unwrap();
+    assert_eq!(push_target(&wt).unwrap().remote, "upstream");
+
+    let config = f.repo.join(".git").join("config");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&config)
+        .unwrap();
+    file.write_all(b"[branch \"feat\"]\n\tpushRemote = \xff\xfe\n")
+        .unwrap();
+
+    assert!(
+        push_target(&wt).is_none(),
+        "an unreadable pushRemote is unknown, not upstream"
+    );
+}

@@ -401,8 +401,12 @@ pub fn has_upstream(repo_path: &Path) -> bool {
 /// `branch.<name>.remote`. `tracks` is the upstream's short name
 /// (`upstream/feat`), for the prompt. `None` on a detached HEAD, a branch
 /// with no upstream (that case has its own confirmation, which sets one on
-/// origin), a branch whose remote is not configured, or any error, so the
-/// caller falls back to the routing it had before this existed.
+/// origin), a branch whose remote is not configured, or anything that
+/// cannot be read: a key that is present but not valid UTF-8 is not
+/// skipped in favour of a lower-priority one, since git would honour it,
+/// so the destination is unknown rather than guessed. The git-ops overlay
+/// treats an unknown destination on a branch with an upstream as a reason
+/// to ask, never as origin.
 pub struct PushTarget {
     pub remote: String,
     pub tracks: String,
@@ -424,14 +428,19 @@ pub fn push_target(repo_path: &Path) -> Option<PushTarget> {
         .ok()??
         .to_string();
     let config = repo.config().ok()?;
-    let remote = [
+    let keys = [
         format!("branch.{}.pushRemote", name),
         "remote.pushDefault".to_string(),
         format!("branch.{}.remote", name),
-    ]
-    .iter()
-    .find_map(|key| config.get_string(key).ok())?;
-    Some(PushTarget { remote, tracks })
+    ];
+    for key in &keys {
+        match config.get_string(key) {
+            Ok(remote) => return Some(PushTarget { remote, tracks }),
+            Err(e) if e.code() == git2::ErrorCode::NotFound => continue,
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 /// Return the names of all local branches that are strictly behind their

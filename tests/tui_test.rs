@@ -11453,6 +11453,38 @@ mod push_remote_confirmation_tests {
         }
     }
 
+    /// An upstream whose push destination could not be read (a config
+    /// value git2 cannot decode, a ref name that is not UTF-8) is not a
+    /// reason to push unasked: the destination is unknown, so the stage
+    /// asks, and says so.
+    #[test]
+    fn an_unreadable_destination_asks_rather_than_pushing() {
+        let mut app = menu_app("upstream");
+        if let Screen::GitOps(st) = &mut app.screen {
+            st.push_target = None;
+        }
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::ConfirmPushRemote,
+            "an unknown destination asks"
+        );
+        assert!(app.gitop_rx.is_none(), "no worker before the answer");
+        let flat = render_text(&app, 80, 24)
+            .replace(
+                ['\u{2502}', '\u{256d}', '\u{256e}', '\u{2570}', '\u{256f}'],
+                " ",
+            )
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            flat.contains("Branch feat: where a push goes could not be read. Push anyway? [y/N]"),
+            "the prompt says the destination is unknown, got:\n{}",
+            flat
+        );
+    }
+
     #[test]
     fn the_prompt_names_the_branch_and_both_remotes_at_80_by_24() {
         let mut app = menu_app("upstream");

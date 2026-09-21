@@ -65,8 +65,8 @@ pub struct GitOpsState {
     /// Where a bare `git push` of the current branch goes and what the branch
     /// tracks (`git::push_target`), when it has an upstream. A destination
     /// other than origin routes the push through `ConfirmPushRemote` instead
-    /// of straight to the worker; `None` keeps the routing `has_upstream`
-    /// alone decides.
+    /// of straight to the worker, and so does `None` while `has_upstream`
+    /// is set: a destination that could not be read is unknown, not origin.
     pub push_target: Option<crate::core::git::PushTarget>,
     pub status: Option<String>,
     /// The network op currently running (fetch / pull / push), used by the
@@ -304,14 +304,14 @@ impl GitOpsState {
         }
     }
 
-    /// The remote a bare push of the current branch would publish to when
-    /// that is not origin: the case that asks first. `None` when the push
-    /// goes to origin, or when nothing is known about the destination.
-    pub fn push_remote_needing_confirmation(&self) -> Option<&str> {
+    /// Whether a push of the current branch must ask first: its destination
+    /// is a remote other than origin, or could not be read at all (an
+    /// unknown destination is not origin). Only a destination read as
+    /// origin pushes unasked.
+    pub fn push_needs_confirmation(&self) -> bool {
         self.push_target
             .as_ref()
-            .map(|t| t.remote.as_str())
-            .filter(|remote| *remote != "origin")
+            .is_none_or(|t| t.remote != "origin")
     }
 
     fn handle_menu_key(&mut self, key: KeyEvent) -> ScreenAction {
@@ -356,7 +356,7 @@ impl GitOpsState {
                 // with one that pushes elsewhere, confirm the remote first;
                 // with none, confirm before publishing the branch (push -u
                 // origin <branch>).
-                if self.has_upstream && self.push_remote_needing_confirmation().is_some() {
+                if self.has_upstream && self.push_needs_confirmation() {
                     self.stage = GitOpsStage::ConfirmPushRemote;
                     self.status = None;
                     ScreenAction::Continue

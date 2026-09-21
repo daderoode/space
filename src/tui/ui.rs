@@ -2113,15 +2113,16 @@ fn render_gitops_overlay(
         let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
         let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
 
-        let (remote, tracks) = state
-            .push_target
-            .as_ref()
-            .map(|t| (t.remote.as_str(), t.tracks.as_str()))
-            .unwrap_or(("?", "?"));
-        let prompt = format!(
-            "Branch {} tracks {}. Push to {}?  [y/N]",
-            state.branch, tracks, remote
-        );
+        let prompt = match &state.push_target {
+            Some(t) => format!(
+                "Branch {} tracks {}. Push to {}?  [y/N]",
+                state.branch, t.tracks, t.remote
+            ),
+            None => format!(
+                "Branch {}: where a push goes could not be read. Push anyway?  [y/N]",
+                state.branch
+            ),
+        };
         frame.render_widget(Paragraph::new(prompt).wrap(Wrap { trim: false }), inner);
         return;
     }
