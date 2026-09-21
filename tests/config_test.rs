@@ -8,6 +8,11 @@ use tempfile::TempDir;
 /// without this lock, config_path_is_under_config_dir can observe the temp
 /// path set by config_dir_respects_space_config_dir_env and fail the
 /// `ends_with("space/config.toml")` assertion.
+///
+/// Taken with `into_inner()` on poison (the shape of `core::spawn::enter`):
+/// a `std::sync::Mutex` poisons when a holder panics, and a bare `unwrap()`
+/// would fail every later holder in this binary for one failing assertion.
+/// The lock guards no data, only the order of the tests.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
@@ -39,7 +44,7 @@ dir = "/tmp/test-workspaces"
 
 #[test]
 fn config_path_is_under_config_dir() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = SpaceConfig::config_path();
     assert!(
         path.ends_with("space/config.toml"),
@@ -51,7 +56,7 @@ fn config_path_is_under_config_dir() {
 fn config_dir_respects_space_config_dir_env() {
     // ENV_LOCK serialises this test with config_path_is_under_config_dir so
     // the set_var/remove_var pair does not race with the assertion there.
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = TempDir::new().unwrap();
     std::env::set_var("SPACE_CONFIG_DIR", tmp.path());
     let dir = SpaceConfig::config_dir();
@@ -86,4 +91,23 @@ fn config_save_load_round_trip() {
     let loaded: SpaceConfig = toml::from_str(&content).unwrap();
 
     assert_eq!(loaded, original);
+}
+
+/// One test panicking under `ENV_LOCK` must not fail the tests that lock it
+/// next. The guard drops while the thread is panicking, which is what poisons
+/// a `std::sync::Mutex`; the second acquisition then only succeeds because the
+/// lock is taken with `into_inner()` on poison instead of a bare `unwrap()`.
+///
+/// Recovering the guard does not clear the poison, so from this test on the
+/// lock stays poisoned for the rest of the binary and a bare `unwrap()`
+/// reintroduced at either other site fails whenever it runs after this one.
+/// The name sorts first so that under `--test-threads=1` both do.
+#[test]
+fn a_panic_under_the_env_lock_fails_only_its_own_test() {
+    let outcome = std::panic::catch_unwind(|| {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        panic!("deliberate panic while holding ENV_LOCK");
+    });
+    assert!(outcome.is_err(), "the body must have panicked");
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 }
