@@ -10297,6 +10297,102 @@ mod content_length_tests {
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     }
 
+    /// The text area row of the name dialog on the 80 x 24 frame: 52 cells
+    /// from column 14 of row 10.
+    fn name_dialog_text_row(buffer: &Buffer) -> Result<Vec<String>, String> {
+        let dialog = super::dialog_size_tests::find_dialog(buffer, " Workspace Name ")?;
+        let y = dialog.y + 2;
+        Ok((dialog.x + 2..dialog.x + dialog.width - 2)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect())
+    }
+
+    /// The cells a Paragraph scrolled by `scroll` columns draws for `value`
+    /// on a 52-cell row: the mechanism the dialog used before the fix, and
+    /// the oracle for what it must still draw.
+    fn scrolled_paragraph_row(value: &str, scroll: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(52, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new(value).scroll((0, scroll)),
+                    frame.area(),
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..52)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect()
+    }
+
+    /// The independent reviewer's case: two flags (each two regional
+    /// indicators, drawn as one two-cell cluster) then filler, cursor after
+    /// 53 characters. tui-input counts the four indicators as one column
+    /// each, so the scroll is 1, which lands inside the first flag. A
+    /// scrolled Paragraph keeps a straddled cluster whole, so the row reads
+    /// US flag, GB flag, then 48 `y`; a cut between the indicators would
+    /// pair the wrong two into a different flag.
+    #[test]
+    fn text_input_scrolled_into_a_flag_keeps_the_flag_whole() {
+        let value = format!("\u{1f1fa}\u{1f1f8}\u{1f1ec}\u{1f1e7}{}", "y".repeat(60));
+        let app = name_input_with_cursor(&value, 53);
+        let mut want = vec!["\u{1f1fa}\u{1f1f8}".to_string(), " ".to_string()];
+        want.push("\u{1f1ec}\u{1f1e7}".to_string());
+        want.push(" ".to_string());
+        want.extend(std::iter::repeat_n("y".to_string(), 48));
+        let failure = render_and_check("text input scrolled into a flag", &app, |buffer, _| {
+            let shown = name_dialog_text_row(buffer)?;
+            if shown != want {
+                return Err(format!("row is {:?}, expected {:?}", shown, want));
+            }
+            Ok(())
+        });
+        assert!(failure.is_none(), "{}", failure.unwrap_or_default());
+    }
+
+    /// At every ordinary length the dialog must draw exactly the cells a
+    /// Paragraph scrolled by tui-input's scroll drew before the fix. Each
+    /// value opens with the clusters (single wide characters, flags, an
+    /// emoji sequence joined with zero-width joiners, combining marks) and
+    /// ends with enough filler that, as the cursor walks the whole value,
+    /// the scroll lands on every boundary inside them. A value whose
+    /// clusters sit past the reachable scroll would test nothing.
+    #[test]
+    fn text_input_draws_what_a_scrolled_paragraph_drew_at_every_cursor() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let values = [
+            format!("{}{}", "ab\u{65e5}\u{672c}".repeat(5), "z".repeat(60)),
+            format!(
+                "\u{1f1fa}\u{1f1f8}\u{1f1ec}\u{1f1e7}\u{1f1e9}\u{1f1ea}{}",
+                "y".repeat(60)
+            ),
+            format!("{}{}{}", family, family, "r".repeat(60)),
+            format!("e\u{301}e\u{301}\u{65e5}{}", "n".repeat(60)),
+        ];
+        let mut failures = Vec::new();
+        for value in &values {
+            let chars = value.chars().count();
+            for cursor in 0..=chars {
+                let input = Input::default()
+                    .with_value(value.clone())
+                    .with_cursor(cursor);
+                let scroll = input.visual_scroll(52);
+                let want = scrolled_paragraph_row(value, u16::try_from(scroll).unwrap());
+                let app = name_input_with_cursor(value, cursor);
+                let name = format!("value {:?} at cursor {}", value, cursor);
+                failures.extend(render_and_check(&name, &app, |buffer, _| {
+                    let shown = name_dialog_text_row(buffer)?;
+                    if shown != want {
+                        return Err(format!("row is {:?}, expected {:?}", shown, want));
+                    }
+                    Ok(())
+                }));
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
     fn config_editing_app(chars: usize) -> App {
         let mut app = test_app(vec![], vec![]);
         let mut st = ConfigState::from_config(&SpaceConfig::default());

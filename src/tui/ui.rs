@@ -11,6 +11,7 @@ use ratatui::{
     },
     Frame,
 };
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Build a table cell showing "+N -M" with green additions and red deletions.
@@ -746,15 +747,13 @@ fn render_text_input_dialog(
     // Horizontal scroll that keeps the cursor in the text area, in columns.
     // All of this stays `usize`: a pasted value can be longer than `u16::MAX`,
     // and `Paragraph::scroll` takes a `u16`, so instead of scrolling the
-    // Paragraph the scrolled-off prefix is cut from the value and the rest is
-    // drawn from column 0. `skip_display_width` runs the loop `visual_scroll`
-    // ran to find `scroll`, so it stops on the same character and the cells
-    // are the ones the scrolled Paragraph drew before.
+    // Paragraph the scrolled-off prefix is cut from the value by `after_scroll`
+    // and the rest is drawn from column 0.
     let text_area_cols = usize::from(text_area_w);
     let scroll = input.visual_scroll(text_area_cols);
     let cursor_col = input.visual_cursor();
     let value_vis_w = UnicodeWidthStr::width(input.value());
-    let visible = skip_display_width(input.value(), scroll);
+    let visible = after_scroll(input.value(), scroll);
 
     // Left indicator: ‹ when text is scrolled (content hidden on left)
     let left_text = if scroll > 0 { "\u{2039}" } else { " " }; // ‹
@@ -793,6 +792,27 @@ fn render_text_input_dialog(
     if let Some(err) = error {
         frame.render_widget(Paragraph::new(err).style(theme::error()), sections[2]);
     }
+}
+
+/// `value` from `scroll` columns in, cut the way ratatui's line truncator
+/// cuts a Paragraph scrolled by `scroll` columns: whole grapheme clusters
+/// are dropped while their widths fit in `scroll`, and a cluster the scroll
+/// lands inside is kept whole. Not `skip_display_width`: that walks chars,
+/// and a flag or an emoji sequence is several chars that ratatui draws as
+/// one cluster, so a cut between them would draw a different glyph than the
+/// scrolled Paragraph did.
+fn after_scroll(value: &str, scroll: usize) -> &str {
+    let mut left = scroll;
+    let mut start = 0;
+    for cluster in UnicodeSegmentation::graphemes(value, true) {
+        let width = UnicodeWidthStr::width(cluster);
+        if width > left {
+            break;
+        }
+        left -= width;
+        start += cluster.len();
+    }
+    &value[start..]
 }
 
 fn render_name_input(
@@ -1378,6 +1398,29 @@ mod tests {
         // '日' width=2; skip=1 bisects the wide char.
         // Policy: snap forward — skip the entire wide char, return "bc".
         assert_eq!(skip_display_width("日bc", 1), "bc");
+    }
+
+    /// The cut matches ratatui's own `trim_offset`: whole clusters go while
+    /// they fit, a straddled one stays whole, and a multi-char cluster (a
+    /// flag is two regional indicators) is never split.
+    #[test]
+    fn after_scroll_cuts_on_grapheme_clusters_and_keeps_a_straddled_one() {
+        assert_eq!(after_scroll("abcdef", 0), "abcdef");
+        assert_eq!(after_scroll("abcdef", 3), "def");
+        assert_eq!(after_scroll("abcdef", 6), "");
+        assert_eq!(after_scroll("abcdef", 40), "");
+        // A wide character the scroll lands inside is kept whole, where
+        // `skip_display_width` would snap past it.
+        assert_eq!(after_scroll("\u{65e5}bc", 1), "\u{65e5}bc");
+        assert_eq!(after_scroll("\u{65e5}bc", 2), "bc");
+        // Two flags: four regional indicators, two clusters of width 2.
+        let flags = "\u{1f1fa}\u{1f1f8}\u{1f1ec}\u{1f1e7}y";
+        assert_eq!(after_scroll(flags, 1), flags);
+        assert_eq!(after_scroll(flags, 2), "\u{1f1ec}\u{1f1e7}y");
+        assert_eq!(after_scroll(flags, 3), "\u{1f1ec}\u{1f1e7}y");
+        assert_eq!(after_scroll(flags, 4), "y");
+        // A combining mark goes with its base character.
+        assert_eq!(after_scroll("e\u{301}x", 1), "x");
     }
 
     /// Past `u16::MAX` a count saturates; below it, it is the count.
