@@ -681,7 +681,10 @@ fn create_worktree_cancellable_reads_the_flag_again_after_the_fetch() {
     // record once the test can no longer release it or after its cap. git
     // runs in its own session, so a killed test binary leaves nothing else to
     // stop it, and the fetch limit below dies with the test process; the pid
-    // guard is what ends it then (ticket 31).
+    // guard is what ends it then (ticket 31). A panic in the flipper below
+    // does not drop this TempDir, which this thread owns while it is inside
+    // the fetch, so on that path only the fetch limit ends the hold; the
+    // marker guard covers the return and drop paths.
     let hold = Arc::new(common::hold::Hold::new(tmp.path(), "gate"));
     let gate = tmp.path().join("gate.sh");
     hold.write_script(&gate, "exec git upload-pack \"$@\"");
@@ -2725,15 +2728,26 @@ mod hold_guards {
         }
     }
 
+    /// A tail that records that it ran, so a give-up test can assert it did
+    /// not: the tail is gated on the receipt, and a helper that gave up must
+    /// never do the fixture's work.
+    fn recording_tail(tmp: &TempDir) -> (std::path::PathBuf, String) {
+        let ran = tmp.path().join("tail-ran");
+        let tail = format!(": > '{}'", ran.display());
+        (ran, tail)
+    }
+
     #[test]
     fn gives_up_without_a_record_when_its_marker_is_gone() {
         let tmp = TempDir::new().unwrap();
         let hold = Hold::new(tmp.path(), "marker");
-        let mut child = start(&hold, &tmp, "");
+        let (ran, tail) = recording_tail(&tmp);
+        let mut child = start(&hold, &tmp, &tail);
         std::fs::remove_file(&hold.holding).unwrap();
         let status = exit_within(&mut child, Duration::from_secs(5))
             .expect("the helper must exit once its marker is gone");
         assert!(!status.success(), "a helper that gave up must not exit 0");
+        assert!(!ran.exists(), "a helper that gave up must not run its tail");
         assert!(
             !hold.saw_release(),
             "no release was written, so none may be recorded"
@@ -2746,8 +2760,9 @@ mod hold_guards {
         // A pid no process can have: above the platform's maximum, so
         // `kill -0` fails at once and stays failed.
         let hold = Hold::new(tmp.path(), "pid").watching_pid(i32::MAX as u32);
+        let (ran, tail) = recording_tail(&tmp);
         let script = tmp.path().join("hold.sh");
-        hold.write_script(&script, "");
+        hold.write_script(&script, &tail);
         let mut child = Command::new("/bin/sh")
             .arg(&script)
             .stdin(Stdio::null())
@@ -2756,6 +2771,7 @@ mod hold_guards {
         let status = exit_within(&mut child, Duration::from_secs(5))
             .expect("the helper must exit once the pid it watches is gone");
         assert!(!status.success(), "a helper that gave up must not exit 0");
+        assert!(!ran.exists(), "a helper that gave up must not run its tail");
         assert!(
             !hold.saw_release(),
             "no release was written, so none may be recorded"
@@ -2766,10 +2782,12 @@ mod hold_guards {
     fn gives_up_without_a_record_at_its_cap() {
         let tmp = TempDir::new().unwrap();
         let hold = Hold::new(tmp.path(), "cap").with_cap(3);
-        let mut child = start(&hold, &tmp, "");
+        let (ran, tail) = recording_tail(&tmp);
+        let mut child = start(&hold, &tmp, &tail);
         let status = exit_within(&mut child, Duration::from_secs(5))
             .expect("the helper must exit once its cap is reached");
         assert!(!status.success(), "a helper that gave up must not exit 0");
+        assert!(!ran.exists(), "a helper that gave up must not run its tail");
         assert!(
             !hold.saw_release(),
             "no release was written, so none may be recorded"
