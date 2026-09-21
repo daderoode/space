@@ -679,6 +679,14 @@ fn parse_skip_reason(stderr: &str) -> SkipReason {
 /// "Device not configured". `GIT_SSH_COMMAND` is deliberately not set so
 /// the user's own ssh configuration applies.
 ///
+/// `LC_ALL=C` pins git's output language, as `check_branch_name`,
+/// `git_worktree_add` and the `branch -f` runner do, because what comes back
+/// is read as English text: the sync report's DETAIL column and the Creating
+/// log's fetch note strip git's `fatal: ` prefix, and the https-prompt tests
+/// classify the refusal by its wording. A gettext git under a non-English
+/// locale would hand every one of them a translated line. The cost is that
+/// every fetch failure reaches the report in English.
+///
 /// Only stderr is captured: `run_unattended` discards stdout, and
 /// `Unattended` has nowhere to carry it. That suits a command whose useful
 /// output is on stderr, which is why `git fetch --quiet` fits. It does not
@@ -689,7 +697,8 @@ pub fn run_git_unattended(args: &[&str], cwd: &Path, timeout: Duration) -> Unatt
     let mut cmd = Command::new("git");
     cmd.args(args)
         .current_dir(cwd)
-        .env("GIT_TERMINAL_PROMPT", "0");
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C");
     run_unattended(cmd, timeout)
 }
 
@@ -3103,6 +3112,112 @@ mod tests {
             elapsed < UNATTENDED_KILL_GRACE + Duration::from_secs(2),
             "the child must be killed once the grace ends, took {:?}",
             elapsed
+        );
+    }
+
+    /// `run_git_unattended` pins `LC_ALL=C` on the child, as the three other
+    /// stderr-parsing helpers do, because the sync report's DETAIL column,
+    /// the Creating log's fetch note and the https-prompt tests' classifier
+    /// all read git's English text. The test process carries
+    /// `LC_ALL=de_DE.UTF-8` while the fetch runs, so the child's `C` can only
+    /// have come from the helper, not from an unset inheritance.
+    ///
+    /// Two assertions on one fetch. The upload-pack the fetch runs is a
+    /// script that prints its own `LC_ALL` to stderr and exits 1, and that
+    /// line is the proof on every git: the environment the helper set is what
+    /// git handed its child. git's own `Could not read from remote
+    /// repository.` after it is the English sentence the readers parse; on a
+    /// gettext git it is what the override keeps English, on Apple git
+    /// (built without gettext) it is English either way, so it is pinned but
+    /// proves nothing about the override there.
+    ///
+    /// The locale goes on the test process by re-running this test binary on
+    /// this one test with `LC_ALL=de_DE.UTF-8` and a marker in its
+    /// environment: a `set_var` in the multi-threaded test process would
+    /// leak the locale into every other test's git spawn. With the marker
+    /// set, the test runs the fetch and asserts; without it, it runs the
+    /// child and fails with the child's output if the child failed or ran
+    /// anything other than this one test.
+    #[test]
+    fn run_git_unattended_pins_lc_all_to_c_for_the_child() {
+        const MARKER: &str = "SPACE_TEST_LC_ALL_INNER";
+        if std::env::var_os(MARKER).is_none() {
+            let (_, in_crate) = module_path!().split_once("::").unwrap();
+            let test_name = format!(
+                "{}::run_git_unattended_pins_lc_all_to_c_for_the_child",
+                in_crate
+            );
+            let out = Cmd::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--test-threads=1", "--nocapture"])
+                .env("LC_ALL", "de_DE.UTF-8")
+                .env(MARKER, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success(),
+                "the fetch under LC_ALL=de_DE.UTF-8 failed:\n{}{}",
+                stdout,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            // A filter that matches nothing exits green with zero tests run,
+            // so the child's success counts only when it ran this one test.
+            assert!(
+                stdout.contains("test result: ok. 1 passed;"),
+                "the child run must have run exactly this test, got\n{}",
+                stdout
+            );
+            return;
+        }
+        assert_eq!(
+            std::env::var("LC_ALL").as_deref(),
+            Ok("de_DE.UTF-8"),
+            "the inner run must carry the locale the override has to beat"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        Cmd::new("git")
+            .args(["init", "--bare", "-b", "main", "origin.git"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        let local = plain_repo(tmp.path(), "local");
+        let origin_url = format!("file://{}", tmp.path().join("origin.git").display());
+        git(&["remote", "add", "origin", &origin_url], &local);
+        let script = tmp.path().join("upload-pack-prints-lc-all.sh");
+        std::fs::write(&script, "echo \"LC_ALL=[$LC_ALL]\" >&2\nexit 1\n").unwrap();
+        git(
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                &format!("/bin/sh {}", script.display()),
+            ],
+            &local,
+        );
+
+        let outcome = run_git_unattended(
+            &["fetch", "--quiet", "origin"],
+            &local,
+            Duration::from_secs(20),
+        );
+        let Unattended::Exited { status, stderr } = outcome else {
+            panic!("expected the fetch to exit on its own, got {:?}", outcome);
+        };
+        assert_eq!(
+            status.code(),
+            Some(128),
+            "git's exit for a failed remote\n{}",
+            stderr
+        );
+        assert!(
+            stderr.contains("LC_ALL=[C]"),
+            "git's child must see LC_ALL=C, got\n{}",
+            stderr
+        );
+        assert!(
+            stderr.contains("Could not read from remote repository."),
+            "git's own line must be the English one, got\n{}",
+            stderr
         );
     }
 
