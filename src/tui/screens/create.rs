@@ -326,7 +326,9 @@ impl CreateState {
                     // A space name has no `/`, so no remote prefix can
                     // apply here; the per-repo guard in the worker derives
                     // the real name.
-                    if let Some(branch) = crate::core::workspace::branch_slot_name(&strategy, &[]) {
+                    if let Some(branch) =
+                        crate::core::workspace::branch_slot_name(&strategy, &[], None)
+                    {
                         if let Err(e) = crate::core::workspace::check_branch_name(branch) {
                             self.error = Some(e.to_string());
                             return ScreenAction::Continue;

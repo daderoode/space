@@ -1923,13 +1923,37 @@ fn split_remote_branch<'a>(name: &'a str, remotes: &[String]) -> Option<(&'a str
     best
 }
 
+/// `split_remote_branch` settled against the repo's own branches: for a
+/// remote other than origin, a local branch named by the whole string wins
+/// (`refs/heads/<name>` exists, asked exactly through `ref_exists`), so the
+/// name is not split and goes to git as it is, which checks that branch
+/// out. That is git's own precedence and what master did for those names
+/// (a coworker's fork added as remote `alice` beside branches named
+/// `alice/<x>` is the realistic collision). `origin/<x>` is always the
+/// tracking form, as it has been since ticket 13, whatever local branch
+/// exists. `add_worktree`, the skip rule and the `-b` guard all derive
+/// through this one function.
+fn split_remote_branch_in<'a>(
+    repo_path: &Path,
+    name: &'a str,
+    remotes: &[String],
+) -> Option<(&'a str, &'a str)> {
+    let (remote, local) = split_remote_branch(name, remotes)?;
+    if remote != DEFAULT_REMOTE && ref_exists(repo_path, &format!("refs/heads/{}", name)) {
+        return None;
+    }
+    Some((remote, local))
+}
+
 /// The branch name a strategy hands to the `-b` slot of `git worktree add`,
 /// exactly as `add_worktree` derives it: a `NewBranch` name verbatim, an
 /// `ExistingBranch` name with its `<remote>/` prefix stripped
-/// (`split_remote_branch`: the local branch git creates to track the remote
-/// one), and none for `DetachedHead`. `remotes` is the repo's configured
-/// remotes (`remote_names`); a caller with no repo in hand passes an empty
-/// list and gets the `origin/` rule alone.
+/// (`split_remote_branch_in`: the local branch git creates to track the
+/// remote one), and none for `DetachedHead`. `remotes` is the repo's
+/// configured remotes (`remote_names`) and `repo_path` the repo whose local
+/// branches settle a collision; a caller with no repo in hand passes an
+/// empty list and `None` and gets the `origin/` rule alone, which needs
+/// neither.
 ///
 /// One function because two places must agree on it: the guard in
 /// `create_worktree_cancellable` and the entry points that ask git whether
@@ -1938,11 +1962,19 @@ fn split_remote_branch<'a>(name: &'a str, remotes: &[String]) -> Option<(&'a str
 /// `origin/-M` as a branch name, but the stripped `-M` is what reaches `-b`,
 /// and git's child `git branch` then reads it as force-rename of the
 /// checked-out branch of the source repo (reproduced on git 2.50.1).
-pub fn branch_slot_name<'a>(strategy: &'a BranchStrategy, remotes: &[String]) -> Option<&'a str> {
+pub fn branch_slot_name<'a>(
+    strategy: &'a BranchStrategy,
+    remotes: &[String],
+    repo_path: Option<&Path>,
+) -> Option<&'a str> {
     match strategy {
         BranchStrategy::NewBranch(name) => Some(name),
         BranchStrategy::ExistingBranch(name) => {
-            Some(split_remote_branch(name, remotes).map_or(name.as_str(), |(_, local)| local))
+            let split = match repo_path {
+                Some(repo) => split_remote_branch_in(repo, name, remotes),
+                None => split_remote_branch(name, remotes),
+            };
+            Some(split.map_or(name.as_str(), |(_, local)| local))
         }
         BranchStrategy::DetachedHead => None,
     }
@@ -2000,7 +2032,7 @@ pub fn create_worktree_cancellable(
     // sentence as git's so the caller sees one wording whichever layer
     // refused.
     let remotes = remote_names(repo_path);
-    if let Some(branch) = branch_slot_name(strategy, &remotes) {
+    if let Some(branch) = branch_slot_name(strategy, &remotes, Some(repo_path)) {
         if branch.starts_with('-') {
             return WorktreeAttempt {
                 fetch: None,
@@ -2088,11 +2120,13 @@ fn strategy_reads_origin(repo_path: &Path, strategy: &BranchStrategy, remotes: &
     // (the plain-name arm only).
     let (tracking_under, local_name): (Option<String>, Option<&str>) = match strategy {
         BranchStrategy::NewBranch(_) => return true,
-        BranchStrategy::ExistingBranch(name) => match split_remote_branch(name, remotes) {
-            Some((remote, _)) if remote == DEFAULT_REMOTE => return true,
-            Some((remote, _)) => (Some(format!("refs/remotes/{}/", remote)), None),
-            None => (None, Some(name.as_str())),
-        },
+        BranchStrategy::ExistingBranch(name) => {
+            match split_remote_branch_in(repo_path, name, remotes) {
+                Some((remote, _)) if remote == DEFAULT_REMOTE => return true,
+                Some((remote, _)) => (Some(format!("refs/remotes/{}/", remote)), None),
+                None => (None, Some(name.as_str())),
+            }
+        }
         BranchStrategy::DetachedHead => (None, None),
     };
     let Ok(repo) = git2::Repository::open(repo_path) else {
@@ -2269,7 +2303,7 @@ fn add_worktree(
         }
 
         BranchStrategy::ExistingBranch(branch_name) => {
-            if let Some((remote, local)) = split_remote_branch(branch_name, remotes) {
+            if let Some((remote, local)) = split_remote_branch_in(repo_path, branch_name, remotes) {
                 // A remote-tracking name from the picker, `origin/<x>` or
                 // any other configured remote's: a new local `<x>` tracking
                 // the remote-tracking ref itself, so a tag named
@@ -7425,52 +7459,55 @@ mod tests {
         let existing = |name: &str| BranchStrategy::ExistingBranch(name.to_string());
         let remotes = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
         assert_eq!(
-            branch_slot_name(&BranchStrategy::NewBranch("-x".to_string()), &[]),
+            branch_slot_name(&BranchStrategy::NewBranch("-x".to_string()), &[], None),
             Some("-x")
         );
         assert_eq!(
-            branch_slot_name(&existing("origin/-M"), &[]),
+            branch_slot_name(&existing("origin/-M"), &[], None),
             Some("-M"),
             "origin/-M passes git's check as a whole, but -M is what reaches -b"
         );
         assert_eq!(
-            branch_slot_name(&existing("origin/-M"), &remotes(&["upstream"])),
+            branch_slot_name(&existing("origin/-M"), &remotes(&["upstream"]), None),
             Some("-M"),
             "origin counts whether or not it is configured"
         );
         assert_eq!(
-            branch_slot_name(&existing("feature/x"), &[]),
+            branch_slot_name(&existing("feature/x"), &[], None),
             Some("feature/x")
         );
-        assert_eq!(branch_slot_name(&BranchStrategy::DetachedHead, &[]), None);
         assert_eq!(
-            branch_slot_name(&existing("origin/origin/-x"), &[]),
+            branch_slot_name(&BranchStrategy::DetachedHead, &[], None),
+            None
+        );
+        assert_eq!(
+            branch_slot_name(&existing("origin/origin/-x"), &[], None),
             Some("origin/-x"),
             "one prefix is stripped, as add_worktree strips one, so the slot \
              name does not begin with a dash and needs no refusal"
         );
         assert_eq!(
-            branch_slot_name(&existing("upstream/-M"), &[]),
+            branch_slot_name(&existing("upstream/-M"), &[], None),
             Some("upstream/-M"),
             "a prefix that names no remote is part of the branch name"
         );
         assert_eq!(
-            branch_slot_name(&existing("upstream/-M"), &remotes(&["upstream"])),
+            branch_slot_name(&existing("upstream/-M"), &remotes(&["upstream"]), None),
             Some("-M"),
             "a configured remote's prefix is stripped like origin's"
         );
         assert_eq!(
-            branch_slot_name(&existing("a/b/-M"), &remotes(&["a", "a/b"])),
+            branch_slot_name(&existing("a/b/-M"), &remotes(&["a", "a/b"]), None),
             Some("-M"),
             "the longest configured remote wins"
         );
         assert_eq!(
-            branch_slot_name(&existing("a/b/-M"), &remotes(&["a"])),
+            branch_slot_name(&existing("a/b/-M"), &remotes(&["a"]), None),
             Some("b/-M"),
             "and a shorter one when the longer is not configured"
         );
         assert_eq!(
-            branch_slot_name(&existing("upstream/"), &remotes(&["upstream"])),
+            branch_slot_name(&existing("upstream/"), &remotes(&["upstream"]), None),
             Some("upstream/"),
             "an empty local part is not a split"
         );

@@ -269,7 +269,9 @@ impl AddState {
                     // idx 1 (ExistingBranch) or idx 2 (DetachedHead); see
                     // the create flow for why git is asked here.
                     let strategy = self.branch_strategy();
-                    if let Some(branch) = crate::core::workspace::branch_slot_name(&strategy, &[]) {
+                    if let Some(branch) =
+                        crate::core::workspace::branch_slot_name(&strategy, &[], None)
+                    {
                         if let Err(e) = crate::core::workspace::check_branch_name(branch) {
                             self.error = Some(e.to_string());
                             return ScreenAction::Continue;

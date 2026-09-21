@@ -2912,12 +2912,12 @@ fn a_prefix_that_names_no_remote_stays_a_plain_name() {
 /// T5. Ticket 13's guard runs on the derived name for every remote: the
 /// `-M` that `upstream/-M` would hand to `-b` is refused before git runs,
 /// with git's sentence, and the source repo's checked-out branch keeps its
-/// name.
+/// name. (A local branch of that whole name would win instead, and is
+/// checked out safely: T18.)
 #[test]
 fn an_upstream_dash_branch_is_refused_before_git() {
     let env = common::TestEnv::new();
     let f = two_remote_repo(&env);
-    git_ok(&f.repo, &["branch", "-q", "upstream/-M", "main"]);
 
     let err = create_worktree(
         &f.repo,
@@ -3333,4 +3333,137 @@ mod hold_guards {
         );
         assert!(done.exists(), "the tail must have run");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Ticket 25, residual 3 (coordinator decision): for a remote other than
+// origin, a local branch named by the whole string wins, git's own
+// precedence and master's behaviour for those names.
+// ---------------------------------------------------------------------------
+
+/// The two-remote fixture plus a remote named `alice` (the same bare repo as
+/// `upstream`) with a branch `fix` on it, so `alice/fix` is a remote-tracking
+/// ref and a plausible local branch name at once.
+fn with_alice(f: &TwoRemotes) {
+    let upstream = f._tmp.path().join("upstream.git");
+    git_ok(
+        &f.repo,
+        &["remote", "add", "alice", upstream.to_str().unwrap()],
+    );
+    git_ok(&f.repo, &["push", "-q", "upstream", "main:fix"]);
+    git_ok(&f.repo, &["fetch", "-q", "alice"]);
+}
+
+/// T15. A local branch `alice/fix` beside a remote `alice` that has `fix`:
+/// picking the local row checks out that branch, as master did; no local
+/// `fix` is created.
+#[test]
+fn a_local_branch_named_like_another_remotes_branch_is_checked_out() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    with_alice(&f);
+    git_ok(&f.repo, &["branch", "-q", "alice/fix", "main"]);
+
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t15",
+        &BranchStrategy::ExistingBranch("alice/fix".to_string()),
+    )
+    .expect("the local branch is checked out");
+
+    assert_eq!(head_symref(&wt), "refs/heads/alice/fix");
+    let fix = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/fix"])
+        .current_dir(&f.repo)
+        .status()
+        .unwrap();
+    assert!(!fix.success(), "no local fix is created for the local row");
+}
+
+/// T16. Without the local branch, `alice/fix` is the remote-tracking form:
+/// a local `fix` tracking `refs/remotes/alice/fix`.
+#[test]
+fn without_the_local_branch_another_remotes_branch_still_tracks() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    with_alice(&f);
+
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t16",
+        &BranchStrategy::ExistingBranch("alice/fix".to_string()),
+    )
+    .expect("alice/fix is checked out as a tracking branch");
+
+    assert_eq!(head_symref(&wt), "refs/heads/fix");
+    assert_eq!(upstream_of(&f.repo, "fix"), "refs/remotes/alice/fix");
+}
+
+/// T17. `origin/<x>` keeps master's rule: always the tracking form, even
+/// beside a local branch literally named `origin/<x>` (master: the
+/// `origin/` prefix test ran before anything else; probed on git 2.50.1,
+/// `--track -b feat -- wt refs/remotes/origin/feat` ignores a local
+/// `origin/feat`).
+#[test]
+fn an_origin_collision_keeps_masters_rule() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(&f.repo, &["branch", "-q", "origin/feat", "main"]);
+
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t17",
+        &BranchStrategy::ExistingBranch("origin/feat".to_string()),
+    )
+    .expect("origin/feat is the tracking form");
+
+    assert_eq!(
+        head_symref(&wt),
+        "refs/heads/feat",
+        "not the local origin/feat"
+    );
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/origin/feat");
+    assert_eq!(
+        git_ok(&wt, &["rev-parse", "HEAD"]).trim(),
+        f.origin_feat,
+        "at origin's tip"
+    );
+}
+
+/// T18. The dash guard follows the same rule: a local branch named
+/// `alice/-M` is checked out as that branch (the name sits after `--`, so
+/// `-M` never reaches `-b`) and the source repo's checked-out branch keeps
+/// its name; without the local branch the derived `-M` is still refused.
+#[test]
+fn a_local_dash_branch_named_like_another_remotes_is_checked_out_safely() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    with_alice(&f);
+
+    let err = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t18-refused",
+        &BranchStrategy::ExistingBranch("alice/-M".to_string()),
+    )
+    .expect_err("with no such local branch the derived -b name is refused");
+    assert_eq!(err.to_string(), "'-M' is not a valid branch name");
+
+    git_ok(&f.repo, &["branch", "-q", "alice/-M", "main"]);
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t18",
+        &BranchStrategy::ExistingBranch("alice/-M".to_string()),
+    )
+    .expect("the local branch is checked out");
+    assert_eq!(head_symref(&wt), "refs/heads/alice/-M");
+    assert_eq!(
+        head_symref(&f.repo),
+        "refs/heads/main",
+        "the source branch keeps its name"
+    );
 }

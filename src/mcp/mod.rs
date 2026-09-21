@@ -199,9 +199,11 @@ fn checked_branch(
 ) -> std::result::Result<(), McpError> {
     let names: std::collections::BTreeSet<String> = repo_paths
         .iter()
-        .map(|repo| workspace::remote_names(repo))
-        .chain(std::iter::once(Vec::new()))
-        .filter_map(|remotes| workspace::branch_slot_name(strategy, &remotes).map(String::from))
+        .map(|repo| (workspace::remote_names(repo), Some(repo.as_path())))
+        .chain(std::iter::once((Vec::new(), None)))
+        .filter_map(|(remotes, repo)| {
+            workspace::branch_slot_name(strategy, &remotes, repo).map(String::from)
+        })
         .collect();
     for branch in names {
         workspace::check_branch_name(&branch)
