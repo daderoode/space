@@ -705,6 +705,31 @@ fn create_workspace_rejects_an_upstream_prefixed_dash_branch() {
     });
 }
 
+/// Ticket 25, security pass. The name is derived per repo, and a call
+/// with no repos derives nothing; the branch must still be checked, as it
+/// was before the derivation became per repo.
+#[test]
+fn create_workspace_rejects_a_dash_branch_with_no_repos() {
+    with_test_env(|env, server| {
+        for (strategy, branch) in [("new", "-x"), ("existing", "origin/-x")] {
+            let err = server
+                .create_workspace(Parameters(CreateWorkspaceParams {
+                    name: "dashed-none".to_string(),
+                    repos: vec![],
+                    strategy: strategy.to_string(),
+                    branch: Some(branch.to_string()),
+                }))
+                .expect_err("a branch beginning with '-' is refused with no repos too");
+            assert_eq!(
+                invalid_params(&err),
+                "'-x' is not a valid branch name",
+                "strategy {strategy}"
+            );
+            assert!(!env.workspaces_dir.join("dashed-none").exists());
+        }
+    });
+}
+
 /// Ticket 13, coverage found in review: the creation rule allows interior
 /// spaces, so a name with one must create end to end, not only pass the
 /// unit table.

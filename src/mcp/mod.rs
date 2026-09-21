@@ -187,18 +187,21 @@ fn bad_space_name(name: &str, e: anyhow::Error) -> McpError {
 /// reaches git's `-b` slot (`workspace::branch_slot_name`: for `existing`
 /// with a `<remote>/` prefix that is the stripped local name, the one git
 /// will create). Which prefixes count depends on each repo's configured
-/// remotes, so the name is derived per repo and each distinct result is
-/// checked once. `detached` has no branch. The message is git's sentence,
-/// e.g. `'-x' is not a valid branch name`, as `invalid_params`.
+/// remotes, so the name is derived per repo, and once more with no
+/// remotes (the `origin/` rule alone, the check this call made before the
+/// derivation became per repo), so a call with no repos still refuses an
+/// invalid name; each distinct result is checked once. `detached` has no
+/// branch. The message is git's sentence, e.g. `'-x' is not a valid branch
+/// name`, as `invalid_params`.
 fn checked_branch(
     strategy: &BranchStrategy,
     repo_paths: &[PathBuf],
 ) -> std::result::Result<(), McpError> {
     let names: std::collections::BTreeSet<String> = repo_paths
         .iter()
-        .filter_map(|repo| {
-            workspace::branch_slot_name(strategy, &workspace::remote_names(repo)).map(String::from)
-        })
+        .map(|repo| workspace::remote_names(repo))
+        .chain(std::iter::once(Vec::new()))
+        .filter_map(|remotes| workspace::branch_slot_name(strategy, &remotes).map(String::from))
         .collect();
     for branch in names {
         workspace::check_branch_name(&branch)
