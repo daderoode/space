@@ -11641,4 +11641,85 @@ mod push_remote_confirmation_tests {
             text
         );
     }
+
+    /// Origin is trusted by name, not by where it points (PR #59 residual 8,
+    /// ticket 43). `mirror` is added with origin's own URL and `feat` tracks
+    /// `mirror/feat`: the push goes to `mirror`, so it asks. A rule comparing
+    /// the destination's URL with origin's would call it origin and push
+    /// unasked; the tests above cannot see that, because their repo path does
+    /// not exist, every URL lookup fails, and such a rule falls back to names.
+    #[test]
+    fn a_remote_sharing_origins_url_still_asks_before_pushing() {
+        let env = TestEnv::new();
+        let repo = env.create_repo("shared");
+        let git = |args: &[&str], dir: &std::path::Path| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let bare = env.workspaces_dir.join("shared.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        git(&["init", "-q", "--bare", "-b", "main"], &bare);
+        for remote in ["origin", "mirror"] {
+            git(&["remote", "add", remote, bare.to_str().unwrap()], &repo);
+        }
+        git(&["push", "-q", "origin", "main", "main:feat"], &repo);
+        git(&["fetch", "-q", "--all"], &repo);
+        git(
+            &["checkout", "-q", "-b", "feat", "--track", "mirror/feat"],
+            &repo,
+        );
+        assert_eq!(
+            git(&["remote", "get-url", "--push", "mirror"], &repo),
+            git(&["remote", "get-url", "--push", "origin"], &repo),
+            "fixture: both remotes push to one URL"
+        );
+
+        let ws = Workspace {
+            name: "test-ws".into(),
+            path: env.workspaces_dir.clone(),
+            repos: vec![WorkspaceRepo {
+                name: "shared".into(),
+                path: repo.clone(),
+                branch: "feat".into(),
+                status: RepoStatus::default(),
+                ahead: 0,
+                behind: 0,
+            }],
+        };
+        let config = config_from_env(&env);
+        let mut app = test_app_with_config(config, vec![ws], vec![repo]);
+        app.load_selected_workspace_detail();
+        app.focus = Pane::Right;
+        app.handle_key(shift_key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::ConfirmPushRemote,
+            "mirror is not origin, whatever its URL, so Push asks"
+        );
+        assert!(app.gitop_rx.is_none(), "no worker before the answer");
+        let flat = render_text(&app, 80, 24)
+            .replace(
+                ['\u{2502}', '\u{256d}', '\u{256e}', '\u{2570}', '\u{256f}'],
+                " ",
+            )
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            flat.contains("Branch feat tracks mirror/feat. Push to mirror? [y/N]"),
+            "the prompt names the remote git pushes to, got:\n{}",
+            flat
+        );
+    }
 }
