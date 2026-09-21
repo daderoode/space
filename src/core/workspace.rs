@@ -3580,7 +3580,9 @@ mod tests {
     }
 
     /// The test's own limit expiring is a skip too: the bound is shorter than
-    /// curl's 75 s connect attempt, so a black-hole host lands here.
+    /// the 75 s the macOS kernel gives a connect before giving up
+    /// (`net.inet.tcp.keepinit`, which git's `http.connectTimeout` does not
+    /// shorten on this build), so a black-hole host lands here.
     #[test]
     fn prompt_probe_timed_out_is_unreached() {
         let fetch = FetchOutcome::TimedOut {
@@ -3657,8 +3659,10 @@ mod tests {
     /// "prompt refused" from "never got there": git consults
     /// `GIT_TERMINAL_PROMPT` only after the server's 401, so a run that never
     /// got an answer prints the same text and exit code with or without the
-    /// fix. Fail: anything else, including an HTTP status other than 401,
-    /// which means github answered and did not produce the refusal.
+    /// fix. Fail: anything else, including any `The requested URL returned
+    /// error: <status>` line, since a status means github answered and the
+    /// refusal did not happen (git consumes its 401 in the credential path,
+    /// so that status never reaches this text).
     #[test]
     fn sync_repo_reports_refused_https_prompt_as_fetch_failed() {
         use std::net::{TcpStream, ToSocketAddrs};
@@ -3732,10 +3736,12 @@ mod tests {
     /// "prompt refused" from "never got there": git consults
     /// `GIT_TERMINAL_PROMPT` only after the server's 401, so a run that never
     /// got an answer prints the same text and exit code with or without the
-    /// fix. Fail: anything else, including an HTTP status other than 401,
-    /// which means github answered and did not produce the refusal. The
-    /// creation-from-local-refs half is only asserted on a pass; the
-    /// timed-out test below pins it without the network.
+    /// fix. Fail: anything else, including any `The requested URL returned
+    /// error: <status>` line, since a status means github answered and the
+    /// refusal did not happen (git consumes its 401 in the credential path,
+    /// so that status never reaches this text). The creation half holds for
+    /// a refused and an unreached fetch alike, so it is asserted before the
+    /// skip: only the refusal check is skipped, and the skip message says so.
     #[test]
     fn create_worktree_refused_https_prompt_still_creates_from_local_refs() {
         use std::net::{TcpStream, ToSocketAddrs};
@@ -3799,17 +3805,16 @@ mod tests {
             .fetch
             .as_ref()
             .expect("PreCreateFetch::Run must record a fetch outcome");
-        match prompt_probe(fetch) {
-            PromptProbe::Refused => {}
-            PromptProbe::Unreached(reason) => {
-                eprintln!("skipping: github.com was not reached: {}", reason);
-                return;
-            }
-            PromptProbe::Unexpected(reason) => panic!("{}", reason),
+        let verdict = prompt_probe(fetch);
+        if let PromptProbe::Unexpected(reason) = &verdict {
+            panic!("{}", reason);
         }
+        // Refused or unreached, the fetch failed, and a failed fetch must not
+        // fail the creation: the worktree exists and, with no `origin/main`
+        // to prefer, the branch starts at the local base tip.
         let path = attempt
             .created
-            .expect("a refused prompt must not fail the creation");
+            .expect("a failed fetch must not fail the creation");
         assert!(
             path.exists(),
             "the worktree must still be created: {}",
@@ -3820,6 +3825,12 @@ mod tests {
             base_tip,
             "the new branch must start at the local base tip"
         );
+        if let PromptProbe::Unreached(reason) = verdict {
+            eprintln!(
+                "skipping the refusal check (the worktree was still created from local refs): github.com was not reached: {}",
+                reason
+            );
+        }
     }
 
     /// A remote that never answers must not block the creation for git's own
