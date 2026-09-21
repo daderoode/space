@@ -311,6 +311,13 @@ pub fn workspace_detail(ws_dir: &Path, name: &str) -> Result<Workspace> {
 /// this message: a localized git would turn every checked-out refusal into
 /// the generic failure and the strategy-picker bounce would be dead again.
 /// The cost is that every `worktree add` refusal reaches the log in English.
+///
+/// No time limit and no `setsid` here, and a test depends on that:
+/// `creating_esc_stops_the_run_and_leaves_the_partial_space` in
+/// `tests/tui_test.rs` holds this very call open through a `post-checkout`
+/// hook until after its Esc, so bounding it the way `run_unattended` does
+/// (`setsid` plus `killpg`) would kill that hook and its receipt (ticket 22).
+/// Whoever bounds this call has to move that hold first.
 fn git_worktree_add(args: &[&str], cwd: &Path) -> Result<()> {
     let out = spawn::output(
         Command::new("git")
@@ -3485,31 +3492,18 @@ mod tests {
     #[test]
     fn a_failed_fetch_records_how_long_it_took() {
         let (tmp, local) = make_behind_repo();
-        let holding = tmp.path().join("upload-pack-holding");
-        let release = tmp.path().join("upload-pack-release");
-        let released = tmp.path().join("upload-pack-released");
-        // The upload-pack holds until the test writes `release`, and records
-        // in `released` that it saw it. It gives up without that record once
-        // the test can no longer write `release`: `holding` is gone when the
-        // test's TempDir is dropped (it returned or panicked), and its pid is
-        // gone when it was killed. git runs in its own session, so nothing
-        // else would stop it.
+        // The upload-pack is the shared hold (`spawn::hold`): it holds until
+        // the test releases it and records that it saw the release, giving up
+        // without that record once the test can no longer release it or
+        // after its cap. git runs in its own session, so a killed test binary
+        // leaves nothing else to stop it, and the 20 s fetch limit below dies
+        // with the test process; the pid guard is what ends it then. The cap
+        // sits well above that limit, so the limit fires first and says so.
+        // A released upload-pack still fails the fetch: that is the outcome
+        // under test.
+        let hold = super::spawn::hold::Hold::new(tmp.path(), "upload-pack");
         let script = tmp.path().join("held-failing-upload-pack.sh");
-        std::fs::write(
-            &script,
-            format!(
-                ": > '{holding}'\n\
-                 while [ -e '{holding}' ] && [ ! -e '{release}' ] && kill -0 {pid} 2>/dev/null\n\
-                 do sleep 0.1; done\n\
-                 [ -e '{release}' ] && : > '{released}'\n\
-                 exit 1\n",
-                holding = holding.display(),
-                release = release.display(),
-                released = released.display(),
-                pid = std::process::id()
-            ),
-        )
-        .unwrap();
+        hold.write_script(&script, "exit 1");
         let origin_url = format!("file://{}", tmp.path().join("origin.git").display());
         git(&["remote", "set-url", "origin", &origin_url], &local);
         git(
@@ -3528,25 +3522,25 @@ mod tests {
         let slow_run = std::thread::spawn(move || {
             sync_repo_with_timeout(&local, Duration::from_secs(20)).fetch
         });
-        while !holding.exists() {
-            if slow_run.is_finished() {
-                panic!(
-                    "the slow fetch ended before its upload-pack held it: {:?}",
-                    slow_run.join()
-                );
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
+        hold.wait_holding(
+            Duration::from_secs(60),
+            "the slow fetch's upload-pack never started holding",
+            || {
+                slow_run
+                    .is_finished()
+                    .then(|| "the slow fetch ended before its upload-pack held it".to_string())
+            },
+        );
         let window_started = Instant::now();
         let fast = sync_repo_with_timeout(&fast_repo, Duration::from_secs(20)).fetch;
         let window = window_started.elapsed();
-        std::fs::write(&release, "").unwrap();
+        hold.release();
         let slow = slow_run.join().unwrap();
         // Everything below rests on the slow fetch still being held when the
         // window closed, so check that from the upload-pack's side rather
         // than by timing: it saw `release`, which is written after the window.
         assert!(
-            released.exists(),
+            hold.saw_release(),
             "the slow fetch's upload-pack must hold until the release (a \
              TimedOut here means the hold outlasted the fetch limit): {:?}",
             slow

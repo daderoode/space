@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod hold;
+
 use space::core::config::SpaceConfig;
 use space::core::workspace::Workspace;
 use space::tui::app::{App, Pane, Screen};
