@@ -2114,6 +2114,12 @@ fn render_gitops_overlay(
         let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
 
         let prompt = match &state.push_target {
+            // `.` is git's name for the repository itself (a branch that
+            // tracks a local branch); say so rather than print a dot.
+            Some(t) if t.remote == "." => format!(
+                "Branch {} tracks the local branch {}. Push into this repository?  [y/N]",
+                state.branch, t.tracks
+            ),
             Some(t) => format!(
                 "Branch {} tracks {}. Push to {}?  [y/N]",
                 state.branch, t.tracks, t.remote

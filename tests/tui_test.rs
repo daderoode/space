@@ -11533,6 +11533,121 @@ mod push_remote_confirmation_tests {
         assert_eq!(bottom - top + 1, 7, "dialog rows, got:\n{}", text);
     }
 
+    /// A branch that tracks a local branch has `branch.<n>.remote = .`,
+    /// git's name for the repository itself; the prompt says that instead
+    /// of printing a dot.
+    #[test]
+    fn a_dot_remote_is_named_as_this_repository() {
+        let mut app = menu_app(".");
+        if let Screen::GitOps(st) = &mut app.screen {
+            st.push_target = Some(PushTarget {
+                remote: ".".to_string(),
+                tracks: "main".to_string(),
+            });
+        }
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::ConfirmPushRemote,
+            "a dot remote asks"
+        );
+        let flat = render_text(&app, 80, 24)
+            .replace(
+                ['\u{2502}', '\u{256d}', '\u{256e}', '\u{2570}', '\u{256f}'],
+                " ",
+            )
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            flat.contains(
+                "Branch feat tracks the local branch main. Push into this repository? [y/N]"
+            ),
+            "got:\n{}",
+            flat
+        );
+    }
+
+    /// The whole path on a real repository, not three stubs: a repo with
+    /// two remotes whose checked-out branch tracks `upstream/feat`, the
+    /// overlay opened with `G` (so `GitOpsState::new` resolves the
+    /// destination itself), then `P`. Its mirror on a branch tracking
+    /// `origin/main` takes the no-prompt path.
+    fn real_two_remote_app(track: &str) -> (TestEnv, App) {
+        let env = TestEnv::new();
+        let repo = env.create_repo("two");
+        let run = |args: &[&str], dir: &std::path::Path| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        for remote in ["origin", "upstream"] {
+            let bare = env.workspaces_dir.join(format!("{}.git", remote));
+            std::fs::create_dir_all(&bare).unwrap();
+            run(&["init", "-q", "--bare", "-b", "main"], &bare);
+            run(&["remote", "add", remote, bare.to_str().unwrap()], &repo);
+        }
+        run(&["push", "-q", "origin", "main"], &repo);
+        run(&["push", "-q", "upstream", "main:feat"], &repo);
+        run(&["fetch", "-q", "--all"], &repo);
+        run(&["checkout", "-q", "-b", "feat", "--track", track], &repo);
+
+        let ws = Workspace {
+            name: "test-ws".into(),
+            path: env.workspaces_dir.clone(),
+            repos: vec![WorkspaceRepo {
+                name: "two".into(),
+                path: repo.clone(),
+                branch: "feat".into(),
+                status: RepoStatus::default(),
+                ahead: 0,
+                behind: 0,
+            }],
+        };
+        let config = config_from_env(&env);
+        let mut app = test_app_with_config(config, vec![ws], vec![repo]);
+        app.load_selected_workspace_detail();
+        app.focus = Pane::Right;
+        app.handle_key(shift_key(KeyCode::Char('G')));
+        assert!(
+            matches!(app.screen, Screen::GitOps(_)),
+            "fixture must reach the git-ops overlay"
+        );
+        (env, app)
+    }
+
+    #[test]
+    fn a_real_worktree_tracking_upstream_asks_before_pushing() {
+        let (_env, mut app) = real_two_remote_app("upstream/feat");
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::ConfirmPushRemote,
+            "the destination read from the real repo is upstream, so Push asks"
+        );
+        assert!(app.gitop_rx.is_none(), "no worker before the answer");
+    }
+
+    #[test]
+    fn a_real_worktree_tracking_origin_pushes_without_asking() {
+        let (_env, mut app) = real_two_remote_app("origin/main");
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::Running,
+            "the destination read from the real repo is origin, so Push runs"
+        );
+        assert!(app.gitop_rx.is_some(), "the worker starts at once");
+    }
+
     #[test]
     fn the_prompt_names_the_branch_and_both_remotes_at_80_by_24() {
         let mut app = menu_app("upstream");
