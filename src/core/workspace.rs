@@ -3510,7 +3510,8 @@ mod tests {
         /// or the test's limit, for the skip message.
         Unreached(String),
         /// Anything else, with the text to fail on: the server answered with
-        /// an HTTP status other than 401 (the probe URL rotted, or an outage),
+        /// an HTTP status line (the probe URL rotted, or an outage; a 401 is
+        /// consumed by git's credential path and never reaches that text),
         /// the refusal text arrived under another exit code, git did not
         /// start or was signalled, or the fetch succeeded.
         Unexpected(String),
