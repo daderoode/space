@@ -4298,12 +4298,14 @@ fn switch_finds_no_remote_branch_through_a_tag_of_either_name() {
             name
         );
         let picked = format!("origin/{}", name);
-        let result = space::core::workspace::switch_worktree_branch(&wt, &picked, false);
+        let err = space::core::workspace::switch_worktree_branch(&wt, &picked, false)
+            .expect_err("no remote branch has this name")
+            .to_string();
         assert!(
-            result.is_err(),
-            "{} is no remote branch, got {:?}",
-            picked,
-            result
+            err.contains(name),
+            "git reports the name {}, got {:?}",
+            name,
+            err
         );
         assert!(
             is_detached(&wt),
@@ -4405,12 +4407,145 @@ fn switch_to_a_remote_branch_that_is_gone_guesses_no_other_remote() {
     );
     let wt = detached_wt(&env, &f, "t41-6");
 
-    let result = space::core::workspace::switch_worktree_branch(&wt, "origin/only-up", false);
+    let err = space::core::workspace::switch_worktree_branch(&wt, "origin/only-up", false)
+        .expect_err("origin has no only-up")
+        .to_string();
 
-    assert!(result.is_err(), "origin has no only-up, got {:?}", result);
+    assert!(
+        err.contains("only-up"),
+        "git reports the name, got {:?}",
+        err
+    );
     assert!(is_detached(&wt), "the worktree has not moved");
     assert!(
         !has_ref(&f.repo, "refs/heads/only-up"),
         "no local only-up is created"
     );
+}
+
+/// T7. For a remote other than origin, an existing local `feat` that tracks
+/// another line (here origin's) is not switched to in place of the picked
+/// `upstream/feat`: the switch is refused with a sentence naming both, and
+/// nothing moves. Head `1edf10d` switched to it silently, so the dashboard
+/// showed origin's code under a pick of upstream's.
+#[test]
+fn switch_to_another_remotes_branch_refuses_a_local_branch_on_another_line() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.repo,
+        &[
+            "branch",
+            "-q",
+            "--track",
+            "feat",
+            "refs/remotes/origin/feat",
+        ],
+    );
+    let wt = detached_wt(&env, &f, "t41-7");
+
+    let err = space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("the local feat tracks origin, not upstream")
+        .to_string();
+
+    assert!(
+        err.contains("already exists and does not track upstream/feat"),
+        "the refusal names the pick, got {:?}",
+        err
+    );
+    assert!(is_detached(&wt), "the worktree has not moved");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/origin/feat");
+}
+
+/// T8. A local `feat` that already tracks `upstream/feat` (the first pick
+/// of the row made it) is where a second pick of that row goes, although
+/// the remote-tracking ref exists too.
+#[test]
+fn switch_to_another_remotes_branch_goes_to_the_local_branch_tracking_it() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.repo,
+        &[
+            "branch",
+            "-q",
+            "--track",
+            "feat",
+            "refs/remotes/upstream/feat",
+        ],
+    );
+    let wt = detached_wt(&env, &f, "t41-8");
+
+    space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect("the local feat tracking upstream/feat is checked out");
+
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/upstream/feat");
+}
+
+/// T9. `origin/<x>` keeps master's rule: an existing local `feat` is
+/// checked out whatever it tracks, here nothing, at its own commit, beside
+/// the remote-tracking ref of the same name.
+#[test]
+fn switch_to_origins_branch_checks_out_the_local_branch_whatever_it_tracks() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let decoy = switch_decoy(&f);
+    git_ok(&f.repo, &["branch", "-q", "--no-track", "feat", &decoy]);
+    let wt = detached_wt(&env, &f, "t41-9");
+
+    space::core::workspace::switch_worktree_branch(&wt, "origin/feat", false)
+        .expect("the local feat is checked out");
+
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    let head = git_ok(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(head, decoy, "at the local branch's own commit");
+    assert_eq!(upstream_of(&f.repo, "feat"), "", "still tracking nothing");
+}
+
+/// T10. The new branch tracks the picked remote-tracking ref whatever
+/// `branch.autoSetupMerge` says: `false` and `inherit` set no upstream from
+/// a remote-tracking start point unless `--track` is passed (probed on git
+/// 2.50.1), and a branch with no upstream would later be offered `push -u
+/// origin`, publishing upstream's commits there.
+#[test]
+fn switch_tracks_the_picked_remote_whatever_auto_setup_merge_says() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = detached_wt(&env, &f, "t41-10");
+
+    for (mode, picked, local) in [
+        ("false", "upstream/feat", "feat"),
+        ("inherit", "upstream/only-up", "only-up"),
+    ] {
+        git_ok(&f.repo, &["config", "branch.autoSetupMerge", mode]);
+        space::core::workspace::switch_worktree_branch(&wt, picked, false)
+            .unwrap_or_else(|e| panic!("{} under {}: {}", picked, mode, e));
+        assert_eq!(
+            upstream_of(&f.repo, local),
+            format!("refs/remotes/{}", picked),
+            "{} tracks {} under autoSetupMerge {}",
+            local,
+            picked,
+            mode
+        );
+    }
+}
+
+/// T11. A remote whose name holds a slash splits at the longest configured
+/// remote through the switch too: `a/b/feat` is `feat` on remote `a/b`
+/// (upstream's bare repo), tracking `refs/remotes/a/b/feat`.
+#[test]
+fn switch_splits_a_remote_named_with_a_slash_at_the_remote() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = detached_wt(&env, &f, "t41-11");
+
+    space::core::workspace::switch_worktree_branch(&wt, "a/b/feat", false)
+        .expect("a/b/feat becomes a local tracking branch");
+
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/a/b/feat");
+    let head = git_ok(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(head, f.upstream_feat, "at upstream's tip");
 }
