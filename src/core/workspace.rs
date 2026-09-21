@@ -1551,7 +1551,7 @@ pub fn refuses_because_checked_out(err: &str) -> bool {
 /// `<ws_dir>/<ws_name>/<the repo directory's name>`.
 ///
 /// Shared rather than derived twice because the Creating worker asks
-/// `is_worktree_of` about this exact path before attempting the add. Two
+/// `placement_of` about this exact path before attempting the add. Two
 /// copies of the rule would let the predicate check one path while the add
 /// created another, and the skip would quietly stop matching.
 pub fn worktree_path(ws_dir: &Path, ws_name: &str, repo_path: &Path) -> PathBuf {
@@ -1559,73 +1559,147 @@ pub fn worktree_path(ws_dir: &Path, ws_name: &str, repo_path: &Path) -> PathBuf 
     ws_dir.join(ws_name).join(repo_name.as_ref())
 }
 
-/// Whether `wt_path` is a git worktree of the repo at `repo_path`: the
-/// Creating worker's definition of "already created in this space".
+/// Where a repo stands at its place in a space: the Creating worker's and
+/// MCP `place_repos`'s decision to skip it, refuse it, or attempt the add.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Placement {
+    /// A finished worktree of this repo is already there. It is skipped and
+    /// reported as already created.
+    Adopted,
+    /// A worktree of this repo whose `git worktree add` never finished. The
+    /// add is not run: it would refuse with `already exists`, and the tree
+    /// may be missing files. The text is the row's reason and names the way
+    /// out.
+    HalfBuilt(String),
+    /// Anything else: the add runs, and git's own refusal is the row.
+    Attempt,
+}
+
+/// Where the repo at `repo_path` stands at `wt_path`, read from git's own
+/// layout on disk by the same reader `remove_workspace` uses
+/// (`classify_space_entry`), and not from libgit2.
+///
+/// libgit2 refuses any repository format extension its version does not
+/// know, so the earlier predicate, which opened the path with git2,
+/// answered "not a worktree" for a worktree made under
+/// `worktree.useRelativePaths` (git 2.48 and later, `extensions.relativeWorktrees`)
+/// and for one whose source repo is reftable (git 2.45 and later,
+/// `extensions.refstorage`), and every retry for those users then failed on
+/// `already exists`. The layout does not move with a format extension.
 ///
 /// One notch stricter than the codebase's usual test for a repo in a space,
-/// `<path>/.git` exists (`workspace_repo_skeletons`, `workspace_detail`,
-/// `remove_workspace`), which a plain clone dropped in the directory also
-/// satisfies. A linked worktree's `Repository::path()` is
-/// `<source>/.git/worktrees/<id>/`, so its grandparent is the source repo's
-/// git dir, and comparing that is what ties the directory to THIS repo.
-///
-/// The `is_worktree()` guard is not an early exit for what the comparison
-/// would catch anyway: it is the only thing that rejects a SUBMODULE. A
-/// submodule's gitdir is `<source>/.git/modules/<name>/`, whose grandparent
-/// is that same `<source>/.git`, so on the path comparison alone a submodule
-/// checkout sitting where the space wants one would be reported as already
-/// created and never attempted. Pinned by
-/// `is_worktree_of_rejects_a_submodule_whose_gitdir_lives_under_the_source`.
-///
-/// Both sides are canonicalised because git resolves symlinks and the app
-/// does not: on macOS a space under `$TMPDIR` comes back from git as
-/// `/private/var/...` while the config holds `/var/...`, and a byte
-/// comparison would call every such worktree foreign. Only the `repo_path`
-/// side can differ today, because libgit2 hands back a path it has already
-/// resolved; the git-dir side is canonicalised so that both are compared
-/// under one rule rather than on a reader's memory of which library resolves
-/// what.
+/// `<path>/.git` exists, which a clone dropped in the directory also
+/// satisfies. A linked worktree's admin directory holds `commondir`, git's
+/// own link to the repository it belongs to (`../..` from
+/// `<source>/.git/worktrees/<id>`, relative to the admin directory, the
+/// same under relative paths); resolving it and comparing with the source
+/// repo's `.git` is what ties the directory to THIS repo. A submodule
+/// checkout has no `commondir` (its gitdir is a repository of its own under
+/// `<host>/.git/modules/`), so the reader calls it a repository and it is
+/// attempted, as before. Both sides are canonicalised because git resolves
+/// symlinks and the app does not: on macOS a space under `$TMPDIR` reads
+/// back as `/private/var/...` while the config holds `/var/...`.
 ///
 /// Branch and strategy are deliberately not checked. The retry this serves
 /// exists BECAUSE the strategy changed, so the repos already in the space are
 /// on the old one by design; demanding a match would re-attempt every one of
 /// them and fail on `already exists`, which is the defect the skip removes.
 ///
-/// False on any error, on a directory that is not a repository, on a clone,
-/// and on a worktree of a different repo. Each of those still reaches
-/// `git worktree add` and fails exactly as before, which is the truthful row
-/// for a path this space does not own.
+/// Every answer the reader gives other than a worktree of this repo is
+/// `Attempt`: a plain directory, a clone, a submodule, an orphan, a worktree
+/// of another repo, and a `.git` file it cannot read or resolve. Each of
+/// those still reaches `git worktree add` and fails exactly as before, which
+/// is the truthful row for a path this space does not own; this side
+/// deletes nothing, so the reader's caution has nothing to protect here and
+/// git's refusal is the right message. The source-repo-is-itself-a-worktree
+/// case falls the same way: its `.git` is a file, so the comparison cannot
+/// match. No ordinary route reaches it, since `find_repos_in` requires
+/// `.git` to be a directory and every list of repo paths in the app is the
+/// scanner's output; the one way in is a hand-edited cache file.
 ///
-/// One case falls the same way for a different reason, and falls safe: a
-/// SOURCE repo that is itself a linked worktree has a gitlink file rather
-/// than a directory at `.git`, so the comparison cannot match and its repos
-/// are attempted as they were before the skip existed. No ordinary route
-/// reaches it: `find_repos_in` requires `.git` to be a DIRECTORY
-/// (`entry.file_type().is_dir()`), so the scanner never returns such a repo,
-/// and every list of repo paths in the app is the scanner's output (the TUI
-/// picker and the CLI's `create`/`add` take `App::repos_cache`, MCP
-/// `resolve_repos` matches names against the same cache). The one way in is
-/// a hand-edited cache file, which `load_cache` reads back as paths without
-/// revalidating them.
-pub fn is_worktree_of(wt_path: &Path, repo_path: &Path) -> bool {
-    let wt = match git2::Repository::open(wt_path) {
-        Ok(wt) => wt,
+/// A worktree of this repo that git never finished (`half_built`) is the
+/// third answer, and the reason this is not a bool: adopting one reports a
+/// tree that may be missing files as complete, and attempting the add fails
+/// on `already exists` with nothing said about why.
+pub fn placement_of(wt_path: &Path, repo_path: &Path) -> Placement {
+    let admin = match classify_space_entry(wt_path) {
+        SpaceEntry::Worktree { admin } => admin,
+        _ => return Placement::Attempt,
+    };
+    if !admin_belongs_to(&admin, repo_path) {
+        return Placement::Attempt;
+    }
+    match half_built(&admin) {
+        None => Placement::Adopted,
+        Some(sign) => Placement::HalfBuilt(format!(
+            "{:?} holds a worktree of this repo whose `git worktree add` never finished: \
+             its admin directory {:?} {}; nothing was attempted. Remove the space and \
+             create it again, or run `git worktree remove -f -f {:?}` in {:?}, then retry",
+            wt_path, admin, sign, wt_path, repo_path
+        )),
+    }
+}
+
+/// Whether the admin directory's `commondir` leads to `repo_path`'s `.git`.
+/// False on any error: a `commondir` that cannot be read or resolved is not
+/// evidence that the worktree is this repo's.
+fn admin_belongs_to(admin: &Path, repo_path: &Path) -> bool {
+    let common = match std::fs::read_to_string(admin.join("commondir")) {
+        Ok(common) => common,
         Err(_) => return false,
     };
-    if !wt.is_worktree() {
-        return false;
-    }
-    let git_dir = match wt.path().parent().and_then(|p| p.parent()) {
-        Some(dir) => dir,
-        None => return false,
-    };
+    let common = resolve_against(admin, common.trim_end_matches(['\n', '\r']));
     match (
-        git_dir.canonicalize(),
-        repo_path.join(".git").canonicalize(),
+        std::fs::canonicalize(common),
+        std::fs::canonicalize(repo_path.join(".git")),
     ) {
         (Ok(linked), Ok(source)) => linked == source,
         _ => false,
     }
+}
+
+/// What in a worktree's admin directory says its `git worktree add` never
+/// finished, or `None` for a finished one, locked or not.
+///
+/// `add_worktree` (`builtin/worktree.c`) writes `locked` reading
+/// `_("initializing")` before anything else of the new worktree and unlinks
+/// it after the checkout child returns, on success and on failure alike; a
+/// failure or a caught signal also removes the admin directory and the
+/// tree. Only `kill -9`, a crash or power loss leaves the file. So the
+/// marker is git's own word that the add never finished, and it is exactly
+/// that: `git worktree list` prints `locked initializing` and
+/// `git worktree remove --force` refuses on it. Compared trimmed, as git
+/// reads it (`worktree_lock_reason`).
+///
+/// The marker is translated (`initialisiere` in de.po, `initialisation` in
+/// fr.po at v2.50.1; Apple Git is built without gettext, Homebrew git is
+/// not), so a second reading of the same state is needed, and it is the one
+/// that means files are missing: `reset --hard` takes `index.lock`, writes
+/// every file, and commits `index` last, so a lock with `index.lock` and no
+/// `index` is a checkout that never finished. Probed three times on git
+/// 2.50.1 with parent and child killed together: that shape every time.
+///
+/// Not read as half-built, on purpose, because the remove side deletes on
+/// this answer and must match only the app's own crash debris: a user's
+/// `git worktree lock` (an empty file with no reason, the reason otherwise)
+/// on a finished tree, which has an `index`; and a `--no-checkout` worktree
+/// the user locked, which has no `index` but no `index.lock` either, since
+/// no checkout ran, and may hold files put there by hand. Two accepted
+/// misses: a user lock whose reason is literally `initializing` is refused
+/// (nothing deleted on the create side), and a localised git whose killed
+/// parent's checkout child finished (a complete tree, `index` present) is
+/// adopted, where the lock then meets ticket 27's unlock hint at removal.
+fn half_built(admin: &Path) -> Option<&'static str> {
+    let locked = std::fs::read_to_string(admin.join("locked")).ok()?;
+    if locked.trim() == "initializing" {
+        return Some("is locked \"initializing\", git's own mark on an add in progress");
+    }
+    if admin.join("index.lock").is_file() && !admin.join("index").exists() {
+        return Some(
+            "holds the checkout's index.lock and no index, so the checkout never finished",
+        );
+    }
+    None
 }
 
 /// The branch name a strategy hands to the `-b` slot of `git worktree add`,
@@ -2181,9 +2255,8 @@ enum SpaceEntry {
 /// Which of those a directory is, decided before anything is spawned or
 /// deleted, from git's own layout on disk.
 ///
-/// Deliberately not from libgit2, though `is_worktree_of` uses it for the
-/// same worktree-or-submodule question. That helper only decides whether to
-/// skip a repo, and its failure is a `false`; this decides whether to delete
+/// Deliberately not from libgit2, which `placement_of` also stopped asking
+/// (it reads this same classification). This decides whether to delete
 /// a directory, and libgit2 refuses any repository format extension its
 /// version does not know. `git init --ref-format=reftable` (git 2.45 and
 /// later) writes `extensions.refstorage`, and `worktree.useRelativePaths`
@@ -2235,7 +2308,7 @@ fn classify_space_entry(dir: &Path) -> SpaceEntry {
             // submodule checkout's `.git` file points instead at
             // `<host>/.git/modules/<name>`, a repository with its own
             // `objects` and `config` and no `commondir`. That is the trap
-            // `is_worktree_of` documents, read from the directory itself.
+            // `placement_of` relies on, read from the directory itself.
             //
             // Asked with the error kept, as the admin directory itself was:
             // `is_file` reads a permission error as "not there", and an admin
@@ -2410,11 +2483,25 @@ fn recorded_at(admin: &Path, dir: &Path) -> RecordedAt {
 /// refuses. git runs inside the worktree itself, so git resolves the source
 /// repo: that covers a relative `gitdir:` and a bare source repo, which
 /// tracing the `.git` file back by hand does not.
+///
+/// `--force` is never doubled for a lock, with one exception: a worktree
+/// git never finished (`half_built`), whose lock is git's own `initializing`
+/// marker or whose checkout never wrote its index. That lock is not the
+/// user's, the tree holds nothing git handed over, and `force` has already
+/// consented to losing whatever the tree holds, so a forced removal passes
+/// `--force --force` for that worktree alone. It is what lets a user who
+/// lost power mid-create remove the space and create it again with no git
+/// command; the create side refuses to adopt such a worktree
+/// (`placement_of`) and names this as the way out.
 fn unregister_worktree(dir: &Path, force: bool, admin: &Path) -> std::result::Result<(), String> {
     let target = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let target = target.to_string_lossy().into_owned();
     let mut args = vec!["worktree", "remove"];
+    let overriding = force && half_built(admin).is_some();
     if force {
+        args.push("--force");
+    }
+    if overriding {
         args.push("--force");
     }
     // Belt and braces: what git gets is the canonicalised path, so a repo
@@ -2440,7 +2527,12 @@ fn unregister_worktree(dir: &Path, force: bool, admin: &Path) -> std::result::Re
             // worktree whose directory was moved has an admin `gitdir` file
             // still naming the old path, which is what git refuses on.
             let first = reason.lines().next().unwrap_or(reason);
-            Err(if admin.join("locked").exists() {
+            // A half-built worktree was already given the second force, so
+            // the unlock hint would be wrong for it; git's reason stands
+            // (seen: `Directory not empty` while the killed add's checkout
+            // child was still writing, after which the admin directory is
+            // gone and the next removal deletes the directory as an orphan).
+            Err(if admin.join("locked").exists() && !overriding {
                 // git's sentence, then space's own way out. git's remaining
                 // lines are dropped here, and only here: they end in
                 // `remove -f -f`, which space does not offer and will not,
@@ -4432,33 +4524,56 @@ mod tests {
         );
     }
 
+    /// The admin directory a worktree's `.git` file names, read the way the
+    /// fixtures need it: git's `gitdir: ` line, resolved against the worktree
+    /// when relative.
+    fn admin_dir_of(wt: &Path) -> PathBuf {
+        let content = std::fs::read_to_string(wt.join(".git")).unwrap();
+        let target = content
+            .strip_prefix("gitdir: ")
+            .unwrap()
+            .trim_end_matches(['\n', '\r']);
+        let target = Path::new(target);
+        if target.is_absolute() {
+            target.to_path_buf()
+        } else {
+            wt.join(target)
+        }
+    }
+
+    /// A worktree of `repo` at `spaces/<ws>/repo`, made by the production
+    /// path on a branch of its own.
+    fn worktree_in(repo: &Path, spaces: &Path, ws: &str) -> PathBuf {
+        create_worktree_with_fetch(
+            repo,
+            spaces,
+            ws,
+            &BranchStrategy::NewBranch(format!("topic-{}", ws)),
+            PreCreateFetch::Skip,
+        )
+        .created
+        .expect("the fixture's worktree must be created")
+    }
+
     /// The predicate the Creating worker skips on. A worktree made by the
     /// production path counts whatever branch it carries, which is the case
     /// the retry after a checked-out bounce turns on: the repos already in
     /// the space were created under the strategy the user has just replaced.
     #[test]
-    fn is_worktree_of_accepts_a_worktree_of_the_source_repo() {
+    fn placement_of_adopts_a_worktree_of_the_source_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = plain_repo(tmp.path(), "repo");
-
-        let wt = create_worktree_with_fetch(
-            &repo,
-            &tmp.path().join("spaces"),
-            "ws-a",
-            &BranchStrategy::NewBranch("topic".to_string()),
-            PreCreateFetch::Skip,
-        )
-        .created
-        .expect("the fixture's worktree must be created");
+        let wt = worktree_in(&repo, &tmp.path().join("spaces"), "ws-a");
 
         assert_eq!(
             git::current_branch(&wt).unwrap(),
-            "topic",
+            "topic-ws-a",
             "the fixture is on a branch the source repo is not on, so a \
              branch-blind predicate is what is being asserted"
         );
-        assert!(
-            is_worktree_of(&wt, &repo),
+        assert_eq!(
+            placement_of(&wt, &repo),
+            Placement::Adopted,
             "a worktree of the source repo is already created in this space"
         );
     }
@@ -4471,7 +4586,7 @@ mod tests {
     /// exists`, which `workspace_detail` and `remove_workspace` use for "a
     /// repo in a space", accepts it.
     #[test]
-    fn is_worktree_of_rejects_a_plain_directory_a_clone_and_another_repos_worktree() {
+    fn placement_of_attempts_a_plain_directory_a_clone_and_another_repos_worktree() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = plain_repo(tmp.path(), "repo");
         let other = plain_repo(tmp.path(), "other");
@@ -4480,8 +4595,9 @@ mod tests {
         let plain = spaces.join("ws-a").join("repo");
         std::fs::create_dir_all(&plain).unwrap();
         std::fs::write(plain.join("README.md"), "not a repo\n").unwrap();
-        assert!(
-            !is_worktree_of(&plain, &repo),
+        assert_eq!(
+            placement_of(&plain, &repo),
+            Placement::Attempt,
             "a plain directory is not a worktree of anything"
         );
 
@@ -4495,8 +4611,9 @@ mod tests {
             clone.join(".git").is_dir(),
             "the fixture must be a real clone, which `.git exists` would accept"
         );
-        assert!(
-            !is_worktree_of(&clone, &repo),
+        assert_eq!(
+            placement_of(&clone, &repo),
+            Placement::Attempt,
             "a clone of the source repo is not a worktree of it"
         );
 
@@ -4506,28 +4623,29 @@ mod tests {
             &["worktree", "add", "-b", "topic", foreign.to_str().unwrap()],
             &other,
         );
-        assert!(
-            is_worktree_of(&foreign, &other),
+        assert_eq!(
+            placement_of(&foreign, &other),
+            Placement::Adopted,
             "the fixture must be a worktree of the OTHER repo"
         );
-        assert!(
-            !is_worktree_of(&foreign, &repo),
+        assert_eq!(
+            placement_of(&foreign, &repo),
+            Placement::Attempt,
             "a worktree of a different repo must not count as this repo's"
         );
     }
 
-    /// The one shape the `is_worktree()` guard, and nothing else, keeps out.
-    /// A submodule's gitdir is `<source>/.git/modules/<name>/`, whose
-    /// grandparent is `<source>/.git`: exactly what the path comparison
-    /// accepts. It is not a worktree (no `gitdir`/`commondir` in that
-    /// directory), so only the guard separates it from a real one, and
-    /// without the guard a submodule checkout would be reported as already
-    /// created and silently skipped.
+    /// The one shape only the commondir check keeps out. A submodule's
+    /// gitdir is `<source>/.git/modules/<name>/`, a repository of its own
+    /// with no `commondir`, so the layout reader calls it a repository
+    /// rather than a worktree. Without that, a submodule checkout sitting
+    /// where the space wants one would be reported as already created and
+    /// silently skipped.
     ///
     /// `protocol.file.allow=always` is needed from git 2.38.1: the file
     /// transport is refused for submodules by default (CVE-2022-39253).
     #[test]
-    fn is_worktree_of_rejects_a_submodule_whose_gitdir_lives_under_the_source() {
+    fn placement_of_attempts_a_submodule_whose_gitdir_lives_under_the_source() {
         let tmp = tempfile::tempdir().unwrap();
         let source = plain_repo(tmp.path(), "source");
         let other = plain_repo(tmp.path(), "other");
@@ -4554,10 +4672,211 @@ mod tests {
             source.join(".git").join("modules").join("sub").is_dir(),
             "the fixture's gitdir must live under the source repo's .git"
         );
-        assert!(
-            !is_worktree_of(&sub, &source),
+        assert_eq!(
+            placement_of(&sub, &source),
+            Placement::Attempt,
             "a submodule is not a worktree of its superproject: its place in \
              a space must still be attempted, not skipped"
+        );
+    }
+
+    /// git writes `locked` reading `initializing` before anything else of a
+    /// new worktree and unlinks it after the checkout child returns
+    /// (`builtin/worktree.c`, `add_worktree`), so a worktree still carrying
+    /// it is one git never finished. A `kill -9` of `git worktree add` alone
+    /// leaves exactly this: the checkout child is not killed with its
+    /// parent and completes, so the tree is whole and the index written,
+    /// and the lock stays. Built by hand from a finished add, since that is
+    /// the state and a kill in the suite would race the child.
+    #[test]
+    fn placement_of_refuses_a_worktree_whose_add_never_finished() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = plain_repo(tmp.path(), "repo");
+        let wt = worktree_in(&repo, &tmp.path().join("spaces"), "ws-a");
+        let admin = admin_dir_of(&wt);
+        assert!(
+            admin.join("index").is_file(),
+            "fixture: a finished add has an index"
+        );
+        std::fs::write(admin.join("locked"), "initializing\n").unwrap();
+
+        match placement_of(&wt, &repo) {
+            Placement::HalfBuilt(why) => {
+                assert!(
+                    why.contains("never finished") && why.contains("initializing"),
+                    "the reason says what it is, got {:?}",
+                    why
+                );
+                assert!(
+                    why.contains(&format!("{:?}", wt)) && why.contains("git worktree remove -f -f"),
+                    "the reason names the path and the way out, got {:?}",
+                    why
+                );
+            }
+            other => panic!(
+                "a worktree git never finished must be refused, got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// The same state as a localised git writes it (`initializing` is
+    /// `_("initializing")`: `initialisiere` in de.po, `initialisation` in
+    /// fr.po at v2.50.1), and the one that means files are missing: a
+    /// killed checkout leaves the index lock it took and never writes the
+    /// index, because `reset --hard` writes every file first and commits the
+    /// index last. Probed three times on git 2.50.1 with parent and child
+    /// killed together: `locked`, `index.lock`, no `index`, every time.
+    #[test]
+    fn placement_of_refuses_a_locked_worktree_whose_checkout_never_wrote_its_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = plain_repo(tmp.path(), "repo");
+        let wt = worktree_in(&repo, &tmp.path().join("spaces"), "ws-a");
+        let admin = admin_dir_of(&wt);
+        std::fs::write(admin.join("locked"), "initialisiere\n").unwrap();
+        std::fs::remove_file(admin.join("index")).unwrap();
+        std::fs::write(admin.join("index.lock"), "").unwrap();
+
+        match placement_of(&wt, &repo) {
+            Placement::HalfBuilt(why) => assert!(
+                why.contains("never finished") && why.contains("index.lock"),
+                "the reason says what it is, got {:?}",
+                why
+            ),
+            other => panic!(
+                "a checkout that never wrote its index must be refused, got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// A lock the user placed is not a half-built worktree, whatever its
+    /// reason: `git worktree lock` writes an empty file with no reason and
+    /// the reason otherwise, and the tree under it is whole (it has an
+    /// index). A `--no-checkout` worktree the user then locked has no index
+    /// but no `index.lock` either, since no checkout ever ran: it is adopted
+    /// too, because refusing it would let the remove side delete files the
+    /// user put there by hand.
+    #[test]
+    fn placement_of_adopts_a_worktree_the_user_locked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = plain_repo(tmp.path(), "repo");
+        let spaces = tmp.path().join("spaces");
+
+        let no_reason = worktree_in(&repo, &spaces, "ws-a");
+        git(&["worktree", "lock", no_reason.to_str().unwrap()], &repo);
+        assert_eq!(
+            std::fs::read_to_string(admin_dir_of(&no_reason).join("locked")).unwrap(),
+            "",
+            "fixture: a lock with no reason is an empty file"
+        );
+        assert_eq!(placement_of(&no_reason, &repo), Placement::Adopted);
+
+        let reason = worktree_in(&repo, &spaces, "ws-b");
+        git(
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "on a usb stick",
+                reason.to_str().unwrap(),
+            ],
+            &repo,
+        );
+        assert_eq!(placement_of(&reason, &repo), Placement::Adopted);
+
+        let no_checkout = spaces.join("ws-c").join("repo");
+        std::fs::create_dir_all(no_checkout.parent().unwrap()).unwrap();
+        git(
+            &[
+                "worktree",
+                "add",
+                "--no-checkout",
+                "--lock",
+                "-b",
+                "topic-ws-c",
+                no_checkout.to_str().unwrap(),
+            ],
+            &repo,
+        );
+        let admin = admin_dir_of(&no_checkout);
+        assert!(
+            !admin.join("index").exists() && !admin.join("index.lock").exists(),
+            "fixture: no checkout ran, so neither the index nor its lock exists"
+        );
+        std::fs::write(no_checkout.join("by-hand.txt"), "mine\n").unwrap();
+        assert_eq!(
+            placement_of(&no_checkout, &repo),
+            Placement::Adopted,
+            "a --no-checkout worktree the user locked is theirs, not half-built"
+        );
+    }
+
+    /// `worktree.useRelativePaths` (git 2.48 and later) writes a relative
+    /// gitdir into the worktree's `.git` file and `extensions.relativeWorktrees`
+    /// into the source repo, which the libgit2 this crate links cannot open.
+    /// The old predicate answered "not a worktree" and the retry failed on
+    /// `already exists`. The config is set for real, not the file hand-written
+    /// (the ticket 27 lesson).
+    #[test]
+    fn placement_of_adopts_a_relative_paths_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = plain_repo(tmp.path(), "repo");
+        git(&["config", "worktree.useRelativePaths", "true"], &repo);
+        let wt = worktree_in(&repo, &tmp.path().join("spaces"), "ws-a");
+
+        let gitfile = std::fs::read_to_string(wt.join(".git")).unwrap();
+        assert!(
+            gitfile.starts_with("gitdir: ..") || gitfile.starts_with("gitdir: ./"),
+            "fixture: git must have written a relative gitdir, got {:?}",
+            gitfile
+        );
+        assert!(
+            git2::Repository::open(&wt).is_err(),
+            "fixture: git2 must be unable to open it, or the test proves nothing"
+        );
+        assert_eq!(
+            placement_of(&wt, &repo),
+            Placement::Adopted,
+            "a worktree with a relative gitdir is a worktree of its repo"
+        );
+    }
+
+    /// A reftable source repo (`git init --ref-format=reftable`, git 2.45 and
+    /// later, `extensions.refstorage`) is the other format libgit2 refuses.
+    /// Where the local git is older, an unknown extension stands in, as in
+    /// the ticket 27 tests: git2 refuses either.
+    #[test]
+    fn placement_of_adopts_a_worktree_of_a_reftable_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let reftable = Cmd::new("git")
+            .args(["init", "-q", "-b", "main", "--ref-format=reftable"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        if !reftable.status.success() {
+            Cmd::new("git")
+                .args(["init", "-q", "-b", "main"])
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            git(&["config", "core.repositoryformatversion", "1"], &repo);
+            git(&["config", "extensions.spaceUnknown", "true"], &repo);
+        }
+        git_setup(&repo);
+        git(&["commit", "--allow-empty", "-m", "init"], &repo);
+        assert!(
+            git2::Repository::open(&repo).is_err(),
+            "fixture: git2 must refuse the source repo, or the test proves nothing"
+        );
+        let wt = worktree_in(&repo, &tmp.path().join("spaces"), "ws-a");
+
+        assert_eq!(
+            placement_of(&wt, &repo),
+            Placement::Adopted,
+            "a worktree of a repo in a format libgit2 refuses is still its worktree"
         );
     }
 

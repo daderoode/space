@@ -1065,6 +1065,88 @@ fn remove_workspace_keeps_a_locked_worktree_and_removes_the_others() {
     );
 }
 
+/// The admin directory a worktree's `.git` file names.
+fn admin_dir_of(wt: &Path) -> PathBuf {
+    let content = std::fs::read_to_string(wt.join(".git")).unwrap();
+    PathBuf::from(
+        content
+            .strip_prefix("gitdir: ")
+            .unwrap()
+            .trim_end_matches(['\n', '\r']),
+    )
+}
+
+/// Ticket 20. The one lock `space` does override: git's own `initializing`,
+/// which `git worktree add` writes first and unlinks last, so a worktree
+/// still carrying it (a `kill -9` of the add, or power loss) is one git never
+/// handed over, and its tree holds nothing of the user's. `--force` has
+/// already consented to losing whatever the tree holds, so a forced removal
+/// runs `git worktree remove --force --force` for that worktree alone: the
+/// space a user lost power creating is removed and can be created again with
+/// no git command. Both shapes of the state are covered (the marker, and a
+/// locked tree whose checkout left `index.lock` and no `index`), and a user's
+/// own lock beside them is still kept with ticket 27's unlock hint, which
+/// pins that the second force is not applied to any lock.
+#[test]
+fn remove_workspace_removes_a_half_built_worktree_and_keeps_a_user_locked_one() {
+    let env = common::TestEnv::new();
+    let marker_repo = env.create_repo("a-marker");
+    let index_repo = env.create_repo("b-no-index");
+    let user_repo = env.create_repo("c-user-lock");
+    let marker_wt = worktree_in_space(&env, &marker_repo, "test-ws");
+    let index_wt = worktree_in_space(&env, &index_repo, "test-ws");
+    let user_wt = worktree_in_space(&env, &user_repo, "test-ws");
+
+    std::fs::write(admin_dir_of(&marker_wt).join("locked"), "initializing\n").unwrap();
+    let index_admin = admin_dir_of(&index_wt);
+    std::fs::write(index_admin.join("locked"), "initialisiere\n").unwrap();
+    std::fs::remove_file(index_admin.join("index")).unwrap();
+    std::fs::write(index_admin.join("index.lock"), "").unwrap();
+    git_ok(
+        &user_repo,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "on usb",
+            user_wt.to_str().unwrap(),
+        ],
+    );
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "test-ws", true)
+        .expect_err("the user's lock is still refused");
+    let text = err.to_string();
+    assert!(
+        text.contains("c-user-lock") && text.contains("git worktree unlock"),
+        "the user's lock keeps ticket 27's hint, got {:?}",
+        text
+    );
+    let kept_part = text.split("removed:").next().unwrap();
+    assert!(
+        !kept_part.contains("a-marker") && !kept_part.contains("b-no-index"),
+        "neither half-built worktree is reported as kept, got {:?}",
+        text
+    );
+    assert!(
+        text.contains("removed: \"a-marker\", \"b-no-index\""),
+        "both are reported as removed, got {:?}",
+        text
+    );
+    assert!(
+        !marker_wt.exists() && !index_wt.exists(),
+        "both half-built worktrees are gone from the space"
+    );
+    assert!(
+        !registered_worktrees(&marker_repo).contains("test-ws")
+            && !registered_worktrees(&index_repo).contains("test-ws"),
+        "and their source repos no longer register them"
+    );
+    assert!(
+        user_wt.join(".git").exists() && registered_worktrees(&user_repo).contains("test-ws"),
+        "the user-locked worktree survives, still registered"
+    );
+}
+
 /// `git worktree add` writes a relative `gitdir:` when the user sets
 /// `worktree.useRelativePaths` (git 2.48 and later). The old code resolved
 /// that against the process's own working directory, found no repo, and ran
@@ -1266,7 +1348,7 @@ fn remove_workspace_keeps_a_bare_repo_in_the_space() {
 /// Review of the first commit: a submodule checkout's `.git` file points at
 /// `<host>/.git/modules/<name>`, which exists, so reading the gitfile alone
 /// called it a worktree and left git to refuse it with `is not a working
-/// tree`. git2's `is_worktree` is what `is_worktree_of` uses for this exact
+/// tree`. the layout reader (`commondir`) is what `placement_of` uses for this exact
 /// trap, and it gives the honest reason instead.
 #[test]
 fn remove_workspace_keeps_a_submodule_checkout() {

@@ -57,7 +57,7 @@ pub enum CreateOutcome {
     /// This run added the worktree.
     Created,
     /// The worktree was already a worktree of this repo in this space, so the
-    /// run did nothing for it. See `workspace::is_worktree_of`.
+    /// run did nothing for it. See `workspace::placement_of`.
     AlreadyCreated,
     /// `git worktree add` (or the setup before it) failed, with git's text.
     Failed(String),
@@ -2158,7 +2158,7 @@ struct WorkerAttempt {
 /// repo, sending `Started` and `Finished` per repo over `tx`, then `Done`.
 ///
 /// A repo whose place in the space already holds a worktree of that repo
-/// (`workspace::is_worktree_of`) is skipped: no fetch, no add, and a
+/// (`workspace::placement_of` says `Adopted`) is skipped: no fetch, no add, and a
 /// `Finished` that says `AlreadyCreated`. That is a property of what is on
 /// disk rather than of how the run got here, so it applies to every run, not
 /// only to a retry after the checked-out bounce. Without it the retry fails
@@ -2207,26 +2207,33 @@ fn run_create_worker(
             &params.workspace_name,
             repo_path,
         );
-        let attempt = if crate::core::workspace::is_worktree_of(&wt_path, repo_path) {
-            WorkerAttempt {
+        let attempt = match crate::core::workspace::placement_of(&wt_path, repo_path) {
+            crate::core::workspace::Placement::Adopted => WorkerAttempt {
                 fetch: None,
                 created: CreateOutcome::AlreadyCreated,
-            }
-        } else {
-            let attempt = crate::core::workspace::create_worktree_cancellable(
-                repo_path,
-                &params.workspace_dir,
-                &params.workspace_name,
-                &params.branch_strategy,
-                params.pre_create_fetch(repo_path),
-                &cancel,
-            );
-            WorkerAttempt {
-                fetch: attempt.fetch,
-                created: match attempt.created {
-                    Ok(_) => CreateOutcome::Created,
-                    Err(e) => CreateOutcome::Failed(e.to_string()),
-                },
+            },
+            // The add is not run: it would refuse with `already exists`, and
+            // the honest row is why. Nothing is deleted on this side.
+            crate::core::workspace::Placement::HalfBuilt(why) => WorkerAttempt {
+                fetch: None,
+                created: CreateOutcome::Failed(why),
+            },
+            crate::core::workspace::Placement::Attempt => {
+                let attempt = crate::core::workspace::create_worktree_cancellable(
+                    repo_path,
+                    &params.workspace_dir,
+                    &params.workspace_name,
+                    &params.branch_strategy,
+                    params.pre_create_fetch(repo_path),
+                    &cancel,
+                );
+                WorkerAttempt {
+                    fetch: attempt.fetch,
+                    created: match attempt.created {
+                        Ok(_) => CreateOutcome::Created,
+                        Err(e) => CreateOutcome::Failed(e.to_string()),
+                    },
+                }
             }
         };
         if cancel.load(Ordering::Relaxed) {
@@ -4339,6 +4346,107 @@ mod tests {
         );
     }
 
+    /// The admin directory a worktree's `.git` file names.
+    fn admin_dir_of(wt: &std::path::Path) -> PathBuf {
+        let content = std::fs::read_to_string(wt.join(".git")).unwrap();
+        PathBuf::from(
+            content
+                .strip_prefix("gitdir: ")
+                .unwrap()
+                .trim_end_matches(['\n', '\r']),
+        )
+    }
+
+    /// Ticket 20. A worktree of the repo that git never finished (its admin
+    /// directory still locked `initializing`, which a `kill -9` of
+    /// `git worktree add` leaves) is neither adopted, which would report a
+    /// tree that may be missing files as complete, nor attempted, which
+    /// would fail on `already exists` with nothing said about why. The row
+    /// fails with the reason, nothing on disk is touched, the run goes on to
+    /// the next repo, and it is not the checked-out stop.
+    #[test]
+    fn run_create_worker_refuses_a_half_built_worktree_without_touching_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_a = make_repo(tmp.path(), "repo-a");
+        let repo_b = make_repo(tmp.path(), "repo-b");
+        let ws_dir = tmp.path().join("spaces");
+
+        let wt = crate::core::workspace::create_worktree_with_fetch(
+            &repo_a,
+            &ws_dir,
+            "ws-a",
+            &crate::core::workspace::BranchStrategy::NewBranch("topic".to_string()),
+            crate::core::workspace::PreCreateFetch::Skip,
+        )
+        .created
+        .expect("the fixture's worktree must be created");
+        let admin = admin_dir_of(&wt);
+        std::fs::write(admin.join("locked"), "initializing\n").unwrap();
+        std::fs::write(wt.join("half.txt"), "partial\n").unwrap();
+
+        let mut params = create_params(&ws_dir, "ws-a", vec![repo_a.clone(), repo_b.clone()]);
+        params.fresh_repos = vec![];
+        let (tx, rx) = mpsc::sync_channel::<CreateProgress>(64);
+        run_create_worker(params, tx, Arc::new(AtomicBool::new(false)));
+
+        assert!(matches!(
+            rx.recv().unwrap(),
+            CreateProgress::Started { index: 0 }
+        ));
+        match rx.recv().unwrap() {
+            CreateProgress::Finished {
+                index,
+                fetch,
+                created,
+            } => {
+                assert_eq!(index, 0);
+                match created {
+                    CreateOutcome::Failed(why) => assert!(
+                        why.contains("never finished") && why.contains("git worktree remove -f -f"),
+                        "the row says what it is and the way out, got {:?}",
+                        why
+                    ),
+                    other => panic!("a half-built worktree must fail its row, got {:?}", other),
+                }
+                assert!(
+                    fetch.is_none(),
+                    "nothing is attempted, so nothing is fetched for"
+                );
+            }
+            _ => panic!("expected Finished for the refused repo"),
+        }
+        assert!(
+            matches!(rx.recv().unwrap(), CreateProgress::Started { index: 1 }),
+            "the refusal is not a stop: the next repo is attempted"
+        );
+        match rx.recv().unwrap() {
+            CreateProgress::Finished { created, .. } => {
+                assert_eq!(
+                    created,
+                    CreateOutcome::Created,
+                    "repo-b is created as usual"
+                )
+            }
+            _ => panic!("expected Finished for repo-b"),
+        }
+        assert!(matches!(rx.recv().unwrap(), CreateProgress::Done));
+
+        assert_eq!(
+            std::fs::read_to_string(admin.join("locked")).unwrap(),
+            "initializing\n",
+            "the create side deletes nothing: the lock is as it was"
+        );
+        assert!(
+            wt.join("half.txt").is_file(),
+            "the create side deletes nothing: the tree is as it was"
+        );
+        assert!(
+            crate::core::git::current_branch(&repo_b).is_ok()
+                && ws_dir.join("ws-a").join("repo-b").join(".git").is_file(),
+            "repo-b's worktree is in the space"
+        );
+    }
+
     /// The strategy skip is silent. A detached HEAD reads no remote ref, so
     /// there is no age to warn about, and a successful fetch already says
     /// nothing at this stage: a create that needed no fetch must not log
@@ -5178,7 +5286,7 @@ mod tests {
     ///
     /// Both repos are already in the space, so the retry is decided by disk
     /// state alone: no git refusal has to be arranged, nothing is created, and
-    /// the run is over as fast as two `is_worktree_of` checks.
+    /// the run is over as fast as two `placement_of` checks.
     ///
     /// Enter is pressed on the row the picker came back on, with no arrow key
     /// before it, and that is the whole point rather than a shortcut. `Up`,
@@ -5295,7 +5403,7 @@ mod tests {
 
         // The worker runs on its own thread, so the end of the run is waited
         // for rather than stepped. Five seconds at the outside, which is two
-        // `is_worktree_of` checks' worth many times over.
+        // `placement_of` checks' worth many times over.
         for _ in 0..500 {
             app.poll_create_result();
             if app.create_job.is_none() {
