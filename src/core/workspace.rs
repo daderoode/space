@@ -683,16 +683,20 @@ fn parse_skip_reason(stderr: &str) -> SkipReason {
 /// `git_worktree_add` and the `branch -f` runner do. In production the
 /// readers display rather than classify: the sync report's DETAIL column and
 /// the Creating log's fetch note strip a `fatal: ` or `error: ` prefix
-/// (`first_stderr_line`) and show the rest, so a gettext git under a
-/// non-English locale would only show a translated reason with its prefix
-/// left on. The tests do classify: the missing-remote sync test asserts
-/// `'origin' does not appear to be a git repository` and the https-prompt
-/// tests' `prompt_probe` reads `terminal prompts disabled`, both of them
-/// gettext strings. The cost is that every fetch failure reaches the report
-/// in English. Unlike the three siblings, which run local commands, this is
-/// the one pinned run that reaches ssh, curl and a configured credential or
-/// askpass helper, and they inherit the pin too; `LC_ALL` rather than
-/// `LC_MESSAGES` for consistency with the siblings, as the ticket asked.
+/// (`first_stderr_line`) and show the rest. git marks those prefixes for
+/// translation (`usage.c`, git 2.50.1), so a gettext git under a non-English
+/// locale would show a translated reason with its translated prefix left
+/// on. The wording tests on this path mostly read literals git never
+/// translates: `terminal prompts disabled` (`prompt.c`) for the https-prompt
+/// tests' `prompt_probe`, and `'origin' does not appear to be a git
+/// repository` (`builtin/upload-pack.c`) for the missing-remote sync test;
+/// the one translated sentence a test asserts is `Could not read from
+/// remote repository.` (`connect.c`), in the test of this pin. The cost is
+/// that every fetch failure reaches the report in English. Unlike the three
+/// siblings, which run local commands, this is the one pinned run that
+/// reaches ssh, curl and a configured credential or askpass helper, and they
+/// inherit the pin too; `LC_ALL` rather than `LC_MESSAGES` for consistency
+/// with the siblings, as the ticket asked.
 ///
 /// Only stderr is captured: `run_unattended` discards stdout, and
 /// `Unattended` has nowhere to carry it. That suits a command whose useful
@@ -3124,9 +3128,8 @@ mod tests {
 
     /// `run_git_unattended` pins `LC_ALL=C` on the child, as the three other
     /// stderr-parsing helpers do, because the sync report's DETAIL column
-    /// and the Creating log's fetch note strip git's English prefix, and the
-    /// missing-remote and https-prompt tests assert git's English wording on
-    /// this path. The test process carries
+    /// and the Creating log's fetch note strip git's English prefix, which
+    /// git translates. The test process carries
     /// `LC_ALL=de_DE.UTF-8` while the fetch runs, so the child's `C` can only
     /// have come from the helper, not from an unset inheritance.
     ///
