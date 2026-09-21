@@ -1765,8 +1765,9 @@ pub enum Placement {
 /// them and fail on `already exists`, which is the defect the skip removes.
 ///
 /// Every answer the reader gives other than a worktree of this repo is
-/// `Attempt`: a plain directory, a clone, a submodule, an orphan, a worktree
-/// of another repo, and a `.git` file it cannot read or resolve. Each of
+/// `Attempt`: a plain directory, a clone, a submodule, an orphan, a
+/// directory git has no record of, a worktree of another repo, and a `.git`
+/// file it cannot read or resolve. Each of
 /// those still reaches `git worktree add` and fails exactly as before, which
 /// is the truthful row for a path this space does not own; this side
 /// deletes nothing, so the reader's caution has nothing to protect here and
@@ -1856,8 +1857,11 @@ fn admin_belongs_to(admin: &Path, repo_path: &Path) -> bool {
 /// running in another process looks half-built for as long as its checkout
 /// runs; a forced removal of its space then removes the tree under it,
 /// where git alone would have refused on the lock. The tree being built
-/// holds nothing of the user's, and the next removal deletes what is left
-/// as an orphan. When the checkout child finished before the admin
+/// holds nothing of the user's. What git leaves of it goes with the next
+/// removal as plain content if its `.git` file went too, and is otherwise
+/// kept as `Unregistered` (its source repo is still there) for the user to
+/// delete by hand, which is friction, not loss. When the checkout child
+/// finished before the admin
 /// directory went, the add exits 0 and the process that started it shows
 /// that repo as created; that row is this race, not a worker bug.
 fn half_built(admin: &Path) -> bool {
@@ -2310,11 +2314,12 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
 
     // Two worktrees in the space that name one admin directory are a worktree
     // and its copy. Two passes are not enough on their own: removing the
-    // original still destroys that admin directory, the copy is kept with
-    // nothing registered under it, and the next removal deletes it as an
-    // orphan, every such copy at once, with a clean success. So neither is
-    // handed to git. Both are kept and reported as a pair, and the space is
-    // left exactly as it was found, which a retry then finds again.
+    // original still destroys that admin directory and leaves the copy with
+    // nothing registered under it, which git can no longer read (a later
+    // removal keeps it as `Unregistered`; before ticket 36 it deleted every
+    // such copy as an orphan). So neither is handed to git. Both are kept and
+    // reported as a pair, and the space is left exactly as it was found,
+    // which a retry then finds again.
     //
     // The key is the canonical admin path, computed once per entry: a relative
     // gitdir reaches the same admin directory through different text from
@@ -2369,10 +2374,12 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
             // Not a repository of any kind: ordinary content of the space,
             // which goes when the space does, as it always has.
             SpaceEntry::Plain => {}
-            // Nothing registered points at this directory any more: its source
-            // repo was deleted or moved, or the entry was already pruned. Git
-            // has nothing to unregister, so with `force` the directory goes
-            // with the space rather than making the space unremovable.
+            // Nothing registered points at this directory any more, and its
+            // source repo is gone from where the `.git` file says it is:
+            // deleted or moved (`absent_admin`; a record that is gone while
+            // the repo is there is `Unregistered`, kept). Git has nothing to
+            // unregister, so with `force` the directory goes with the space
+            // rather than making the space unremovable.
             //
             // Every caller in the app passes `force` (`cli/remove.rs`, which
             // refuses the command without `--force`, `mcp/mod.rs` and the TUI
@@ -2400,6 +2407,22 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
                     .to_string(),
             )),
             SpaceEntry::Unresolved(reason) => kept.push((repo, reason)),
+            // No repair hint: for a copy it would hand the original's name to
+            // the copy, and there is no record left to repair anyway. The
+            // path stays off the first line, which may become the summary.
+            SpaceEntry::Unregistered { admin } => kept.push((
+                repo,
+                format!(
+                    "git has no record of it any more, though its source repo is still \
+                     there, so what it holds cannot be told\nits .git file names {:?}, \
+                     which does not exist; a copy of a worktree looks like this once the \
+                     original is removed (a space duplicated with `cp -R`, for instance), \
+                     and so does a worktree whose record was pruned or whose source repo \
+                     was cloned again; keep what you need from it, delete it by hand, then \
+                     remove the space again",
+                    admin
+                ),
+            )),
             SpaceEntry::Unreadable(why) => kept.push((
                 repo,
                 format!(
@@ -2436,8 +2459,14 @@ enum SpaceEntry {
     /// A linked worktree whose admin directory (`<source>/.git/worktrees/<id>`)
     /// is still there, so git can unregister it.
     Worktree { admin: PathBuf },
-    /// A `.git` file whose target has gone.
+    /// A `.git` file whose target has gone, and whose source repo has gone
+    /// with it (`absent_admin`).
     Orphan,
+    /// A `.git` file whose target has gone while its source repo is still
+    /// there: git has no record of this directory any more. A copy of a
+    /// worktree whose original was removed looks like this, and nothing on
+    /// disk ties it to that original, so it is kept whatever `force` says.
+    Unregistered { admin: PathBuf },
     /// A repository in its own right rather than a worktree: a clone dropped
     /// in the space by hand, a bare repo, or a submodule checkout, whose
     /// `.git` file points into `<host>/.git/modules/`.
@@ -2499,7 +2528,7 @@ fn classify_space_entry(dir: &Path) -> SpaceEntry {
                     admin, dir
                 ))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => SpaceEntry::Orphan,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => absent_admin(admin),
             Err(e) => SpaceEntry::Unreadable(format!(
                 "its .git file names {:?}, which cannot be read ({})",
                 admin, e
@@ -2540,6 +2569,48 @@ fn classify_space_entry(dir: &Path) -> SpaceEntry {
         return SpaceEntry::Repository;
     }
     SpaceEntry::Plain
+}
+
+/// What a directory is when the absolute gitdir its `.git` file names is not
+/// there. An admin directory that is gone proves only that git no longer has
+/// a record of this directory, and a copy of a worktree is in exactly that
+/// state once its original is removed, by this app or by hand (a space
+/// duplicated with `cp -R`, ticket 36), as is a copy edited by hand to an
+/// admin id git never registered. What makes a directory an orphan, which is
+/// deleted, is that its source repo is gone too, so that is what is checked.
+///
+/// git writes a linked worktree's gitdir as `<common>/worktrees/<id>`, from
+/// the real path of the common dir, so absolute and with no `..`. Only that
+/// shape says where the source repo is, and only a `NotFound` for `<common>`
+/// itself proves it is gone. `<common>/worktrees` is no evidence: git deletes
+/// it with the repo's last worktree. A path in any other shape was written by
+/// hand, and where its repo would be cannot be read from it; a `..` in
+/// particular walks through a `worktrees` directory that may have gone, so
+/// the kernel reports `NotFound` for a `<common>` that is there.
+///
+/// After the admin directory itself answered `NotFound`, every directory on
+/// its path down to the missing one was searchable, so `<common>` answers
+/// `Ok` or `NotFound` but for a race; any other error keeps, as everywhere a
+/// deletion is decided.
+fn absent_admin(admin: PathBuf) -> SpaceEntry {
+    let in_gits_shape = !admin
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir));
+    let common = admin
+        .parent()
+        .filter(|worktrees| in_gits_shape && worktrees.file_name() == Some("worktrees".as_ref()))
+        .and_then(Path::parent);
+    match common {
+        Some(common) => match std::fs::symlink_metadata(common) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => SpaceEntry::Orphan,
+            _ => SpaceEntry::Unregistered { admin },
+        },
+        None => SpaceEntry::Unreadable(format!(
+            "its .git file names {:?}, which does not exist and is not where git keeps a \
+             worktree's admin directory",
+            admin
+        )),
+    }
 }
 
 /// Whether `dir` is itself a repository, by what every repository has
@@ -2736,7 +2807,8 @@ fn unregister_worktree(dir: &Path, force: bool, admin: &Path) -> std::result::Re
             // the unlock hint would be wrong for it; git's reason stands
             // (seen: `Directory not empty` while the killed add's checkout
             // child was still writing, after which the admin directory is
-            // gone and the next removal deletes the directory as an orphan).
+            // gone and the next removal keeps what is left as `Unregistered`,
+            // or deletes it as plain content if its `.git` file went too).
             Err(if admin.join("locked").exists() && !overriding {
                 // git's sentence, then space's own way out. git's remaining
                 // lines are dropped here, and only here: they end in
@@ -2760,7 +2832,8 @@ fn unregister_worktree(dir: &Path, force: bool, admin: &Path) -> std::result::Re
                         "it is a copy of a worktree git still knows, and this is not\nthat \
                          worktree is at {:?}; keep what you need from this copy, then \
                          delete it by hand and remove the space again (removing the space \
-                         again as it is deletes this copy once that worktree is gone)\n{}",
+                         again as it is keeps this copy, also once that worktree is gone, \
+                         while its source repo is there)\n{}",
                         there, first
                     ),
                     RecordedAt::Here | RecordedAt::Unknown => reason.to_string(),
@@ -2873,10 +2946,10 @@ fn pair_reason(
             };
             format!(
                 "{} in this space ({}) {} its admin directory, so {} is removed\n\
-                 removing it would leave {} with nothing registered, and removing the space \
-                 again could then delete {}; keep what you need from {}, delete {} by hand, \
-                 then remove the space again",
-                copies, listed, share, none, them, them, them, them
+                 removing it would leave {} with nothing registered, which git could no \
+                 longer read; keep what you need from {}, delete {} by hand, then remove the \
+                 space again",
+                copies, listed, share, none, them, them, them
             )
         }
         Some(o) => format!(

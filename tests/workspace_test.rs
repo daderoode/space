@@ -1844,10 +1844,11 @@ fn remove_workspace_reports_in_name_order_whatever_read_dir_says() {
 
 /// A worktree copied beside its original in the same space shares its `.git`
 /// file, so both name one admin directory. Removing the original destroys
-/// that admin directory, after which the copy has nothing registered and a
-/// retry deletes it as an orphan, every such copy at once, with a clean
-/// success. So neither is handed to git: the pair is kept and reported
-/// together, and nothing is left in a state a retry reads as an orphan.
+/// that admin directory, after which the copy has nothing registered and git
+/// can no longer read it (before ticket 36 a retry then deleted it as an
+/// orphan, every such copy at once, with a clean success). So neither is
+/// handed to git: the pair is kept and reported together, and the space is
+/// left as it was found.
 #[test]
 fn remove_workspace_keeps_a_worktree_and_its_copy_across_retries() {
     let env = common::TestEnv::new();
@@ -1997,7 +1998,10 @@ fn remove_workspace_keeps_a_worktree_whose_admin_cannot_be_read() {
 /// one line and a file carrying anything else is not a gitfile. Accepting
 /// more than git does is not harmless: the extra text became part of the
 /// path, the path did not exist, and a path that does not exist used to mean
-/// "orphan", which deletes.
+/// "orphan", which deletes. Since ticket 36 such a path is kept anyway while
+/// its source repo is there, so the near-miss check is pinned by its reason:
+/// without it the report would say git has no record of a directory whose
+/// admin directory is live.
 #[test]
 fn remove_workspace_keeps_a_gitfile_with_more_than_a_gitdir_line() {
     let env = common::TestEnv::new();
@@ -2029,6 +2033,11 @@ fn remove_workspace_keeps_a_gitfile_with_more_than_a_gitdir_line() {
     assert!(
         err.to_string().contains("z-odd"),
         "the report names it, got {:?}",
+        err.to_string()
+    );
+    assert!(
+        err.to_string().contains("in a form git does not read"),
+        "as a near miss of a live admin directory, got {:?}",
         err.to_string()
     );
     assert!(odd.join("keep.txt").exists(), "and the work in it is there");
@@ -2134,9 +2143,11 @@ fn remove_workspace_names_repair_for_a_space_that_was_moved() {
 /// A gitfile git rejects because blanks follow a path that does not end in
 /// one. git's reading names nothing, but the path trimmed names a live admin
 /// directory, so it is a near miss: reported and kept, not read as an absent
-/// repo. Reading only git's way, without the near-miss check, would delete
-/// it as an orphan; trimming instead of reading git's way would delete the
-/// worktree whose real path ends in a blank (the test after next).
+/// repo. Reading only git's way, without the near-miss check, deleted it as
+/// an orphan before ticket 36 and would now report it as a directory git has
+/// no record of, which is false, so the reason is pinned; trimming instead of
+/// reading git's way would lose the worktree whose real path ends in a blank
+/// (the test after next).
 #[test]
 fn remove_workspace_keeps_a_worktree_whose_gitfile_has_trailing_blanks() {
     let env = common::TestEnv::new();
@@ -2160,6 +2171,11 @@ fn remove_workspace_keeps_a_worktree_whose_gitfile_has_trailing_blanks() {
     assert!(
         err.to_string().contains("alpha"),
         "the report names it, got {:?}",
+        err.to_string()
+    );
+    assert!(
+        err.to_string().contains("in a form git does not read"),
+        "as a near miss of a live admin directory, got {:?}",
         err.to_string()
     );
     assert_eq!(
@@ -2335,8 +2351,10 @@ fn remove_workspace_does_not_tell_a_copy_to_repair() {
     );
     assert!(
         text.contains("it is a copy of a worktree git still knows")
-            && text.contains("deletes this copy"),
-        "it is told what it is and what removing the space again would do, got {:?}",
+            && text.contains("keeps this copy")
+            && !text.contains("deletes this copy"),
+        "it is told what it is and what removing the space again would do, which is \
+         keep it (ticket 36), got {:?}",
         text
     );
     assert_eq!(
@@ -2821,5 +2839,336 @@ mod hold_guards {
             "the helper must record that it saw the release"
         );
         assert!(done.exists(), "the tail must have run");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ticket 36: a copy of a worktree is never deleted as an orphan while its
+// source repo is there. An absolute gitdir that names nothing is an orphan
+// only in git's own shape (`<common>/worktrees/<id>`) with `<common>` gone.
+// ---------------------------------------------------------------------------
+
+/// The admin directory a worktree's `.git` file names, as git wrote it.
+fn admin_named_by(worktree: &Path) -> PathBuf {
+    let gitfile = std::fs::read_to_string(worktree.join(".git")).unwrap();
+    PathBuf::from(
+        gitfile
+            .strip_prefix("gitdir: ")
+            .expect("fixture: a gitfile")
+            .trim_end_matches(['\n', '\r']),
+    )
+}
+
+/// `cp -R`, as a user duplicating a space runs it.
+fn cp_r(from: &Path, to: &Path) {
+    let status = Command::new("cp")
+        .arg("-R")
+        .arg(from)
+        .arg(to)
+        .status()
+        .unwrap();
+    assert!(status.success(), "fixture: cp -R {:?} {:?}", from, to);
+}
+
+fn remove_forced(env: &TestEnv, name: &str) -> anyhow::Result<()> {
+    space::core::workspace::remove_workspace(&env.workspaces_dir, name, true)
+}
+
+/// The number of worktrees `repo` has registered, its own checkout included.
+fn registered_count(repo: &Path) -> usize {
+    registered_worktrees(repo)
+        .lines()
+        .filter(|l| l.starts_with("worktree "))
+        .count()
+}
+
+/// A space duplicated with `cp -R`, the original's space removed first. git
+/// deletes the admin directory, and `<common>/worktrees` with it since this
+/// was the repo's only worktree, so the copy's `.git` names nothing. It used
+/// to be deleted as an orphan on its space's first removal, with its work
+/// and no report. Its source repo is still there, so it is kept, every time.
+#[test]
+fn a_cp_r_copy_is_kept_once_its_original_space_is_removed() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    worktree_in_space(&env, &repo, "feat");
+    cp_r(
+        &env.workspaces_dir.join("feat"),
+        &env.workspaces_dir.join("feat-copy"),
+    );
+    let copy = env.workspaces_dir.join("feat-copy").join("alpha");
+    std::fs::write(copy.join("mine.txt"), "a day of work").unwrap();
+
+    remove_forced(&env, "feat").unwrap();
+    assert!(
+        !repo.join(".git").join("worktrees").exists(),
+        "fixture: git removed `worktrees` with its last worktree, so that directory \
+         cannot be the evidence the source repo is there"
+    );
+
+    for run in 1..=2 {
+        let text = remove_forced(&env, "feat-copy")
+            .expect_err("a copy whose source repo is there is kept")
+            .to_string();
+        assert!(
+            text.contains("\"alpha\""),
+            "run {}: the report names it, got {:?}",
+            run,
+            text
+        );
+        assert_eq!(
+            std::fs::read_to_string(copy.join("mine.txt")).unwrap(),
+            "a day of work",
+            "run {}: and its work is still there",
+            run
+        );
+    }
+}
+
+/// The same duplicate, the copy's space removed first. The first report used
+/// to promise that removing the space again deletes the copy once the
+/// original is gone, and that is what happened. What the report promises now
+/// is what the later removals do: the copy is kept.
+#[test]
+fn a_cp_r_copy_removed_first_is_told_the_truth_about_later_removals() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    worktree_in_space(&env, &repo, "feat");
+    cp_r(
+        &env.workspaces_dir.join("feat"),
+        &env.workspaces_dir.join("feat-copy"),
+    );
+    let copy = env.workspaces_dir.join("feat-copy").join("alpha");
+    std::fs::write(copy.join("mine.txt"), "a day of work").unwrap();
+
+    let first = remove_forced(&env, "feat-copy")
+        .expect_err("git will not remove a copy it does not know")
+        .to_string();
+    assert!(
+        first.contains("keeps this copy") && !first.contains("deletes this copy"),
+        "the first report says later removals keep the copy, got {:?}",
+        first
+    );
+
+    remove_forced(&env, "feat").unwrap();
+    remove_forced(&env, "feat-copy").expect_err("and they do");
+    assert_eq!(
+        std::fs::read_to_string(copy.join("mine.txt")).unwrap(),
+        "a day of work",
+        "with its work"
+    );
+}
+
+/// A copy whose `.git` was edited by hand to an admin id git never
+/// registered, beside its original in the same space. Nothing ties it to the
+/// original, so it is not grouped; it used to be deleted as an orphan on the
+/// first removal, with no report. Its source repo is there, so it is kept,
+/// and the original, a real worktree, is removed as asked.
+#[test]
+fn a_copy_edited_to_an_unregistered_admin_id_is_kept() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let original = worktree_in_space(&env, &repo, "ws");
+    let copy = env.workspaces_dir.join("ws").join("alpha-copy");
+    cp_r(&original, &copy);
+    let common = admin_named_by(&original)
+        .parent()
+        .and_then(Path::parent)
+        .unwrap()
+        .to_path_buf();
+    std::fs::write(
+        copy.join(".git"),
+        format!(
+            "gitdir: {}\n",
+            common.join("worktrees").join("alpha-copy").display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(copy.join("mine.txt"), "a day of work").unwrap();
+
+    let text = remove_forced(&env, "ws")
+        .expect_err("the copy is kept")
+        .to_string();
+    assert!(
+        text.contains("\"alpha-copy\"") && text.contains("removed: \"alpha\""),
+        "the copy is kept and the original removed, got {:?}",
+        text
+    );
+    assert!(!original.exists(), "the original is gone");
+    assert_eq!(
+        std::fs::read_to_string(copy.join("mine.txt")).unwrap(),
+        "a day of work",
+        "and the copy's work is still there"
+    );
+}
+
+/// PR #44 residual 13's shape: a copy whose `.git` names its original's live
+/// admin directory with blanks after the path, which git does not read. The
+/// first removal keeps it as unreadable and removes the original; the retry
+/// then found a path naming nothing and deleted it. It is kept on the retry.
+#[test]
+fn a_near_miss_copy_is_kept_on_the_retry_after_its_original_goes() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let original = worktree_in_space(&env, &repo, "ws");
+    let copy = env.workspaces_dir.join("ws").join("alpha-copy");
+    cp_r(&original, &copy);
+    std::fs::write(
+        copy.join(".git"),
+        format!("gitdir: {}  \n", admin_named_by(&original).display()),
+    )
+    .unwrap();
+    std::fs::write(copy.join("mine.txt"), "a day of work").unwrap();
+
+    let first = remove_forced(&env, "ws")
+        .expect_err("the near miss is unreadable, so kept")
+        .to_string();
+    assert!(
+        first.contains("removed: \"alpha\""),
+        "fixture: the original went on the first run, got {:?}",
+        first
+    );
+
+    let retry = remove_forced(&env, "ws")
+        .expect_err("the retry keeps it too")
+        .to_string();
+    assert!(
+        retry.contains("\"alpha-copy\""),
+        "the retry names it, got {:?}",
+        retry
+    );
+    assert_eq!(
+        std::fs::read_to_string(copy.join("mine.txt")).unwrap(),
+        "a day of work",
+        "and its work is still there"
+    );
+}
+
+/// git writes a worktree's gitdir as `<common>/worktrees/<id>`, absolute and
+/// with no `..`. A `.git` naming anything else was written by hand (or is a
+/// `--separate-git-dir` checkout, which space never makes), so where its
+/// source repo would be cannot be read from it, and a `NotFound` on it is not
+/// proof the source repo is gone. Both are kept even when nothing on the
+/// path exists: one under a directory that is not `worktrees`, one whose
+/// `..` walks through the `worktrees` directory git has already removed.
+/// Each sits alone in its own space: an orphan is deleted only with its
+/// space, which a kept neighbour would hold back.
+#[test]
+fn a_gitdir_not_in_gits_own_shape_is_kept_when_it_names_nothing() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let shapes = [
+        (
+            "not-worktrees",
+            env.dir.path().join("gone").join("deeper").join("alpha"),
+        ),
+        (
+            "dot-dot",
+            repo.join(".git")
+                .join("worktrees")
+                .join("..")
+                .join("worktrees")
+                .join("alpha"),
+        ),
+    ];
+    assert!(
+        !repo.join(".git").join("worktrees").exists(),
+        "fixture: the repo has no worktrees, so `worktrees/..` names nothing"
+    );
+    for (name, gitdir) in &shapes {
+        let dir = env.workspaces_dir.join(name).join("alpha");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+        std::fs::write(dir.join("mine.txt"), "a day of work").unwrap();
+
+        let text = match remove_forced(&env, name) {
+            Ok(()) => panic!("{}: its space was removed, so it went as an orphan", name),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            text.contains("1 of 1 repos in the space were kept"),
+            "{}: it is kept, not removed as an orphan, got {:?}",
+            name,
+            text
+        );
+        assert!(
+            dir.join("mine.txt").exists(),
+            "{}: and its work is still there",
+            name
+        );
+    }
+}
+
+/// Removing a space is not blocked by a copy of one of its worktrees in
+/// another space. Grouping across spaces was the rejected design: it would
+/// make a space unremovable because of an unrelated one, and the copy is
+/// protected where it is deleted instead.
+#[test]
+fn a_copy_in_another_space_does_not_keep_the_original() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let original = worktree_in_space(&env, &repo, "feat");
+    cp_r(
+        &env.workspaces_dir.join("feat"),
+        &env.workspaces_dir.join("feat-copy"),
+    );
+    let copy = env.workspaces_dir.join("feat-copy").join("alpha");
+    std::fs::write(copy.join("mine.txt"), "a day of work").unwrap();
+
+    remove_forced(&env, "feat").unwrap();
+
+    assert!(!original.exists(), "the original's space is removed");
+    assert_eq!(
+        registered_count(&repo),
+        1,
+        "and git unregistered its worktree"
+    );
+    assert!(
+        copy.join("mine.txt").exists(),
+        "while the copy in the other space is left alone"
+    );
+}
+
+/// The reason a copy whose source repo is there gets says that, and gives
+/// neither of its neighbours' advice: not the repair a relative gitdir gets
+/// (a copy handed the original's registration breaks the original), and not
+/// "remove the space with force" (force keeps it too). Unforced says the same.
+#[test]
+fn a_copy_with_no_record_is_told_git_has_none() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    worktree_in_space(&env, &repo, "feat");
+    cp_r(
+        &env.workspaces_dir.join("feat"),
+        &env.workspaces_dir.join("feat-copy"),
+    );
+    remove_forced(&env, "feat").unwrap();
+
+    for force in [true, false] {
+        let text =
+            space::core::workspace::remove_workspace(&env.workspaces_dir, "feat-copy", force)
+                .expect_err("kept")
+                .to_string();
+        let summary = text.lines().next().unwrap_or_default();
+        assert!(
+            summary.contains("git has no record of it"),
+            "force {}: the summary's reason says git has no record, got {:?}",
+            force,
+            summary
+        );
+        assert!(
+            text.contains("source repo is still there"),
+            "force {}: and that its source repo is there, got {:?}",
+            force,
+            text
+        );
+        assert!(
+            !text.contains("git worktree repair")
+                && !text.contains("with force")
+                && !text.contains("cannot be told; look at it"),
+            "force {}: and nothing its neighbours are told, got {:?}",
+            force,
+            text
+        );
     }
 }
