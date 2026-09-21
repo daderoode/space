@@ -617,11 +617,11 @@ fn refuses_because_checked_out_matches_both_git_wordings() {
 /// worktree the user pressed Esc to avoid.
 ///
 /// The ordering is enforced by files, not by sleeps. `remote.origin.uploadpack`
-/// points at a script that touches STARTED and then blocks until RELEASE
-/// appears, so the fetch cannot finish until this test lets it. The test waits
-/// for STARTED, at which point the fetch is provably running and checkpoint 1
+/// points at a script that marks that it is holding and then blocks until it
+/// is released, so the fetch cannot finish until this test lets it. The test
+/// waits for that mark, at which point the fetch is provably running and checkpoint 1
 /// has provably passed with the flag clear, sets the flag, and only then
-/// touches RELEASE. Checkpoint 2 therefore always reads a flag that was false
+/// releases it. Checkpoint 2 therefore always reads a flag that was false
 /// at entry and true by the time the fetch returned, with no assumption about
 /// ordering anywhere.
 ///
@@ -725,7 +725,7 @@ fn create_worktree_cancellable_reads_the_flag_again_after_the_fetch() {
 
     // Everything below rests on the fetch having been held until the flag was
     // set. Checked from the upload-pack's side rather than by timing: it wrote
-    // `RELEASED` only after seeing `RELEASE`. A fetch that hit its limit above
+    // its receipt only after seeing the release. A fetch that hit its limit above
     // was killed with its upload-pack before it could write that, so a
     // missing record names the timeout instead of reading as a cancellation
     // regression.
