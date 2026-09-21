@@ -660,7 +660,7 @@ fn render_create_overlay(
         CreateStage::PickBranchStrategy => render_branch_strategy_picker(
             frame,
             state.ws_name.value(),
-            &state.new_branch_name(),
+            state.new_branch_name(),
             state.branch_strategy_idx,
             state.error.as_deref(),
             &state.recent_branches,

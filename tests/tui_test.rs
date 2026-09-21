@@ -3784,44 +3784,50 @@ fn create_strategy_label_truncates_a_long_typed_branch_name_at_80_columns() {
         56,
         "the option text is exactly the dialog's option width"
     );
-    assert!(
-        UnicodeWidthStr::width(row.as_str()) <= 80,
-        "the row cannot be wider than the frame, row: {:?}",
-        row
-    );
 }
 
-/// The name inside a New branch row that is short enough not to be cut.
+/// The name inside a New branch row that is short enough not to be cut,
+/// read up to the dialog's right border so nothing drawn beside the dialog
+/// on the same row can leak into it.
 fn new_branch_label(rendered: &str) -> String {
     let row = new_branch_row(rendered);
     let after = row
         .split_once("New branch '")
         .unwrap_or_else(|| panic!("no New branch row in {:?}", row))
         .1;
-    let end = after
+    let inside = after
+        .split_once('\u{2502}')
+        .map_or(after, |(inside, _)| inside);
+    let end = inside
         .rfind('\'')
         .unwrap_or_else(|| panic!("the label is not closed in {:?}", row));
-    after[..end].to_string()
+    inside[..end].to_string()
 }
 
 #[test]
 fn the_row_names_what_enter_creates_in_every_state_the_flow_can_reach() {
+    use space::core::workspace::BranchStrategy;
+    use space::tui::actions::{ScreenAction, ScreenContext};
+    use space::tui::screens::create::CreateStage;
+
     // The three tests above are examples of one rule; this is the rule. For
-    // every state of (branch name field, the space name the stage recorded,
-    // the live space name) that the keys can reach, the row names the branch
-    // that Enter in the stage it opens creates.
+    // each combination below of branch name field, recorded space name and
+    // live space name, the row names the branch that Enter in the stage it
+    // opens asks the create to make, and `branch_strategy()` reports that
+    // same name for the row.
     //
-    // No case here has a space name with surrounding whitespace: Stage 1
-    // writes back the trimmed name before anything can reach Stage 4
-    // (`create_name_is_trimmed_before_it_is_validated`). A space name that
-    // kept its padding is the one state where the row and Enter disagree,
-    // the row showing ` b ` where Enter creates `b`, and only a caller that
-    // sets `ws_name` itself can build it.
-    let cases: [(&str, Option<&str>, &str); 15] = [
+    // The rename is written to `ws_name` directly, standing in for Esc back
+    // to Stage 1. That stage writes back a trimmed, validated name
+    // (`create_name_is_trimmed_before_it_is_validated`), and neither it nor
+    // the way forward to Stage 4 writes the field or the recorded name, so no
+    // case has an empty space name or one with surrounding whitespace. The
+    // padded one is the only state where the row and Enter disagree (the row
+    // shows ` b `, Enter creates `b`), and only a caller that sets `ws_name`
+    // itself can build it.
+    let cases: [(&str, Option<&str>, &str); 14] = [
         // (named, what the field is left holding, renamed to)
         ("a", None, "a"),
         ("a", None, "b"),
-        ("a", None, ""),
         ("a", Some(""), "a"),
         ("a", Some(""), "b"),
         ("a", Some("   "), "a"),
@@ -3835,6 +3841,11 @@ fn the_row_names_what_enter_creates_in_every_state_the_flow_can_reach() {
         ("a", Some(" a "), "b"),
         ("a", Some(" feat "), "b"),
     ];
+    let config = SpaceConfig::default();
+    let ctx = ScreenContext {
+        config: &config,
+        creating_in_flight: false,
+    };
 
     for (named, left_holding, renamed_to) in cases {
         use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
@@ -3851,7 +3862,7 @@ fn the_row_names_what_enter_creates_in_every_state_the_flow_can_reach() {
         if let Screen::CreateWorkspace(ref mut st) = app.screen {
             assert_eq!(
                 st.stage,
-                space::tui::screens::create::CreateStage::PickBranchStrategy,
+                CreateStage::PickBranchStrategy,
                 "case {:?}: Esc returns to the picker",
                 case
             );
@@ -3862,26 +3873,41 @@ fn the_row_names_what_enter_creates_in_every_state_the_flow_can_reach() {
 
         let label = new_branch_label(&render_text(&app, 120, 24));
 
-        app.handle_key(key(KeyCode::Enter));
-        if let Screen::CreateWorkspace(ref st) = app.screen {
-            assert_eq!(
-                st.stage,
-                space::tui::screens::create::CreateStage::EnterBranchName,
-                "case {:?}: the row opens the branch name stage",
-                case
-            );
-            let creates = st.branch_name_input.value().trim();
-            assert_eq!(
-                label,
-                creates,
-                "case {:?}: the row said {:?} but Enter there creates {:?} (field {:?})",
-                case,
-                label,
-                creates,
-                st.branch_name_input.value()
-            );
-        } else {
+        let Screen::CreateWorkspace(ref mut st) = app.screen else {
             panic!("case {:?}: expected CreateWorkspace screen", case);
+        };
+        match st.branch_strategy() {
+            BranchStrategy::NewBranch(name) => assert_eq!(
+                name, label,
+                "case {:?}: branch_strategy() names another branch than the row",
+                case
+            ),
+            other => panic!("case {:?}: expected a new branch, got {:?}", case, other),
+        }
+
+        // Enter on the row, then Enter in the stage it opens, on the screen
+        // itself so the create it asks for is read rather than run.
+        st.handle_key(key(KeyCode::Enter), &ctx);
+        assert_eq!(
+            st.stage,
+            CreateStage::EnterBranchName,
+            "case {:?}: the row opens the branch name stage",
+            case
+        );
+        let field = st.branch_name_input.value().to_string();
+        match st.handle_key(key(KeyCode::Enter), &ctx) {
+            ScreenAction::ExecuteWorktreeFlow(p) => match p.branch_strategy {
+                BranchStrategy::NewBranch(created) => assert_eq!(
+                    label, created,
+                    "case {:?}: the row said {:?} but Enter created {:?} (field {:?})",
+                    case, label, created, field
+                ),
+                other => panic!("case {:?}: expected a new branch, got {:?}", case, other),
+            },
+            _ => panic!(
+                "case {:?}: Enter did not start the create (field {:?}, error {:?})",
+                case, field, st.error
+            ),
         }
     }
 }

@@ -303,22 +303,19 @@ impl CreateState {
                         slow_fetch_repos: self.report.slow_fetch_paths(),
                     })
                 } else if self.branch_strategy_idx == 0 {
-                    // New branch: open the branch name stage. A field left
-                    // reading the space name it was opened with, or nothing,
-                    // is not the user's and follows the space name, so going
-                    // back to rename the space renames the branch too;
-                    // anything else they typed is kept. It is read trimmed,
-                    // as Enter reads it, and replaced only when the name
-                    // changes, so the cursor stays where it was left. The
-                    // picker's own label reads the same rule through
-                    // `new_branch_name`, so it names what this opens.
-                    let ws_name = self.ws_name.value().to_string();
-                    if self.branch_name_follows_space()
-                        && self.branch_name_input.value().trim() != ws_name
-                    {
-                        self.branch_name_input = Input::default().with_value(ws_name.clone());
+                    // New branch: open the branch name stage on
+                    // `new_branch_name`, the name the picker's row shows. A
+                    // field left reading the space name it was opened with,
+                    // or nothing, is not the user's and follows the space
+                    // name, so going back to rename the space renames the
+                    // branch too; anything else they typed is kept. The field
+                    // is replaced only when its trimmed value differs, so the
+                    // cursor stays where it was left.
+                    let opens_with = self.new_branch_name().to_string();
+                    if self.branch_name_input.value().trim() != opens_with {
+                        self.branch_name_input = Input::default().with_value(opens_with);
                     }
-                    self.branch_name_default = ws_name;
+                    self.branch_name_default = self.ws_name.value().to_string();
                     self.error = None;
                     self.stage = CreateStage::EnterBranchName;
                     ScreenAction::Continue
@@ -505,16 +502,17 @@ impl CreateState {
         field.is_empty() || field == self.branch_name_default
     }
 
-    /// The branch the "New branch" option creates: the name its stage opens
-    /// with, which is the live space name while the field follows the space
-    /// and the user's name once they have typed one. The strategy picker's
-    /// label renders this, so the row cannot name a branch other than the one
-    /// choosing it leads to (ticket 30).
-    pub fn new_branch_name(&self) -> String {
+    /// The branch the "New branch" option creates: the live space name while
+    /// the field follows the space, and the user's name, trimmed, once they
+    /// have typed one. The strategy picker's row renders it and the branch
+    /// name stage opens on it, so the row names what Enter there creates;
+    /// Enter trims the field, which agrees with the row because
+    /// `handle_enter_name` writes the space name back trimmed (ticket 30).
+    pub fn new_branch_name(&self) -> &str {
         if self.branch_name_follows_space() {
-            self.ws_name.value().to_string()
+            self.ws_name.value()
         } else {
-            self.branch_name_input.value().trim().to_string()
+            self.branch_name_input.value().trim()
         }
     }
 
@@ -527,11 +525,11 @@ impl CreateState {
                     .clone()
                     .unwrap_or_else(|| self.ws_name.value().to_string()),
             ),
-            // idx 0, New Branch: the name comes from the EnterBranchName
-            // stage input, and `new_branch_name` falls back to the space name
-            // for a field nobody has typed in, which is what a direct caller
-            // (a test, a future MCP tool) has before the stage gate has run.
-            _ => BranchStrategy::NewBranch(self.new_branch_name()),
+            // idx 0, New Branch: the name the picker's row shows and its
+            // stage opens on. The picker never asks for idx 0 here (Enter on
+            // that row opens the branch name stage instead), so only a
+            // direct caller reaches this arm.
+            _ => BranchStrategy::NewBranch(self.new_branch_name().to_string()),
         }
     }
 }
