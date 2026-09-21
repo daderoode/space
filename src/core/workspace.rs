@@ -3495,10 +3495,170 @@ mod tests {
         }
     }
 
+    /// What a fetch against a remote that should refuse a credential prompt
+    /// tells the test, once the outcome is read for what it can prove.
+    #[derive(Debug)]
+    enum PromptProbe {
+        /// git reached the server, got its 401, and refused the prompt with
+        /// its own text under exit code 128: the shape the two network tests
+        /// pin.
+        Refused,
+        /// git never got an answer from the server, so its prompt logic never
+        /// ran. The test cannot tell the fixed code from the bug here: a
+        /// transport failure reads the same whether or not prompts are
+        /// disabled, and both shapes exit 128. The reason is git's own line,
+        /// or the test's limit, for the skip message.
+        Unreached(String),
+        /// Anything else, with the text to fail on: the server answered with
+        /// an HTTP status other than 401 (the probe URL rotted, or an outage),
+        /// the refusal text arrived under another exit code, git did not
+        /// start or was signalled, or the fetch succeeded.
+        Unexpected(String),
+    }
+
+    /// Classify a prompt probe's fetch. Pass is the refusal text with exit
+    /// 128. Skip is `TimedOut`, or `Failed` carrying git's transport prefix
+    /// (`unable to access`) without an HTTP status (`The requested URL
+    /// returned error`): every resolve, connect, TLS and reset failure lands
+    /// there, and none of them ever reached the prompt. Everything else fails.
+    fn prompt_probe(fetch: &FetchOutcome) -> PromptProbe {
+        match fetch {
+            FetchOutcome::TimedOut { after, .. } => {
+                PromptProbe::Unreached(format!("timed out after {}s", after.as_secs()))
+            }
+            FetchOutcome::Failed {
+                exit_code: Some(128),
+                stderr,
+                ..
+            } if stderr.contains("terminal prompts disabled") => PromptProbe::Refused,
+            FetchOutcome::Failed { stderr, .. }
+                if stderr.contains("unable to access")
+                    && !stderr.contains("The requested URL returned error") =>
+            {
+                PromptProbe::Unreached(stderr.trim_end().to_string())
+            }
+            other => PromptProbe::Unexpected(format!(
+                "expected git's refused-prompt text under exit code 128, got {:?}",
+                other
+            )),
+        }
+    }
+
+    /// The refusal text with git's exit code is the one pass.
+    #[test]
+    fn prompt_probe_refusal_text_with_exit_128_is_refused() {
+        let fetch = FetchOutcome::Failed {
+            exit_code: Some(128),
+            stderr: "fatal: could not read Username for 'https://github.com': terminal prompts disabled\n".to_string(),
+            elapsed: Duration::from_millis(400),
+        };
+        assert!(matches!(prompt_probe(&fetch), PromptProbe::Refused));
+    }
+
+    /// Every transport failure git reports as `unable to access` is a skip
+    /// with git's own line as the reason: the server never answered, so the
+    /// prompt logic never ran.
+    #[test]
+    fn prompt_probe_transport_failures_are_unreached() {
+        let lines = [
+            "fatal: unable to access 'https://github.com/x/repo.git/': Failed to connect to github.com port 443 after 3 ms: Couldn't connect to server\n",
+            "fatal: unable to access 'https://github.com/x/repo.git/': Could not resolve host: github.com\n",
+            "fatal: unable to access 'https://github.com/x/repo.git/': LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443\n",
+            "fatal: unable to access 'https://github.com/x/repo.git/': Recv failure: Connection reset by peer\n",
+        ];
+        for line in lines {
+            let fetch = FetchOutcome::Failed {
+                exit_code: Some(128),
+                stderr: line.to_string(),
+                elapsed: Duration::from_millis(5),
+            };
+            match prompt_probe(&fetch) {
+                PromptProbe::Unreached(reason) => assert_eq!(reason, line.trim_end()),
+                other => panic!("{:?} must be Unreached, got {:?}", line, other),
+            }
+        }
+    }
+
+    /// The test's own limit expiring is a skip too: the bound is shorter than
+    /// curl's 75 s connect attempt, so a black-hole host lands here.
+    #[test]
+    fn prompt_probe_timed_out_is_unreached() {
+        let fetch = FetchOutcome::TimedOut {
+            after: Duration::from_secs(20),
+            stderr: String::new(),
+        };
+        match prompt_probe(&fetch) {
+            PromptProbe::Unreached(reason) => assert_eq!(reason, "timed out after 20s"),
+            other => panic!("expected Unreached, got {:?}", other),
+        }
+    }
+
+    /// An HTTP status means the server was reached, so the refusal path was
+    /// reachable and did not refuse: that is a failure for a person to read,
+    /// whether the probe URL rotted or the code changed.
+    #[test]
+    fn prompt_probe_http_status_is_unexpected() {
+        let fetch = FetchOutcome::Failed {
+            exit_code: Some(128),
+            stderr: "fatal: unable to access 'https://github.com/x/repo.git/': The requested URL returned error: 404\n".to_string(),
+            elapsed: Duration::from_millis(300),
+        };
+        match prompt_probe(&fetch) {
+            PromptProbe::Unexpected(reason) => {
+                assert!(reason.contains("returned error: 404"), "{}", reason)
+            }
+            other => panic!("expected Unexpected, got {:?}", other),
+        }
+    }
+
+    /// The refusal text under any other exit code, a spawn failure, a signal
+    /// death and a clean fetch all fail: none of them is the pinned shape.
+    #[test]
+    fn prompt_probe_other_shapes_are_unexpected() {
+        let refusal =
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled\n";
+        let shapes = [
+            FetchOutcome::Failed {
+                exit_code: Some(1),
+                stderr: refusal.to_string(),
+                elapsed: Duration::ZERO,
+            },
+            FetchOutcome::Failed {
+                exit_code: None,
+                stderr: format!("{}: No such file or directory", SPAWN_FAILURE_PREFIX),
+                elapsed: Duration::ZERO,
+            },
+            FetchOutcome::Failed {
+                exit_code: None,
+                stderr: String::new(),
+                elapsed: Duration::from_millis(10),
+            },
+            FetchOutcome::Ok,
+        ];
+        for fetch in shapes {
+            assert!(
+                matches!(prompt_probe(&fetch), PromptProbe::Unexpected(_)),
+                "{:?} must be Unexpected",
+                fetch
+            );
+        }
+    }
+
     /// A remote that would prompt for credentials fails at once with git's
     /// own "terminal prompts disabled" text instead of hanging. Needs the
-    /// network: skipped when github.com is unreachable or an askpass helper
-    /// is configured (it would answer the prompt instead).
+    /// network.
+    ///
+    /// Pass: `FetchOutcome::Failed` with exit code 128 and the refusal text.
+    /// Skip, with the reason printed: an askpass helper is configured (it
+    /// would answer the prompt); `github.com:443` does not accept a TCP
+    /// connect within 3 s; or the fetch itself never got an answer (a
+    /// transport failure, or the 20 s limit). The network can change between
+    /// the 3 s precheck and the fetch, and a connect failure cannot tell
+    /// "prompt refused" from "never got there": git consults
+    /// `GIT_TERMINAL_PROMPT` only after the server's 401, so a run that never
+    /// got an answer prints the same text and exit code with or without the
+    /// fix. Fail: anything else, including an HTTP status other than 401,
+    /// which means github answered and did not produce the refusal.
     #[test]
     fn sync_repo_reports_refused_https_prompt_as_fetch_failed() {
         use std::net::{TcpStream, ToSocketAddrs};
@@ -3547,18 +3707,12 @@ mod tests {
 
         let result = sync_repo_with_timeout(tmp.path(), Duration::from_secs(20));
 
-        match &result.fetch {
-            FetchOutcome::Failed {
-                exit_code, stderr, ..
-            } => {
-                assert_eq!(*exit_code, Some(128));
-                assert!(
-                    stderr.contains("terminal prompts disabled"),
-                    "expected git's refused-prompt text, got: {:?}",
-                    stderr
-                );
+        match prompt_probe(&result.fetch) {
+            PromptProbe::Refused => {}
+            PromptProbe::Unreached(reason) => {
+                eprintln!("skipping: github.com was not reached: {}", reason);
             }
-            other => panic!("expected FetchOutcome::Failed, got {:?}", other),
+            PromptProbe::Unexpected(reason) => panic!("{}", reason),
         }
     }
 
@@ -3566,9 +3720,22 @@ mod tests {
     /// that would prompt for credentials fails at once with git's own
     /// "terminal prompts disabled" text instead of prompting on the raw-mode
     /// terminal behind the alternate screen. A failed fetch is not an error:
-    /// the worktree is still created from local refs. Needs the network:
-    /// skipped when github.com is unreachable or an askpass helper is
-    /// configured (it would answer the prompt instead).
+    /// the worktree is still created from local refs. Needs the network.
+    ///
+    /// Pass: `Some(FetchOutcome::Failed)` with exit code 128 and the refusal
+    /// text, then the worktree exists and its branch starts at the local tip.
+    /// Skip, with the reason printed: an askpass helper is configured (it
+    /// would answer the prompt); `github.com:443` does not accept a TCP
+    /// connect within 3 s; or the fetch itself never got an answer (a
+    /// transport failure, or the 20 s limit). The network can change between
+    /// the 3 s precheck and the fetch, and a connect failure cannot tell
+    /// "prompt refused" from "never got there": git consults
+    /// `GIT_TERMINAL_PROMPT` only after the server's 401, so a run that never
+    /// got an answer prints the same text and exit code with or without the
+    /// fix. Fail: anything else, including an HTTP status other than 401,
+    /// which means github answered and did not produce the refusal. The
+    /// creation-from-local-refs half is only asserted on a pass; the
+    /// timed-out test below pins it without the network.
     #[test]
     fn create_worktree_refused_https_prompt_still_creates_from_local_refs() {
         use std::net::{TcpStream, ToSocketAddrs};
@@ -3628,18 +3795,17 @@ mod tests {
             PreCreateFetch::Run(Duration::from_secs(20)),
         );
 
-        match &attempt.fetch {
-            Some(FetchOutcome::Failed {
-                exit_code, stderr, ..
-            }) => {
-                assert_eq!(*exit_code, Some(128));
-                assert!(
-                    stderr.contains("terminal prompts disabled"),
-                    "expected git's refused-prompt text, got: {:?}",
-                    stderr
-                );
+        let fetch = attempt
+            .fetch
+            .as_ref()
+            .expect("PreCreateFetch::Run must record a fetch outcome");
+        match prompt_probe(fetch) {
+            PromptProbe::Refused => {}
+            PromptProbe::Unreached(reason) => {
+                eprintln!("skipping: github.com was not reached: {}", reason);
+                return;
             }
-            other => panic!("expected Some(FetchOutcome::Failed), got {:?}", other),
+            PromptProbe::Unexpected(reason) => panic!("{}", reason),
         }
         let path = attempt
             .created
