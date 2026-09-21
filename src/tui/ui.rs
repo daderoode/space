@@ -699,7 +699,7 @@ fn render_text_input_dialog(
     frame: &mut Frame,
 ) {
     use ratatui::widgets::Clear;
-    let dialog_w = (frame.area().width * 70 / 100).max(50);
+    let dialog_w = percent_of(frame.area().width, 70, 50);
     let area = centered_rect_fixed(dialog_w, 7, frame.area());
     frame.render_widget(Clear, area);
 
@@ -822,7 +822,7 @@ fn render_branch_strategy_picker(
     let branch_rows = if n > 0 { 1 + n as u16 + 1 } else { 1 };
     let content_rows = 3 + branch_rows;
     let height: u16 = content_rows + 2 + if has_error { 3 } else { 1 };
-    let dialog_w = (frame.area().width * 70 / 100).max(62);
+    let dialog_w = percent_of(frame.area().width, 70, 62);
     let area = centered_rect_fixed(dialog_w, height, frame.area());
     frame.render_widget(Clear, area);
 
@@ -923,22 +923,32 @@ fn render_branch_strategy_picker(
     }
 }
 
+/// `pct` percent of `dim`, at least `min`, never more than `dim`: the size of
+/// a dialog that takes a share of the frame. Every such size goes through
+/// here. Computed in `u32`, where `u16 * u16` cannot overflow, so a very wide
+/// or tall frame cannot either.
+fn percent_of(dim: u16, pct: u16, min: u16) -> u16 {
+    let share = u32::from(dim) * u32::from(pct) / 100;
+    share.max(u32::from(min)).min(u32::from(dim)) as u16
+}
+
 /// Shared dialog geometry for the Syncing and Creating stages: 70% of the
 /// frame wide (minimum 60), as tall as `content_rows` plus chrome (borders
-/// and footer) up to 80% of the frame height, never under 10 rows. Below the
-/// cap the dialog is exactly as tall as its content; at the cap it scrolls.
+/// and footer) up to 80% of the frame height, never under 10 rows unless the
+/// frame is. Below the cap the dialog is exactly as tall as its content; at
+/// the cap it scrolls.
 fn progress_dialog_area(frame_area: Rect, content_rows: usize) -> Rect {
     let dialog_w = progress_dialog_width(frame_area);
-    let cap = (usize::from(frame_area.height) * 80 / 100).max(10);
-    let height = (content_rows + 3).clamp(10, cap);
+    let cap = usize::from(percent_of(frame_area.height, 80, 10));
+    // Not `clamp(10, cap)`: on a frame under 10 rows the cap is the frame's
+    // height, below 10, and `clamp` panics when its bounds cross.
+    let height = (content_rows + 3).max(10).min(cap);
     centered_rect_fixed(dialog_w, height as u16, frame_area)
 }
 
-/// 70% of the frame, minimum 60, never wider than the frame. Computed in
-/// `usize` so a very wide frame cannot overflow `u16`.
+/// 70% of the frame, minimum 60, never wider than the frame.
 fn progress_dialog_width(frame_area: Rect) -> u16 {
-    let w = usize::from(frame_area.width);
-    (w * 70 / 100).max(60).min(w) as u16
+    percent_of(frame_area.width, 70, 60)
 }
 
 /// Pad `text` with spaces to `width` display columns.
@@ -1448,16 +1458,11 @@ fn render_config_editor(
 }
 
 fn centered_rect_percent(width_pct: u16, height_pct: u16, area: Rect) -> Rect {
-    let width = (area.width as u32 * width_pct as u32 / 100) as u16;
-    let height = (area.height as u32 * height_pct as u32 / 100) as u16;
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Rect {
-        x,
-        y,
-        width: width.min(area.width),
-        height: height.min(area.height),
-    }
+    centered_rect_fixed(
+        percent_of(area.width, width_pct, 0),
+        percent_of(area.height, height_pct, 0),
+        area,
+    )
 }
 
 fn render_diff_overlay(state: &crate::tui::screens::diff::DiffViewerState, frame: &mut Frame) {
@@ -1538,7 +1543,7 @@ fn render_help_overlay(help: &crate::tui::screens::help::HelpState, frame: &mut 
                                                               // Floor of 56 rather than 50: 56 leaves the 54-column interior that the
                                                               // registry test asserts every row fits, so that budget is now true at
                                                               // every width where the dialog is drawn, not only at 80 columns.
-    let dialog_w = (frame.area().width * 70 / 100).max(56);
+    let dialog_w = percent_of(frame.area().width, 70, 56);
     let area = centered_rect_fixed(dialog_w, height, frame.area());
     frame.render_widget(Clear, area);
 
@@ -1649,7 +1654,7 @@ fn render_switch_strategy_picker(
     let branch_rows: u16 = 1 + if n > 0 { 1 + n as u16 + 1 } else { 1 };
     let height: u16 = (branch_rows + 2 + if has_error { 3 } else { 1 })
         .min(frame.area().height.saturating_sub(2));
-    let dialog_w = (frame.area().width * 70 / 100).max(60);
+    let dialog_w = percent_of(frame.area().width, 70, 60);
     let area = centered_rect_fixed(dialog_w, height, frame.area());
     frame.render_widget(Clear, area);
 
@@ -1756,10 +1761,9 @@ fn render_gitops_overlay(
 ) {
     // Running stage: a network op (Phase 2: fetch) streaming live output.
     if state.stage == crate::tui::screens::gitops::GitOpsStage::Running {
-        let dialog_w = (frame.area().width * 60 / 100).max(48);
-        let dialog_h = (frame.area().height * 60 / 100)
-            .max(10)
-            .min(frame.area().height.saturating_sub(2));
+        let dialog_w = percent_of(frame.area().width, 60, 48);
+        let dialog_h =
+            percent_of(frame.area().height, 60, 10).min(frame.area().height.saturating_sub(2));
         let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
         let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
 
@@ -1808,10 +1812,9 @@ fn render_gitops_overlay(
 
     // Log stage: read-only scrollable list of recent commits.
     if state.stage == crate::tui::screens::gitops::GitOpsStage::Log {
-        let dialog_w = (frame.area().width * 70 / 100).max(56);
-        let dialog_h = (frame.area().height * 70 / 100)
-            .max(10)
-            .min(frame.area().height.saturating_sub(2));
+        let dialog_w = percent_of(frame.area().width, 70, 56);
+        let dialog_h =
+            percent_of(frame.area().height, 70, 10).min(frame.area().height.saturating_sub(2));
         let title = format!(" Git log: {} ({}) ", state.repo_name, state.branch);
         let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
 
@@ -1868,7 +1871,7 @@ fn render_gitops_overlay(
 
     // Rebase pre-flight: branch state plus either a blocker or a ready prompt.
     if state.stage == crate::tui::screens::gitops::GitOpsStage::RebasePreflight {
-        let dialog_w = (frame.area().width * 60 / 100).max(48);
+        let dialog_w = percent_of(frame.area().width, 60, 48);
         let dialog_h = 9u16.min(frame.area().height.saturating_sub(2));
         let title = format!(" Rebase: {} ({}) ", state.repo_name, state.branch);
         let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
@@ -1901,7 +1904,7 @@ fn render_gitops_overlay(
 
     // Rebase confirm: an ahead/behind preview plus the [y/N] prompt.
     if state.stage == crate::tui::screens::gitops::GitOpsStage::RebaseConfirm {
-        let dialog_w = (frame.area().width * 60 / 100).max(48);
+        let dialog_w = percent_of(frame.area().width, 60, 48);
         // Seven logical lines, but the preview, the abort note, and the push
         // note each wrap to two rows at the minimum width — reserve room so
         // [y/N] is never clipped.
@@ -1941,7 +1944,7 @@ fn render_gitops_overlay(
 
     // ConfirmPush stage: confirm publishing a branch that has no upstream.
     if state.stage == crate::tui::screens::gitops::GitOpsStage::ConfirmPush {
-        let dialog_w = (frame.area().width * 60 / 100).max(48);
+        let dialog_w = percent_of(frame.area().width, 60, 48);
         let dialog_h = 7u16.min(frame.area().height.saturating_sub(2));
         let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
         let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
@@ -1956,7 +1959,7 @@ fn render_gitops_overlay(
 
     // Committing stage: staged-file summary above a single-line message input.
     if state.stage == crate::tui::screens::gitops::GitOpsStage::Committing {
-        let dialog_w = (frame.area().width * 60 / 100).max(48);
+        let dialog_w = percent_of(frame.area().width, 60, 48);
         let staged_n = state.staged_files.len() as u16;
         // header + staged list + prompt + input + status row, plus the border.
         // The status row is always reserved because the layout below always
@@ -2011,7 +2014,7 @@ fn render_gitops_overlay(
 
     let has_status = state.status.is_some();
     let content_rows = 6u16 + if has_status { 1 } else { 0 };
-    let dialog_w = (frame.area().width * 50 / 100).max(40);
+    let dialog_w = percent_of(frame.area().width, 50, 40);
     let height: u16 = (content_rows + 2).min(frame.area().height.saturating_sub(2));
     let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
     let inner = gitops_dialog(title, dialog_w, height, frame);

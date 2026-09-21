@@ -9656,3 +9656,375 @@ fn create_name_is_trimmed_before_it_is_validated() {
     assert_eq!(st.ws_name.value(), "ws");
     assert!(st.error.is_none());
 }
+
+/// Ticket 34: a dialog's size is a percentage of the frame, with a minimum.
+/// Worked out in `u16`, the percentage overflowed once the frame passed about
+/// 936 columns or rows: a panic in a debug build, and in a release build a
+/// wrap to a dialog a few columns wide. Every dialog sized that way is here.
+mod dialog_size_tests {
+    use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use space::core::git::BranchInfo;
+    use space::tui::screens::create::{CreateStage, CreateState};
+    use space::tui::screens::diff::DiffViewerState;
+    use space::tui::screens::gitops::{GitOpsStage, GitOpsState};
+    use space::tui::screens::switch_branch::SwitchBranchState;
+
+    /// A dialog sized from the frame: an app showing it, the title that finds
+    /// it on screen, and the rect it must fill at each frame size the tests
+    /// use. The rects are worked out by hand from the dialog's percentage and
+    /// minimum, so a changed argument shows up as a moved border.
+    struct SizedDialog {
+        name: &'static str,
+        app: App,
+        title: String,
+        at_2000_by_2000: Rect,
+        at_64_by_14: Rect,
+        at_64_by_11: Rect,
+        at_64_by_8: Rect,
+    }
+
+    fn create_app(stage: CreateStage) -> App {
+        let mut app = test_app(vec![], vec![]);
+        let mut st = CreateState::new(vec![], vec![]);
+        st.stage = stage;
+        app.screen = Screen::CreateWorkspace(st);
+        app
+    }
+
+    fn gitops_app(stage: GitOpsStage) -> App {
+        let mut app = test_app(vec![], vec![]);
+        // A path that is not a repo: the state degrades to branch "?".
+        let mut st = GitOpsState::new(
+            "repo-a".to_string(),
+            PathBuf::from("/nonexistent/ticket-34/repo-a"),
+        );
+        st.stage = stage;
+        app.screen = Screen::GitOps(st);
+        app
+    }
+
+    fn sized_dialogs() -> Vec<SizedDialog> {
+        let mut help = test_app(vec![], vec![]);
+        help.handle_key(key(KeyCode::Char('?')));
+        assert!(help.help.is_some(), "fixture must open the help overlay");
+        // The help dialog is as tall as the registry plus borders and footer.
+        let help_rows = space::tui::keybindings::rendered_row_count() as u16 + 3;
+
+        let mut switch = test_app(vec![], vec![]);
+        switch.screen = Screen::SwitchBranch(SwitchBranchState::new(
+            "my-repo".to_string(),
+            PathBuf::from("/nonexistent/ticket-34/my-repo"),
+        ));
+
+        let mut diff = test_app(vec![], vec![]);
+        diff.screen = Screen::DiffViewer(DiffViewerState {
+            repo_index: 0,
+            repo_name: "repo-a".into(),
+            repo_path: PathBuf::from("/nonexistent/ticket-34/repo-a"),
+            file_path: "f.txt".into(),
+            staged: false,
+            diff: Err("unused".into()),
+            scroll_offset: 0,
+            total_lines: 1,
+        });
+
+        // Twenty log lines plus borders and footer want 23 rows, so the cap
+        // rather than the floor decides the height on a small frame.
+        let mut creating_20 = create_app(CreateStage::Creating);
+        if let Screen::CreateWorkspace(st) = &mut creating_20.screen {
+            st.progress = (1..=20).map(|i| format!("line {}", i)).collect();
+        }
+
+        let git = " Git: repo-a (?) ";
+        let rebase = " Rebase: repo-a (?) ";
+        vec![
+            SizedDialog {
+                name: "text input (70%, min 50)",
+                app: create_app(CreateStage::EnterName),
+                title: " Workspace Name ".into(),
+                at_2000_by_2000: Rect::new(300, 996, 1400, 7),
+                at_64_by_14: Rect::new(7, 3, 50, 7),
+                at_64_by_11: Rect::new(7, 2, 50, 7),
+                at_64_by_8: Rect::new(7, 0, 50, 7),
+            },
+            SizedDialog {
+                name: "branch strategy (70%, min 62)",
+                app: create_app(CreateStage::PickBranchStrategy),
+                title: " Branch Strategy ".into(),
+                at_2000_by_2000: Rect::new(300, 996, 1400, 7),
+                at_64_by_14: Rect::new(1, 3, 62, 7),
+                at_64_by_11: Rect::new(1, 2, 62, 7),
+                at_64_by_8: Rect::new(1, 0, 62, 7),
+            },
+            SizedDialog {
+                name: "help (70%, min 56)",
+                app: help,
+                title: " Help ".into(),
+                at_2000_by_2000: Rect::new(300, (2000 - help_rows) / 2, 1400, help_rows),
+                at_64_by_14: Rect::new(4, 0, 56, 14),
+                at_64_by_11: Rect::new(4, 0, 56, 11),
+                at_64_by_8: Rect::new(4, 0, 56, 8),
+            },
+            SizedDialog {
+                name: "switch branch strategy (70%, min 60)",
+                app: switch,
+                title: " Switch Branch: my-repo ".into(),
+                at_2000_by_2000: Rect::new(300, 997, 1400, 5),
+                at_64_by_14: Rect::new(2, 4, 60, 5),
+                at_64_by_11: Rect::new(2, 3, 60, 5),
+                at_64_by_8: Rect::new(2, 1, 60, 5),
+            },
+            SizedDialog {
+                name: "git-ops running (60%, min 48; height 60%, min 10)",
+                app: gitops_app(GitOpsStage::Running),
+                title: git.into(),
+                at_2000_by_2000: Rect::new(400, 400, 1200, 1200),
+                at_64_by_14: Rect::new(8, 2, 48, 10),
+                at_64_by_11: Rect::new(8, 1, 48, 9),
+                at_64_by_8: Rect::new(8, 1, 48, 6),
+            },
+            SizedDialog {
+                name: "git-ops log (70%, min 56; height 70%, min 10)",
+                app: gitops_app(GitOpsStage::Log),
+                title: " Git log: repo-a (?) ".into(),
+                at_2000_by_2000: Rect::new(300, 300, 1400, 1400),
+                at_64_by_14: Rect::new(4, 2, 56, 10),
+                at_64_by_11: Rect::new(4, 1, 56, 9),
+                at_64_by_8: Rect::new(4, 1, 56, 6),
+            },
+            SizedDialog {
+                name: "git-ops rebase preflight (60%, min 48)",
+                app: gitops_app(GitOpsStage::RebasePreflight),
+                title: rebase.into(),
+                at_2000_by_2000: Rect::new(400, 995, 1200, 9),
+                at_64_by_14: Rect::new(8, 2, 48, 9),
+                at_64_by_11: Rect::new(8, 1, 48, 9),
+                at_64_by_8: Rect::new(8, 1, 48, 6),
+            },
+            SizedDialog {
+                name: "git-ops rebase confirm (60%, min 48)",
+                app: gitops_app(GitOpsStage::RebaseConfirm),
+                title: rebase.into(),
+                at_2000_by_2000: Rect::new(400, 993, 1200, 13),
+                at_64_by_14: Rect::new(8, 1, 48, 12),
+                at_64_by_11: Rect::new(8, 1, 48, 9),
+                at_64_by_8: Rect::new(8, 1, 48, 6),
+            },
+            SizedDialog {
+                name: "git-ops confirm push (60%, min 48)",
+                app: gitops_app(GitOpsStage::ConfirmPush),
+                title: git.into(),
+                at_2000_by_2000: Rect::new(400, 996, 1200, 7),
+                at_64_by_14: Rect::new(8, 3, 48, 7),
+                at_64_by_11: Rect::new(8, 2, 48, 7),
+                at_64_by_8: Rect::new(8, 1, 48, 6),
+            },
+            SizedDialog {
+                name: "git-ops committing (60%, min 48)",
+                app: gitops_app(GitOpsStage::Committing),
+                title: git.into(),
+                at_2000_by_2000: Rect::new(400, 995, 1200, 9),
+                at_64_by_14: Rect::new(8, 2, 48, 9),
+                at_64_by_11: Rect::new(8, 1, 48, 9),
+                at_64_by_8: Rect::new(8, 1, 48, 6),
+            },
+            SizedDialog {
+                name: "git-ops menu (50%, min 40)",
+                app: gitops_app(GitOpsStage::Menu),
+                title: git.into(),
+                at_2000_by_2000: Rect::new(500, 996, 1000, 8),
+                at_64_by_14: Rect::new(12, 3, 40, 8),
+                at_64_by_11: Rect::new(12, 1, 40, 8),
+                at_64_by_8: Rect::new(12, 1, 40, 6),
+            },
+            SizedDialog {
+                name: "creating log, empty (70%, min 60; height floor 10)",
+                app: create_app(CreateStage::Creating),
+                title: " Creating Workspace ".into(),
+                at_2000_by_2000: Rect::new(300, 995, 1400, 10),
+                at_64_by_14: Rect::new(2, 2, 60, 10),
+                at_64_by_11: Rect::new(2, 0, 60, 10),
+                at_64_by_8: Rect::new(2, 0, 60, 8),
+            },
+            SizedDialog {
+                name: "creating log, 20 lines (height capped at 80%, cap at least 10)",
+                app: creating_20,
+                title: " Creating Workspace ".into(),
+                at_2000_by_2000: Rect::new(300, 988, 1400, 23),
+                at_64_by_14: Rect::new(2, 1, 60, 11),
+                at_64_by_11: Rect::new(2, 0, 60, 10),
+                at_64_by_8: Rect::new(2, 0, 60, 8),
+            },
+            SizedDialog {
+                name: "diff viewer (90% by 80%)",
+                app: diff,
+                title: " repo-a/f.txt \u{b7} HEAD \u{b7} unstaged ".into(),
+                at_2000_by_2000: Rect::new(100, 200, 1800, 1600),
+                at_64_by_14: Rect::new(3, 1, 57, 11),
+                at_64_by_11: Rect::new(3, 1, 57, 8),
+                at_64_by_8: Rect::new(3, 1, 57, 6),
+            },
+        ]
+    }
+
+    /// The rounded border around the first occurrence of `title`, read back
+    /// from the rendered cells.
+    fn find_dialog(buffer: &Buffer, title: &str) -> Result<Rect, String> {
+        let title: Vec<String> = title.chars().map(String::from).collect();
+        let len = title.len() as u16;
+        let (width, height) = (buffer.area.width, buffer.area.height);
+        let sym = |x: u16, y: u16| buffer[(x, y)].symbol();
+        for y in 0..height {
+            let Some(start) = (0..width.saturating_sub(len)).find(|&x| {
+                title
+                    .iter()
+                    .enumerate()
+                    .all(|(i, c)| sym(x + i as u16, y) == c)
+            }) else {
+                continue;
+            };
+            let mut left = start.checked_sub(1).ok_or("title at the left edge")?;
+            while sym(left, y) == "─" && left > 0 {
+                left -= 1;
+            }
+            let mut right = start + len;
+            while right + 1 < width && sym(right, y) == "─" {
+                right += 1;
+            }
+            let mut bottom = y + 1;
+            while bottom + 1 < height && sym(left, bottom) == "│" {
+                bottom += 1;
+            }
+            let corners = [
+                sym(left, y),
+                sym(right, y),
+                sym(left, bottom),
+                sym(right, bottom),
+            ];
+            if corners != ["╭", "╮", "╰", "╯"] {
+                return Err(format!(
+                    "title on row {} but corners {:?} at x {} and {}, y {} and {}",
+                    y, corners, left, right, y, bottom
+                ));
+            }
+            return Ok(Rect::new(left, y, right - left + 1, bottom - y + 1));
+        }
+        Err("title not found".to_string())
+    }
+
+    /// Render `dialog` on a fresh `width` x `height` terminal and compare its
+    /// border with `expected`. A panic is caught and reported, so one run
+    /// names every dialog that breaks rather than stopping at the first.
+    fn check(dialog: &SizedDialog, width: u16, height: u16, expected: Rect) -> Option<String> {
+        let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| space::tui::ui::view(&dialog.app, frame))
+                .unwrap();
+            find_dialog(terminal.backend().buffer(), &dialog.title)
+        }));
+        let problem = match found {
+            Ok(Ok(rect)) if rect == expected => return None,
+            Ok(Ok(rect)) => format!("drawn at {:?}, expected {:?}", rect, expected),
+            Ok(Err(e)) => e,
+            Err(payload) => {
+                let msg = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_default();
+                format!("panicked: {}", msg)
+            }
+        };
+        Some(format!(
+            "{} at {}x{}: {}",
+            dialog.name, width, height, problem
+        ))
+    }
+
+    /// Every percentage overflowed `u16` at 2000 (70% from 937, 60% from 1093,
+    /// 50% from 1311). The terminals are made one at a time: each 2000 x 2000
+    /// one holds three 4-million-cell buffers.
+    #[test]
+    fn every_percent_sized_dialog_keeps_its_size_on_a_2000_by_2000_frame() {
+        let failures: Vec<String> = sized_dialogs()
+            .iter()
+            .filter_map(|d| check(d, 2000, 2000, d.at_2000_by_2000))
+            .collect();
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    /// At 64 x 14 every minimum is larger than its percentage and still fits
+    /// (70% of 64 is 44, 60% is 38, 50% is 32; 60% and 70% of 14 are 8 and 9),
+    /// so each dialog's minimum decides its size. At 64 x 11 the git-ops
+    /// heights meet their two-row margin and the progress dialog's 80% cap
+    /// meets its floor of 10. At 64 x 8 every height is cut to the frame.
+    #[test]
+    fn every_percent_sized_dialog_keeps_its_minimum_on_a_small_frame() {
+        let failures: Vec<String> = sized_dialogs()
+            .iter()
+            .flat_map(|d| {
+                [
+                    check(d, 64, 14, d.at_64_by_14),
+                    check(d, 64, 11, d.at_64_by_11),
+                    check(d, 64, 8, d.at_64_by_8),
+                ]
+            })
+            .flatten()
+            .collect();
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    fn recent(name: &str) -> BranchInfo {
+        BranchInfo {
+            name: name.to_string(),
+            is_remote: false,
+            is_current: false,
+            // A timestamp of 0 renders as "unknown", which does not age.
+            last_commit_time: 0,
+        }
+    }
+
+    /// Below its minimum a strategy picker is drawn as wide as the frame, and
+    /// it truncates its rows for that width: a long label ends in an ellipsis
+    /// and a recent branch's time stays inside the border.
+    #[test]
+    fn strategy_pickers_fit_their_rows_to_a_frame_narrower_than_their_minimum() {
+        let mut app = test_app(vec![], vec![]);
+        let mut st = CreateState::new(vec![], vec![]);
+        st.ws_name = tui_input::Input::default().with_value("payments-reconciliation".into());
+        st.recent_branches = vec![recent("feature/login")];
+        st.stage = CreateStage::PickBranchStrategy;
+        app.screen = Screen::CreateWorkspace(st);
+        let rendered = render_text(&app, 50, 24);
+        let time_row = format!("│    feature/login{}unknown  │", " ".repeat(22));
+        for row in [
+            "│  Existing branch 'payments-reconciliation'...  │",
+            time_row.as_str(),
+        ] {
+            assert!(
+                rendered.lines().any(|l| l == row),
+                "branch strategy at 50 columns lacks the row\n{}\nin\n{}",
+                row,
+                rendered
+            );
+        }
+
+        let mut app = test_app(vec![], vec![]);
+        let mut st = SwitchBranchState::new(
+            "my-repo".to_string(),
+            PathBuf::from("/nonexistent/ticket-34/my-repo"),
+        );
+        st.recent_branches = vec![recent("feature/login")];
+        app.screen = Screen::SwitchBranch(st);
+        let rendered = render_text(&app, 50, 24);
+        assert!(
+            rendered.lines().any(|l| l == time_row),
+            "switch branch at 50 columns lacks the row\n{}\nin\n{}",
+            time_row,
+            rendered
+        );
+    }
+}
