@@ -9661,6 +9661,13 @@ fn create_name_is_trimmed_before_it_is_validated() {
 /// Worked out in `u16`, the percentage overflowed once the frame passed about
 /// 936 columns or rows: a panic in a debug build, and in a release build a
 /// wrap to a dialog a few columns wide. Every dialog sized that way is here.
+///
+/// A width overflows from 937 columns at 70%, 1093 at 60% and 1311 at 50%, and
+/// the two percentage heights from 937 rows (70%) and 1093 (60%), whatever the
+/// other dimension is. So the overflow tests use a frame 2000 wide and 40 tall
+/// for the widths, and one 100 wide and 2000 tall for the heights: both clear
+/// every threshold, at about 280 thousand cells a dialog instead of the 4
+/// million of a 2000 x 2000 frame.
 mod dialog_size_tests {
     use super::*;
     use ratatui::buffer::Buffer;
@@ -9679,7 +9686,8 @@ mod dialog_size_tests {
         name: &'static str,
         app: App,
         title: String,
-        at_2000_by_2000: Rect,
+        at_2000_by_40: Rect,
+        at_100_by_2000: Rect,
         at_64_by_14: Rect,
         at_64_by_11: Rect,
         at_64_by_8: Rect,
@@ -9745,7 +9753,8 @@ mod dialog_size_tests {
                 name: "text input (70%, min 50)",
                 app: create_app(CreateStage::EnterName),
                 title: " Workspace Name ".into(),
-                at_2000_by_2000: Rect::new(300, 996, 1400, 7),
+                at_2000_by_40: Rect::new(300, 16, 1400, 7),
+                at_100_by_2000: Rect::new(15, 996, 70, 7),
                 at_64_by_14: Rect::new(7, 3, 50, 7),
                 at_64_by_11: Rect::new(7, 2, 50, 7),
                 at_64_by_8: Rect::new(7, 0, 50, 7),
@@ -9754,7 +9763,8 @@ mod dialog_size_tests {
                 name: "branch strategy (70%, min 62)",
                 app: create_app(CreateStage::PickBranchStrategy),
                 title: " Branch Strategy ".into(),
-                at_2000_by_2000: Rect::new(300, 996, 1400, 7),
+                at_2000_by_40: Rect::new(300, 16, 1400, 7),
+                at_100_by_2000: Rect::new(15, 996, 70, 7),
                 at_64_by_14: Rect::new(1, 3, 62, 7),
                 at_64_by_11: Rect::new(1, 2, 62, 7),
                 at_64_by_8: Rect::new(1, 0, 62, 7),
@@ -9763,7 +9773,8 @@ mod dialog_size_tests {
                 name: "help (70%, min 56)",
                 app: help,
                 title: " Help ".into(),
-                at_2000_by_2000: Rect::new(300, (2000 - help_rows) / 2, 1400, help_rows),
+                at_2000_by_40: Rect::new(300, 0, 1400, 40),
+                at_100_by_2000: Rect::new(15, (2000 - help_rows) / 2, 70, help_rows),
                 at_64_by_14: Rect::new(4, 0, 56, 14),
                 at_64_by_11: Rect::new(4, 0, 56, 11),
                 at_64_by_8: Rect::new(4, 0, 56, 8),
@@ -9772,7 +9783,8 @@ mod dialog_size_tests {
                 name: "switch branch strategy (70%, min 60)",
                 app: switch,
                 title: " Switch Branch: my-repo ".into(),
-                at_2000_by_2000: Rect::new(300, 997, 1400, 5),
+                at_2000_by_40: Rect::new(300, 17, 1400, 5),
+                at_100_by_2000: Rect::new(15, 997, 70, 5),
                 at_64_by_14: Rect::new(2, 4, 60, 5),
                 at_64_by_11: Rect::new(2, 3, 60, 5),
                 at_64_by_8: Rect::new(2, 1, 60, 5),
@@ -9781,7 +9793,8 @@ mod dialog_size_tests {
                 name: "git-ops running (60%, min 48; height 60%, min 10)",
                 app: gitops_app(GitOpsStage::Running),
                 title: git.into(),
-                at_2000_by_2000: Rect::new(400, 400, 1200, 1200),
+                at_2000_by_40: Rect::new(400, 8, 1200, 24),
+                at_100_by_2000: Rect::new(20, 400, 60, 1200),
                 at_64_by_14: Rect::new(8, 2, 48, 10),
                 at_64_by_11: Rect::new(8, 1, 48, 9),
                 at_64_by_8: Rect::new(8, 1, 48, 6),
@@ -9790,7 +9803,8 @@ mod dialog_size_tests {
                 name: "git-ops log (70%, min 56; height 70%, min 10)",
                 app: gitops_app(GitOpsStage::Log),
                 title: " Git log: repo-a (?) ".into(),
-                at_2000_by_2000: Rect::new(300, 300, 1400, 1400),
+                at_2000_by_40: Rect::new(300, 6, 1400, 28),
+                at_100_by_2000: Rect::new(15, 300, 70, 1400),
                 at_64_by_14: Rect::new(4, 2, 56, 10),
                 at_64_by_11: Rect::new(4, 1, 56, 9),
                 at_64_by_8: Rect::new(4, 1, 56, 6),
@@ -9799,7 +9813,8 @@ mod dialog_size_tests {
                 name: "git-ops rebase preflight (60%, min 48)",
                 app: gitops_app(GitOpsStage::RebasePreflight),
                 title: rebase.into(),
-                at_2000_by_2000: Rect::new(400, 995, 1200, 9),
+                at_2000_by_40: Rect::new(400, 15, 1200, 9),
+                at_100_by_2000: Rect::new(20, 995, 60, 9),
                 at_64_by_14: Rect::new(8, 2, 48, 9),
                 at_64_by_11: Rect::new(8, 1, 48, 9),
                 at_64_by_8: Rect::new(8, 1, 48, 6),
@@ -9808,7 +9823,8 @@ mod dialog_size_tests {
                 name: "git-ops rebase confirm (60%, min 48)",
                 app: gitops_app(GitOpsStage::RebaseConfirm),
                 title: rebase.into(),
-                at_2000_by_2000: Rect::new(400, 993, 1200, 13),
+                at_2000_by_40: Rect::new(400, 13, 1200, 13),
+                at_100_by_2000: Rect::new(20, 993, 60, 13),
                 at_64_by_14: Rect::new(8, 1, 48, 12),
                 at_64_by_11: Rect::new(8, 1, 48, 9),
                 at_64_by_8: Rect::new(8, 1, 48, 6),
@@ -9817,7 +9833,8 @@ mod dialog_size_tests {
                 name: "git-ops confirm push (60%, min 48)",
                 app: gitops_app(GitOpsStage::ConfirmPush),
                 title: git.into(),
-                at_2000_by_2000: Rect::new(400, 996, 1200, 7),
+                at_2000_by_40: Rect::new(400, 16, 1200, 7),
+                at_100_by_2000: Rect::new(20, 996, 60, 7),
                 at_64_by_14: Rect::new(8, 3, 48, 7),
                 at_64_by_11: Rect::new(8, 2, 48, 7),
                 at_64_by_8: Rect::new(8, 1, 48, 6),
@@ -9826,7 +9843,8 @@ mod dialog_size_tests {
                 name: "git-ops committing (60%, min 48)",
                 app: gitops_app(GitOpsStage::Committing),
                 title: git.into(),
-                at_2000_by_2000: Rect::new(400, 995, 1200, 9),
+                at_2000_by_40: Rect::new(400, 15, 1200, 9),
+                at_100_by_2000: Rect::new(20, 995, 60, 9),
                 at_64_by_14: Rect::new(8, 2, 48, 9),
                 at_64_by_11: Rect::new(8, 1, 48, 9),
                 at_64_by_8: Rect::new(8, 1, 48, 6),
@@ -9835,7 +9853,8 @@ mod dialog_size_tests {
                 name: "git-ops menu (50%, min 40)",
                 app: gitops_app(GitOpsStage::Menu),
                 title: git.into(),
-                at_2000_by_2000: Rect::new(500, 996, 1000, 8),
+                at_2000_by_40: Rect::new(500, 16, 1000, 8),
+                at_100_by_2000: Rect::new(25, 996, 50, 8),
                 at_64_by_14: Rect::new(12, 3, 40, 8),
                 at_64_by_11: Rect::new(12, 1, 40, 8),
                 at_64_by_8: Rect::new(12, 1, 40, 6),
@@ -9844,7 +9863,8 @@ mod dialog_size_tests {
                 name: "creating log, empty (70%, min 60; height floor 10)",
                 app: create_app(CreateStage::Creating),
                 title: " Creating Workspace ".into(),
-                at_2000_by_2000: Rect::new(300, 995, 1400, 10),
+                at_2000_by_40: Rect::new(300, 15, 1400, 10),
+                at_100_by_2000: Rect::new(15, 995, 70, 10),
                 at_64_by_14: Rect::new(2, 2, 60, 10),
                 at_64_by_11: Rect::new(2, 0, 60, 10),
                 at_64_by_8: Rect::new(2, 0, 60, 8),
@@ -9853,7 +9873,8 @@ mod dialog_size_tests {
                 name: "creating log, 1700 lines (height capped at 80%, cap at least 10)",
                 app: creating_long,
                 title: " Creating Workspace ".into(),
-                at_2000_by_2000: Rect::new(300, 200, 1400, 1600),
+                at_2000_by_40: Rect::new(300, 4, 1400, 32),
+                at_100_by_2000: Rect::new(15, 200, 70, 1600),
                 at_64_by_14: Rect::new(2, 1, 60, 11),
                 at_64_by_11: Rect::new(2, 0, 60, 10),
                 at_64_by_8: Rect::new(2, 0, 60, 8),
@@ -9862,7 +9883,8 @@ mod dialog_size_tests {
                 name: "diff viewer (90% by 80%)",
                 app: diff,
                 title: " repo-a/f.txt \u{b7} HEAD \u{b7} unstaged ".into(),
-                at_2000_by_2000: Rect::new(100, 200, 1800, 1600),
+                at_2000_by_40: Rect::new(100, 4, 1800, 32),
+                at_100_by_2000: Rect::new(5, 200, 90, 1600),
                 at_64_by_14: Rect::new(3, 1, 57, 11),
                 at_64_by_11: Rect::new(3, 1, 57, 8),
                 at_64_by_8: Rect::new(3, 1, 57, 6),
@@ -9925,8 +9947,7 @@ mod dialog_size_tests {
     /// Render every dialog on its own `width` x `height` terminal and compare
     /// its border with the rect `expected` picks. A panic is caught and
     /// reported, so one run names every dialog that breaks rather than
-    /// stopping at the first. The terminals are made one at a time: a
-    /// 2000 x 2000 one holds three 4-million-cell buffers.
+    /// stopping at the first.
     fn check_all(width: u16, height: u16, expected: fn(&SizedDialog) -> Rect) -> Vec<String> {
         let mut failures = Vec::new();
         for dialog in sized_dialogs() {
@@ -9958,13 +9979,23 @@ mod dialog_size_tests {
         failures
     }
 
-    /// On master the first 11 dialogs overflowed `u16` here and panicked in a
-    /// debug build (70% from 937 cells, 60% from 1093, 50% from 1311). The
-    /// Creating logs and the diff viewer did not overflow on master; they are
-    /// here because their sizes moved onto the same helper.
+    /// On master the first 11 dialogs overflowed `u16` on their width here
+    /// and panicked in a debug build. The Creating logs and the diff viewer
+    /// did not overflow on master; they are here because their sizes moved
+    /// onto the same helper.
     #[test]
-    fn every_percent_sized_dialog_keeps_its_size_on_a_2000_by_2000_frame() {
-        let failures = check_all(2000, 2000, |d| d.at_2000_by_2000);
+    fn every_percent_sized_dialog_keeps_its_width_on_a_2000_column_frame() {
+        let failures = check_all(2000, 40, |d| d.at_2000_by_40);
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    /// On master the git-ops Running and Log dialogs overflowed `u16` on their
+    /// height here (every width is 70% or less of 100, so no width can). The
+    /// long Creating log reaches its 80% cap, and the diff viewer its 80%
+    /// height.
+    #[test]
+    fn every_percent_sized_dialog_keeps_its_height_on_a_2000_row_frame() {
+        let failures = check_all(100, 2000, |d| d.at_100_by_2000);
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     }
 
