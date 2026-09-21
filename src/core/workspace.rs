@@ -2046,10 +2046,13 @@ pub fn create_worktree_cancellable(
 /// - `ExistingBranch("origin/x")` adds `--track` from
 ///   `refs/remotes/origin/x`: always.
 /// - `ExistingBranch("<remote>/x")` for another configured remote
-///   (`split_remote_branch`) adds `--track` from `refs/remotes/<remote>/x`,
-///   which `git fetch origin` never writes under the default refspec: reads
-///   origin iff origin's fetch refspec can write under
-///   `refs/remotes/<remote>/` (`fetch_writes_under`).
+///   (`split_remote_branch`) adds `--track -b x` from
+///   `refs/remotes/<remote>/x`, which `git fetch origin` never writes under
+///   the default refspec, and creates `refs/heads/x`, which it never writes
+///   either: reads origin iff origin's fetch refspec can write under
+///   `refs/remotes/<remote>/` or under `refs/heads/` (`fetch_writes_under`;
+///   the second because a fetch that creates `refs/heads/x` turns the add
+///   into git's `already exists` refusal).
 /// - `ExistingBranch("x")` runs `git worktree add <wt> x`. With a local
 ///   branch `x` git checks it out at its local tip and never looks at
 ///   `origin/x`. Without one, git's own DWIM resolves `x` to `origin/x`
@@ -2064,26 +2067,32 @@ pub fn create_worktree_cancellable(
 /// `refs/heads/*`; the sync stage is what fast-forwards local branches, and
 /// it has already run. A repo whose fetch refspec does write into
 /// `refs/heads/*` (`fetch_writes_under`) has no such fixed point, so it
-/// fetches whatever the strategy; the same guard, asked about
-/// `refs/remotes/<remote>/`, covers the other-remote arm. A repo git2
-/// cannot open is treated as reading origin, the side that fetches.
+/// fetches whatever the strategy; the other-remote arm asks the same guard
+/// about `refs/remotes/<remote>/` as well. A repo git2 cannot open is
+/// treated as reading origin, the side that fetches.
 fn strategy_reads_origin(repo_path: &Path, strategy: &BranchStrategy, remotes: &[String]) -> bool {
-    // The ref namespace the add reads, and the local branch whose presence
-    // keeps the add off origin (the plain-name arm only).
-    let (read_under, local_name): (String, Option<&str>) = match strategy {
+    // The remote-tracking namespace the add reads (the other-remote arm
+    // only), and the local branch whose presence keeps the add off origin
+    // (the plain-name arm only).
+    let (tracking_under, local_name): (Option<String>, Option<&str>) = match strategy {
         BranchStrategy::NewBranch(_) => return true,
         BranchStrategy::ExistingBranch(name) => match split_remote_branch(name, remotes) {
             Some((remote, _)) if remote == DEFAULT_REMOTE => return true,
-            Some((remote, _)) => (format!("refs/remotes/{}/", remote), None),
-            None => ("refs/heads/".to_string(), Some(name.as_str())),
+            Some((remote, _)) => (Some(format!("refs/remotes/{}/", remote)), None),
+            None => (None, Some(name.as_str())),
         },
-        BranchStrategy::DetachedHead => ("refs/heads/".to_string(), None),
+        BranchStrategy::DetachedHead => (None, None),
     };
     let Ok(repo) = git2::Repository::open(repo_path) else {
         return true;
     };
-    if fetch_writes_under(&repo, &read_under) {
+    if fetch_writes_under(&repo, "refs/heads/") {
         return true;
+    }
+    if let Some(prefix) = tracking_under {
+        if fetch_writes_under(&repo, &prefix) {
+            return true;
+        }
     }
     match local_name {
         Some(name) => repo.find_branch(name, git2::BranchType::Local).is_err(),
@@ -5390,6 +5399,32 @@ mod tests {
                 refspec_writes_under(spec, "refs/heads/"),
                 expected,
                 "refspec {:?}",
+                spec
+            );
+        }
+        // The same classifier asked about another remote's namespace
+        // (ticket 25): an unqualified destination is a local branch, never
+        // a remote-tracking ref, and a wildcard counts only when its
+        // literal part can reach the prefix.
+        let upstream_cases = [
+            ("+refs/heads/*:refs/remotes/upstream/*", true),
+            ("+refs/heads/main:refs/remotes/upstream/feat", true),
+            ("+refs/heads/*:refs/remotes/*", true),
+            ("+refs/heads/*:refs/remotes/up*", true),
+            ("+refs/*:refs/*", true),
+            ("+refs/heads/*:refs/remotes/upstream/rel-*", true),
+            ("+refs/heads/*:refs/remotes/origin/*", false),
+            ("+refs/heads/*:refs/heads/*", false),
+            ("+refs/heads/feat:feat", false),
+            ("+refs/heads/*:*", false),
+            ("+refs/heads/*:refs/remotes/upstreamer/*", false),
+            ("refs/heads/feat", false),
+        ];
+        for (spec, expected) in upstream_cases {
+            assert_eq!(
+                refspec_writes_under(spec, "refs/remotes/upstream/"),
+                expected,
+                "refspec {:?} under refs/remotes/upstream/",
                 spec
             );
         }

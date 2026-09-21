@@ -3029,3 +3029,45 @@ fn list_branches_offers_every_remotes_branches() {
         branches
     );
 }
+
+/// T11 (skeptical review of PR #59). The tracking arm creates a local
+/// branch as well as reading a remote-tracking ref, so ticket 16's other
+/// invariant still holds for it: a repo whose origin refspec writes into
+/// `refs/heads/*` fetches whatever the strategy. Positive evidence: the
+/// fetch writes the local `mirror-main` the refspec names, and the add
+/// still lands on upstream's `feat`.
+#[test]
+fn an_origin_refspec_writing_local_branches_fetches_for_an_upstream_name() {
+    use space::core::workspace::{create_worktree_with_fetch, FetchOutcome, PreCreateFetch};
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/main:refs/heads/mirror-main",
+        ],
+    );
+
+    let attempt = create_worktree_with_fetch(
+        &f.repo,
+        &env.workspaces_dir,
+        "t11",
+        &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+        PreCreateFetch::Run(std::time::Duration::from_secs(20)),
+    );
+    let wt = attempt.created.expect("the worktree must be created");
+    assert_eq!(attempt.fetch, Some(FetchOutcome::Ok), "the fetch ran");
+    let mirrored = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/mirror-main"])
+        .current_dir(&f.repo)
+        .status()
+        .unwrap();
+    assert!(
+        mirrored.success(),
+        "the fetch wrote the local branch its refspec names"
+    );
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/upstream/feat");
+}
