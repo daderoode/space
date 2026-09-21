@@ -3644,9 +3644,7 @@ fn type_branch_name_and_go_back(app: &mut App, filled_in: &str, typed: &str) {
     }
 
     app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-    for c in typed.chars() {
-        app.handle_key(key(KeyCode::Char(c)));
-    }
+    type_text(app, typed);
     app.handle_key(key(KeyCode::Esc));
 
     if let Screen::CreateWorkspace(ref st) = app.screen {
@@ -3791,6 +3789,101 @@ fn create_strategy_label_truncates_a_long_typed_branch_name_at_80_columns() {
         "the row cannot be wider than the frame, row: {:?}",
         row
     );
+}
+
+/// The name inside a New branch row that is short enough not to be cut.
+fn new_branch_label(rendered: &str) -> String {
+    let row = new_branch_row(rendered);
+    let after = row
+        .split_once("New branch '")
+        .unwrap_or_else(|| panic!("no New branch row in {:?}", row))
+        .1;
+    let end = after
+        .rfind('\'')
+        .unwrap_or_else(|| panic!("the label is not closed in {:?}", row));
+    after[..end].to_string()
+}
+
+#[test]
+fn the_row_names_what_enter_creates_in_every_state_the_flow_can_reach() {
+    // The three tests above are examples of one rule; this is the rule. For
+    // every state of (branch name field, the space name the stage recorded,
+    // the live space name) that the keys can reach, the row names the branch
+    // that Enter in the stage it opens creates.
+    //
+    // No case here has a space name with surrounding whitespace: Stage 1
+    // writes back the trimmed name before anything can reach Stage 4
+    // (`create_name_is_trimmed_before_it_is_validated`). A space name that
+    // kept its padding is the one state where the row and Enter disagree,
+    // the row showing ` b ` where Enter creates `b`, and only a caller that
+    // sets `ws_name` itself can build it.
+    let cases: [(&str, Option<&str>, &str); 15] = [
+        // (named, what the field is left holding, renamed to)
+        ("a", None, "a"),
+        ("a", None, "b"),
+        ("a", None, ""),
+        ("a", Some(""), "a"),
+        ("a", Some(""), "b"),
+        ("a", Some("   "), "a"),
+        ("a", Some("   "), "b"),
+        ("a", Some("feat"), "a"),
+        ("a", Some("feat"), "b"),
+        ("a", Some("feat"), "feat"),
+        ("a", Some("a"), "a"),
+        ("a", Some("a"), "b"),
+        ("a", Some(" a "), "a"),
+        ("a", Some(" a "), "b"),
+        ("a", Some(" feat "), "b"),
+    ];
+
+    for (named, left_holding, renamed_to) in cases {
+        use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+        let case = (named, left_holding, renamed_to);
+
+        let mut app = create_at_branch_strategy(named);
+        // The first visit is what records the space name the field follows.
+        app.handle_key(key(KeyCode::Enter));
+        if let Some(text) = left_holding {
+            app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+            type_text(&mut app, text);
+        }
+        app.handle_key(key(KeyCode::Esc));
+        if let Screen::CreateWorkspace(ref mut st) = app.screen {
+            assert_eq!(
+                st.stage,
+                space::tui::screens::create::CreateStage::PickBranchStrategy,
+                "case {:?}: Esc returns to the picker",
+                case
+            );
+            st.ws_name = tui_input::Input::default().with_value(renamed_to.to_string());
+        } else {
+            panic!("case {:?}: expected CreateWorkspace screen", case);
+        }
+
+        let label = new_branch_label(&render_text(&app, 120, 24));
+
+        app.handle_key(key(KeyCode::Enter));
+        if let Screen::CreateWorkspace(ref st) = app.screen {
+            assert_eq!(
+                st.stage,
+                space::tui::screens::create::CreateStage::EnterBranchName,
+                "case {:?}: the row opens the branch name stage",
+                case
+            );
+            let creates = st.branch_name_input.value().trim();
+            assert_eq!(
+                label,
+                creates,
+                "case {:?}: the row said {:?} but Enter there creates {:?} (field {:?})",
+                case,
+                label,
+                creates,
+                st.branch_name_input.value()
+            );
+        } else {
+            panic!("case {:?}: expected CreateWorkspace screen", case);
+        }
+    }
 }
 
 #[test]
