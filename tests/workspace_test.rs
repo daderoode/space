@@ -4612,3 +4612,112 @@ fn a_pull_reports_a_namesake_gone_from_its_remote_without_reading_origin() {
     );
     assert_eq!(rev(&wt, "HEAD"), f.upstream_feat, "feat is where it was");
 }
+
+/// T13. A branch whose `branch.<name>.remote` names a remote the repo does
+/// not have is refused, though its merge names its own branch: `git fetch
+/// -- ghost` would read the name as a path, and here a repository sits at
+/// `ghost` beside the worktree, so the pull would fetch from it.
+#[test]
+fn a_pull_refuses_a_namesake_on_a_remote_the_repo_does_not_have() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = upstream_feat_space(&env, &f);
+    let ghost = wt.join("ghost");
+    git_ok(
+        &wt,
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "feat",
+            ghost.to_str().unwrap(),
+        ],
+    );
+    publish(&f.repo, &ghost, &f.upstream_feat, "feat");
+    git_ok(&f.repo, &["config", "branch.feat.remote", "ghost"]);
+    let fetch_head = wt.join(git_ok(&wt, &["rev-parse", "--git-path", "FETCH_HEAD"]).trim());
+    assert!(
+        !fetch_head.exists(),
+        "fixture: the worktree has not fetched"
+    );
+
+    let result = pull_repo(&wt);
+
+    assert_eq!(
+        result.outcome,
+        PullOutcome::NoUpstream,
+        "{}",
+        result.message
+    );
+    assert_eq!(
+        result.message,
+        "feat tracks ghost/feat, which space does not pull; nothing was pulled."
+    );
+    assert!(!fetch_head.exists(), "and nothing was fetched from ./ghost");
+}
+
+/// T14. A branch with two `branch.<name>.merge` values tracks two branches
+/// (git's pull merges both), which is not the one namesake space pulls: it
+/// is refused rather than read by whichever value was added last, here its
+/// own name, while upstream's `feat` has moved on.
+#[test]
+fn a_pull_refuses_a_branch_that_tracks_two_branches() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = upstream_feat_space(&env, &f);
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "--replace-all",
+            "branch.feat.merge",
+            "refs/heads/main",
+        ],
+    );
+    git_ok(
+        &f.repo,
+        &["config", "--add", "branch.feat.merge", "refs/heads/feat"],
+    );
+    let upstream_next = mint(&f.repo, &f.upstream_feat, "upstream-next");
+    publish(&f.repo, &upstream_bare(&f), &upstream_next, "feat");
+
+    let result = pull_repo(&wt);
+
+    assert_eq!(
+        result.outcome,
+        PullOutcome::NoUpstream,
+        "{}",
+        result.message
+    );
+    assert_eq!(
+        result.message,
+        "feat tracks upstream/main and upstream/feat, which space does not pull; \
+         nothing was pulled."
+    );
+    assert_eq!(rev(&wt, "HEAD"), f.upstream_feat, "feat is where it was");
+}
+
+/// T15. A `branch.<name>.merge` written with no value (a bare `merge` line,
+/// which only a hand edit makes) cannot be read: the pull says so and runs
+/// nothing, rather than panicking on the missing value.
+#[test]
+fn a_pull_refuses_a_branch_whose_merge_key_has_no_value() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = upstream_feat_space(&env, &f);
+    let config = f.repo.join(".git").join("config");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("[branch \"feat\"]\n\tmerge\n");
+    std::fs::write(&config, text).unwrap();
+
+    let result = pull_repo(&wt);
+
+    assert_eq!(result.outcome, PullOutcome::Failed, "{}", result.message);
+    assert_eq!(
+        result.message,
+        "Could not read what feat tracks (branch.feat.merge: set with no value); \
+         nothing was pulled."
+    );
+    assert_eq!(rev(&wt, "HEAD"), f.upstream_feat, "feat is where it was");
+}

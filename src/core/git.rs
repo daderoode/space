@@ -444,9 +444,9 @@ pub enum Upstream {
     /// The ref may not exist.
     Tracked { remote: String, refname: String },
     /// The branch tracks something on a remote other than origin that is
-    /// not its namesake there: a branch of another name, the repository
-    /// itself (`.`), a URL, or a remote the repo does not have. `tracks`
-    /// says what, for the refusal.
+    /// not its namesake there: a branch of another name, several branches
+    /// (one `merge` value each), the repository itself (`.`), a URL, or a
+    /// remote the repo does not have. `tracks` says what, for the refusal.
     Refused { tracks: String },
     /// A key could not be read (not UTF-8, a config error). Unknown acts on
     /// nothing, so this is never read as origin.
@@ -493,16 +493,21 @@ pub fn branch_upstream(repo: &Repository, branch: &str) -> Upstream {
         // depend on it.
         Some(remote) if remote == "origin" => remote,
         Some(remote) => {
-            let merge = match read(format!("branch.{}.merge", branch)) {
-                Ok(merge) => merge,
+            // Every value: git's pull merges one branch per value, so two
+            // values are two branches, not the namesake, whichever was
+            // added last.
+            let merges = match config_values(&config, &format!("branch.{}.merge", branch)) {
+                Ok(merges) => merges,
                 Err(reason) => return Upstream::Unreadable { reason },
             };
-            let namesake = merge.as_deref() == Some(format!("refs/heads/{}", branch).as_str());
+            let namesake = merges == [format!("refs/heads/{}", branch)];
+            // A configured remote only: `git fetch -- <name>` reads any
+            // other name as a path or URL.
             if namesake && repo.find_remote(&remote).is_ok() {
                 remote
             } else {
                 return Upstream::Refused {
-                    tracks: describe_upstream(&remote, merge.as_deref()),
+                    tracks: describe_upstream(&remote, &merges),
                 };
             }
         }
@@ -523,21 +528,51 @@ pub fn branch_upstream_at(repo_path: &Path, branch: &str) -> Upstream {
     }
 }
 
+/// Every value of `key`, in the order git lists them; none when it is not
+/// set. A value that is not UTF-8, or a key written with no value at all,
+/// cannot be read.
+fn config_values(config: &git2::Config, key: &str) -> Result<Vec<String>, String> {
+    let unreadable = |detail: &str| format!("{}: {}", key, detail);
+    let mut entries = match config.multivar(key, None) {
+        Ok(entries) => entries,
+        Err(e) if e.code() == git2::ErrorCode::NotFound => return Ok(vec![]),
+        Err(e) => return Err(unreadable(e.message())),
+    };
+    let mut values = vec![];
+    while let Some(entry) = entries.next() {
+        let entry = entry.map_err(|e| unreadable(e.message()))?;
+        // `value()` panics on a key with no value, so ask first.
+        if !entry.has_value() {
+            return Err(unreadable("set with no value"));
+        }
+        match entry.value() {
+            Some(value) => values.push(value.to_string()),
+            None => return Err(unreadable("configuration value is not valid utf8")),
+        }
+    }
+    Ok(values)
+}
+
 /// What a refused branch tracks, the way git abbreviates it: `upstream/main`
 /// for a remote's branch, `main` for the repository's own (`.`), the remote
-/// alone when no merge is set.
-fn describe_upstream(remote: &str, merge: Option<&str>) -> String {
-    match merge {
-        None => remote.to_string(),
-        Some(merge) => {
+/// alone when no merge is set, and every branch, joined, when there are
+/// several.
+fn describe_upstream(remote: &str, merges: &[String]) -> String {
+    if merges.is_empty() {
+        return remote.to_string();
+    }
+    merges
+        .iter()
+        .map(|merge| {
             let name = merge.strip_prefix("refs/heads/").unwrap_or(merge);
             if remote == "." {
                 name.to_string()
             } else {
                 format!("{}/{}", remote, name)
             }
-        }
-    }
+        })
+        .collect::<Vec<_>>()
+        .join(" and ")
 }
 
 /// A local branch strictly behind the branch it is read against, and that
