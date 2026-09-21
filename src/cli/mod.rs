@@ -70,7 +70,7 @@ pub(crate) fn resolve_repo_names(repos: &[PathBuf], names: &[String]) -> Result<
                 }
             }
             [] => {
-                if name.is_empty() || name.contains(['/', '\\']) {
+                if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\']) {
                     anyhow::bail!(
                         "'{name}' is not a repo name; pass the directory name exactly as 'space repos' lists it, with no path or scope"
                     );
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn resolve_repo_names_refuses_a_path_or_empty_argument_as_not_a_name() {
         let repos = cache(&["/r/api"]);
-        for arg in ["acme/", "./api", "/r/api", ""] {
+        for arg in ["acme/", "./api", "/r/api", "", ".", ".."] {
             let err = resolve_repo_names(&repos, &names(&[arg])).unwrap_err();
             assert!(
                 err.to_string()
