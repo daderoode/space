@@ -3805,7 +3805,7 @@ fn new_branch_label(rendered: &str) -> String {
 }
 
 #[test]
-fn the_row_names_what_enter_creates_in_every_state_the_flow_can_reach() {
+fn the_row_names_the_branch_enter_creates() {
     use space::core::workspace::BranchStrategy;
     use space::tui::actions::{ScreenAction, ScreenContext};
     use space::tui::screens::create::CreateStage;
@@ -3814,7 +3814,10 @@ fn the_row_names_what_enter_creates_in_every_state_the_flow_can_reach() {
     // each combination below of branch name field, recorded space name and
     // live space name, the row names the branch that Enter in the stage it
     // opens asks the create to make, and `branch_strategy()` reports that
-    // same name for the row.
+    // same name for the row. The cases are representative, not exhaustive:
+    // the agreement is structural (the row and the stage both read
+    // `new_branch_name()`, which trims a typed name as Enter does), and these
+    // cases pin the reads and the trims that make it so.
     //
     // The rename is written to `ws_name` directly, standing in for Esc back
     // to Stage 1. That stage writes back a trimmed, validated name
