@@ -4775,6 +4775,37 @@ mod tests {
         );
     }
 
+    /// T6c: the New-branch strategy on the T6b source (HEAD symbolic to a
+    /// remote-tracking ref) is refused by git itself, whatever the start
+    /// point: `git worktree add -b` dies with `HEAD not found below
+    /// refs/heads!` there (git 2.50.1, probed with every bare and qualified
+    /// start point, including master's bare `origin/main`). So this case is
+    /// neither fixed nor changed by ticket 24; the test pins that the error
+    /// reaching the caller is git's own sentence, so a later change that
+    /// makes the strategy silently detach or start elsewhere is noticed. It
+    /// passes on master too, and says so.
+    #[test]
+    fn new_branch_from_a_source_whose_head_is_not_a_local_branch_is_refused_by_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _) = gated_repo(tmp.path(), "repo");
+        git(&["symbolic-ref", "HEAD", "refs/remotes/origin/feat"], &repo);
+
+        let err = create_worktree_with_fetch(
+            &repo,
+            &tmp.path().join("ws"),
+            "ws",
+            &BranchStrategy::NewBranch("a".into()),
+            PreCreateFetch::Skip,
+        )
+        .created
+        .expect_err("git refuses to create a branch in such a repo");
+        assert!(
+            err.to_string().contains("HEAD not found below refs/heads!"),
+            "git's own refusal, got {:?}",
+            err.to_string()
+        );
+    }
+
     /// T7: `origin/feat` is read as `refs/remotes/origin/feat`, so a tag
     /// named `origin/feat` neither shadows it nor makes it ambiguous.
     #[test]
