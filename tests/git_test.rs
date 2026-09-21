@@ -1513,3 +1513,135 @@ fn ahead_behind_vs_returns_none_on_detached_head() {
         "detached HEAD must degrade to None even when the target resolves"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Ticket 42: status counts against the branch a branch tracks when that is
+// its namesake on another remote, and a detached worktree against
+// `origin/HEAD`, as before.
+// ---------------------------------------------------------------------------
+
+/// Run git in `dir` and return its stdout, asserting it worked.
+fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A new commit on `parent`, minted without touching any checkout.
+fn mint_commit(repo: &std::path::Path, parent: &str, msg: &str) -> String {
+    let tree = format!("{}^{{tree}}", parent);
+    git_out(repo, &["commit-tree", &tree, "-p", parent, "-m", msg])
+}
+
+/// T9. A worktree made from `upstream/feat` tracks upstream's `feat`, and
+/// its status counts against it: one commit of its own, one of upstream's
+/// it lacks. Origin has no `feat`, so on master the counts were 0 and 0
+/// (`space status` printed no Tracking line, MCP said `ahead: 0, behind: 0`).
+#[test]
+fn status_counts_against_a_namesake_on_another_remote() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    common::init_repo(&repo);
+    for name in ["origin", "upstream"] {
+        let bare = tmp.path().join(format!("{}.git", name));
+        std::fs::create_dir(&bare).unwrap();
+        git_out(&bare, &["init", "-q", "--bare", "-b", "main"]);
+        git_out(&repo, &["remote", "add", name, bare.to_str().unwrap()]);
+        git_out(&repo, &["push", "-q", name, "main"]);
+    }
+    let upstream_feat = mint_commit(&repo, "main", "upstream-feat");
+    git_out(
+        &repo,
+        &[
+            "push",
+            "-q",
+            "upstream",
+            &format!("{}:refs/heads/feat", upstream_feat),
+        ],
+    );
+    git_out(&repo, &["fetch", "-q", "--all"]);
+    let ws_dir = tmp.path().join("ws");
+    let wt = space::core::workspace::create_worktree(
+        &repo,
+        &ws_dir,
+        "s",
+        &space::core::workspace::BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+    )
+    .unwrap();
+    let upstream_next = mint_commit(&repo, &upstream_feat, "upstream-next");
+    git_out(
+        &repo,
+        &[
+            "push",
+            "-q",
+            "upstream",
+            &format!("{}:refs/heads/feat", upstream_next),
+        ],
+    );
+    git_out(&wt, &["commit", "-q", "--allow-empty", "-m", "mine"]);
+
+    assert_eq!(space::core::git::ahead_behind(&wt).unwrap(), (1, 1));
+    let detail = space::core::workspace::workspace_detail(&ws_dir, "s").unwrap();
+    assert_eq!(
+        (detail.repos[0].ahead, detail.repos[0].behind),
+        (1, 1),
+        "workspace_detail, which space status and MCP print"
+    );
+}
+
+/// T10. A detached worktree's status still counts against `origin/HEAD`,
+/// as the guide says: origin's main has one commit the worktree lacks.
+#[test]
+fn status_of_a_detached_worktree_counts_against_origin_head() {
+    let tmp = TempDir::new().unwrap();
+    let seed = tmp.path().join("seed");
+    std::fs::create_dir(&seed).unwrap();
+    common::init_repo(&seed);
+    let origin = tmp.path().join("origin.git");
+    std::fs::create_dir(&origin).unwrap();
+    git_out(&origin, &["init", "-q", "--bare", "-b", "main"]);
+    git_out(&seed, &["push", "-q", origin.to_str().unwrap(), "main"]);
+    git_out(
+        tmp.path(),
+        &["clone", "-q", origin.to_str().unwrap(), "clone"],
+    );
+    let clone = tmp.path().join("clone");
+    assert_eq!(
+        git_out(&clone, &["symbolic-ref", "refs/remotes/origin/HEAD"]),
+        "refs/remotes/origin/main",
+        "fixture: the clone has origin/HEAD"
+    );
+    let ws_dir = tmp.path().join("ws");
+    let wt = space::core::workspace::create_worktree(
+        &clone,
+        &ws_dir,
+        "d",
+        &space::core::workspace::BranchStrategy::DetachedHead,
+    )
+    .unwrap();
+    let next = mint_commit(&seed, "main", "next");
+    git_out(
+        &seed,
+        &[
+            "push",
+            "-q",
+            origin.to_str().unwrap(),
+            &format!("{}:refs/heads/main", next),
+        ],
+    );
+    git_out(&clone, &["fetch", "-q", "origin"]);
+
+    assert_eq!(space::core::git::ahead_behind(&wt).unwrap(), (0, 1));
+    let detail = space::core::workspace::workspace_detail(&ws_dir, "d").unwrap();
+    assert_eq!((detail.repos[0].ahead, detail.repos[0].behind), (0, 1));
+}

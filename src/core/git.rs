@@ -294,11 +294,19 @@ pub fn ahead_behind_from_repo(repo: &Repository) -> Result<(usize, usize)> {
         Some(o) => o,
         None => return Ok((0, 0)),
     };
-    let branch_name = match head.shorthand() {
-        Some(n) => n.to_string(),
-        None => return Ok((0, 0)),
+    let upstream_ref = if head.is_branch() {
+        let Some(branch_name) = head.shorthand() else {
+            return Ok((0, 0));
+        };
+        match branch_upstream(repo, branch_name) {
+            Upstream::Tracked { refname, .. } => refname,
+            Upstream::Refused { .. } | Upstream::Unreadable { .. } => return Ok((0, 0)),
+        }
+    } else {
+        // A detached HEAD's shorthand is `HEAD`, so it has always been
+        // counted against `origin/HEAD`; the guide says so.
+        "refs/remotes/origin/HEAD".to_string()
     };
-    let upstream_ref = format!("refs/remotes/origin/{}", branch_name);
     let upstream_oid = match repo.refname_to_id(&upstream_ref) {
         Ok(o) => o,
         Err(_) => return Ok((0, 0)),
@@ -307,30 +315,15 @@ pub fn ahead_behind_from_repo(repo: &Repository) -> Result<(usize, usize)> {
     Ok((ahead, behind))
 }
 
-/// Return (ahead, behind) relative to the upstream tracking branch.
-/// Returns (0, 0) if there is no upstream or the repo has no remote.
+/// Return (ahead, behind) against the branch `branch_upstream` reads for
+/// the current branch (`origin/<branch>`, or its namesake on the other
+/// remote it tracks), or against `origin/HEAD` on a detached HEAD.
+/// Returns (0, 0) when that ref is absent or refused, or the repo has no
+/// remote.
 #[allow(dead_code)] // used by integration tests (space::core::git); bin crate has private mod core
 pub fn ahead_behind(repo_path: &Path) -> Result<(usize, usize)> {
     let repo = Repository::open(repo_path)?;
-    let head = repo.head()?;
-    let local_oid = match head.target() {
-        Some(o) => o,
-        None => return Ok((0, 0)),
-    };
-
-    let branch_name = match head.shorthand() {
-        Some(n) => n.to_string(),
-        None => return Ok((0, 0)),
-    };
-
-    let upstream_ref = format!("refs/remotes/origin/{}", branch_name);
-    let upstream_oid = match repo.refname_to_id(&upstream_ref) {
-        Ok(o) => o,
-        Err(_) => return Ok((0, 0)),
-    };
-
-    let (ahead, behind) = repo.graph_ahead_behind(local_oid, upstream_oid)?;
-    Ok((ahead, behind))
+    ahead_behind_from_repo(&repo)
 }
 
 /// Return `(ahead, behind)` of the current `HEAD` relative to an arbitrary
@@ -443,14 +436,126 @@ pub fn push_target(repo_path: &Path) -> Option<PushTarget> {
     None
 }
 
-/// Return the names of all local branches that are strictly behind their
-/// `origin/<branch>` ref (0 commits ahead, 1+ commits behind). The comparison is
-/// always against `refs/remotes/origin/<name>`, not any configured upstream, so
-/// this assumes a single remote named `origin`. Branches with no matching
-/// `origin/<branch>` ref, equal, ahead, or diverged are excluded. Used by
-/// `sync_repo` to identify which branches are safe to fast-forward without
-/// losing local work.
-pub fn branches_behind_upstream(repo_path: &Path) -> Vec<String> {
+/// What pull, sync and status compare a local branch with (ticket 42).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Upstream {
+    /// Compare with `refname` (fully qualified,
+    /// `refs/remotes/<remote>/<branch>`), which a fetch of `remote` updates.
+    /// The ref may not exist.
+    Tracked { remote: String, refname: String },
+    /// The branch tracks something on a remote other than origin that is
+    /// not its namesake there: a branch of another name, the repository
+    /// itself (`.`), a URL, or a remote the repo does not have. `tracks`
+    /// says what, for the refusal.
+    Refused { tracks: String },
+    /// A key could not be read (not UTF-8, a config error). Unknown acts on
+    /// nothing, so this is never read as origin.
+    Unreadable { reason: String },
+}
+
+/// The branch pull, sync and status read for local branch `branch`, from
+/// the two keys git's own fetch and pull read, `branch.<name>.remote` and
+/// `branch.<name>.merge`:
+/// - no remote, or `origin` whatever the merge: `refs/remotes/origin/<name>`,
+///   the rule from before ticket 42. That includes a new branch started
+///   from `origin/<base>`, which git sets to track the base.
+/// - the namesake (`merge` is `refs/heads/<name>`) on another remote the
+///   repo has: `refs/remotes/<remote>/<name>`, the ref ticket 25's
+///   `--track` add reads, so every branch made from `<remote>/<name>` is
+///   followed.
+/// - anything else on a remote that is not origin: `Refused`, so origin is
+///   never read for a branch configured to track another remote.
+///
+/// Not `push_target`: a push reads `pushRemote` and `remote.pushDefault`
+/// first, and a pull does not, so a branch that pulls from upstream and
+/// pushes to a fork must still be read against upstream.
+pub fn branch_upstream(repo: &Repository, branch: &str) -> Upstream {
+    let config = match repo.config() {
+        Ok(c) => c,
+        Err(e) => {
+            return Upstream::Unreadable {
+                reason: e.message().to_string(),
+            }
+        }
+    };
+    let read = |key: String| match config.get_string(&key) {
+        Ok(value) => Ok(Some(value)),
+        Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {}", key, e.message())),
+    };
+    let (remote, merge) = match (
+        read(format!("branch.{}.remote", branch)),
+        read(format!("branch.{}.merge", branch)),
+    ) {
+        (Ok(remote), Ok(merge)) => (remote, merge),
+        (Err(reason), _) | (_, Err(reason)) => return Upstream::Unreadable { reason },
+    };
+    let remote = match remote {
+        None => "origin".to_string(),
+        Some(remote) if remote == "origin" => remote,
+        Some(remote) => {
+            let namesake = merge.as_deref() == Some(format!("refs/heads/{}", branch).as_str());
+            if namesake && repo.find_remote(&remote).is_ok() {
+                remote
+            } else {
+                return Upstream::Refused {
+                    tracks: describe_upstream(&remote, merge.as_deref()),
+                };
+            }
+        }
+    };
+    Upstream::Tracked {
+        refname: format!("refs/remotes/{}/{}", remote, branch),
+        remote,
+    }
+}
+
+/// `branch_upstream` for a path; a repo that does not open is unreadable.
+pub fn branch_upstream_at(repo_path: &Path, branch: &str) -> Upstream {
+    match Repository::open(repo_path) {
+        Ok(repo) => branch_upstream(&repo, branch),
+        Err(e) => Upstream::Unreadable {
+            reason: e.message().to_string(),
+        },
+    }
+}
+
+/// What a refused branch tracks, the way git abbreviates it: `upstream/main`
+/// for a remote's branch, `main` for the repository's own (`.`), the remote
+/// alone when no merge is set.
+fn describe_upstream(remote: &str, merge: Option<&str>) -> String {
+    match merge {
+        None => remote.to_string(),
+        Some(merge) => {
+            let name = merge.strip_prefix("refs/heads/").unwrap_or(merge);
+            if remote == "." {
+                name.to_string()
+            } else {
+                format!("{}/{}", remote, name)
+            }
+        }
+    }
+}
+
+/// A local branch strictly behind the branch it is read against, and that
+/// branch's fully qualified name (`refs/remotes/<remote>/<name>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BehindBranch {
+    pub name: String,
+    pub target: String,
+}
+
+/// Return every local branch that is strictly behind the branch
+/// `branch_upstream` reads for it (0 commits ahead, 1+ commits behind),
+/// with that branch's name, so the fast-forward moves it to the very ref
+/// the comparison read. That is `refs/remotes/origin/<name>` for a branch
+/// that tracks nothing or tracks origin, and `refs/remotes/<remote>/<name>`
+/// for one that tracks its namesake on another remote. A branch
+/// `branch_upstream` refuses or cannot read, one whose ref is absent, and
+/// one that is equal, ahead, or diverged are excluded. Used by `sync_repo`
+/// to identify which branches are safe to fast-forward without losing
+/// local work.
+pub fn branches_behind_upstream(repo_path: &Path) -> Vec<BehindBranch> {
     let repo = match Repository::open(repo_path) {
         Ok(r) => r,
         Err(_) => return vec![],
@@ -470,8 +575,10 @@ pub fn branches_behind_upstream(repo_path: &Path) -> Vec<String> {
         let Some(local_oid) = branch.get().target() else {
             continue;
         };
-        let upstream_ref = format!("refs/remotes/origin/{}", name);
-        let upstream_oid = match repo.refname_to_id(&upstream_ref) {
+        let Upstream::Tracked { refname, .. } = branch_upstream(&repo, &name) else {
+            continue;
+        };
+        let upstream_oid = match repo.refname_to_id(&refname) {
             Ok(o) => o,
             Err(_) => continue,
         };
@@ -479,7 +586,10 @@ pub fn branches_behind_upstream(repo_path: &Path) -> Vec<String> {
             continue;
         };
         if ahead == 0 && behind > 0 {
-            result.push(name);
+            result.push(BehindBranch {
+                name,
+                target: refname,
+            });
         }
     }
     result
@@ -1035,16 +1145,18 @@ mod tests {
     fn branches_behind_upstream_returns_branches_behind_remote() {
         let (_tmp, local) = make_behind_repo();
         let behind = branches_behind_upstream(&local);
-        assert!(
-            behind.contains(&"main".to_string()),
-            "main should be behind: {:?}",
-            behind
-        );
-        assert!(
-            behind.contains(&"dev".to_string()),
-            "dev should be behind: {:?}",
-            behind
-        );
+        for name in ["main", "dev"] {
+            let expected = BehindBranch {
+                name: name.to_string(),
+                target: format!("refs/remotes/origin/{}", name),
+            };
+            assert!(
+                behind.contains(&expected),
+                "{} should be behind origin's: {:?}",
+                name,
+                behind
+            );
+        }
     }
 
     #[test]
@@ -1070,7 +1182,7 @@ mod tests {
 
         let behind = branches_behind_upstream(&local);
         assert!(
-            !behind.contains(&"main".to_string()),
+            !behind.iter().any(|b| b.name == "main"),
             "main should NOT be behind when it has local-only commits: {:?}",
             behind
         );

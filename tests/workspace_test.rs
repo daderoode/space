@@ -4184,3 +4184,431 @@ fn a_gitfile_with_blanks_after_a_path_that_holds_a_blank_is_a_near_miss() {
     );
     assert!(wt.join("mine.txt").exists(), "and its work is still there");
 }
+
+// ---------------------------------------------------------------------------
+// Ticket 42: pull, sync and status read the branch a branch tracks when that
+// is its namesake on another remote, origin's as before otherwise, and
+// refuse anything else on a remote that is not origin.
+// ---------------------------------------------------------------------------
+
+use space::core::workspace::{pull_repo, sync_repo, PullOutcome};
+
+/// The bare repo `two_remote_repo` made for `upstream`.
+fn upstream_bare(f: &TwoRemotes) -> PathBuf {
+    f._tmp.path().join("upstream.git")
+}
+
+/// A new commit on `parent`, minted without touching any checkout.
+fn mint(repo: &Path, parent: &str, msg: &str) -> String {
+    let tree = format!("{}^{{tree}}", parent);
+    git_ok(repo, &["commit-tree", &tree, "-p", parent, "-m", msg])
+        .trim()
+        .to_string()
+}
+
+/// Point `branch` on the bare repo at `sha`. Pushed by path, not by remote
+/// name, so the clone's remote-tracking refs do not move: the clone sees the
+/// commit only once something fetches that remote.
+fn publish(repo: &Path, bare: &Path, sha: &str, branch: &str) {
+    let refspec = format!("{}:refs/heads/{}", sha, branch);
+    git_ok(
+        repo,
+        &["push", "-q", "-f", bare.to_str().unwrap(), &refspec],
+    );
+}
+
+fn rev(repo: &Path, name: &str) -> String {
+    git_ok(repo, &["rev-parse", name]).trim().to_string()
+}
+
+fn ref_present(repo: &Path, refname: &str) -> bool {
+    Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", refname])
+        .current_dir(repo)
+        .status()
+        .unwrap()
+        .success()
+}
+
+fn is_ancestor(repo: &Path, ancestor: &str, of: &str) -> bool {
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", ancestor, of])
+        .current_dir(repo)
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// The space `s` made from `upstream/feat` by ticket 25's path, so `feat`
+/// tracks `refs/remotes/upstream/feat` exactly as git wrote it.
+fn upstream_feat_space(env: &TestEnv, f: &TwoRemotes) -> PathBuf {
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "s",
+        &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+    )
+    .unwrap();
+    assert_eq!(
+        upstream_of(&f.repo, "feat"),
+        "refs/remotes/upstream/feat",
+        "fixture: feat tracks upstream's feat"
+    );
+    wt
+}
+
+/// T1. A pull of a branch that tracks its namesake on upstream merges
+/// upstream's branch, never origin's. Origin's `feat` has diverged from it
+/// and upstream's has moved on; on master the pull merged origin's `feat`
+/// into the upstream-tracking branch.
+#[test]
+fn a_pull_follows_a_namesake_on_another_remote() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = upstream_feat_space(&env, &f);
+    let origin_only = mint(&f.repo, &f.origin_feat, "origin-only");
+    publish(&f.repo, &f.origin, &origin_only, "feat");
+    let upstream_next = mint(&f.repo, &f.upstream_feat, "upstream-next");
+    publish(&f.repo, &upstream_bare(&f), &upstream_next, "feat");
+    git_ok(&f.repo, &["fetch", "-q", "--all"]);
+
+    let result = pull_repo(&wt);
+
+    assert_eq!(
+        result.outcome,
+        PullOutcome::FastForwarded,
+        "{}",
+        result.message
+    );
+    assert_eq!(
+        result.message,
+        "Fast-forwarded feat to upstream/feat (1 commit(s))."
+    );
+    assert_eq!(rev(&wt, "HEAD"), upstream_next, "at upstream's new tip");
+    assert!(
+        !is_ancestor(&wt, &origin_only, "HEAD"),
+        "origin's commit is not in the branch"
+    );
+}
+
+/// T2. The pull fetches the remote the branch tracks, and its merge arm
+/// merges that remote's branch: a commit that reached upstream after the
+/// space was made is merged with the branch's own commit, though nothing in
+/// the clone has fetched upstream since. Fetching origin and merging
+/// upstream's ref would report the branch ahead; merging origin's ref here
+/// would merge nothing of upstream's.
+#[test]
+fn a_pull_fetches_and_merges_the_remote_the_branch_tracks() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = upstream_feat_space(&env, &f);
+    let upstream_next = mint(&f.repo, &f.upstream_feat, "upstream-next");
+    publish(&f.repo, &upstream_bare(&f), &upstream_next, "feat");
+    assert_eq!(
+        rev(&f.repo, "refs/remotes/upstream/feat"),
+        f.upstream_feat,
+        "fixture: the clone has not seen upstream's new commit"
+    );
+    git_ok(&wt, &["commit", "-q", "--allow-empty", "-m", "mine"]);
+
+    let result = pull_repo(&wt);
+
+    assert_eq!(result.outcome, PullOutcome::Merged, "{}", result.message);
+    assert_eq!(
+        result.message,
+        "Merged upstream/feat into feat (1 ahead, 1 behind)."
+    );
+    assert!(
+        is_ancestor(&wt, &upstream_next, "HEAD"),
+        "upstream's new commit is in the branch"
+    );
+    assert_eq!(
+        git_ok(&wt, &["log", "-1", "--format=%s"]).trim(),
+        "Merge remote-tracking branch 'upstream/feat' into feat"
+    );
+}
+
+/// T3. A branch that tracks a branch of another name on a remote that is
+/// not origin is refused with a sentence, and nothing runs: `fix` tracks
+/// `upstream/main`, origin has a `fix` strictly ahead of it, and upstream's
+/// `main` has moved too. Falling back to origin would fast-forward to
+/// origin's `fix`; following git's upstream would pull `main` into it;
+/// reading the namesake on upstream would report `upstream/fix` missing.
+#[test]
+fn a_pull_refuses_an_upstream_of_another_name_on_another_remote() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let main = rev(&f.repo, "refs/remotes/upstream/main");
+    git_ok(
+        &f.repo,
+        &[
+            "branch",
+            "-q",
+            "--track",
+            "fix",
+            "refs/remotes/upstream/main",
+        ],
+    );
+    assert_eq!(
+        upstream_of(&f.repo, "fix"),
+        "refs/remotes/upstream/main",
+        "fixture: fix tracks upstream's main"
+    );
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "s",
+        &BranchStrategy::ExistingBranch("fix".to_string()),
+    )
+    .unwrap();
+    let origin_fix = mint(&f.repo, &main, "origin-fix");
+    publish(&f.repo, &f.origin, &origin_fix, "fix");
+    let upstream_main = mint(&f.repo, &main, "upstream-main");
+    publish(&f.repo, &upstream_bare(&f), &upstream_main, "main");
+
+    let result = pull_repo(&wt);
+
+    assert_eq!(
+        result.outcome,
+        PullOutcome::NoUpstream,
+        "{}",
+        result.message
+    );
+    assert_eq!(
+        result.message,
+        "fix tracks upstream/main, which space does not pull; nothing was pulled."
+    );
+    assert_eq!(rev(&wt, "HEAD"), main, "fix is where it was");
+    assert!(
+        !ref_present(&f.repo, "refs/remotes/origin/fix"),
+        "and nothing was fetched"
+    );
+}
+
+/// T4. A new branch started from `origin/main` tracks `origin/main` (git's
+/// `branch.autoSetupMerge`), and a pull of it still reads `origin/<branch>`
+/// as before ticket 42: the base is neither fast-forwarded nor merged into
+/// the branch, which is what following git's upstream literally would do.
+#[test]
+fn a_pull_of_a_new_branch_still_reads_its_own_name_on_origin() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "newb",
+        &BranchStrategy::NewBranch("newb".to_string()),
+    )
+    .unwrap();
+    assert_eq!(
+        upstream_of(&f.repo, "newb"),
+        "refs/remotes/origin/main",
+        "fixture: git set the new branch to track its base"
+    );
+    let start = rev(&wt, "HEAD");
+    let main_next = mint(&f.repo, &start, "main-next");
+    publish(&f.repo, &f.origin, &main_next, "main");
+
+    let result = pull_repo(&wt);
+
+    assert_eq!(
+        result.outcome,
+        PullOutcome::NoUpstream,
+        "{}",
+        result.message
+    );
+    assert_eq!(
+        result.message,
+        "newb has no upstream (origin/newb) to pull."
+    );
+    assert_eq!(rev(&wt, "HEAD"), start, "the base is not pulled into it");
+}
+
+/// T5. A branch that pulls from upstream and pushes to origin (a fork's
+/// triangular setup, `branch.<name>.pushRemote`) is pulled from upstream:
+/// where a push goes (`push_target`) is not what a pull reads.
+#[test]
+fn a_pull_reads_where_a_branch_pulls_from_not_where_it_pushes() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = upstream_feat_space(&env, &f);
+    git_ok(&f.repo, &["config", "branch.feat.pushRemote", "origin"]);
+    let origin_only = mint(&f.repo, &f.origin_feat, "origin-only");
+    publish(&f.repo, &f.origin, &origin_only, "feat");
+    let upstream_next = mint(&f.repo, &f.upstream_feat, "upstream-next");
+    publish(&f.repo, &upstream_bare(&f), &upstream_next, "feat");
+
+    let result = pull_repo(&wt);
+
+    assert_eq!(
+        result.outcome,
+        PullOutcome::FastForwarded,
+        "{}",
+        result.message
+    );
+    assert_eq!(rev(&wt, "HEAD"), upstream_next, "at upstream's new tip");
+    assert!(
+        !is_ancestor(&wt, &origin_only, "HEAD"),
+        "origin's commit is not in the branch"
+    );
+}
+
+/// T6. A `branch.<name>.remote` that is not UTF-8 cannot be read, and an
+/// upstream that cannot be read is never taken for origin: the pull says
+/// so and runs nothing, though origin has a `feat` it could fast-forward to.
+#[test]
+fn a_pull_refuses_a_branch_whose_upstream_cannot_be_read() {
+    use std::os::unix::ffi::OsStrExt;
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = upstream_feat_space(&env, &f);
+    let origin_next = mint(&f.repo, &f.upstream_feat, "origin-next");
+    publish(&f.repo, &f.origin, &origin_next, "feat");
+    let fetched = rev(&f.repo, "refs/remotes/origin/feat");
+    let out = Command::new("git")
+        .arg("config")
+        .arg("branch.feat.remote")
+        .arg(std::ffi::OsStr::from_bytes(b"up\xffstream"))
+        .current_dir(&f.repo)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "fixture: git stores the bytes");
+
+    let result = pull_repo(&wt);
+
+    assert_eq!(result.outcome, PullOutcome::Failed, "{}", result.message);
+    assert!(
+        result
+            .message
+            .starts_with("Could not read what feat tracks (")
+            && result.message.ends_with("); nothing was pulled."),
+        "got {:?}",
+        result.message
+    );
+    assert_eq!(rev(&wt, "HEAD"), f.upstream_feat, "feat is where it was");
+    assert_eq!(
+        rev(&f.repo, "refs/remotes/origin/feat"),
+        fetched,
+        "and nothing was fetched"
+    );
+}
+
+/// T7. The sync fast-forwards a local branch that tracks its namesake on
+/// upstream to upstream's branch, not origin's, and its tracking stays as
+/// it was. On master it moved `feat` onto origin's `feat`, and the
+/// `branch -f` re-pointed it to track origin.
+#[test]
+fn a_sync_forwards_a_namesake_of_another_remote_to_that_remote() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.repo,
+        &[
+            "branch",
+            "-q",
+            "--track",
+            "feat",
+            "refs/remotes/upstream/feat",
+        ],
+    );
+    let upstream_next = mint(&f.repo, &f.upstream_feat, "upstream-next");
+    publish(&f.repo, &upstream_bare(&f), &upstream_next, "feat");
+    git_ok(&f.repo, &["fetch", "-q", "upstream"]);
+    let origin_next = mint(&f.repo, &f.upstream_feat, "origin-next");
+    publish(&f.repo, &f.origin, &origin_next, "feat");
+
+    let result = sync_repo(&f.repo);
+
+    assert_eq!(
+        result.forwarded,
+        vec!["feat".to_string()],
+        "skipped: {:?}",
+        result.skipped
+    );
+    assert_eq!(
+        rev(&f.repo, "refs/heads/feat"),
+        upstream_next,
+        "at upstream's tip"
+    );
+    assert_eq!(
+        upstream_of(&f.repo, "feat"),
+        "refs/remotes/upstream/feat",
+        "still tracking upstream"
+    );
+}
+
+/// T8. The sync leaves alone a branch that tracks a branch of another name
+/// on a remote that is not origin, though origin has a `fix` strictly ahead
+/// of it and upstream's `main` has moved too.
+#[test]
+fn a_sync_leaves_an_upstream_of_another_name_on_another_remote() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let main = rev(&f.repo, "refs/remotes/upstream/main");
+    git_ok(
+        &f.repo,
+        &[
+            "branch",
+            "-q",
+            "--track",
+            "fix",
+            "refs/remotes/upstream/main",
+        ],
+    );
+    let origin_fix = mint(&f.repo, &main, "origin-fix");
+    publish(&f.repo, &f.origin, &origin_fix, "fix");
+    let upstream_main = mint(&f.repo, &main, "upstream-main");
+    publish(&f.repo, &upstream_bare(&f), &upstream_main, "main");
+    git_ok(&f.repo, &["fetch", "-q", "upstream"]);
+
+    let result = sync_repo(&f.repo);
+
+    assert!(
+        result.forwarded.is_empty() && result.skipped.is_empty(),
+        "nothing is forwarded or tried: {:?} {:?}",
+        result.forwarded,
+        result.skipped
+    );
+    assert_eq!(rev(&f.repo, "refs/heads/fix"), main, "fix is where it was");
+    assert_eq!(
+        upstream_of(&f.repo, "fix"),
+        "refs/remotes/upstream/main",
+        "and still tracks upstream's main"
+    );
+}
+
+/// T11. A branch whose namesake on upstream is gone (deleted there and
+/// pruned here) has no upstream to pull, and the pull says so naming
+/// upstream's branch; origin's `feat`, strictly ahead of it, is not read.
+#[test]
+fn a_pull_reports_a_namesake_gone_from_its_remote_without_reading_origin() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = upstream_feat_space(&env, &f);
+    let origin_next = mint(&f.repo, &f.upstream_feat, "origin-next");
+    publish(&f.repo, &f.origin, &origin_next, "feat");
+    git_ok(
+        &f.repo,
+        &[
+            "push",
+            "-q",
+            upstream_bare(&f).to_str().unwrap(),
+            ":refs/heads/feat",
+        ],
+    );
+    git_ok(&f.repo, &["update-ref", "-d", "refs/remotes/upstream/feat"]);
+
+    let result = pull_repo(&wt);
+
+    assert_eq!(
+        result.outcome,
+        PullOutcome::NoUpstream,
+        "{}",
+        result.message
+    );
+    assert_eq!(
+        result.message,
+        "feat has no upstream (upstream/feat) to pull."
+    );
+    assert_eq!(rev(&wt, "HEAD"), f.upstream_feat, "feat is where it was");
+}

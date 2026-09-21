@@ -421,7 +421,8 @@ pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) ->
     run_git_in(wt_path, &["switch", "--", local_name])
 }
 
-/// Why a branch that was strictly behind `origin/<name>` was not fast-forwarded.
+/// Why a branch that was strictly behind the branch it is read against
+/// (`git::branches_behind_upstream`) was not fast-forwarded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
     /// git refused because the branch is checked out in the worktree at this path.
@@ -566,10 +567,13 @@ const _: () = assert!(
 );
 
 /// Fetch from `origin` and fast-forward all local branches that are strictly
-/// behind their `origin/<branch>` ref (0 ahead, N behind); this assumes a single
-/// remote named `origin` rather than each branch's configured upstream. Branches
-/// with local commits ahead, diverged, or currently checked out are left
-/// untouched and the refusals are reported as skips.
+/// behind the branch `git::branch_upstream` reads for them (0 ahead, N
+/// behind): `origin/<branch>`, or for a branch that tracks its namesake on
+/// another remote, that remote's branch as of that remote's last fetch,
+/// since only origin is fetched here. A branch that tracks anything else on
+/// a remote other than origin is left alone. Branches with local commits
+/// ahead, diverged, or currently checked out are left untouched and the
+/// refusals are reported as skips.
 ///
 /// The fetch runs under the unattended-run policy (see `fetch_origin_unattended`)
 /// with the fixed `UNATTENDED_FETCH_TIMEOUT`. When it does not succeed the outcome
@@ -612,17 +616,22 @@ pub fn sync_repo_cancellable(
 
     let mut forwarded = vec![];
     let mut skipped = vec![];
-    for branch in git::branches_behind_upstream(repo_path) {
+    for git::BehindBranch {
+        name: branch,
+        target,
+    } in git::branches_behind_upstream(repo_path)
+    {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let remote_ref = format!("origin/{}", branch);
+        // `target` is the ref the comparison read, fully qualified, so the
+        // branch moves to exactly what it was found behind (ticket 42).
         // `LC_ALL=C` pins git's output language so `parse_skip_reason` sees
         // the English refusal; a localized git would turn every skip into
         // `Other`.
         let out = spawn::output(
             Command::new("git")
-                .args(["branch", "-f", &branch, &remote_ref])
+                .args(["branch", "-f", &branch, &target])
                 .env("LC_ALL", "C")
                 .current_dir(repo_path),
         );
@@ -987,7 +996,10 @@ pub enum PullOutcome {
     FetchFailed,
     /// No current branch (detached HEAD) — nothing to pull onto.
     DetachedHead,
-    /// The current branch has no `origin/<branch>` upstream to pull from.
+    /// The current branch has no upstream space pulls from: the branch
+    /// `git::branch_upstream` reads (`origin/<branch>`, or its namesake on
+    /// the other remote it tracks) is absent after the fetch, or the branch
+    /// tracks something space does not pull and nothing ran.
     NoUpstream,
     /// Local already matches upstream (0 ahead, 0 behind).
     UpToDate,
@@ -1055,7 +1067,10 @@ fn merge_in_progress(repo_path: &Path) -> std::io::Result<bool> {
     Ok(repo_path.join(path).exists())
 }
 
-/// Pull the current branch of `repo_path` from its `origin/<branch>` upstream.
+/// Pull the current branch of `repo_path` from the branch
+/// `git::branch_upstream` reads for it: `origin/<branch>` for a branch that
+/// tracks nothing or tracks origin, or `<remote>/<branch>` for one that tracks
+/// its namesake on another remote, which is the remote fetched.
 ///
 /// Fetches first, then classifies the branch state and acts:
 /// - behind only  → fast-forward (`FastForwarded`)
@@ -1066,6 +1081,8 @@ fn merge_in_progress(repo_path: &Path) -> std::io::Result<bool> {
 ///   the branch state, so the abort only ever runs on a merge this call started
 /// - up to date / only ahead → no-op (`UpToDate`/`Ahead`)
 /// - detached HEAD / no upstream / fetch failure → report without acting.
+/// - an upstream space does not pull (another remote's branch of another name,
+///   and the like) or one that cannot be read → report before the fetch.
 pub fn pull_repo(repo_path: &Path) -> PullResult {
     // Detached HEAD is checked BEFORE the fetch: a detached-HEAD pull must
     // report without acting at all (not even mutating remote-tracking refs).
@@ -1108,12 +1125,44 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
         }
     }
 
+    // What to pull from, derived once and before the fetch, since the
+    // fetch's remote comes from it; the existence check, the classification
+    // and both merges read this same ref (ticket 42). A branch that tracks
+    // something space does not pull is refused here, before anything runs,
+    // and so is one whose tracking cannot be read.
+    let (remote, refname) = match git::branch_upstream_at(repo_path, &branch) {
+        git::Upstream::Tracked { remote, refname } => (remote, refname),
+        git::Upstream::Refused { tracks } => {
+            return PullResult {
+                outcome: PullOutcome::NoUpstream,
+                message: format!(
+                    "{} tracks {}, which space does not pull; nothing was pulled.",
+                    branch, tracks
+                ),
+            };
+        }
+        git::Upstream::Unreadable { reason } => {
+            return PullResult {
+                outcome: PullOutcome::Failed,
+                message: format!(
+                    "Could not read what {} tracks ({}); nothing was pulled.",
+                    branch, reason
+                ),
+            };
+        }
+    };
+    // `refs/remotes/upstream/feat` as `upstream/feat`, for the messages.
+    let remote_ref = refname
+        .strip_prefix("refs/remotes/")
+        .unwrap_or(&refname)
+        .to_string();
+
     // `spawn::output` (not `spawn::status`): capture stderr both to surface the real
     // failure cause (auth, DNS, missing remote) and to keep git from writing
     // to the inherited stderr, which would scribble over the raw-mode TUI.
     let fetch = spawn::output(
         Command::new("git")
-            .args(["fetch", "--quiet", "origin"])
+            .args(["fetch", "--quiet", "--", &remote])
             .current_dir(repo_path),
     );
     let fetch_failed_message = match &fetch {
@@ -1135,16 +1184,11 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
         };
     }
 
-    // No `origin/<branch>` upstream to pull from (checked post-fetch so the
-    // remote-tracking refs are fresh).
+    // No such ref to pull from (checked post-fetch so the remote-tracking
+    // refs are fresh).
     let remote_exists = spawn::output(
         Command::new("git")
-            .args([
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("refs/remotes/origin/{}", branch),
-            ])
+            .args(["rev-parse", "--verify", "--quiet", &refname])
             .current_dir(repo_path),
     )
     .map(|o| o.status.success())
@@ -1152,17 +1196,16 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
     if !remote_exists {
         return PullResult {
             outcome: PullOutcome::NoUpstream,
-            message: format!("{} has no upstream (origin/{}) to pull.", branch, branch),
+            message: format!("{} has no upstream ({}) to pull.", branch, remote_ref),
         };
     }
 
-    let (ahead, behind) = git::ahead_behind(repo_path).unwrap_or((0, 0));
+    let (ahead, behind) = git::ahead_behind_vs(repo_path, &refname).unwrap_or((0, 0));
 
     if behind > 0 && ahead == 0 {
-        let remote_ref = format!("origin/{}", branch);
         let output = spawn::output(
             Command::new("git")
-                .args(["merge", "--ff-only", &remote_ref])
+                .args(["merge", "--ff-only", &refname])
                 .current_dir(repo_path),
         );
         match output {
@@ -1204,10 +1247,12 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
     }
 
     if ahead > 0 && behind > 0 {
-        let remote_ref = format!("origin/{}", branch);
         // `LC_ALL=C` keeps git's text English for the readers of the merge's
         // and the abort's stderr: the report shown in the overlay, and the
-        // tests that assert on its wording.
+        // tests that assert on its wording. The short name, not `refname`:
+        // git titles the merge commit with the name it was given, so the
+        // qualified one would read `Merge remote-tracking branch
+        // 'refs/remotes/origin/<b>'` where it has always read `'origin/<b>'`.
         let merge = spawn::output(
             Command::new("git")
                 .args(["merge", "--no-edit", &remote_ref])
