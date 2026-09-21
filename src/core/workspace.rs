@@ -680,12 +680,19 @@ fn parse_skip_reason(stderr: &str) -> SkipReason {
 /// the user's own ssh configuration applies.
 ///
 /// `LC_ALL=C` pins git's output language, as `check_branch_name`,
-/// `git_worktree_add` and the `branch -f` runner do, because what comes back
-/// is read as English text: the sync report's DETAIL column and the Creating
-/// log's fetch note strip git's `fatal: ` prefix, and the https-prompt tests
-/// classify the refusal by its wording. A gettext git under a non-English
-/// locale would hand every one of them a translated line. The cost is that
-/// every fetch failure reaches the report in English.
+/// `git_worktree_add` and the `branch -f` runner do. In production the
+/// readers display rather than classify: the sync report's DETAIL column and
+/// the Creating log's fetch note strip a `fatal: ` or `error: ` prefix
+/// (`first_stderr_line`) and show the rest, so a gettext git under a
+/// non-English locale would only show a translated reason with its prefix
+/// left on. The tests do classify: the missing-remote sync test asserts
+/// `'origin' does not appear to be a git repository` and the https-prompt
+/// tests' `prompt_probe` reads `terminal prompts disabled`, both of them
+/// gettext strings. The cost is that every fetch failure reaches the report
+/// in English. Unlike the three siblings, which run local commands, this is
+/// the one pinned run that reaches ssh, curl and a configured credential or
+/// askpass helper, and they inherit the pin too; `LC_ALL` rather than
+/// `LC_MESSAGES` for consistency with the siblings, as the ticket asked.
 ///
 /// Only stderr is captured: `run_unattended` discards stdout, and
 /// `Unattended` has nowhere to carry it. That suits a command whose useful
@@ -3116,9 +3123,10 @@ mod tests {
     }
 
     /// `run_git_unattended` pins `LC_ALL=C` on the child, as the three other
-    /// stderr-parsing helpers do, because the sync report's DETAIL column,
-    /// the Creating log's fetch note and the https-prompt tests' classifier
-    /// all read git's English text. The test process carries
+    /// stderr-parsing helpers do, because the sync report's DETAIL column
+    /// and the Creating log's fetch note strip git's English prefix, and the
+    /// missing-remote and https-prompt tests assert git's English wording on
+    /// this path. The test process carries
     /// `LC_ALL=de_DE.UTF-8` while the fetch runs, so the child's `C` can only
     /// have come from the helper, not from an unset inheritance.
     ///
@@ -3137,7 +3145,10 @@ mod tests {
     /// leak the locale into every other test's git spawn. With the marker
     /// set, the test runs the fetch and asserts; without it, it runs the
     /// child and fails with the child's output if the child failed or ran
-    /// anything other than this one test.
+    /// anything other than this one test. That child is started through the
+    /// spawn gate: it lives for a whole test run, far longer than a fixture
+    /// `git` call, so a pipe it inherited from another thread's spawn would
+    /// hold that thread's reader for as long (`core::spawn`).
     #[test]
     fn run_git_unattended_pins_lc_all_to_c_for_the_child() {
         const MARKER: &str = "SPACE_TEST_LC_ALL_INNER";
@@ -3151,12 +3162,13 @@ mod tests {
                 "{}::run_git_unattended_pins_lc_all_to_c_for_the_child",
                 in_crate
             );
-            let out = Cmd::new(std::env::current_exe().unwrap())
-                .args(["--exact", &test_name, "--test-threads=1", "--nocapture"])
-                .env("LC_ALL", "de_DE.UTF-8")
-                .env(MARKER, "1")
-                .output()
-                .unwrap();
+            let out = crate::core::spawn::output(
+                Cmd::new(std::env::current_exe().unwrap())
+                    .args(["--exact", &test_name, "--test-threads=1", "--nocapture"])
+                    .env("LC_ALL", "de_DE.UTF-8")
+                    .env(MARKER, "1"),
+            )
+            .unwrap();
             let stdout = String::from_utf8_lossy(&out.stdout);
             assert!(
                 out.status.success(),
