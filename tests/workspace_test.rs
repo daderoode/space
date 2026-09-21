@@ -2397,6 +2397,14 @@ fn remove_workspace_tells_a_moved_pair_to_repair_not_to_delete_the_original() {
             name,
             entry
         );
+        // The user picks which one is real; if they pick the copy, "the
+        // others" includes the original and its uncommitted work.
+        assert!(
+            entry.contains("keep what you need from the others"),
+            "{}: and told to keep work before deleting anything, got {:?}",
+            name,
+            entry
+        );
     }
 }
 
@@ -2486,5 +2494,83 @@ fn remove_workspace_unresolved_advice_keeps_the_summary_clean() {
         text.contains("delete this directory by hand"),
         "the manual step says which directory, got {:?}",
         text
+    );
+    // The CLI prints the whole report to stderr, body included.
+    assert!(
+        !text.contains('\u{1b}'),
+        "no escape byte anywhere in the report, got {:?}",
+        text
+    );
+}
+
+/// Which member of a pair is the original is read from git's record, not from
+/// where it sorts or where it sits among the space's entries. Here the copy
+/// sorts first and a plain directory sits between the two, so a member's
+/// position in the pair differs from its position in the space. Mixing those
+/// up, or taking the first member as the original, tells the real original
+/// it is a copy and to delete itself by hand.
+#[test]
+fn remove_workspace_finds_the_original_of_a_pair_wherever_it_sorts() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("beta");
+    let original = worktree_in_space(&env, &repo, "sort-ws");
+    let space = env.workspaces_dir.join("sort-ws");
+    let copy = space.join("0-beta-copy");
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::copy(original.join(".git"), copy.join(".git")).unwrap();
+    std::fs::create_dir_all(space.join("Alpha-plain")).unwrap();
+
+    let text = space::core::workspace::remove_workspace(&env.workspaces_dir, "sort-ws", true)
+        .expect_err("the pair is kept")
+        .to_string();
+    let entry = |name: &str| {
+        text.lines()
+            .find(|l| l.trim_start().starts_with(&format!("{:?}:", name)))
+            .unwrap_or_else(|| panic!("an entry for {}, in {:?}", name, text))
+            .to_string()
+    };
+    assert!(
+        entry("beta").contains("a copy of it") && !entry("beta").contains("it is a copy"),
+        "the original is told it has a copy, got {:?}",
+        entry("beta")
+    );
+    assert!(
+        entry("0-beta-copy").contains("it is a copy of \"beta\""),
+        "the copy is told it is one, of the real original, got {:?}",
+        entry("0-beta-copy")
+    );
+}
+
+/// Two copies of a worktree that lives outside the space: neither is the
+/// original, and the one piece of advice they must not get is the repair,
+/// which would take the outside worktree's registration away from it.
+#[test]
+fn remove_workspace_never_tells_copies_of_an_outside_worktree_to_repair() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let outside = worktree_in_space(&env, &repo, "home-ws");
+    let copies = env.workspaces_dir.join("copies-ws");
+    for name in ["c1", "c2"] {
+        std::fs::create_dir_all(copies.join(name)).unwrap();
+        std::fs::copy(outside.join(".git"), copies.join(name).join(".git")).unwrap();
+    }
+
+    let text = space::core::workspace::remove_workspace(&env.workspaces_dir, "copies-ws", true)
+        .expect_err("the copies are kept")
+        .to_string();
+    assert!(
+        !text.contains("git worktree repair"),
+        "copies of an outside worktree are never told to repair, got {:?}",
+        text
+    );
+    assert!(
+        text.contains("home-ws"),
+        "they are told where the worktree git knows lives, got {:?}",
+        text
+    );
+    assert_eq!(
+        git_ok(&outside, &["rev-parse", "--is-inside-work-tree"]).trim(),
+        "true",
+        "and the outside worktree still works"
     );
 }

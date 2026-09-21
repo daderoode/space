@@ -2212,10 +2212,10 @@ fn classify_space_entry(dir: &Path) -> SpaceEntry {
                 // The path stays off the first line, which may become the
                 // summary the TUI shows.
                 SpaceEntry::Unresolved(format!(
-                    "its .git file names a relative gitdir that does not resolve from \
-                     here, which moving the space or its source repo leaves behind as \
-                     well as deleting the source repo, so it is kept\nit resolves to \
-                     {:?}; if the space or the source repo was moved, run `git worktree \
+                    "its .git file names a relative gitdir that no longer leads anywhere, \
+                     which moving the space or its source repo leaves behind as well as \
+                     deleting the source repo, so it is kept\nit points at {:?}, which does \
+                     not exist; if the space or the source repo was moved, run `git worktree \
                      repair {:?}` from the source repo; if the source repo is gone, delete \
                      this directory by hand; then remove the space again",
                     admin, dir
@@ -2569,17 +2569,17 @@ fn pair_reason(
     let one = others.len() == 1;
     match original {
         Some(o) if o == me => {
-            let (copies, share, them) = if one {
-                ("a copy of it", "shares", "the copy")
+            let (copies, share, none, them) = if one {
+                ("a copy of it", "shares", "neither", "the copy")
             } else {
-                ("copies of it", "share", "the copies")
+                ("copies of it", "share", "none of them", "the copies")
             };
             format!(
-                "{} in this space ({}) {} its admin directory, so none of them is removed\n\
+                "{} in this space ({}) {} its admin directory, so {} is removed\n\
                  removing it would leave {} with nothing registered, and removing the space \
-                 again would then delete {}; keep what you need from {}, delete {} by hand, \
+                 again could then delete {}; keep what you need from {}, delete {} by hand, \
                  then remove the space again",
-                copies, listed, share, them, them, them, them
+                copies, listed, share, none, them, them, them, them
             )
         }
         Some(o) => format!(
@@ -2593,7 +2593,8 @@ fn pair_reason(
                 "it and {} share one admin directory whose worktree is no longer where git \
                  recorded it, so none of them is removed\ngit recorded it at {:?}: run \
                  `git worktree repair <path>` from the source repo for the one that is the \
-                 real worktree, delete the others by hand, then remove the space again",
+                 real worktree, keep what you need from the others, delete them by hand, \
+                 then remove the space again",
                 listed, was
             ),
             RecordedAt::Elsewhere(there) => format!(
