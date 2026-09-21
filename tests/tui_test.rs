@@ -10094,7 +10094,7 @@ mod content_length_tests {
     /// Render `app` once on the 80 x 24 frame and hand the cells and the
     /// cursor to `check`. A panic is caught and reported as the failure, so
     /// the caller's list names every site rather than the first.
-    fn render_and_check(
+    pub(super) fn render_and_check(
         name: &str,
         app: &App,
         check: impl FnOnce(&Buffer, Position) -> Result<(), String>,
@@ -10122,7 +10122,7 @@ mod content_length_tests {
         Some(format!("{}: {}", name, problem))
     }
 
-    fn row_text(buffer: &Buffer, x: u16, y: u16, width: u16) -> String {
+    pub(super) fn row_text(buffer: &Buffer, x: u16, y: u16, width: u16) -> String {
         (x..x + width).map(|x| buffer[(x, y)].symbol()).collect()
     }
 
@@ -10438,32 +10438,38 @@ mod content_length_tests {
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     }
 
-    fn config_editing_app(chars: usize) -> App {
+    pub(super) fn config_editing_app(value: &str) -> App {
         let mut app = test_app(vec![], vec![]);
         let mut st = ConfigState::from_config(&SpaceConfig::default());
         st.start_editing();
-        st.input = Input::default().with_value("x".repeat(chars));
+        st.input = Input::default().with_value(value.to_string());
         app.screen = Screen::ConfigEditor(st);
         app
     }
 
-    /// The editor fills the frame, so the value row starts at column 1 and
-    /// the cursor is asked for at 1 plus the cursor index. On master that
-    /// index was cast to `u16` first: 65,535 characters overflowed the
-    /// addition, and 70,000 wrapped to column 4,465. The row has no
-    /// horizontal scroll, so any long value already puts the cursor past the
-    /// frame for the terminal to clamp; the fix saturates at 65,535 rather
-    /// than wrapping.
+    /// The editor fills the frame, so the value row is the 78 cells from
+    /// column 1 of row 2. On master the cursor index was cast to `u16` and
+    /// added to the column: 65,535 characters overflowed the addition, and
+    /// 70,000 wrapped to column 4,465. Ticket 35 saturated the sum at 65,535,
+    /// still past the frame; ticket 37 scrolls the row, so at any length the
+    /// cursor is on the row's last cell and the row shows the value's tail.
+    /// The scroll is `usize` throughout, which these lengths prove.
     #[test]
-    fn config_editor_cursor_past_65535_characters_saturates() {
+    fn config_editor_cursor_past_65535_characters_stays_on_the_row() {
         let mut failures = Vec::new();
         for chars in [65_535usize, 70_000] {
-            let app = config_editing_app(chars);
+            let value = format!("{}{}", "x".repeat(chars - TAIL.len()), TAIL);
+            let app = config_editing_app(&value);
             let name = format!("config editor with {} characters", chars);
-            failures.extend(render_and_check(&name, &app, |_, cursor| {
-                let want = Position::new(u16::MAX, 2);
+            failures.extend(render_and_check(&name, &app, |buffer, cursor| {
+                let want = Position::new(78, 2);
                 if cursor != want {
                     return Err(format!("cursor at {:?}, expected {:?}", cursor, want));
+                }
+                let shown = row_text(buffer, 1, 2, 78);
+                let tail: String = value.chars().skip(chars - 78).collect();
+                if shown != tail {
+                    return Err(format!("row is {:?}, expected {:?}", shown, tail));
                 }
                 Ok(())
             }));
@@ -10471,25 +10477,27 @@ mod content_length_tests {
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     }
 
-    fn repo_search_app(chars: usize) -> App {
+    pub(super) fn repo_search_app(value: &str) -> App {
         let mut app = test_app(vec![], vec![]);
         let mut st = SearchState::new(vec![]);
-        st.picker.input = Input::default().with_value("x".repeat(chars));
+        st.picker.input = Input::default().with_value(value.to_string());
         app.screen = Screen::RepoSearch(st);
         app
     }
 
-    /// The repo search picker asks for its cursor at the row's left edge plus
-    /// 2 plus the cursor index, the config editor's shape in
-    /// `widgets/fuzzy_picker.rs`. On master the index was cast to `u16`
-    /// first, so a few lengths just under 65,536 overflowed the addition and
-    /// 70,000 wrapped. The row it lands on is read from a short query.
+    /// The repo search picker's query row: the picker is 56 wide at column
+    /// 12 on the 80-column frame, its `> ` prefix takes two cells, so the
+    /// query has 52 cells. On master the cursor index was cast to `u16` and
+    /// added to the column, so lengths just under 65,536 overflowed and
+    /// 70,000 wrapped. Ticket 35 saturated the sum; ticket 37 scrolls the
+    /// row, so at any length the cursor is on the query's last cell and the
+    /// row shows the query's tail. The row is read from a short query.
     #[test]
-    fn repo_search_cursor_past_65535_characters_saturates() {
+    fn repo_search_cursor_past_65535_characters_stays_on_the_row() {
         let mut row = None;
         let short = render_and_check(
             "repo search with 5 characters",
-            &repo_search_app(5),
+            &repo_search_app("xxxxx"),
             |_, cursor| {
                 row = Some(cursor.y);
                 Ok(())
@@ -10499,12 +10507,19 @@ mod content_length_tests {
         let row = row.expect("the short query renders a cursor");
         let mut failures = Vec::new();
         for chars in [65_535usize, 70_000] {
-            let app = repo_search_app(chars);
+            let value = format!("{}{}", "x".repeat(chars - TAIL.len()), TAIL);
+            let app = repo_search_app(&value);
             let name = format!("repo search with {} characters", chars);
-            failures.extend(render_and_check(&name, &app, |_, cursor| {
-                let want = Position::new(u16::MAX, row);
+            failures.extend(render_and_check(&name, &app, |buffer, cursor| {
+                let want = Position::new(15 + 51, row);
                 if cursor != want {
                     return Err(format!("cursor at {:?}, expected {:?}", cursor, want));
+                }
+                let shown = row_text(buffer, 13, row, 54);
+                let tail: String = value.chars().skip(chars - 52).collect();
+                let want = format!("> {}", tail);
+                if shown != want {
+                    return Err(format!("row is {:?}, expected {:?}", shown, want));
                 }
                 Ok(())
             }));
@@ -10590,5 +10605,201 @@ mod content_length_tests {
             ));
         }
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+}
+
+/// Ticket 37: the config editor's value row and the fuzzy picker's query row
+/// scroll horizontally on grapheme clusters, the text input dialog's window
+/// since ticket 35, so the cursor stays inside the row and the row ends with
+/// the text under it. Every case renders a 200-character value on the
+/// 80 x 24 frame: the config row is 78 cells from column 1 of row 2, the
+/// picker's query is 52 cells after its `> ` prefix.
+mod cursor_row_scroll_tests {
+    use super::content_length_tests::{
+        config_editing_app, render_and_check, repo_search_app, row_text,
+    };
+    use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Position;
+    use tui_input::Input;
+
+    const PICKER_TITLE: &str = " Search repos  ENTER=navigate  ESC=cancel ";
+
+    /// `n` characters cycling through the alphabet, so any two windows that
+    /// start at different offsets read differently: an unscrolled row could
+    /// not pass as a scrolled one.
+    fn cycled(n: usize) -> String {
+        (0..n)
+            .map(|i| char::from(b'A' + u8::try_from(i % 26).unwrap()))
+            .collect()
+    }
+
+    fn config_app_with_cursor(value: &str, cursor: usize) -> App {
+        let mut app = config_editing_app(value);
+        if let Screen::ConfigEditor(st) = &mut app.screen {
+            st.input = Input::default()
+                .with_value(value.to_string())
+                .with_cursor(cursor);
+        }
+        app
+    }
+
+    fn search_app_with_cursor(value: &str, cursor: usize) -> App {
+        let mut app = repo_search_app(value);
+        if let Screen::RepoSearch(st) = &mut app.screen {
+            st.picker.input = Input::default()
+                .with_value(value.to_string())
+                .with_cursor(cursor);
+        }
+        app
+    }
+
+    /// The cells of a row as one string per cell, `width` cells from `x`.
+    fn cells(buffer: &Buffer, x: u16, y: u16, width: u16) -> Vec<String> {
+        (x..x + width)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    /// The cursor sits inside the row and the row reads the `width`
+    /// characters ending at the cursor. Unscrolled, the cursor's cell holds
+    /// the character after it, the ordinary convention. Scrolled, tui-input
+    /// puts the cursor one cell past the row and the clamp pulls it onto the
+    /// last cell, over the character before it: the text input dialog's
+    /// convention since ticket 35. Before the fix a cursor past the row was
+    /// asked for as is: column 201 for a 200-character value.
+    fn check_window(
+        value: &str,
+        cursor: usize,
+        row: &str,
+        row_x: u16,
+        width: usize,
+        cursor_pos: Position,
+        want_x: u16,
+    ) -> Result<(), String> {
+        if cursor_pos.x != want_x {
+            return Err(format!(
+                "cursor at column {}, expected {}",
+                cursor_pos.x, want_x
+            ));
+        }
+        let start = cursor.saturating_sub(width);
+        let want: String = value.chars().skip(start).take(width).collect();
+        if row != want {
+            return Err(format!("row is {:?}, expected {:?}", row, want));
+        }
+        let under = row
+            .chars()
+            .nth(usize::from(cursor_pos.x - row_x))
+            .unwrap_or_default();
+        let at = if cursor >= width { cursor - 1 } else { cursor };
+        let expected = value.chars().nth(at).unwrap_or_default();
+        if under != expected {
+            return Err(format!(
+                "cell under the cursor is {:?}, expected {:?}",
+                under, expected
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn config_editor_value_row_scrolls_to_keep_the_cursor_in_the_row() {
+        let value = cycled(200);
+        let mut failures = Vec::new();
+        for (cursor, want_x) in [(200usize, 78u16), (100, 78), (10, 11)] {
+            let app = config_app_with_cursor(&value, cursor);
+            let name = format!("config editor, cursor at {}", cursor);
+            failures.extend(render_and_check(&name, &app, |buffer, pos| {
+                let row = row_text(buffer, 1, 2, 78);
+                check_window(&value, cursor, &row, 1, 78, pos, want_x)
+            }));
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn repo_search_query_row_scrolls_to_keep_the_cursor_in_the_row() {
+        let value = cycled(200);
+        let mut failures = Vec::new();
+        for (cursor, want_x) in [(200usize, 15 + 51u16), (100, 15 + 51), (10, 15 + 10)] {
+            let app = search_app_with_cursor(&value, cursor);
+            let name = format!("repo search, cursor at {}", cursor);
+            failures.extend(render_and_check(&name, &app, |buffer, pos| {
+                let dialog = super::dialog_size_tests::find_dialog(buffer, PICKER_TITLE)?;
+                let y = dialog.y + 1;
+                if pos.y != y {
+                    return Err(format!("cursor on row {}, expected {}", pos.y, y));
+                }
+                let prefix = row_text(buffer, dialog.x + 1, y, 2);
+                if prefix != "> " {
+                    return Err(format!("prefix is {:?}, expected \"> \"", prefix));
+                }
+                let row = row_text(buffer, dialog.x + 3, y, 52);
+                check_window(&value, cursor, &row, dialog.x + 3, 52, pos, want_x)
+            }));
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    /// Two flags (each two regional indicators drawn as one two-cell
+    /// cluster) then filler, with the cursor placed so tui-input's scroll is
+    /// 1, inside the first flag. A cut on grapheme clusters keeps that flag
+    /// whole at the window edge; a cut per char would pair the second
+    /// indicator with the next flag's first and draw a different flag.
+    fn flags_then(filler: usize) -> String {
+        format!("\u{1f1fa}\u{1f1f8}\u{1f1ec}\u{1f1e7}{}", "y".repeat(filler))
+    }
+
+    fn flag_row(filler_shown: usize) -> Vec<String> {
+        let mut want = vec!["\u{1f1fa}\u{1f1f8}".to_string(), " ".to_string()];
+        want.push("\u{1f1ec}\u{1f1e7}".to_string());
+        want.push(" ".to_string());
+        want.extend(std::iter::repeat_n("y".to_string(), filler_shown));
+        want
+    }
+
+    #[test]
+    fn config_editor_value_row_keeps_a_flag_whole_at_the_window_edge() {
+        let value = flags_then(100);
+        let app = config_app_with_cursor(&value, 79);
+        let want = flag_row(74);
+        let failure =
+            render_and_check("config editor scrolled into a flag", &app, |buffer, pos| {
+                if pos != Position::new(78, 2) {
+                    return Err(format!("cursor at {:?}, expected (78, 2)", pos));
+                }
+                let shown = cells(buffer, 1, 2, 78);
+                if shown != want {
+                    return Err(format!("row is {:?}, expected {:?}", shown, want));
+                }
+                Ok(())
+            });
+        assert!(failure.is_none(), "{}", failure.unwrap_or_default());
+    }
+
+    #[test]
+    fn repo_search_query_row_keeps_a_flag_whole_at_the_window_edge() {
+        let value = flags_then(100);
+        let app = search_app_with_cursor(&value, 53);
+        let want = flag_row(48);
+        let failure = render_and_check("repo search scrolled into a flag", &app, |buffer, pos| {
+            let dialog = super::dialog_size_tests::find_dialog(buffer, PICKER_TITLE)?;
+            let y = dialog.y + 1;
+            if pos != Position::new(dialog.x + 3 + 51, y) {
+                return Err(format!(
+                    "cursor at {:?}, expected ({}, {})",
+                    pos,
+                    dialog.x + 3 + 51,
+                    y
+                ));
+            }
+            let shown = cells(buffer, dialog.x + 3, y, 52);
+            if shown != want {
+                return Err(format!("row is {:?}, expected {:?}", shown, want));
+            }
+            Ok(())
+        });
+        assert!(failure.is_none(), "{}", failure.unwrap_or_default());
     }
 }

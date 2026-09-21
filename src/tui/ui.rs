@@ -744,19 +744,14 @@ fn render_text_input_dialog(
         height: 1,
     };
 
-    // Horizontal scroll that keeps the cursor in the text area, in columns.
-    // All of this stays `usize`: a pasted value can be longer than `u16::MAX`,
-    // and `Paragraph::scroll` takes a `u16`, so instead of scrolling the
-    // Paragraph the scrolled-off prefix is cut from the value by `after_scroll`
-    // and the rest is drawn from column 0.
+    // The scrolled window and the cursor's cell inside it, shared with the
+    // config editor's value row and the fuzzy picker's query row.
     let text_area_cols = usize::from(text_area_w);
-    let scroll = input.visual_scroll(text_area_cols);
-    let cursor_col = input.visual_cursor();
+    let window = input_window(input, text_area_cols);
     let value_vis_w = UnicodeWidthStr::width(input.value());
-    let visible = after_scroll(input.value(), scroll, text_area_cols);
 
     // Left indicator: ‹ when text is scrolled (content hidden on left)
-    let left_text = if scroll > 0 { "\u{2039}" } else { " " }; // ‹
+    let left_text = if window.scroll > 0 { "\u{2039}" } else { " " }; // ‹
     frame.render_widget(
         Paragraph::new(left_text).style(indicator_style),
         left_ind_area,
@@ -764,12 +759,12 @@ fn render_text_input_dialog(
 
     // The text from the scroll column on.
     frame.render_widget(
-        Paragraph::new(visible).style(theme::input_style()),
+        Paragraph::new(window.visible).style(theme::input_style()),
         text_area,
     );
 
     // Right indicator: › when content extends beyond the visible right edge.
-    let right_text = if value_vis_w > text_area_cols.saturating_add(scroll) {
+    let right_text = if value_vis_w > text_area_cols.saturating_add(window.scroll) {
         "\u{203a}" // ›
     } else {
         " "
@@ -779,18 +774,62 @@ fn render_text_input_dialog(
         right_ind_area,
     );
 
-    // Cursor: its column inside the text area, at most the last cell, so the
-    // cast after the `min` cannot overflow.
-    let cursor_offset = cursor_col
-        .saturating_sub(scroll)
-        .min(text_area_cols.saturating_sub(1));
-    let cursor_x = text_area.x + fit_u16(cursor_offset);
     if show_cursor {
+        let cursor_x = text_area.x.saturating_add(window.cursor_cell);
         frame.set_cursor_position((cursor_x, text_area.y));
     }
 
     if let Some(err) = error {
         frame.render_widget(Paragraph::new(err).style(theme::error()), sections[2]);
+    }
+}
+
+/// The window a single-row text input `cols` cells wide shows of `input`,
+/// and where its cursor sits. All of it stays `usize` until the last step:
+/// a pasted value can be longer than `u16::MAX`, and `Paragraph::scroll`
+/// takes a `u16`, so instead of scrolling the Paragraph the scrolled-off
+/// prefix is cut from the value by `after_scroll` and the rest is drawn
+/// from the row's first cell. The scroll is tui-input's, in columns, which
+/// keeps the cursor in the row; when it does, the cursor is asked for one
+/// cell past the row, and `cursor_cell` pulls it onto the last cell. Shared
+/// by the text input dialog, the config editor's value row and the fuzzy
+/// picker's query row.
+///
+/// Two limits, both older than the sharing. tui-input's scroll walks
+/// chars and can stop inside a cluster; the cut keeps that cluster whole
+/// and spends none of the scroll on it, so the row starts earlier than the
+/// cursor cell assumes by up to the cluster's width less one, and the
+/// character before the cursor sits that far off the right edge: one
+/// column inside a flag, none for a joined emoji sequence (its first char
+/// is as wide as the cluster), but 38 on a 78-cell row for a consonant
+/// carrying 55 spacing vowel signs, a 56-column cluster the scroll of 38
+/// lands inside. And at `cols` of 0 every cluster is over-wide, the row is
+/// empty and the cell is 0, which a caller with a prefix (the picker's
+/// `> `) then places past a popup narrower than the prefix. Neither
+/// panics; both are the terminal's to clamp.
+pub(crate) struct InputWindow<'a> {
+    /// The value from the scroll column on, whole clusters only.
+    pub visible: &'a str,
+    /// Columns scrolled off the left, for a dialog's `‹` indicator.
+    pub scroll: usize,
+    /// The cursor's cell from the row's first cell: at most the last cell,
+    /// so adding it to the row's `x` cannot leave the row.
+    pub cursor_cell: u16,
+}
+
+pub(crate) fn input_window(input: &tui_input::Input, cols: usize) -> InputWindow<'_> {
+    let scroll = input.visual_scroll(cols);
+    let visible = after_scroll(input.value(), scroll, cols);
+    let cursor_cell = fit_u16(
+        input
+            .visual_cursor()
+            .saturating_sub(scroll)
+            .min(cols.saturating_sub(1)),
+    );
+    InputWindow {
+        visible,
+        scroll,
+        cursor_cell,
     }
 }
 
@@ -980,7 +1019,7 @@ fn percent_of(dim: u16, pct: u16, min: u16) -> u16 {
 /// `u16` row or column count: `n` where it fits, else `u16::MAX`. A plain
 /// `as u16` wraps at 65,536, and the addition after it overflows just below
 /// that; with this and `saturating_add` the count saturates instead, and the
-/// frame clamps it from there. Shared with the fuzzy picker's cursor.
+/// frame clamps it from there.
 pub(crate) fn fit_u16(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
 }
@@ -1523,23 +1562,17 @@ fn render_config_editor(
 
         // Value row
         if is_focused && state.editing {
-            // Show input value with blinking cursor
+            // The value scrolled so the cursor stays in the row, cut on
+            // grapheme clusters like the text input dialog.
+            let window = input_window(&state.input, usize::from(value_area.width));
             frame.render_widget(
-                Paragraph::new(state.input.value()).style(theme::input_style()),
+                Paragraph::new(window.visible).style(theme::input_style()),
                 value_area,
             );
             // Set terminal cursor position, unless help is drawn over us.
             if show_cursor {
-                // Known limitation: the value row has no horizontal scroll,
-                // so a value longer than the row asks for a cursor past the
-                // frame and the terminal clamps it. Past `u16::MAX` the
-                // column saturates rather than wrapping back to the start
-                // of the row (ticket 35); scrolling the row is a follow-up.
-                let cursor_x = value_area
-                    .x
-                    .saturating_add(fit_u16(state.input.visual_cursor()));
-                let cursor_y = value_area.y;
-                frame.set_cursor_position((cursor_x, cursor_y));
+                let cursor_x = value_area.x.saturating_add(window.cursor_cell);
+                frame.set_cursor_position((cursor_x, value_area.y));
             }
         } else {
             let value_style = if is_focused {
