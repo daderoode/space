@@ -1090,8 +1090,9 @@ fn admin_dir_of(wt: &Path) -> PathBuf {
 /// is removed and can be created again with no git command. The content of
 /// the lock decides nothing: a finished tree under git's own `initializing`
 /// word (a killed add whose checkout child finished, or a user who typed
-/// the word) is kept with ticket 27's unlock hint, never escalated, and so
-/// is a user's own lock.
+/// the word), even with a stale `index.lock` beside its surviving index, is
+/// kept with ticket 27's unlock hint, never escalated, and so is a user's
+/// own lock.
 #[test]
 fn remove_workspace_removes_a_half_built_worktree_and_keeps_every_finished_lock() {
     let env = common::TestEnv::new();
@@ -1108,6 +1109,9 @@ fn remove_workspace_removes_a_half_built_worktree_and_keeps_every_finished_lock(
         marker_admin.join("index").is_file(),
         "fixture: a finished tree"
     );
+    // And a stale index.lock beside the surviving index (a killed index
+    // writer): still a finished tree, still never escalated.
+    std::fs::write(marker_admin.join("index.lock"), "").unwrap();
     std::fs::write(marker_wt.join("WIP"), "mine\n").unwrap();
     let index_admin = admin_dir_of(&index_wt);
     std::fs::write(index_admin.join("locked"), "initializing\n").unwrap();
