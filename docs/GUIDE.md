@@ -678,7 +678,7 @@ Create a workspace with git worktrees for selected repos, or complete one.
 - `"existing"` without `branch` -> `invalid_params`
 - Worktree creation failure (e.g. branch already checked out) -> `internal_error` naming the repo's path and git's message. The call stops at that repo: the repos before it stay in place and the repos after it are not attempted. Retrying the same call once the cause is fixed completes the workspace, with the repos the first call made listed under `repos_already_created`
 
-> **Warning:** Git does not allow the same branch to be checked out in two worktrees simultaneously. If you get a "branch already checked out" error (`is already used by worktree at`), either free the branch where it is checked out and retry the same call, or retry with a different `branch` or with `"detached"`. Switching to `"existing"` with the same branch is refused the same way. The repos the first call had already created keep their branch and are listed under `repos_already_created`. A worktree of a requested repo whose `git worktree add` never finished (its admin directory still locked `initializing`) is not adopted: the call fails at that repo with an error naming it and the way out (remove the space and create it again, or `git worktree remove -f -f <path>` in the repo), and nothing on disk is touched.
+> **Warning:** Git does not allow the same branch to be checked out in two worktrees simultaneously. If you get a "branch already checked out" error (`is already used by worktree at`), either free the branch where it is checked out and retry the same call, or retry with a different `branch` or with `"detached"`. Switching to `"existing"` with the same branch is refused the same way. The repos the first call had already created keep their branch and are listed under `repos_already_created`. A worktree of a requested repo whose `git worktree add` never finished (its admin directory still locked `initializing`, or a locked one whose checkout left an `index.lock` and no index) is not adopted: the call fails at that repo with an error naming it and the way out (remove the space and create it again, or `git worktree remove -f -f <path>` in the repo), and nothing on disk is touched.
 
 ---
 
@@ -732,7 +732,7 @@ Remove a workspace and all its git worktrees.
 }
 ```
 
-> **Note:** This always uses force removal. Each repo's worktree is removed with `git worktree remove --force`, and the workspace directory is deleted only once nothing has been kept. A worktree git refuses to give up (a locked one, for example, except the `initializing` lock of a worktree whose add never finished, which is removed with `--force --force`), a directory holding a repository of its own, and one that cannot be read are all kept: the call fails with an error naming each of them and the reason, the repos already removed stay removed, and retrying after the cause is fixed removes the rest.
+> **Note:** This always uses force removal. Each repo's worktree is removed with `git worktree remove --force`, and the workspace directory is deleted only once nothing has been kept. A worktree git refuses to give up (a locked one, for example, except a worktree whose add never finished, still locked `initializing` or locked with an `index.lock` and no index, which is removed with `--force --force`), a directory holding a repository of its own, and one that cannot be read are all kept: the call fails with an error naming each of them and the reason, the repos already removed stay removed, and retrying after the cause is fixed removes the rest.
 
 ---
 

@@ -994,15 +994,20 @@ fn create_workspace_retry_after_a_partial_failure_completes_the_space() {
     });
 }
 
-/// The admin directory a worktree's `.git` file names.
+/// The admin directory a worktree's `.git` file names, resolved against
+/// the worktree when git wrote it relative (`worktree.useRelativePaths`,
+/// which a developer's global config may set).
 fn admin_dir_of(wt: &std::path::Path) -> PathBuf {
     let content = std::fs::read_to_string(wt.join(".git")).unwrap();
-    PathBuf::from(
-        content
-            .strip_prefix("gitdir: ")
-            .unwrap()
-            .trim_end_matches(['\n', '\r']),
-    )
+    let target = content
+        .strip_prefix("gitdir: ")
+        .unwrap()
+        .trim_end_matches(['\n', '\r']);
+    if std::path::Path::new(target).is_absolute() {
+        PathBuf::from(target)
+    } else {
+        wt.join(target)
+    }
 }
 
 /// Ticket 20. A worktree of the repo that git never finished (its admin

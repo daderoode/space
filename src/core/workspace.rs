@@ -1685,10 +1685,17 @@ fn admin_belongs_to(admin: &Path, repo_path: &Path) -> bool {
 /// on a finished tree, which has an `index`; and a `--no-checkout` worktree
 /// the user locked, which has no `index` but no `index.lock` either, since
 /// no checkout ran, and may hold files put there by hand. Two accepted
-/// misses: a user lock whose reason is literally `initializing` is refused
-/// (nothing deleted on the create side), and a localised git whose killed
-/// parent's checkout child finished (a complete tree, `index` present) is
-/// adopted, where the lock then meets ticket 27's unlock hint at removal.
+/// misses, decided with the coordinator: a user lock whose reason is
+/// literally `initializing` cannot be told from git's marker, so it is
+/// refused on the create side and, on a forced removal, removed with the
+/// second force like the crash debris it looks like; and a localised git
+/// whose killed parent's checkout child finished (a complete tree, `index`
+/// present) is adopted, where the lock then meets ticket 27's unlock hint
+/// at removal. An add still running in another process looks the same as a
+/// dead one for as long as it runs; a forced removal of its space then
+/// removes the tree under it, where git alone would have refused on the
+/// lock. The tree being built holds nothing of the user's, and the next
+/// removal deletes what is left as an orphan.
 fn half_built(admin: &Path) -> Option<&'static str> {
     let locked = std::fs::read_to_string(admin.join("locked")).ok()?;
     if locked.trim() == "initializing" {
