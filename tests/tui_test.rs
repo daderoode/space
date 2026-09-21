@@ -8578,6 +8578,10 @@ mod help_overlay_tests {
             let backend = TestBackend::new(80, 24);
             let mut terminal = Terminal::new(backend).unwrap();
 
+            // Parked first, or a screen that sets no cursor reads (0, 0)
+            // and passes as one that does (the Committing row before
+            // ticket 39).
+            terminal.set_cursor_position(SENTINEL).unwrap();
             terminal.draw(|f| space::tui::ui::view(&app, f)).unwrap();
             let without_help = terminal.get_cursor_position().unwrap();
             assert_ne!(
@@ -8622,6 +8626,18 @@ mod help_overlay_tests {
         app.handle_key(shift_key(KeyCode::Char('S')));
         app.handle_key(key(KeyCode::Enter));
         cursor_with_help(app, "config editor editing");
+
+        // 4. The git-ops Committing dialog's message row (ticket 39).
+        let mut app = test_app(vec![], vec![]);
+        let mut st = space::tui::screens::gitops::GitOpsState::new(
+            "repo-a".to_string(),
+            std::path::PathBuf::from("/nonexistent/ticket-39/repo-a"),
+        );
+        st.stage = space::tui::screens::gitops::GitOpsStage::Committing;
+        st.staged_files = vec!["f0".to_string()];
+        st.message_input = tui_input::Input::default().with_value("fix".to_string());
+        app.screen = Screen::GitOps(st);
+        cursor_with_help(app, "git-ops committing message row");
     }
 
     // --- scrolling ---
@@ -10527,7 +10543,7 @@ mod content_length_tests {
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     }
 
-    fn committing_app(staged: usize) -> App {
+    pub(super) fn committing_app(staged: usize) -> App {
         let mut app = test_app(vec![], vec![]);
         let mut st = GitOpsState::new(
             "repo-a".to_string(),
@@ -10616,7 +10632,7 @@ mod content_length_tests {
 /// picker's query is 52 cells after its `> ` prefix.
 mod cursor_row_scroll_tests {
     use super::content_length_tests::{
-        config_editing_app, render_and_check, repo_search_app, row_text,
+        committing_app, config_editing_app, render_and_check, repo_search_app, row_text,
     };
     use super::*;
     use ratatui::buffer::Buffer;
@@ -10795,6 +10811,85 @@ mod cursor_row_scroll_tests {
                 ));
             }
             let shown = cells(buffer, dialog.x + 3, y, 52);
+            if shown != want {
+                return Err(format!("row is {:?}, expected {:?}", shown, want));
+            }
+            Ok(())
+        });
+        assert!(failure.is_none(), "{}", failure.unwrap_or_default());
+    }
+
+    const COMMITTING_TITLE: &str = " Git: repo-a (?) ";
+
+    fn committing_app_with_cursor(value: &str, cursor: usize) -> App {
+        let mut app = committing_app(1);
+        if let Screen::GitOps(st) = &mut app.screen {
+            st.message_input = Input::default()
+                .with_value(value.to_string())
+                .with_cursor(cursor);
+        }
+        app
+    }
+
+    /// The Committing dialog's message row: the inner row above the status
+    /// row and the bottom border, as wide as the dialog less its borders.
+    /// On 80 x 24 that is the 46 cells at (17, 13); the geometry is derived
+    /// from the dialog so the arithmetic is checked, not assumed.
+    fn committing_row(buffer: &Buffer) -> Result<(u16, u16, u16), String> {
+        let dialog = super::dialog_size_tests::find_dialog(buffer, COMMITTING_TITLE)?;
+        let row = (dialog.x + 1, dialog.y + dialog.height - 3, dialog.width - 2);
+        if row != (17, 13, 46) {
+            return Err(format!(
+                "message row at {:?}, expected (17, 13, 46) on 80 x 24",
+                row
+            ));
+        }
+        Ok(row)
+    }
+
+    /// Ticket 39. On master the row drew the value from its first character
+    /// with no scroll and set no cursor: a 200-character message showed its
+    /// first 46 and the cursor stayed at (0, 0).
+    #[test]
+    fn committing_message_row_scrolls_to_keep_the_cursor_in_the_row() {
+        let value = cycled(200);
+        let mut failures = Vec::new();
+        for (cursor, want_x) in [(200usize, 17 + 45u16), (100, 17 + 45), (10, 17 + 10)] {
+            let app = committing_app_with_cursor(&value, cursor);
+            let name = format!("committing message, cursor at {}", cursor);
+            failures.extend(render_and_check(&name, &app, |buffer, pos| {
+                let (x, y, width) = committing_row(buffer)?;
+                let row = row_text(buffer, x, y, width);
+                if pos.y != y {
+                    return Err(format!(
+                        "cursor on row {}, expected {}; the row reads {:?}",
+                        pos.y, y, row
+                    ));
+                }
+                check_window(&value, cursor, &row, x, usize::from(width), pos, want_x)
+            }));
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn committing_message_row_keeps_a_flag_whole_at_the_window_edge() {
+        let value = flags_then(100);
+        // Visual column 47 on a 46-cell row: tui-input's scroll is 1, inside
+        // the first flag.
+        let app = committing_app_with_cursor(&value, 47);
+        let want = flag_row(42);
+        let failure = render_and_check("committing scrolled into a flag", &app, |buffer, pos| {
+            let (x, y, width) = committing_row(buffer)?;
+            if pos != Position::new(x + width - 1, y) {
+                return Err(format!(
+                    "cursor at {:?}, expected ({}, {})",
+                    pos,
+                    x + width - 1,
+                    y
+                ));
+            }
+            let shown = cells(buffer, x, y, width);
             if shown != want {
                 return Err(format!("row is {:?}, expected {:?}", shown, want));
             }
