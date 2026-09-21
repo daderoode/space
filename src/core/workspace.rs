@@ -2884,7 +2884,9 @@ fn unregister_worktree(dir: &Path, force: bool, admin: &Path) -> std::result::Re
 /// nothing in it can read as part of git's own sentence. The lines under it
 /// carry every reason in full, indented, the count against every repository
 /// the space held (directories holding no repository are not counted, and go
-/// with the space), and what was removed before the run reached the rest.
+/// with the space), what was removed before the run reached the rest, and
+/// the orphans, which are still there and go with the space once nothing is
+/// kept.
 ///
 /// Directory names print with `{:?}`, the convention `checked_space_name`
 /// sets in this module, so a name carrying a newline or an escape sequence
@@ -2939,9 +2941,12 @@ fn removal_report(
     if !removed.is_empty() {
         report.push_str(&format!("\n  removed: {}", quoted(removed)));
     }
+    // An orphan is deleted only with the space, and a report means the space
+    // was kept, so an orphan listed here is still on disk.
     if !orphaned.is_empty() {
         report.push_str(&format!(
-            "\n  removed with no source repository left to unregister them: {}",
+            "\n  no source repository left to unregister, so they go with the space \
+             once nothing is kept: {}",
             quoted(orphaned)
         ));
     }

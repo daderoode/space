@@ -3229,3 +3229,34 @@ fn a_gitdir_under_a_directory_that_is_no_repository_is_not_called_one() {
     );
     assert!(dir.join("mine.txt").exists(), "and its work is still there");
 }
+
+/// An orphan is deleted only with its space, and the space is deleted only
+/// when nothing was kept, so an orphan beside a kept directory is still on
+/// disk when the report is read. The report used to say it was "removed",
+/// which was never true when shown (independent review of PR #61).
+#[test]
+fn an_orphan_beside_a_kept_directory_is_not_reported_removed() {
+    let env = TestEnv::new();
+    let gone = absolute_repo(&env, "gone");
+    let orphan = worktree_in_space(&env, &gone, "ws");
+    std::fs::remove_dir_all(&gone).unwrap();
+    let clone = env.workspaces_dir.join("ws").join("a-clone");
+    git_ok(
+        &env.workspaces_dir.join("ws"),
+        &["init", "-q", clone.to_str().unwrap()],
+    );
+
+    let text = remove_forced(&env, "ws")
+        .expect_err("the clone is kept")
+        .to_string();
+    let line = text
+        .lines()
+        .find(|l| l.contains("\"gone\""))
+        .unwrap_or_else(|| panic!("the orphan is listed, got {:?}", text));
+    assert!(
+        !line.contains("removed") && line.contains("go with the space"),
+        "it is told it goes with the space, not that it is gone, got {:?}",
+        line
+    );
+    assert!(orphan.exists(), "and it is indeed still there");
+}
