@@ -667,6 +667,19 @@ mod tests {
     }
 
     #[test]
+    fn choosing_new_branch_clears_an_error_left_by_another_row() {
+        // The Existing branch row can leave a refusal on the picker; the
+        // branch name stage renders the same error slot, so choosing New
+        // branch must not carry it in.
+        let mut st = at_branch_strategy();
+        st.error = Some("refused".to_string());
+
+        open_branch_name(&mut st);
+
+        assert_eq!(st.error, None, "the stage opens with no error showing");
+    }
+
+    #[test]
     fn choosing_new_branch_again_leaves_the_cursor_where_it_was() {
         let mut st = at_branch_strategy();
         open_branch_name(&mut st);
