@@ -6,6 +6,11 @@ mod mcp;
 mod shell;
 mod tui;
 
+// Keeps this binary's tests off the invoking user's git config (ticket 43).
+#[cfg(test)]
+#[path = "../tests/common/git_isolation.rs"]
+mod git_isolation;
+
 fn main() -> anyhow::Result<()> {
     let cli_args = Cli::parse();
     // `space mcp` installs its own stderr subscriber inside mcp::run().

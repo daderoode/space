@@ -1,3 +1,9 @@
+#![allow(clippy::disallowed_methods)] // fixtures start git directly (ADR 0002)
+
+// Every test binary declares `common`, whose `git_isolation` keeps it off the
+// invoking user's git config before `main`; this one runs no git today.
+mod common;
+
 use space::core::config::SpaceConfig;
 use std::path::PathBuf;
 use std::sync::Mutex;
