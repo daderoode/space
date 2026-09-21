@@ -1244,7 +1244,7 @@ fn render_add_overlay(
         AddStage::PickBranchStrategy => render_branch_strategy_picker(
             frame,
             &state.workspace_name,
-            &state.workspace_name,
+            state.new_branch_name(),
             state.branch_strategy_idx,
             state.error.as_deref(),
             &state.recent_branches,
