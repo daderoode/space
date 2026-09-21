@@ -1485,6 +1485,27 @@ fn add_repos_existing_without_branch_is_refused_before_anything_is_added() {
     });
 }
 
+/// The gates run in `create_workspace`'s order: the repo names are resolved
+/// before the branch rule, so a call that omits the branch for `existing`
+/// and names a repo the cache does not hold is told about the repo, not the
+/// branch. Swapping the two gates in `add_repos` fails this test.
+#[test]
+fn add_repos_reports_an_unknown_repo_ahead_of_a_missing_branch() {
+    with_test_env(|env, server| {
+        let repo_a = env.create_repo("repo-a");
+        env.write_cache(std::slice::from_ref(&repo_a));
+        create_ws(server, "add-ws", &["repo-a"], "new", None).unwrap();
+
+        let err = add_to_ws(server, "add-ws", &["ghost"], "existing", None)
+            .expect_err("an unknown repo must be refused");
+        assert_eq!(
+            invalid_params(&err),
+            "repo 'ghost' not found in cache. Run list_repos with refresh=true to rescan.",
+            "the repo is reported, not the branch"
+        );
+    });
+}
+
 /// The guard against over-fixing: `existing` with a branch still checks
 /// that branch out, and the worktree's HEAD is the branch the call named.
 #[test]
