@@ -1755,6 +1755,13 @@ fn remove_workspace_keeps_a_worktree_copied_beside_its_original() {
         "the report names it, got {:?}",
         err.to_string()
     );
+    // git's own line names the original's admin path, which reads as though
+    // it were about some other repo; space says what happened before it.
+    assert!(
+        err.to_string().contains("removed earlier in this run"),
+        "the reason says the copy shared a worktree removed in this run, got {:?}",
+        err.to_string()
+    );
     assert_eq!(
         std::fs::read_to_string(copy.join("experiment.txt")).unwrap(),
         "a day of work",
@@ -1944,5 +1951,92 @@ fn remove_workspace_names_repair_for_a_space_that_was_moved() {
     assert!(
         env.workspaces_dir.join("renamed-ws").exists(),
         "the space is kept"
+    );
+}
+
+/// The parser is laxer than git in one deliberate place: it strips trailing
+/// spaces as well as line endings. git rejects a gitfile with trailing
+/// blanks; here it resolves to the admin directory it plainly meant, is
+/// handed to git, is refused, and is kept. "Fixing" the parser to match git
+/// exactly would turn this same file into a path that does not exist, which
+/// reads as an orphan and is deleted. This pins the safe side.
+#[test]
+fn remove_workspace_keeps_a_worktree_whose_gitfile_has_trailing_blanks() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "blanks-ws");
+    let admin = repo.join(".git").join("worktrees").join("alpha");
+    std::fs::write(wt.join(".git"), format!("gitdir: {}   \n", admin.display())).unwrap();
+    std::fs::write(wt.join("uncommitted.txt"), "wip").unwrap();
+    let git_says = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(&wt)
+        .output()
+        .unwrap();
+    assert!(
+        !git_says.status.success(),
+        "fixture: git itself rejects a gitfile with trailing blanks"
+    );
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "blanks-ws", true)
+        .expect_err("git refuses it, so it is kept, not treated as an orphan");
+    assert!(
+        err.to_string().contains("alpha"),
+        "the report names it, got {:?}",
+        err.to_string()
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.join("uncommitted.txt")).unwrap(),
+        "wip",
+        "and the work in it is still on disk"
+    );
+}
+
+/// Coordinator review of 750aa5c: the admin directory itself unreadable,
+/// rather than its parent. Stat-ing the admin directory needs only its
+/// parent, so that succeeded, and then `commondir.is_file()` read the
+/// permission error as "no commondir", which is how a submodule module
+/// directory looks. The live worktree was reported as "a git repository of
+/// its own", with advice to delete it by hand.
+#[test]
+fn remove_workspace_keeps_a_worktree_whose_admin_dir_itself_cannot_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "shut-ws");
+    std::fs::write(wt.join("uncommitted.txt"), "wip").unwrap();
+
+    let admin = repo.join(".git").join("worktrees").join("alpha");
+    let restore = std::fs::metadata(&admin).unwrap().permissions();
+    std::fs::set_permissions(&admin, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let parent_still_lets_us_see_it = std::fs::symlink_metadata(&admin).is_ok();
+    let but_not_inside = std::fs::symlink_metadata(admin.join("commondir")).is_err();
+    if !(parent_still_lets_us_see_it && but_not_inside) {
+        std::fs::set_permissions(&admin, restore).unwrap();
+        eprintln!("skipped: this user is not stopped by mode 000");
+        return;
+    }
+
+    let outcome = space::core::workspace::remove_workspace(&env.workspaces_dir, "shut-ws", true);
+    std::fs::set_permissions(&admin, restore).unwrap();
+
+    let text = outcome
+        .expect_err("a worktree that cannot be read is kept")
+        .to_string();
+    assert!(
+        !text.contains("repository of its own"),
+        "a live worktree must not be reported as a repository to delete by hand, got {:?}",
+        text
+    );
+    assert!(
+        text.contains("cannot be read"),
+        "it is reported as unreadable, which is what it is, got {:?}",
+        text
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.join("uncommitted.txt")).unwrap(),
+        "wip",
+        "and the work in it is still there"
     );
 }

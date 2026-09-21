@@ -2157,8 +2157,25 @@ fn classify_space_entry(dir: &Path) -> SpaceEntry {
             // `<host>/.git/modules/<name>`, a repository with its own
             // `objects` and `config` and no `commondir`. That is the trap
             // `is_worktree_of` documents, read from the directory itself.
-            Ok(_) if admin.join("commondir").is_file() => SpaceEntry::Worktree { admin },
-            Ok(_) => SpaceEntry::Repository,
+            //
+            // Asked with the error kept, as the admin directory itself was:
+            // `is_file` reads a permission error as "not there", and an admin
+            // directory that exists but cannot be searched would then be
+            // called a repository of its own, with advice to delete a live
+            // worktree by hand.
+            Ok(_) => match std::fs::symlink_metadata(admin.join("commondir")) {
+                Ok(meta) if meta.is_file() => SpaceEntry::Worktree { admin },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => SpaceEntry::Repository,
+                Err(e) => SpaceEntry::Unreadable(format!(
+                    "its .git file names {}, which cannot be read ({})",
+                    admin.display(),
+                    e
+                )),
+                Ok(_) => SpaceEntry::Unreadable(format!(
+                    "its .git file names {}, whose commondir is not a file",
+                    admin.display()
+                )),
+            },
         };
     }
     // No `.git` file: a clone has a `.git` directory, and a bare repo has no
@@ -2182,15 +2199,27 @@ fn is_repository_dir(dir: &Path) -> bool {
 
 /// The admin directory a linked worktree's `.git` file names.
 ///
-/// Parsed the way git parses it (`setup.c`, `read_gitfile_gently`): the
-/// prefix is exact, the path is the rest of that one line, and a file with
-/// anything after it is not a gitfile. Being laxer than git here is not
-/// harmless, because a shape git rejects but this accepts resolves to a path
-/// that does not exist, which is the answer that deletes. git writes a
-/// relative path when the user sets `worktree.useRelativePaths` (git 2.48
-/// and later) and reads it relative to the worktree, which is what this
-/// does: resolving it against the process's own working directory instead
-/// finds nothing.
+/// git's rule (`setup.c`, `read_gitfile_gently`): the prefix `gitdir: ` is
+/// exact and at the very start, and the path is everything after it with
+/// only trailing `\n` and `\r` removed, so interior newlines belong to the
+/// path. Checked against git 2.50.1 with `git rev-parse --git-dir`, which
+/// accepts the canonical form, no trailing newline, CRLF and a blank second
+/// line, and rejects a leading space, two spaces after the colon, trailing
+/// spaces and a trailing comment line.
+///
+/// This follows that rule with one deliberate difference: it strips every
+/// kind of trailing whitespace, not only line endings. The difference errs
+/// one way only. A gitfile git rejects for trailing blanks resolves here to
+/// the admin directory it plainly meant, so it is classified a worktree,
+/// handed to git, refused, and kept. Matching git exactly would make the
+/// same file name a path that does not exist, and a path that does not exist
+/// is read as an orphan, which is deleted. For a function whose failures
+/// delete, laxness that can only land in "keep" is the safe side.
+///
+/// git writes a relative path when the user sets `worktree.useRelativePaths`
+/// (git 2.48 and later) and reads it relative to the worktree, which is what
+/// this does: resolving it against the process's own working directory
+/// instead finds nothing.
 ///
 /// Asking the git binary instead, the third option after libgit2 and this,
 /// was rejected: `git rev-parse` walks up out of the directory it is given,
@@ -2201,9 +2230,10 @@ fn is_repository_dir(dir: &Path) -> bool {
 fn worktree_admin_dir(dir: &Path) -> std::result::Result<PathBuf, String> {
     let content = std::fs::read_to_string(dir.join(".git"))
         .map_err(|e| format!("its .git file cannot be read ({})", e))?;
-    // git's rule: the prefix is exact and at the start, the path is
-    // everything after it with trailing whitespace stripped. Interior
-    // newlines belong to the path, because a directory name may contain one.
+    // Exact prefix at the start, as git requires. `trim_end` rather than
+    // git's line-endings-only strip is the deliberate difference the doc
+    // comment explains. Interior newlines belong to the path, because a
+    // directory name may contain one.
     let rest = content
         .strip_prefix("gitdir: ")
         .ok_or_else(|| "its .git file does not name a gitdir".to_string())?;
@@ -2302,6 +2332,22 @@ fn unregister_worktree(dir: &Path, force: bool, admin: &Path) -> std::result::Re
             // worktree whose directory was moved has an admin `gitdir` file
             // still naming the old path, which is what git refuses on.
             let first = reason.lines().next().unwrap_or(reason);
+            // The admin directory was there when this directory was
+            // classified, or it would not have been handed to git. If it has
+            // gone since, a worktree removed earlier in this same run shared
+            // it: a copy of a worktree beside its original. git then names
+            // the original's admin path, which reads as though it were about
+            // some other repo, so space says what happened first.
+            if std::fs::symlink_metadata(admin)
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+            {
+                return Err(format!(
+                    "it shared its .git file with a worktree removed earlier in this \
+                     run, so git no longer knows it; keep what you need from it, then \
+                     delete it by hand and remove the space again\n{}",
+                    first
+                ));
+            }
             Err(if admin.join("locked").exists() {
                 // git's sentence, then space's own way out. git's remaining
                 // lines are dropped here, and only here: they end in
