@@ -2208,13 +2208,16 @@ fn add_worktree(
 
 /// Whether the ref named exactly `refname` exists in `repo_path`. Callers
 /// pass a fully qualified name (`refs/heads/x`, `refs/remotes/origin/x`).
-/// `show-ref --verify` is an exact lookup; `rev-parse --verify` is not, even
-/// on a qualified name: it resolves a bare name to a tag before a branch
-/// (how a same-named tag used to be taken for a branch, ticket 24), and it
-/// falls back from an absent `refs/heads/x` to a tag named
+/// `show-ref --verify` is an exact lookup. `rev-parse --verify` is not, in
+/// two ways: on a bare name it resolves a tag before a branch (how a
+/// same-named tag used to be taken for a branch, ticket 24); and on a
+/// qualified name that does not exist it falls back through git's ref
+/// rules, so an absent `refs/heads/x` resolves a tag named
 /// `refs/tags/refs/heads/x` (git 2.50.1, pinned by
-/// `new_branch_ignores_a_tag_named_like_a_qualified_ref`). `--quiet` only
-/// silences the not-found line; the exit status is the answer either way.
+/// `new_branch_ignores_a_tag_named_like_a_qualified_ref`). A qualified
+/// name that exists is unaffected by a same-named tag under either
+/// command. `--quiet` only silences the not-found line; the exit status is
+/// the answer either way.
 fn ref_exists(repo_path: &Path, refname: &str) -> bool {
     spawn::output(
         Command::new("git")
@@ -4772,6 +4775,40 @@ mod tests {
         assert_eq!(
             get_sha(&wt, "HEAD"),
             get_sha(&repo, "refs/remotes/origin/main")
+        );
+    }
+
+    /// T6d: the New-branch strategy on a plainly detached source (T6's
+    /// shape: no symref at all) does work, unlike T6c: the base is `HEAD`,
+    /// `refs/remotes/origin/HEAD` is absent in this fixture, so the branch
+    /// starts at the commit HEAD points at, with no upstream. Pins the half
+    /// of the distinction the GUIDE's Detached bullet implies.
+    #[test]
+    fn new_branch_from_a_detached_source_repo_starts_at_its_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _) = gated_repo(tmp.path(), "repo");
+        git(&["commit", "--allow-empty", "-m", "second"], &repo);
+        git(&["checkout", "--detach", "refs/heads/main~1"], &repo);
+        let source_head = get_sha(&repo, "HEAD");
+        assert_ne!(source_head, get_sha(&repo, "refs/heads/main"), "fixture");
+        assert!(
+            !ref_exists(&repo, "refs/remotes/origin/HEAD"),
+            "fixture: no origin/HEAD, so the start point is HEAD itself"
+        );
+
+        let wt = attempt(
+            &repo,
+            &tmp.path().join("ws"),
+            BranchStrategy::NewBranch("a".into()),
+        );
+
+        assert!(!head_is_detached(&wt));
+        assert_eq!(git::current_branch(&wt).unwrap(), "a");
+        assert_eq!(get_sha(&wt, "HEAD"), source_head);
+        assert_eq!(
+            upstream_of(&wt, "a"),
+            "",
+            "a bare HEAD start point sets no upstream"
         );
     }
 
