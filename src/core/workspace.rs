@@ -4722,6 +4722,29 @@ mod tests {
         assert_eq!(get_sha(&wt, "HEAD"), source_head);
     }
 
+    /// T6b: a source repo whose HEAD is symbolic to something that is not a
+    /// local branch (here a remote-tracking ref, as some tooling leaves a
+    /// clone) has no base branch either; the base is `HEAD`, not
+    /// `refs/heads/origin/main`, which does not exist.
+    #[test]
+    fn detached_head_from_a_source_whose_head_is_not_a_local_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _) = gated_repo(tmp.path(), "repo");
+        git(&["symbolic-ref", "HEAD", "refs/remotes/origin/main"], &repo);
+        let source_head = get_sha(&repo, "HEAD");
+        assert_eq!(
+            source_head,
+            get_sha(&repo, "refs/remotes/origin/main"),
+            "fixture"
+        );
+        assert_ne!(source_head, get_sha(&repo, "refs/heads/main"), "fixture");
+
+        let wt = attempt(&repo, &tmp.path().join("ws"), BranchStrategy::DetachedHead);
+
+        assert!(head_is_detached(&wt));
+        assert_eq!(get_sha(&wt, "HEAD"), source_head);
+    }
+
     /// T7: `origin/feat` is read as `refs/remotes/origin/feat`, so a tag
     /// named `origin/feat` neither shadows it nor makes it ambiguous.
     #[test]
