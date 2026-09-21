@@ -56,7 +56,11 @@ fn repo_name(path: &Path) -> String {
 pub(crate) fn resolve_repo_names(repos: &[PathBuf], names: &[String]) -> Result<Vec<PathBuf>> {
     let mut resolved: Vec<PathBuf> = Vec::new();
     for name in names {
-        let matches: Vec<&PathBuf> = repos.iter().filter(|p| repo_name(p) == *name).collect();
+        // The cache holds a repo once per root it sits under, so overlapping
+        // roots list the same path twice; two entries of one path are one repo.
+        let mut matches: Vec<&PathBuf> = repos.iter().filter(|p| repo_name(p) == *name).collect();
+        matches.sort();
+        matches.dedup();
         match matches.as_slice() {
             [one] => {
                 if !resolved.contains(one) {
@@ -243,6 +247,14 @@ mod tests {
             err.to_string(),
             "no repo named 'API' in the repo list; names are case-sensitive, did you mean 'api'?"
         );
+    }
+
+    /// Overlapping roots (`~/p` and `~/p/work`) cache a repo once per root.
+    #[test]
+    fn resolve_repo_names_treats_a_path_cached_twice_as_one_repo() {
+        let repos = cache(&["/p/work/api", "/p/web", "/p/work/api"]);
+        let got = resolve_repo_names(&repos, &names(&["api"])).unwrap();
+        assert_eq!(got, cache(&["/p/work/api"]));
     }
 
     #[test]
