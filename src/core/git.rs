@@ -483,17 +483,20 @@ pub fn branch_upstream(repo: &Repository, branch: &str) -> Upstream {
         Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
         Err(e) => Err(format!("{}: {}", key, e.message())),
     };
-    let (remote, merge) = match (
-        read(format!("branch.{}.remote", branch)),
-        read(format!("branch.{}.merge", branch)),
-    ) {
-        (Ok(remote), Ok(merge)) => (remote, merge),
-        (Err(reason), _) | (_, Err(reason)) => return Upstream::Unreadable { reason },
+    let remote = match read(format!("branch.{}.remote", branch)) {
+        Ok(remote) => remote,
+        Err(reason) => return Upstream::Unreadable { reason },
     };
     let remote = match remote {
         None => "origin".to_string(),
+        // The merge key is not read here, so origin's rule cannot come to
+        // depend on it.
         Some(remote) if remote == "origin" => remote,
         Some(remote) => {
+            let merge = match read(format!("branch.{}.merge", branch)) {
+                Ok(merge) => merge,
+                Err(reason) => return Upstream::Unreadable { reason },
+            };
             let namesake = merge.as_deref() == Some(format!("refs/heads/{}", branch).as_str());
             if namesake && repo.find_remote(&remote).is_ok() {
                 remote

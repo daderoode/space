@@ -1645,3 +1645,50 @@ fn status_of_a_detached_worktree_counts_against_origin_head() {
     let detail = space::core::workspace::workspace_detail(&ws_dir, "d").unwrap();
     assert_eq!((detail.repos[0].ahead, detail.repos[0].behind), (0, 1));
 }
+
+/// T12. The rule for a branch that tracks origin never reads its merge key,
+/// so one that cannot be read (not UTF-8) leaves status counting against
+/// `origin/<branch>` as before ticket 42, where refusing would show 0 and 0.
+#[test]
+fn status_of_an_origin_branch_does_not_depend_on_its_merge_key() {
+    use std::os::unix::ffi::OsStrExt;
+    let tmp = TempDir::new().unwrap();
+    let seed = tmp.path().join("seed");
+    std::fs::create_dir(&seed).unwrap();
+    common::init_repo(&seed);
+    let origin = tmp.path().join("origin.git");
+    std::fs::create_dir(&origin).unwrap();
+    git_out(&origin, &["init", "-q", "--bare", "-b", "main"]);
+    git_out(&seed, &["push", "-q", origin.to_str().unwrap(), "main"]);
+    git_out(
+        tmp.path(),
+        &["clone", "-q", origin.to_str().unwrap(), "clone"],
+    );
+    let clone = tmp.path().join("clone");
+    let next = mint_commit(&seed, "main", "next");
+    git_out(
+        &seed,
+        &[
+            "push",
+            "-q",
+            origin.to_str().unwrap(),
+            &format!("{}:refs/heads/main", next),
+        ],
+    );
+    git_out(&clone, &["fetch", "-q", "origin"]);
+    let out = Command::new("git")
+        .arg("config")
+        .arg("branch.main.merge")
+        .arg(std::ffi::OsStr::from_bytes(b"refs/heads/ma\xffin"))
+        .current_dir(&clone)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "fixture: git stores the bytes");
+    assert_eq!(
+        git_out(&clone, &["config", "branch.main.remote"]),
+        "origin",
+        "fixture: main tracks origin"
+    );
+
+    assert_eq!(space::core::git::ahead_behind(&clone).unwrap(), (0, 1));
+}
