@@ -1547,8 +1547,9 @@ fn add_repos_existing_with_branch_checks_it_out() {
 ///
 /// `ENV_LOCK` is held only across the spawn, which is when the child copies
 /// the environment other tests set and remove; every line read and every
-/// check runs outside it, so a failure here poisons nothing for the tests
-/// that lock it next. Lines are parsed strictly only after the child is
+/// check runs outside it, so only a spawn that fails its `expect` can poison
+/// the lock, and every site recovers the guard from poison anyway (see
+/// `with_test_env`). Lines are parsed strictly only after the child is
 /// killed and waited for, so a line that is not a message fails the test
 /// with no server left running.
 fn tools_over_stdio(env: &TestEnv) -> std::collections::BTreeMap<String, serde_json::Value> {
@@ -1759,8 +1760,11 @@ fn tools_list_carries_the_adopt_stop_and_branch_rules() {
 ///
 /// Recovering the guard does not clear the poison, so from this test on the
 /// lock stays poisoned for the rest of the binary and a bare `unwrap()`
-/// reintroduced at any other site fails whenever it runs after this one. The
-/// name sorts first so that under `--test-threads=1` every other site does.
+/// reintroduced at any other site fails whenever it runs after this one.
+/// The `with_test_env` site is covered by this test's own second call; the
+/// name sorts ahead of the two raw sites (the `remove_workspace` stream test
+/// and `tools_over_stdio`'s callers) so that under `--test-threads=1` both
+/// run after it.
 #[test]
 fn a_panic_under_the_env_lock_fails_only_its_own_test() {
     let outcome = std::panic::catch_unwind(|| {
