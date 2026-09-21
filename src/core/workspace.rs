@@ -1324,11 +1324,16 @@ pub struct PushResult {
     pub message: String,
 }
 
-/// Push the current branch of `repo_path` to `origin`.
+/// Push the current branch of `repo_path`.
 ///
 /// - `set_upstream == true`  → `git push -u origin <branch>` (first publish of a
 ///   branch with no upstream; also records the tracking ref).
-/// - `set_upstream == false` → `git push` (branch already has an upstream).
+/// - `set_upstream == false` → `git push` (branch already has an upstream),
+///   which git routes to the branch's own push destination
+///   (`git::push_target`): origin for a branch that tracks origin, another
+///   remote for a branch that tracks it (a worktree made from
+///   `upstream/<x>`, ticket 25). The git-ops overlay confirms that second
+///   case before calling this.
 ///
 /// Never forces. A rejected push (remote ahead / non-fast-forward) returns
 /// `success == false` with git's rejection text in `message`, so callers can

@@ -205,7 +205,7 @@ under the general bindings below.
 | `S` | Stage all unstaged files in repo |
 | `U` | Unstage all staged files in repo |
 | `b` | Switch branch for selected repo |
-| `G` | Git operations for selected repo (fetch, pull, push, commit, log, rebase) |
+| `G` | Git operations for selected repo (fetch, pull, push, commit, log, rebase). Push runs `git push` at once for a branch whose push destination is origin; a branch that pushes elsewhere (one made from `upstream/<name>` tracks `upstream`, and a bare push goes there) asks `Branch <name> tracks upstream/<name>. Push to upstream?` first, and a branch with no upstream asks before `push -u origin`; both default to No |
 | `PgUp` / `PgDn` | Page up / down |
 | `Home` / `End` | First / last row |
 | `/` | Search all repos |

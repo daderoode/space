@@ -11367,3 +11367,116 @@ fn add_two_exact_names_preselects_both() {
     let text = render_text(&app, 80, 24);
     assert!(text.contains("2 selected  3/3 matched"), "{text}");
 }
+
+// ---------------------------------------------------------------------------
+// Ticket 25: a push whose destination is not origin asks first.
+// ---------------------------------------------------------------------------
+
+mod push_remote_confirmation_tests {
+    use super::*;
+    use space::core::git::PushTarget;
+    use space::tui::screens::gitops::{GitOpsStage, GitOpsState};
+
+    /// The git-ops menu on a repo whose branch `feat` has an upstream and
+    /// whose bare push would go to `remote`. The path is not a repo, so the
+    /// state is set by hand, as the worker never runs in these tests except
+    /// where a test says so.
+    fn menu_app(remote: &str) -> App {
+        let mut app = test_app(vec![], vec![]);
+        let mut st = GitOpsState::new(
+            "repo-a".to_string(),
+            PathBuf::from("/nonexistent/ticket-25/repo-a"),
+        );
+        st.branch = "feat".to_string();
+        st.has_upstream = true;
+        st.push_target = Some(PushTarget {
+            remote: remote.to_string(),
+            tracks: format!("{}/feat", remote),
+        });
+        app.screen = Screen::GitOps(st);
+        app
+    }
+
+    fn stage(app: &App) -> GitOpsStage {
+        match &app.screen {
+            Screen::GitOps(st) => st.stage.clone(),
+            other => panic!("left the overlay: {:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    #[test]
+    fn push_to_another_remote_asks_first() {
+        let mut app = menu_app("upstream");
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::ConfirmPushRemote,
+            "a push bound for upstream must ask, not run"
+        );
+        assert!(app.gitop_rx.is_none(), "no worker before the answer");
+    }
+
+    #[test]
+    fn push_to_origin_runs_without_asking() {
+        let mut app = menu_app("origin");
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::Running,
+            "a push bound for origin keeps today's no-prompt path"
+        );
+        assert!(app.gitop_rx.is_some(), "the worker starts at once");
+    }
+
+    #[test]
+    fn y_confirms_the_push_to_the_other_remote() {
+        let mut app = menu_app("upstream");
+        app.handle_key(key(KeyCode::Char('P')));
+        app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(stage(&app), GitOpsStage::Running);
+        assert!(app.gitop_rx.is_some(), "y starts the push worker");
+    }
+
+    #[test]
+    fn n_esc_and_enter_push_nothing() {
+        for code in [KeyCode::Char('n'), KeyCode::Esc, KeyCode::Enter] {
+            let mut app = menu_app("upstream");
+            app.handle_key(key(KeyCode::Char('P')));
+            app.handle_key(key(code));
+            assert_eq!(
+                stage(&app),
+                GitOpsStage::Menu,
+                "{:?} declines back to the menu",
+                code
+            );
+            assert!(app.gitop_rx.is_none(), "{:?} starts no worker", code);
+        }
+    }
+
+    #[test]
+    fn the_prompt_names_the_branch_and_both_remotes_at_80_by_24() {
+        let mut app = menu_app("upstream");
+        app.handle_key(key(KeyCode::Char('P')));
+        let text = render_text(&app, 80, 24);
+        // The dialog is 48 columns wide at 80, so the prompt wraps over two
+        // rows; read it across rows with the box border and padding removed.
+        let flat = text
+            .replace(
+                ['\u{2502}', '\u{256d}', '\u{256e}', '\u{2570}', '\u{256f}'],
+                " ",
+            )
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            flat.contains("Git: repo-a (feat)"),
+            "the title names the repo and branch, got:\n{}",
+            text
+        );
+        assert!(
+            flat.contains("Branch feat tracks upstream/feat. Push to upstream? [y/N]"),
+            "the prompt is shown whole at the documented minimum, got:\n{}",
+            text
+        );
+    }
+}

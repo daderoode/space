@@ -3071,3 +3071,89 @@ fn an_origin_refspec_writing_local_branches_fetches_for_an_upstream_name() {
     assert_eq!(head_symref(&wt), "refs/heads/feat");
     assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/upstream/feat");
 }
+
+// ---------------------------------------------------------------------------
+// Ticket 25, push confirmation: where a bare push of a tracking branch goes.
+// ---------------------------------------------------------------------------
+
+/// T12. A confirmed push from a worktree made from `upstream/feat` lands on
+/// upstream, and nowhere else: the bare `git push` the git-ops worker runs
+/// after the confirmation follows the branch's own remote.
+#[test]
+fn a_confirmed_push_from_an_upstream_tracking_branch_lands_on_upstream() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let upstream = f._tmp.path().join("upstream.git");
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t12",
+        &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+    )
+    .unwrap();
+    git_ok(&wt, &["commit", "-q", "--allow-empty", "-m", "local-work"]);
+    let pushed = git_ok(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+
+    let result = space::core::workspace::push_repo(&wt, false);
+
+    assert!(result.success, "the push must succeed: {}", result.message);
+    assert_eq!(
+        git_ok(&upstream, &["rev-parse", "refs/heads/feat"]).trim(),
+        pushed,
+        "upstream's feat is the pushed commit"
+    );
+    assert_eq!(
+        git_ok(&f.origin, &["rev-parse", "refs/heads/feat"]).trim(),
+        f.origin_feat,
+        "origin's feat is untouched"
+    );
+}
+
+/// T13. `git::push_target` names the remote git would push to and what the
+/// branch tracks, resolved as git resolves a bare push: `branch.<n>.pushRemote`
+/// first, then `remote.pushDefault`, then `branch.<n>.remote`.
+#[test]
+fn push_target_resolves_the_destination_as_git_does() {
+    use space::core::git::push_target;
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t13",
+        &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+    )
+    .unwrap();
+
+    let t = push_target(&wt).expect("a tracking branch has a push target");
+    assert_eq!(
+        (t.remote.as_str(), t.tracks.as_str()),
+        ("upstream", "upstream/feat")
+    );
+
+    git_ok(&wt, &["config", "remote.pushDefault", "a/b"]);
+    let t = push_target(&wt).unwrap();
+    assert_eq!(
+        t.remote, "a/b",
+        "remote.pushDefault overrides the branch's remote"
+    );
+    assert_eq!(
+        t.tracks, "upstream/feat",
+        "and does not change what it tracks"
+    );
+
+    git_ok(&wt, &["config", "branch.feat.pushRemote", "origin"]);
+    let t = push_target(&wt).unwrap();
+    assert_eq!(t.remote, "origin", "branch.<n>.pushRemote overrides both");
+
+    git_ok(&f.repo, &["checkout", "-q", "--detach"]);
+    assert!(
+        push_target(&f.repo).is_none(),
+        "a detached HEAD has no target"
+    );
+    git_ok(&f.repo, &["checkout", "-q", "main"]);
+    assert!(
+        push_target(&f.repo).is_none(),
+        "a branch with no upstream has no target: that case has its own prompt"
+    );
+}

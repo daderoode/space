@@ -2105,6 +2105,27 @@ fn render_gitops_overlay(
         return;
     }
 
+    // ConfirmPushRemote stage: the push would go to a remote other than
+    // origin (the branch tracks it, or is configured to push there).
+    if state.stage == crate::tui::screens::gitops::GitOpsStage::ConfirmPushRemote {
+        let dialog_w = percent_of(frame.area().width, 60, 48);
+        let dialog_h = 7u16.min(frame.area().height.saturating_sub(2));
+        let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
+        let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
+
+        let (remote, tracks) = state
+            .push_target
+            .as_ref()
+            .map(|t| (t.remote.as_str(), t.tracks.as_str()))
+            .unwrap_or(("?", "?"));
+        let prompt = format!(
+            "Branch {} tracks {}. Push to {}?  [y/N]",
+            state.branch, tracks, remote
+        );
+        frame.render_widget(Paragraph::new(prompt).wrap(Wrap { trim: false }), inner);
+        return;
+    }
+
     // Committing stage: staged-file summary above a single-line message input.
     if state.stage == crate::tui::screens::gitops::GitOpsStage::Committing {
         let dialog_w = percent_of(frame.area().width, 60, 48);
