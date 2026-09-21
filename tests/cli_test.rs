@@ -387,3 +387,90 @@ fn init_unsupported_shell_errors() {
         .failure()
         .stderr(predicate::str::contains("unsupported"));
 }
+
+// ---------------------------------------------------------------------------
+// 18. rm --force – ticket 27: a refused worktree removal is reported, and the
+//     CLI's own stdout stays its own
+// ---------------------------------------------------------------------------
+#[test]
+fn rm_force_reports_a_locked_worktree() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    create_worktree(
+        &repo,
+        &env.workspaces_dir,
+        "locked-ws",
+        &BranchStrategy::NewBranch("locked-ws".to_string()),
+    )
+    .unwrap();
+    let wt = env.workspaces_dir.join("locked-ws").join("alpha");
+    let out = std::process::Command::new("git")
+        .args(["worktree", "lock", "--reason", "on usb"])
+        .arg(&wt)
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "fixture: lock the worktree");
+
+    space(&env)
+        .args(["rm", "--force", "locked-ws"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("alpha"))
+        .stderr(predicate::str::contains("locked working tree"))
+        .stderr(predicate::str::contains("git worktree unlock"))
+        .stdout(predicate::str::contains("Removed workspace").not());
+
+    assert!(
+        wt.join(".git").exists(),
+        "the space must survive a refused removal"
+    );
+}
+
+/// git inherits the CLI's stdout too, so a git that prints (a wrapper on PATH,
+/// or `GIT_TRACE` pointed at stdout) used to mix its lines into what `space rm`
+/// wrote. Nothing parses the CLI's stdout, but the same inherited handle is the
+/// JSON-RPC stream under MCP; this is the cheap half of that guard.
+#[test]
+fn rm_force_prints_only_its_own_line() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    create_worktree(
+        &repo,
+        &env.workspaces_dir,
+        "quiet",
+        &BranchStrategy::NewBranch("quiet".to_string()),
+    )
+    .unwrap();
+
+    let bin = env.dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let marker = env.dir.path().join("shim-ran.txt");
+    let real_path = std::env::var("PATH").unwrap();
+    std::fs::write(
+        bin.join("git"),
+        format!(
+            "#!/bin/sh\necho \"shim: git $*\"\necho \"$*\" >> '{}'\nPATH='{real_path}'\nexec git \"$@\"\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    space(&env)
+        .env("PATH", format!("{}:{}", bin.display(), real_path))
+        .args(["rm", "--force", "quiet"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("Removed workspace 'quiet'\n"));
+
+    // Without this the test passes when nothing printed because nothing ran:
+    // stdout would be that one line whether or not git was ever started.
+    let ran = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert!(
+        ran.contains("worktree remove"),
+        "the printing git must be the one that removed the worktree, got {ran:?}"
+    );
+}

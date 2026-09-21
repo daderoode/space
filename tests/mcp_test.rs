@@ -1206,3 +1206,188 @@ fn a_repo_named_twice_is_placed_once() {
         assert!(git_lists_worktree(&bravo, &space.join("bravo")));
     });
 }
+
+// ---------------------------------------------------------------------------
+// Ticket 27: git's output must never reach the server's own stdout.
+// ---------------------------------------------------------------------------
+
+/// A `git` that prints one line to stdout and records that it ran, then hands
+/// over to the real git. Returns the directory to put on PATH and the file the
+/// shim appends its arguments to.
+fn git_that_prints_to_stdout(dir: &std::path::Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let marker = dir.join("shim-ran.txt");
+    let real_path = std::env::var("PATH").unwrap();
+    std::fs::write(
+        bin.join("git"),
+        format!(
+            "#!/bin/sh\n\
+             echo \"shim: git $*\"\n\
+             echo \"$*\" >> '{}'\n\
+             PATH='{}'\n\
+             exec git \"$@\"\n",
+            marker.display(),
+            real_path
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    (bin, marker)
+}
+
+/// Under MCP the server's stdout **is** the JSON-RPC stream. `remove_workspace`
+/// ran git with stdout inherited, so a git that prints anything put non-protocol
+/// bytes among the messages: with `GIT_TRACE=/dev/stdout` a stock git 2.50.1 put
+/// three such lines there, and output without a trailing newline fused with the
+/// tool's own response and lost it. This drives the real binary over stdio with
+/// a git that prints, and holds every line the server writes to the protocol.
+#[test]
+fn remove_workspace_keeps_the_jsonrpc_stream_parseable() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    // Other tests in this binary set and remove process-wide environment
+    // variables. Reading `PATH` here without the lock is exactly the race
+    // that lock is documented to prevent.
+    let _guard = ENV_LOCK.lock().unwrap();
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    create_worktree(
+        &repo,
+        &env.workspaces_dir,
+        "traced",
+        &BranchStrategy::NewBranch("traced".to_string()),
+    )
+    .unwrap();
+    let (bin, marker) = git_that_prints_to_stdout(env.dir.path());
+
+    let mut server = Command::new(env!("CARGO_BIN_EXE_space"))
+        .arg("mcp")
+        .env("SPACE_CONFIG_DIR", &env.config_dir)
+        // Keep the server's git config and any log file out of the user's
+        // home. (`space mcp` does not call `logging::init`, so HOME is what
+        // does this, not SPACE_LOG.)
+        .env("HOME", env.dir.path())
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        // The server logs to stderr through its own tracing subscriber
+        // (`mcp::run`). A piped stderr nobody drains would block the server
+        // as soon as the pipe filled, and it would then never answer.
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the built binary must start");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = server.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(line) => {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let mut stdin = server.stdin.take().unwrap();
+    for message in [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"remove_workspace","arguments":{"name":"traced"}}}"#,
+    ] {
+        writeln!(stdin, "{message}").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    // Collect until the answer to the call arrives, or give up rather than
+    // hang the suite on a server that never answers.
+    let mut lines: Vec<String> = Vec::new();
+    let mut answered = false;
+    while !answered {
+        match rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(line) => {
+                answered = serde_json::from_str::<serde_json::Value>(&line)
+                    .ok()
+                    .and_then(|v| v.get("id").and_then(|id| id.as_u64()))
+                    == Some(10);
+                lines.push(line);
+            }
+            Err(_) => break,
+        }
+    }
+    drop(stdin);
+    // Closing stdin is how the server is meant to end, but a server that
+    // cannot make progress would never see it, and `wait` has no deadline.
+    let _ = server.kill();
+    let _ = server.wait();
+    let _ = reader.join();
+
+    let ran = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert!(
+        ran.contains("worktree remove"),
+        "fixture: the printing git must be the one the server ran, got {ran:?}"
+    );
+    assert!(
+        answered,
+        "the call must be answered; the server wrote {lines:#?}"
+    );
+    for line in &lines {
+        serde_json::from_str::<serde_json::Value>(line).unwrap_or_else(|e| {
+            panic!("stdout carried a line that is not a message: {line:?} ({e})")
+        });
+    }
+    assert!(
+        !env.workspaces_dir.join("traced").exists(),
+        "and the space was really removed"
+    );
+}
+
+/// The same call when git refuses: the tool reports the failure instead of
+/// answering `{"removed": ...}`, and the space is still there.
+#[test]
+fn remove_workspace_reports_a_locked_worktree() {
+    with_test_env(|env, server| {
+        let repo = env.create_repo("alpha");
+        create_worktree(
+            &repo,
+            &env.workspaces_dir,
+            "locked-ws",
+            &BranchStrategy::NewBranch("locked-ws".to_string()),
+        )
+        .unwrap();
+        let wt = env.workspaces_dir.join("locked-ws").join("alpha");
+        let out = std::process::Command::new("git")
+            .args(["worktree", "lock", "--reason", "on usb"])
+            .arg(&wt)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "fixture: lock the worktree");
+
+        let err = server
+            .remove_workspace(Parameters(RemoveWorkspaceParams {
+                name: "locked-ws".to_string(),
+            }))
+            .expect_err("a refused worktree removal must be reported");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("alpha") && msg.contains("locked working tree"),
+            "the error names the repo and git's reason, got {msg:?}"
+        );
+        assert!(
+            wt.join(".git").exists(),
+            "the space git refused to give up must still be there"
+        );
+    });
+}

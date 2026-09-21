@@ -86,11 +86,17 @@ When you create a workspace, space does this for each selected repo, except a re
 
 ### Removing a Workspace
 
-For each repo worktree in the workspace:
+Each directory in the workspace (symlinks are left alone, neither sorted nor handed to git) is sorted into one of five kinds. Every directory is sorted before any of them is acted on, because removing one worktree can change what a second one looks like: two directories can name the same admin directory, and the second would read as an orphan once the first had taken it.
 
-1. Reads the `.git` file to trace back to the main repository
-2. Runs `git worktree remove` on the main repo
-3. Deletes the workspace directory
+1. **A worktree.** Its `.git` file names an admin directory that is still there and holds a `commondir`, which is what a linked worktree has and a submodule checkout does not. A relative `gitdir:`, which git writes when `worktree.useRelativePaths` is set, is read against the worktree, the way git reads it
+2. **An orphan.** Its `.git` file names an admin directory that has gone, because the source repo was deleted or moved, or the entry was already pruned
+3. **A repository of its own**, which `space` never creates: a clone dropped in by hand, a bare repo, or a submodule checkout. A repository is recognised by the `objects` directory and `config` file that every repository has, in any format, rather than by asking a library, which would answer "not a repository" for a format it does not know and so delete it
+4. **Unreadable**: its `.git` file cannot be read, or does not name a gitdir
+5. **Plain content**: no repository here at all. Only the directories directly inside the workspace are sorted; a repository nested deeper, such as a clone at `notes/inner`, is not looked for and goes with its parent
+
+For each worktree, `git worktree remove` (with `--force`, which every command in the app passes) runs inside the worktree itself, so git resolves the source repo, and its output is captured rather than let through to the terminal. Only once every directory has been dealt with, and nothing has been kept, is the workspace directory deleted, with the plain content in it.
+
+A worktree git refuses to give up keeps the whole workspace: the worktrees git already removed are gone, but the workspace directory itself is not deleted, and the error names each directory kept along with git's own reason. A worktree whose directory was moved or renamed by hand is refused too, and the error names the `git worktree repair` that fixes it. With `worktree.useRelativePaths` set, a moved space cannot be told apart from a deleted source repo, since a relative link breaks when either side moves, so such a worktree is kept rather than treated as an orphan, and the error names the `git worktree repair` to run from the source repo if either was moved, or says to delete the directory by hand if the source repo is gone. A worktree and a copy of it sitting in the same space share one admin directory; neither is removed, because removing the original would leave the copy with nothing registered and the next removal would delete it, so both are kept and reported as a pair, and the summary leads with their count. Which of them is the original is read from what git recorded, never assumed: in a space moved by hand neither is where git recorded it, and both are told the repair that fixes a move and to keep their work before deleting anything. The common case is a worktree locked with `git worktree lock`, where the error also names the `git worktree unlock` that clears it, since `space` will not override a lock. A repository of its own is kept for the same reason, because deleting it would take its history with it, and so is an unreadable one, because what it is cannot be told. An orphan is not a refusal when the removal is forced, which is every command in the app: git has nothing left to unregister, so that directory goes with the rest, and it is listed in the report if something else in the space was kept. On a removal that succeeds there is no report, and nothing is said about it. Unforced, which only the library API can ask for, an orphan is kept too, because git is no longer there to say whether it holds uncommitted work.
 
 ### Repo Discovery
 
@@ -303,6 +309,8 @@ Progress log showing each repo with a checkmark or error. A repo whose place in 
 ## Delete Workspace
 
 Confirmation dialog showing `Delete workspace?`, the workspace name on its own line, and the worktrees that will be removed. The dialog defaults to No, like the push and rebase confirmations: only `y` or `Y` deletes, while `n`, `N`, `q`, `Enter` and `Esc` all cancel. Long names are truncated with `...`, and long repo lists keep the footer visible by showing `... and N more` when needed. With `space rm --force`, skips the dialog entirely.
+
+If git refuses to remove one of the worktrees, the workspace stays where it is and the status message names the kept repos and the first reason, on one line; the whole report, repo by repo, goes to the log file when logging is on (it is by default; see `SPACE_LOG`). The dashboard is refreshed either way, since the worktrees git did remove are gone from disk. The dialog lists the repo directories `space` can see, which is every directory holding a `.git`; a bare repo has none, so one sitting in the workspace is not listed even though the removal will stop on it.
 
 ---
 
@@ -724,7 +732,7 @@ Remove a workspace and all its git worktrees.
 }
 ```
 
-> **Note:** This always uses force removal. Each repo's worktree is removed via `git worktree remove --force` on the main repository, then the workspace directory is deleted.
+> **Note:** This always uses force removal. Each repo's worktree is removed with `git worktree remove --force`, and the workspace directory is deleted only once nothing has been kept. A worktree git refuses to give up (a locked one, for example), a directory holding a repository of its own, and one that cannot be read are all kept: the call fails with an error naming each of them and the reason, the repos already removed stay removed, and retrying after the cause is fixed removes the rest.
 
 ---
 

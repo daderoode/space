@@ -1706,25 +1706,39 @@ impl App {
             }
             ScreenAction::DeleteWorkspace { name, force } => {
                 let ws_dir = self.config.workspaces.dir.clone();
-                match crate::core::workspace::remove_workspace(&ws_dir, &name, force) {
-                    Ok(()) => {
-                        if let Ok(ws) = crate::core::workspace::list_workspaces(&ws_dir) {
-                            self.workspaces = ws;
-                            self.selected_ws = 0;
-                        }
-                        self.reset_repo_pane_state();
-                        // Intentionally synchronous: workspace deletion is infrequent
-                        // and the user expects the dashboard to reflect the new state.
-                        self.load_selected_workspace_detail();
-                        self.screen = Screen::Dashboard;
-                        self.set_status(
-                            format!("Deleted workspace '{}'", name),
-                            StatusKind::Success,
-                        );
-                    }
+                let outcome = crate::core::workspace::remove_workspace(&ws_dir, &name, force);
+                // The worktrees are unregistered one at a time, so a delete
+                // that failed part-way still changed the disk. Both paths
+                // refresh, or the dashboard keeps listing repos that are gone.
+                if let Ok(ws) = crate::core::workspace::list_workspaces(&ws_dir) {
+                    self.workspaces = ws;
+                    // A space that was kept stays where the user was looking.
+                    self.selected_ws = self
+                        .workspaces
+                        .iter()
+                        .position(|w| w.name == name)
+                        .unwrap_or(0);
+                }
+                self.reset_repo_pane_state();
+                // Intentionally synchronous: workspace deletion is infrequent
+                // and the user expects the dashboard to reflect the new state.
+                self.load_selected_workspace_detail();
+                self.screen = Screen::Dashboard;
+                match outcome {
+                    Ok(()) => self
+                        .set_status(format!("Deleted workspace '{}'", name), StatusKind::Success),
                     Err(e) => {
-                        self.screen = Screen::Dashboard;
-                        self.set_status(format!("Delete failed: {}", e), StatusKind::Error);
+                        // The status message is one line and clears after five
+                        // seconds; the whole report, repo by repo, goes to the
+                        // log. `remove_workspace` writes its first line to
+                        // stand alone for exactly this.
+                        tracing::warn!("{}", e);
+                        let report = e.to_string();
+                        let summary = report.lines().next().unwrap_or_default();
+                        // The prefix stays: the other failures here ("workspace
+                        // 'x' not found") do not say what was being attempted,
+                        // and this is the only line the user sees.
+                        self.set_status(format!("Delete failed: {}", summary), StatusKind::Error);
                     }
                 }
             }
@@ -6097,6 +6111,207 @@ mod tests {
         assert!(
             app.repo_file_cache.contains_key(&99),
             "file cache should not be cleared/populated by workspace load (deferred to expand)"
+        );
+    }
+
+    /// Ticket 27: a delete that git refused used to report success, delete the
+    /// space anyway and leave the dashboard alone. Now the space stays, the
+    /// status is an error naming the repo, and both panes are refreshed,
+    /// because the repos git did give up are gone from disk either way.
+    #[test]
+    fn a_refused_delete_keeps_the_space_and_refreshes_the_dashboard() {
+        use crate::core::workspace::{create_worktree, BranchStrategy};
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Name order decides which repo the removal reaches first.
+        let locked_repo = make_repo(tmp.path(), "a-locked");
+        let free_repo = make_repo(tmp.path(), "b-free");
+        let ws_dir = tmp.path().join("spaces");
+        for repo in [&locked_repo, &free_repo] {
+            create_worktree(
+                repo,
+                &ws_dir,
+                "ws",
+                &BranchStrategy::NewBranch("ws".to_string()),
+            )
+            .unwrap();
+        }
+        // A second space, sorted before the one being deleted, so that
+        // "the kept space stays selected" cannot pass by landing on index 0.
+        create_worktree(
+            &free_repo,
+            &ws_dir,
+            "a-other",
+            &BranchStrategy::NewBranch("a-other".to_string()),
+        )
+        .unwrap();
+        let locked_wt = ws_dir.join("ws").join("a-locked");
+        let out = std::process::Command::new("git")
+            .args(["worktree", "lock", "--reason", "on usb"])
+            .arg(&locked_wt)
+            .current_dir(&locked_repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "fixture: lock the worktree");
+
+        let mut app = make_app(crate::core::workspace::list_workspaces(&ws_dir).unwrap());
+        app.config.workspaces.dir = ws_dir.clone();
+        app.selected_ws = app
+            .workspaces
+            .iter()
+            .position(|w| w.name == "ws")
+            .expect("fixture: the space to delete is listed");
+        assert_eq!(app.selected_ws, 1, "fixture: and it is not at index 0");
+        app.load_selected_workspace_detail();
+        assert_eq!(
+            app.workspaces[app.selected_ws].repos.len(),
+            2,
+            "fixture: the dashboard starts with both repos"
+        );
+        // Pane state keyed to the rows that are about to change.
+        app.cursor_row = 1;
+        app.expanded_repos.insert(1);
+
+        app.process_action(crate::tui::actions::ScreenAction::DeleteWorkspace {
+            name: "ws".to_string(),
+            force: true,
+        });
+
+        assert_eq!(app.status_kind, StatusKind::Error);
+        let status = app.status_message.clone().expect("a status is set");
+        assert!(
+            status.contains("a-locked"),
+            "the status names the repo that was kept, got {:?}",
+            status
+        );
+        assert_eq!(
+            status.lines().count(),
+            1,
+            "the status is one line, whatever the report says, got {:?}",
+            status
+        );
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "the dialog is left either way"
+        );
+
+        let ws = app
+            .workspaces
+            .iter()
+            .find(|w| w.name == "ws")
+            .expect("the space git refused to give up is still listed");
+        let names: Vec<&str> = ws.repos.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["a-locked"],
+            "the repo that was removed is gone from the refreshed pane"
+        );
+        assert!(
+            app.workspaces[app.selected_ws].name == "ws",
+            "and the kept space is still the selected one"
+        );
+        assert!(
+            app.cursor_row == 0 && app.expanded_repos.is_empty(),
+            "pane state keyed to rows that have gone is reset, as on the success path"
+        );
+    }
+
+    /// The other half of that refresh: when the delete failed because the
+    /// space had already gone, another shell having removed the directory,
+    /// the dashboard was left listing a space that is not there. It is
+    /// dropped now, which is what the list reload on the failure path buys.
+    #[test]
+    fn a_delete_of_a_space_that_is_already_gone_drops_it_from_the_list() {
+        use crate::core::workspace::{create_worktree, BranchStrategy};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = make_repo(tmp.path(), "alpha");
+        let ws_dir = tmp.path().join("spaces");
+        for name in ["gone", "stays"] {
+            create_worktree(
+                &repo,
+                &ws_dir,
+                name,
+                &BranchStrategy::NewBranch(name.to_string()),
+            )
+            .unwrap();
+        }
+        let mut app = make_app(crate::core::workspace::list_workspaces(&ws_dir).unwrap());
+        app.config.workspaces.dir = ws_dir.clone();
+        assert_eq!(app.workspaces.len(), 2, "fixture: both spaces are listed");
+
+        // Another shell removes it behind the app's back.
+        std::fs::remove_dir_all(ws_dir.join("gone")).unwrap();
+
+        app.process_action(crate::tui::actions::ScreenAction::DeleteWorkspace {
+            name: "gone".to_string(),
+            force: true,
+        });
+
+        assert_eq!(app.status_kind, StatusKind::Error);
+        let names: Vec<&str> = app.workspaces.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["stays"],
+            "a space that is not on disk any more is dropped from the dashboard"
+        );
+    }
+
+    /// Coordinator review of 175c8ce: the report said what a retry would do
+    /// to a copy, but it started about 350 characters past what the status
+    /// row shows at the supported 80 columns. The count of a kept pair now
+    /// sits right after the names, before any reason, and this reads it off
+    /// the drawn dashboard rather than off the string.
+    #[test]
+    fn a_kept_pair_is_counted_inside_eighty_columns() {
+        use crate::core::workspace::{create_worktree, BranchStrategy};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Ordinary names, the length that pushed a trailing count to column 79.
+        let repo = make_repo(tmp.path(), "frontend-service");
+        let ws_dir = tmp.path().join("spaces");
+        let original = create_worktree(
+            &repo,
+            &ws_dir,
+            "ws",
+            &BranchStrategy::NewBranch("ws".to_string()),
+        )
+        .unwrap();
+        let copy = ws_dir.join("ws").join("frontend-service-copy");
+        std::fs::create_dir_all(&copy).unwrap();
+        std::fs::copy(original.join(".git"), copy.join(".git")).unwrap();
+
+        let mut app = make_app(crate::core::workspace::list_workspaces(&ws_dir).unwrap());
+        app.config.workspaces.dir = ws_dir.clone();
+        app.process_action(crate::tui::actions::ScreenAction::DeleteWorkspace {
+            name: "ws".to_string(),
+            force: true,
+        });
+        assert_eq!(
+            app.status_kind,
+            StatusKind::Error,
+            "fixture: the delete was refused"
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::tui::ui::view(&app, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let status_row = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .find(|row| row.contains("Delete failed:"))
+            .expect("the status row is drawn");
+        assert!(
+            status_row.contains("2 share one worktree"),
+            "the pair's count is inside the 80 columns the user sees, got {:?}",
+            status_row
         );
     }
 }
