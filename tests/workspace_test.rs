@@ -2677,3 +2677,355 @@ fn remove_workspace_never_tells_copies_of_an_outside_worktree_to_repair() {
         "and the outside worktree still works"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Ticket 25: a remote-tracking branch of any remote becomes a local tracking
+// branch, the way `origin/<name>` always has.
+// ---------------------------------------------------------------------------
+
+/// A repo with two remotes, `origin` and `upstream` (bare repos beside it),
+/// plus a third remote named `a/b` (a slash in a remote name is legal) that
+/// points at the same bare repo as `upstream`. `feat` exists on both `origin`
+/// and `upstream` at DIFFERENT tips, so an assertion on the checked-out
+/// commit can tell the two apart; `only-up` exists on `upstream` only. The
+/// repo itself keeps one local branch, `main`, and every remote-tracking ref
+/// is fetched. `upstream/HEAD` is set so the picker's `*/HEAD` exclusion is
+/// exercised.
+struct TwoRemotes {
+    _tmp: TempDir,
+    repo: PathBuf,
+    origin: PathBuf,
+    origin_feat: String,
+    upstream_feat: String,
+}
+
+fn two_remote_repo(env: &TestEnv) -> TwoRemotes {
+    let tmp = TempDir::new().unwrap();
+    let repo = env.create_repo("two");
+    let origin = tmp.path().join("origin.git");
+    let upstream = tmp.path().join("upstream.git");
+    for bare in [&origin, &upstream] {
+        std::fs::create_dir_all(bare).unwrap();
+        git_ok(bare, &["init", "-q", "--bare", "-b", "main"]);
+    }
+    git_ok(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git_ok(
+        &repo,
+        &["remote", "add", "upstream", upstream.to_str().unwrap()],
+    );
+    git_ok(&repo, &["remote", "add", "a/b", upstream.to_str().unwrap()]);
+
+    git_ok(&repo, &["branch", "feat", "main"]);
+    git_ok(&repo, &["push", "-q", "origin", "main", "feat"]);
+    let origin_feat = git_ok(&repo, &["rev-parse", "refs/heads/feat"])
+        .trim()
+        .to_string();
+
+    // A decoy tip for upstream's `feat`, minted without touching the
+    // checked-out branch (ticket 24's lesson: two empty commits in one
+    // second are the same commit, so mint through `commit-tree`).
+    let decoy = git_ok(
+        &repo,
+        &[
+            "commit-tree",
+            "HEAD^{tree}",
+            "-p",
+            "HEAD",
+            "-m",
+            "upstream-only",
+        ],
+    )
+    .trim()
+    .to_string();
+    assert_ne!(decoy, origin_feat, "fixture: upstream's feat must differ");
+    git_ok(&repo, &["update-ref", "refs/heads/feat", &decoy]);
+    git_ok(&repo, &["branch", "only-up", "main"]);
+    git_ok(
+        &repo,
+        &["push", "-q", "upstream", "main", "feat", "only-up"],
+    );
+    git_ok(&repo, &["branch", "-q", "-D", "feat", "only-up"]);
+
+    git_ok(&repo, &["fetch", "-q", "--all"]);
+    git_ok(&repo, &["remote", "set-head", "upstream", "main"]);
+    assert_eq!(
+        git_ok(&repo, &["rev-parse", "refs/remotes/upstream/feat"]).trim(),
+        decoy,
+        "fixture: upstream/feat is the decoy"
+    );
+    TwoRemotes {
+        _tmp: tmp,
+        repo,
+        origin,
+        origin_feat,
+        upstream_feat: decoy,
+    }
+}
+
+fn head_symref(wt: &Path) -> String {
+    git_ok(wt, &["symbolic-ref", "HEAD"]).trim().to_string()
+}
+
+fn upstream_of(repo: &Path, branch: &str) -> String {
+    git_ok(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(upstream)",
+            &format!("refs/heads/{}", branch),
+        ],
+    )
+    .trim()
+    .to_string()
+}
+
+/// T1. `upstream/feat` from the picker is checked out as a new local `feat`
+/// tracking `refs/remotes/upstream/feat`, at upstream's tip and not
+/// origin's. Before the fix git took the name as a commit-ish and detached.
+#[test]
+fn an_upstream_existing_branch_becomes_a_local_tracking_branch() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t1",
+        &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+    )
+    .expect("upstream/feat must be checked out as a tracking branch");
+
+    assert_eq!(
+        head_symref(&wt),
+        "refs/heads/feat",
+        "on a branch, not detached"
+    );
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/upstream/feat");
+    let head = git_ok(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(head, f.upstream_feat, "at upstream's tip");
+    assert_ne!(head, f.origin_feat, "and not origin's");
+}
+
+/// T2. When a local `feat` already exists, whichever remote it tracks, git
+/// refuses with its own sentence and nothing is created or moved; the same
+/// rule `origin/<name>` has always had, with no fallback to the local
+/// branch.
+#[test]
+fn an_upstream_branch_whose_local_name_exists_is_refused() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(&f.repo, &["branch", "-q", "--track", "feat", "origin/feat"]);
+
+    for (ws, tracks) in [
+        ("t2-origin", "origin/feat"),
+        ("t2-upstream", "upstream/feat"),
+    ] {
+        git_ok(&f.repo, &["branch", "-q", "-u", tracks, "feat"]);
+        let err = create_worktree(
+            &f.repo,
+            &env.workspaces_dir,
+            ws,
+            &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+        )
+        .expect_err("a local feat already exists")
+        .to_string();
+        assert!(
+            err.contains("a branch named 'feat' already exists"),
+            "git's own refusal, got {:?}",
+            err
+        );
+        // The space directory itself is made before the add, as it is for
+        // every strategy; the worktree is what must be absent.
+        assert!(
+            !env.workspaces_dir.join(ws).join("two").exists(),
+            "no worktree is created for {}",
+            ws
+        );
+        assert!(
+            !registered_worktrees(&f.repo).contains(ws),
+            "and none is registered for {}",
+            ws
+        );
+        assert_eq!(
+            git_ok(&f.repo, &["rev-parse", "refs/heads/feat"]).trim(),
+            f.origin_feat,
+            "the local feat is not moved"
+        );
+        assert_eq!(
+            upstream_of(&f.repo, "feat"),
+            format!("refs/remotes/{}", tracks),
+            "and keeps its upstream"
+        );
+    }
+}
+
+/// T3. A remote named `a/b` is matched as a whole, so `a/b/feat` becomes the
+/// local `feat` tracking `refs/remotes/a/b/feat`, not a local `b/feat`.
+#[test]
+fn a_remote_named_with_a_slash_splits_at_the_remote() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t3",
+        &BranchStrategy::ExistingBranch("a/b/feat".to_string()),
+    )
+    .expect("a/b/feat must be checked out as a tracking branch");
+
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/a/b/feat");
+}
+
+/// T4. A prefix that names no configured remote is not a remote: the name
+/// goes to git as it is, and a local branch called `nobody/feat` is checked
+/// out as that branch.
+#[test]
+fn a_prefix_that_names_no_remote_stays_a_plain_name() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(&f.repo, &["branch", "-q", "nobody/feat", "main"]);
+
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t4",
+        &BranchStrategy::ExistingBranch("nobody/feat".to_string()),
+    )
+    .expect("a local branch with a slash in its name is checked out");
+
+    assert_eq!(head_symref(&wt), "refs/heads/nobody/feat");
+}
+
+/// T5. Ticket 13's guard runs on the derived name for every remote: the
+/// `-M` that `upstream/-M` would hand to `-b` is refused before git runs,
+/// with git's sentence, and the source repo's checked-out branch keeps its
+/// name.
+#[test]
+fn an_upstream_dash_branch_is_refused_before_git() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(&f.repo, &["branch", "-q", "upstream/-M", "main"]);
+
+    let err = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "t5",
+        &BranchStrategy::ExistingBranch("upstream/-M".to_string()),
+    )
+    .expect_err("the derived -b name begins with '-'");
+    assert_eq!(err.to_string(), "'-M' is not a valid branch name");
+    assert_eq!(head_symref(&f.repo), "refs/heads/main");
+    assert!(!env.workspaces_dir.join("t5").exists());
+}
+
+/// T6. `upstream/feat` reads `refs/remotes/upstream/feat`, which a fetch of
+/// `origin` never writes under the default refspec, so the pre-create fetch
+/// is skipped (ticket 16's rule, generalised). Positive evidence: origin
+/// gains a branch after the clone, and after the create the repo still has
+/// no `refs/remotes/origin/newb`, which the fetch would have created.
+#[test]
+fn an_upstream_existing_branch_runs_no_fetch() {
+    use space::core::workspace::{create_worktree_with_fetch, PreCreateFetch};
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.origin,
+        &["update-ref", "refs/heads/newb", &f.origin_feat],
+    );
+
+    let attempt = create_worktree_with_fetch(
+        &f.repo,
+        &env.workspaces_dir,
+        "t6",
+        &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+        PreCreateFetch::Run(std::time::Duration::from_secs(20)),
+    );
+    let wt = attempt.created.expect("the worktree must be created");
+    assert_eq!(attempt.fetch, None, "the fetch is skipped");
+    let seen = Command::new("git")
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/remotes/origin/newb",
+        ])
+        .current_dir(&f.repo)
+        .status()
+        .unwrap();
+    assert!(
+        !seen.success(),
+        "no fetch reached origin: origin/newb is unknown"
+    );
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/upstream/feat");
+}
+
+/// T7. When origin's fetch refspec writes under `refs/remotes/upstream/`,
+/// the fetch can change what `upstream/feat` names, so it runs. Positive
+/// evidence: the worktree lands on what origin wrote there (origin's
+/// `feat`), not on the decoy the ref held before. Upstream's own refspec is
+/// dropped first: with two remotes mapping the same ref, git refuses
+/// `--track` outright (`not tracking: ambiguous information for ref`,
+/// git 2.50.1), whether or not a fetch ran.
+#[test]
+fn an_origin_refspec_writing_another_remotes_refs_still_fetches() {
+    use space::core::workspace::{create_worktree_with_fetch, FetchOutcome, PreCreateFetch};
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(&f.repo, &["config", "--unset-all", "remote.upstream.fetch"]);
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/upstream/*",
+        ],
+    );
+
+    let attempt = create_worktree_with_fetch(
+        &f.repo,
+        &env.workspaces_dir,
+        "t7",
+        &BranchStrategy::ExistingBranch("upstream/feat".to_string()),
+        PreCreateFetch::Run(std::time::Duration::from_secs(20)),
+    );
+    let wt = attempt.created.expect("the worktree must be created");
+    assert_eq!(attempt.fetch, Some(FetchOutcome::Ok), "the fetch ran");
+    assert_eq!(
+        git_ok(&wt, &["rev-parse", "HEAD"]).trim(),
+        f.origin_feat,
+        "the add read the ref origin's fetch had just written"
+    );
+}
+
+/// T8. The picker's source lists every remote's branches, not origin's
+/// alone, each marked remote, and no `*/HEAD`.
+#[test]
+fn list_branches_offers_every_remotes_branches() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+
+    let branches = space::core::git::list_branches(&f.repo).unwrap();
+    for name in [
+        "origin/feat",
+        "upstream/feat",
+        "upstream/only-up",
+        "a/b/feat",
+    ] {
+        let row = branches
+            .iter()
+            .find(|b| b.name == name)
+            .unwrap_or_else(|| panic!("{} is listed, got {:?}", name, branches));
+        assert!(row.is_remote, "{} is marked remote", name);
+    }
+    assert!(
+        branches.iter().all(|b| !b.name.ends_with("/HEAD")),
+        "no remote HEAD row, got {:?}",
+        branches
+    );
+}

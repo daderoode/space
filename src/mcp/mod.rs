@@ -185,12 +185,23 @@ fn bad_space_name(name: &str, e: anyhow::Error) -> McpError {
 /// Ask git whether the branch a strategy will create or check out is a
 /// valid branch name (`workspace::check_branch_name`), on the name that
 /// reaches git's `-b` slot (`workspace::branch_slot_name`: for `existing`
-/// with an `origin/` prefix that is the stripped local name, the one git
-/// will create). `detached` has no branch. The message is git's sentence,
+/// with a `<remote>/` prefix that is the stripped local name, the one git
+/// will create). Which prefixes count depends on each repo's configured
+/// remotes, so the name is derived per repo and each distinct result is
+/// checked once. `detached` has no branch. The message is git's sentence,
 /// e.g. `'-x' is not a valid branch name`, as `invalid_params`.
-fn checked_branch(strategy: &BranchStrategy) -> std::result::Result<(), McpError> {
-    if let Some(branch) = workspace::branch_slot_name(strategy) {
-        workspace::check_branch_name(branch)
+fn checked_branch(
+    strategy: &BranchStrategy,
+    repo_paths: &[PathBuf],
+) -> std::result::Result<(), McpError> {
+    let names: std::collections::BTreeSet<String> = repo_paths
+        .iter()
+        .filter_map(|repo| {
+            workspace::branch_slot_name(strategy, &workspace::remote_names(repo)).map(String::from)
+        })
+        .collect();
+    for branch in names {
+        workspace::check_branch_name(&branch)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
     }
     Ok(())
@@ -401,7 +412,7 @@ impl SpaceServer {
             resolve_repos(&params.repos, &cache).map_err(|e| McpError::invalid_params(e, None))?;
         let strategy = build_strategy(&params.strategy, params.branch.as_deref(), &params.name)
             .map_err(|e| McpError::invalid_params(e, None))?;
-        checked_branch(&strategy)?;
+        checked_branch(&strategy, &repo_paths)?;
 
         let ws_dir = &cfg.workspaces.dir;
         let placed = place_repos(&repo_paths, ws_dir, &params.name, &strategy, "create")?;
@@ -457,7 +468,7 @@ impl SpaceServer {
             &params.workspace,
         )
         .map_err(|e| McpError::invalid_params(e, None))?;
-        checked_branch(&strategy)?;
+        checked_branch(&strategy, &repo_paths)?;
 
         let placed = place_repos(&repo_paths, ws_dir, &params.workspace, &strategy, "add")?;
 

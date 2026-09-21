@@ -676,6 +676,35 @@ fn create_workspace_rejects_an_origin_prefixed_dash_branch() {
     });
 }
 
+/// Ticket 25. The same guard runs on the derived name for any configured
+/// remote: `existing` with `upstream/-x` would hand `-x` to `-b`, so it is
+/// `invalid_params` before anything runs, as `origin/-x` is.
+#[test]
+fn create_workspace_rejects_an_upstream_prefixed_dash_branch() {
+    with_test_env(|env, server| {
+        let repo_path = env.create_repo("delta");
+        let out = std::process::Command::new("git")
+            .args(["remote", "add", "upstream", "/nonexistent/upstream.git"])
+            .current_dir(&repo_path)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "fixture: a remote named upstream");
+        env.write_cache(&[repo_path]);
+
+        let err = server
+            .create_workspace(Parameters(CreateWorkspaceParams {
+                name: "dashed-up".to_string(),
+                repos: vec!["delta".to_string()],
+                strategy: "existing".to_string(),
+                branch: Some("upstream/-x".to_string()),
+            }))
+            .expect_err("the local name git would create begins with '-'");
+        let msg = invalid_params(&err);
+        assert_eq!(msg, "'-x' is not a valid branch name");
+        assert!(!env.workspaces_dir.join("dashed-up").exists());
+    });
+}
+
 /// Ticket 13, coverage found in review: the creation rule allows interior
 /// spaces, so a name with one must create end to end, not only pass the
 /// unit table.
