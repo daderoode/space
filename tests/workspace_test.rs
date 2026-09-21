@@ -1762,6 +1762,13 @@ fn remove_workspace_keeps_a_worktree_copied_beside_its_original() {
         "the reason says the copy shared a worktree removed in this run, got {:?}",
         err.to_string()
     );
+    // Removing the space again would delete it as an orphan, which is the
+    // agreed policy for an orphan, so the user is told before, not after.
+    assert!(
+        err.to_string().contains("deletes this copy"),
+        "and warns that removing the space again deletes it, got {:?}",
+        err.to_string()
+    );
     assert_eq!(
         std::fs::read_to_string(copy.join("experiment.txt")).unwrap(),
         "a day of work",
@@ -1771,8 +1778,10 @@ fn remove_workspace_keeps_a_worktree_copied_beside_its_original() {
 }
 
 /// The same arm, reached by a permission error rather than by absence: the
-/// source repo is intact and simply cannot be read right now, which is what
-/// an unmounted volume or a share that is offline looks like.
+/// source repo is intact and simply cannot be read right now. (An unmounted
+/// volume does not look like this: its missing mount point is a NotFound,
+/// which is an orphan. That is recorded as a residual of ticket 27, since
+/// nothing on disk tells an unplugged drive from a deleted repo.)
 #[test]
 fn remove_workspace_keeps_a_worktree_whose_admin_cannot_be_read() {
     use std::os::unix::fs::PermissionsExt;
@@ -1954,12 +1963,12 @@ fn remove_workspace_names_repair_for_a_space_that_was_moved() {
     );
 }
 
-/// The parser is laxer than git in one deliberate place: it strips trailing
-/// spaces as well as line endings. git rejects a gitfile with trailing
-/// blanks; here it resolves to the admin directory it plainly meant, is
-/// handed to git, is refused, and is kept. "Fixing" the parser to match git
-/// exactly would turn this same file into a path that does not exist, which
-/// reads as an orphan and is deleted. This pins the safe side.
+/// A gitfile git rejects because blanks follow a path that does not end in
+/// one. git's reading names nothing, but the path trimmed names a live admin
+/// directory, so it is a near miss: reported and kept, not read as an absent
+/// repo. Reading only git's way, without the near-miss check, would delete
+/// it as an orphan; trimming instead of reading git's way would delete the
+/// worktree whose real path ends in a blank (the test after next).
 #[test]
 fn remove_workspace_keeps_a_worktree_whose_gitfile_has_trailing_blanks() {
     let env = common::TestEnv::new();
@@ -2039,4 +2048,185 @@ fn remove_workspace_keeps_a_worktree_whose_admin_dir_itself_cannot_be_read() {
         "wip",
         "and the work in it is still there"
     );
+}
+
+/// Skeptical pass 3, SR-15: a real admin path may end in whitespace, because
+/// a repo directory name may. git made this worktree, of a repo whose name
+/// ends in a non-breaking space, and git reads its `.git` file. Stripping all
+/// trailing whitespace instead of only line endings read a path that does not
+/// exist, which is an orphan, which was deleted without git ever running,
+/// lock and all.
+#[test]
+fn remove_workspace_keeps_a_locked_worktree_whose_real_path_ends_in_a_blank() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("nb\u{a0}");
+    let wt = worktree_in_space(&env, &repo, "nbsp-ws");
+    std::fs::write(wt.join("uncommitted.txt"), "wip").unwrap();
+    git_ok(
+        &repo,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "keep me",
+            wt.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        git_ok(&wt, &["rev-parse", "--is-inside-work-tree"]).trim(),
+        "true",
+        "fixture: git itself reads this worktree's .git file"
+    );
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "nbsp-ws", true)
+        .expect_err("a locked worktree is refused by git, not deleted as an orphan");
+    assert!(
+        err.to_string().contains("git worktree unlock"),
+        "it was handed to git, which refused the lock, got {:?}",
+        err.to_string()
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.join("uncommitted.txt")).unwrap(),
+        "wip",
+        "and the work in it is still there"
+    );
+}
+
+/// The same path, unlocked: git removes it and the source repo forgets it,
+/// which is what reading the path git's way buys.
+#[test]
+fn remove_workspace_unregisters_a_worktree_whose_real_path_ends_in_a_blank() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("nb\u{a0}");
+    worktree_in_space(&env, &repo, "nbsp2-ws");
+
+    space::core::workspace::remove_workspace(&env.workspaces_dir, "nbsp2-ws", true).unwrap();
+
+    let left = registered_worktrees(&repo);
+    assert!(
+        !left.contains("nbsp2-ws"),
+        "git ran and unregistered it, got {}",
+        left
+    );
+}
+
+/// Near misses of git's rule are reported, never read as an absent repo.
+/// Two spaces after the colon and a CRLF line followed by a comment are each
+/// a file git rejects that plainly names a live admin directory.
+#[test]
+fn remove_workspace_keeps_near_miss_gitfiles_of_a_live_worktree() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "near-ws");
+    let admin = repo.join(".git").join("worktrees").join("alpha");
+    std::fs::write(wt.join("uncommitted.txt"), "wip").unwrap();
+
+    for content in [
+        format!("gitdir:  {}\n", admin.display()),
+        format!("gitdir: {}\r\n# a note\n", admin.display()),
+    ] {
+        std::fs::write(wt.join(".git"), &content).unwrap();
+        let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "near-ws", true)
+            .expect_err("a gitfile git rejects but that names a live admin is kept");
+        assert!(
+            err.to_string().contains("alpha"),
+            "the report names it for {:?}, got {:?}",
+            content,
+            err.to_string()
+        );
+        assert!(
+            wt.join("uncommitted.txt").exists(),
+            "and the work is still there after {:?}",
+            content
+        );
+    }
+}
+
+/// Skeptical pass 3, SR-16: the repair hint was given whenever the source
+/// repo's record named some other existing directory, which is what a copy
+/// looks like, not a move. Following it hands the original's registration to
+/// the copy, and the next removal then deletes the admin directory the
+/// original still uses. A space duplicated with `cp -R` is ordinary.
+#[test]
+fn remove_workspace_does_not_tell_a_copy_to_repair() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let original = worktree_in_space(&env, &repo, "feat");
+    let copy_space = env.workspaces_dir.join("feat-copy");
+    std::fs::create_dir_all(copy_space.join("alpha")).unwrap();
+    std::fs::copy(original.join(".git"), copy_space.join("alpha").join(".git")).unwrap();
+    std::fs::write(copy_space.join("alpha").join("mine.txt"), "copy work").unwrap();
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "feat-copy", true)
+        .expect_err("git will not remove a copy it does not know");
+    let text = err.to_string();
+    assert!(
+        !text.contains("git worktree repair"),
+        "a copy must not be told to take over the original's registration, got {:?}",
+        text
+    );
+    assert!(
+        text.contains("copy of the worktree at") && text.contains("deletes this copy"),
+        "it is told what it is and what removing the space again would do, got {:?}",
+        text
+    );
+    assert_eq!(
+        git_ok(&original, &["rev-parse", "--is-inside-work-tree"]).trim(),
+        "true",
+        "and the original, outside this space, still works"
+    );
+}
+
+/// The summary lists two kept names, then a count, so a space with many kept
+/// directories cannot push the reason off an 80-column status row.
+#[test]
+fn remove_workspace_summary_caps_the_names_it_lists() {
+    let env = common::TestEnv::new();
+    let space_dir = env.workspaces_dir.join("many-ws");
+    std::fs::create_dir_all(&space_dir).unwrap();
+    for name in ["a-one", "b-two", "c-three"] {
+        git_ok(
+            &space_dir,
+            &[
+                "init",
+                "--quiet",
+                "--bare",
+                space_dir.join(name).to_str().unwrap(),
+            ],
+        );
+    }
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "many-ws", true)
+        .expect_err("three repositories of their own are kept");
+    let summary = err.to_string().lines().next().unwrap().to_string();
+    assert!(
+        summary.contains("and 1 more") && !summary.contains("c-three"),
+        "two names and a count, got {:?}",
+        summary
+    );
+}
+
+/// A gitdir naming a regular file is reported as such, rather than as a
+/// repository of its own: it is neither, and the advice differs.
+#[test]
+fn remove_workspace_says_when_a_gitdir_names_a_file() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("a-repo");
+    worktree_in_space(&env, &repo, "file-ws");
+    let odd = env.workspaces_dir.join("file-ws").join("z-odd");
+    std::fs::create_dir_all(&odd).unwrap();
+    std::fs::write(
+        odd.join(".git"),
+        format!("gitdir: {}\n", repo.join(".git").join("HEAD").display()),
+    )
+    .unwrap();
+
+    let err = space::core::workspace::remove_workspace(&env.workspaces_dir, "file-ws", true)
+        .expect_err("kept");
+    assert!(
+        err.to_string().contains("not a directory"),
+        "the reason says what is wrong with it, got {:?}",
+        err.to_string()
+    );
+    assert!(odd.join(".git").exists(), "and it is still there");
 }

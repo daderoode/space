@@ -92,7 +92,7 @@ Each directory in the workspace (symlinks are left alone, neither sorted nor han
 2. **An orphan.** Its `.git` file names an admin directory that has gone, because the source repo was deleted or moved, or the entry was already pruned
 3. **A repository of its own**, which `space` never creates: a clone dropped in by hand, a bare repo, or a submodule checkout. A repository is recognised by the `objects` directory and `config` file that every repository has, in any format, rather than by asking a library, which would answer "not a repository" for a format it does not know and so delete it
 4. **Unreadable**: its `.git` file cannot be read, or does not name a gitdir
-5. **Plain content**: no repository here at all
+5. **Plain content**: no repository here at all. Only the directories directly inside the workspace are sorted; a repository nested deeper, such as a clone at `notes/inner`, is not looked for and goes with its parent
 
 For each worktree, `git worktree remove` (with `--force`, which every command in the app passes) runs inside the worktree itself, so git resolves the source repo, and its output is captured rather than let through to the terminal. Only once every directory has been dealt with, and nothing has been kept, is the workspace directory deleted, with the plain content in it.
 

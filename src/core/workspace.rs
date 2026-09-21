@@ -2199,22 +2199,26 @@ fn is_repository_dir(dir: &Path) -> bool {
 
 /// The admin directory a linked worktree's `.git` file names.
 ///
-/// git's rule (`setup.c`, `read_gitfile_gently`): the prefix `gitdir: ` is
-/// exact and at the very start, and the path is everything after it with
-/// only trailing `\n` and `\r` removed, so interior newlines belong to the
-/// path. Checked against git 2.50.1 with `git rev-parse --git-dir`, which
-/// accepts the canonical form, no trailing newline, CRLF and a blank second
-/// line, and rejects a leading space, two spaces after the colon, trailing
-/// spaces and a trailing comment line.
+/// Read by git's rule (`setup.c`, `read_gitfile_gently`): the prefix
+/// `gitdir: ` is exact and at the very start, and the path is everything
+/// after it with only trailing `\n` and `\r` removed. Anything else is part
+/// of the path, interior newlines and trailing blanks included, because a
+/// directory name may end in a blank: git made a worktree of a repo named
+/// with a trailing non-breaking space, and reads its `.git` file. Checked
+/// against git 2.50.1 with `git rev-parse --git-dir`, which accepts the
+/// canonical form, no trailing newline, CRLF and a blank second line, and
+/// rejects a leading space, two spaces after the colon, trailing spaces that
+/// are not part of the path and a trailing comment line.
 ///
-/// This follows that rule with one deliberate difference: it strips every
-/// kind of trailing whitespace, not only line endings. The difference errs
-/// one way only. A gitfile git rejects for trailing blanks resolves here to
-/// the admin directory it plainly meant, so it is classified a worktree,
-/// handed to git, refused, and kept. Matching git exactly would make the
-/// same file name a path that does not exist, and a path that does not exist
-/// is read as an orphan, which is deleted. For a function whose failures
-/// delete, laxness that can only land in "keep" is the safe side.
+/// When git's reading names nothing that exists, that is not yet proof the
+/// source repo is gone, which is what deletes. The near misses a hand edit
+/// or a lax writer produces are tried first: the path trimmed at both ends,
+/// the first line alone, and the first line trimmed. If any of those names
+/// something real, the file is not what git reads and which was meant cannot
+/// be told, so it is reported and kept. Only when every reading names
+/// nothing is git's path returned, for the caller to find absent. An earlier
+/// version trimmed all trailing whitespace instead, which looked safe and was
+/// not: it read a real path ending in a blank as a path that does not exist.
 ///
 /// git writes a relative path when the user sets `worktree.useRelativePaths`
 /// (git 2.48 and later) and reads it relative to the worktree, which is what
@@ -2230,29 +2234,29 @@ fn is_repository_dir(dir: &Path) -> bool {
 fn worktree_admin_dir(dir: &Path) -> std::result::Result<PathBuf, String> {
     let content = std::fs::read_to_string(dir.join(".git"))
         .map_err(|e| format!("its .git file cannot be read ({})", e))?;
-    // Exact prefix at the start, as git requires. `trim_end` rather than
-    // git's line-endings-only strip is the deliberate difference the doc
-    // comment explains. Interior newlines belong to the path, because a
-    // directory name may contain one.
     let rest = content
         .strip_prefix("gitdir: ")
         .ok_or_else(|| "its .git file does not name a gitdir".to_string())?;
-    let whole = rest.trim_end();
-    let resolved = resolve_against(dir, whole);
+    let as_git_reads_it = rest.trim_end_matches(['\n', '\r']);
+    let resolved = resolve_against(dir, as_git_reads_it);
     if resolved.exists() {
         return Ok(resolved);
     }
-    // It names nothing that is there. Before that is read as "the source repo
-    // is gone", which deletes, rule out the file simply having more in it
-    // than a gitdir: if the first line alone does name something, the rest is
-    // what changed the meaning, and this cannot say which was meant.
-    let first = whole
+    let first_line = as_git_reads_it
         .split('\n')
         .next()
-        .unwrap_or(whole)
+        .unwrap_or(as_git_reads_it)
         .trim_end_matches('\r');
-    if first != whole && resolve_against(dir, first).exists() {
-        return Err("its .git file carries more than a gitdir line".to_string());
+    let near_misses = [as_git_reads_it.trim(), first_line, first_line.trim()];
+    if near_misses
+        .iter()
+        .any(|miss| *miss != as_git_reads_it && resolve_against(dir, miss).exists())
+    {
+        return Err(
+            "its .git file names a live admin directory in a form git does not read \
+             (extra lines, or blanks around the path)"
+                .to_string(),
+        );
     }
     Ok(resolved)
 }
@@ -2266,18 +2270,29 @@ fn resolve_against(dir: &Path, target: &str) -> PathBuf {
     }
 }
 
-/// Whether the source repo's record of this worktree names somewhere else,
-/// which is what `git worktree remove` refuses with `is not a working tree`
-/// after a space directory has been moved or renamed by hand. The admin
-/// directory's `gitdir` file holds the path of the worktree's own `.git`
-/// file, so comparing it with where this directory actually is answers it
-/// without reading git's sentence. An unreadable or unresolvable path is not
-/// evidence of a move, so it answers false and the reason stands as git gave
-/// it.
-fn admin_points_elsewhere(admin: &Path, dir: &Path) -> bool {
+/// Where the source repo's record of this worktree says it lives, compared
+/// with where this directory is. The admin directory's `gitdir` file holds
+/// the path of the worktree's own `.git` file, so this answers without
+/// reading git's sentence.
+enum RecordedAt {
+    /// The record names this directory, or cannot be read or resolved, which
+    /// is not evidence of anything: git's reason stands as git gave it.
+    Here,
+    /// The record names a place that is not there at all. That is what moving
+    /// or renaming the space leaves behind, and `git worktree repair` fixes.
+    Gone,
+    /// The record names another directory that exists. That is not a move:
+    /// the worktree git knows is still there, and this is a copy of it, for
+    /// instance a space duplicated with `cp -R`. `git worktree repair` here
+    /// would hand the original's registration to the copy, and removing the
+    /// copy would then delete the admin directory the original still uses.
+    Elsewhere(PathBuf),
+}
+
+fn recorded_at(admin: &Path, dir: &Path) -> RecordedAt {
     let recorded = match std::fs::read_to_string(admin.join("gitdir")) {
-        Ok(recorded) => PathBuf::from(recorded.trim()),
-        Err(_) => return false,
+        Ok(recorded) => PathBuf::from(recorded.trim_end_matches(['\n', '\r'])),
+        Err(_) => return RecordedAt::Here,
     };
     let recorded = if recorded.is_absolute() {
         recorded
@@ -2286,15 +2301,14 @@ fn admin_points_elsewhere(admin: &Path, dir: &Path) -> bool {
     };
     let here = match std::fs::canonicalize(dir) {
         Ok(here) => here,
-        Err(_) => return false,
+        Err(_) => return RecordedAt::Here,
     };
-    let recorded_dir = recorded.parent().unwrap_or(&recorded);
-    match std::fs::canonicalize(recorded_dir) {
-        Ok(there) => there != here,
-        // The record names somewhere that is not there at all, which is what
-        // renaming or moving the space leaves behind.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-        Err(_) => false,
+    let recorded_dir = recorded.parent().unwrap_or(&recorded).to_path_buf();
+    match std::fs::canonicalize(&recorded_dir) {
+        Ok(there) if there == here => RecordedAt::Here,
+        Ok(there) => RecordedAt::Elsewhere(there),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => RecordedAt::Gone,
+        Err(_) => RecordedAt::Here,
     }
 }
 
@@ -2344,7 +2358,9 @@ fn unregister_worktree(dir: &Path, force: bool, admin: &Path) -> std::result::Re
                 return Err(format!(
                     "it shared its .git file with a worktree removed earlier in this \
                      run, so git no longer knows it; keep what you need from it, then \
-                     delete it by hand and remove the space again\n{}",
+                     delete it by hand and remove the space again (removing the space \
+                     again as it is deletes this copy, since nothing registered points \
+                     at it any more)\n{}",
                     first
                 ));
             }
@@ -2360,15 +2376,25 @@ fn unregister_worktree(dir: &Path, force: bool, admin: &Path) -> std::result::Re
                     first,
                     dir.display()
                 )
-            } else if admin_points_elsewhere(admin, dir) {
-                format!(
-                    "{}\nits source repo still points at where it used to be: run \
-                     `git worktree repair {}`, then remove the space again",
-                    first,
-                    dir.display()
-                )
             } else {
-                reason.to_string()
+                match recorded_at(admin, dir) {
+                    RecordedAt::Gone => format!(
+                        "{}\nits source repo still points at where it used to be: run \
+                         `git worktree repair {}`, then remove the space again",
+                        first,
+                        dir.display()
+                    ),
+                    // No repair hint: see `RecordedAt::Elsewhere`.
+                    RecordedAt::Elsewhere(there) => format!(
+                        "it is a copy of the worktree at {}, which git still knows and \
+                         this is not; keep what you need from it, then delete it by hand \
+                         and remove the space again (removing the space again as it is \
+                         deletes this copy once that worktree is gone)\n{}",
+                        there.display(),
+                        first
+                    ),
+                    RecordedAt::Here => reason.to_string(),
+                }
             })
         }
         Err(e) => Err(format!("could not run git: {}", e)),
