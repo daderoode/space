@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod git_isolation;
 pub mod hold;
 
 use space::core::config::SpaceConfig;
@@ -76,7 +77,12 @@ pub fn init_repo(dir: &Path) {
 /// Creates a TempDir with three subdirectories (`config/`, `repos/`, `workspaces/`)
 /// and writes a `config.toml` pointing at the temp dirs.
 ///
-/// Does NOT set env vars automatically -- callers decide.
+/// TestEnv itself sets no env vars; callers decide. Declaring `mod common`
+/// does set some, for the whole process, before `main`: `git_isolation`
+/// points HOME at `/dev/null`, sets `GIT_CONFIG_GLOBAL` and
+/// `GIT_CONFIG_NOSYSTEM`, and removes `XDG_CONFIG_HOME` and the `GIT_*`
+/// variables that point git at another repository or config. A test that
+/// needs a real home sets HOME on the command it runs.
 pub struct TestEnv {
     pub dir: TempDir,
     pub config_dir: PathBuf,
