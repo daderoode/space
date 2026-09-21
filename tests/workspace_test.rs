@@ -3052,7 +3052,8 @@ fn a_near_miss_copy_is_kept_on_the_retry_after_its_original_goes() {
 /// `worktrees`, one whose `..` walks through the `worktrees` directory git
 /// has already removed, and one whose second line (git reads a gitfile's
 /// interior newline as part of the path) ends in `worktrees/<id>`, which the
-/// code review of PR #61 found deleted. Each sits alone in its own space: an
+/// code review of PR #61 found deleted, and the same after a bare carriage
+/// return, which the near-miss check does not split on (skeptical review). Each sits alone in its own space: an
 /// orphan is deleted only with its space, which a kept neighbour would hold
 /// back. The reason leads with what is wrong, and the path, which may be
 /// long, stays off the summary line.
@@ -3077,6 +3078,20 @@ fn a_gitdir_not_in_gits_own_shape_is_kept_when_it_names_nothing() {
             "two-lines",
             PathBuf::from(format!(
                 "{}\n# was {}",
+                repo.join(".git").join("worktrees").join("alpha").display(),
+                env.dir
+                    .path()
+                    .join("old")
+                    .join(".git")
+                    .join("worktrees")
+                    .join("alpha")
+                    .display()
+            )),
+        ),
+        (
+            "carriage-return",
+            PathBuf::from(format!(
+                "{}\r{}",
                 repo.join(".git").join("worktrees").join("alpha").display(),
                 env.dir
                     .path()
