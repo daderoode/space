@@ -9895,7 +9895,7 @@ mod dialog_size_tests {
     /// The rounded border around `title`, read back from the rendered cells:
     /// the first occurrence of the title that sits in the top edge of a whole
     /// box. Any occurrence that does not is reported if no other one does.
-    fn find_dialog(buffer: &Buffer, title: &str) -> Result<Rect, String> {
+    pub(super) fn find_dialog(buffer: &Buffer, title: &str) -> Result<Rect, String> {
         let title: Vec<String> = title.chars().map(String::from).collect();
         let len = title.len() as u16;
         let (width, height) = (buffer.area.width, buffer.area.height);
@@ -10061,5 +10061,534 @@ mod dialog_size_tests {
             time_row,
             rendered
         );
+    }
+}
+
+/// Ticket 35: a content length (staged files, typed characters, recent
+/// branches) cast to `u16` in `ui.rs` and added to. The cast wraps at 65,536
+/// and the addition after it overflows just below that: a panic in a debug
+/// build, and in a release build a dialog sized or scrolled from the wrapped
+/// count. The property is the arithmetic, not the cell count, so every case
+/// here renders a large content on a small 80 x 24 frame.
+///
+/// Each case runs under `catch_unwind` so one red run names every broken
+/// site. The sizes are chosen per site: the largest count whose addition
+/// still overflows (65,535 or a few below it, where master panics), one past
+/// the wrap where master draws the wrong thing, and 70,000, which on master
+/// wraps to 4,464 and looks right by luck at some sites.
+mod content_length_tests {
+    use super::*;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::{Position, Rect};
+    use space::core::git::BranchInfo;
+    use space::tui::screens::config::ConfigState;
+    use space::tui::screens::create::{CreateStage, CreateState};
+    use space::tui::screens::gitops::{GitOpsStage, GitOpsState};
+    use space::tui::screens::search::SearchState;
+    use space::tui::screens::switch_branch::SwitchBranchState;
+    use tui_input::Input;
+
+    const FRAME_W: u16 = 80;
+    const FRAME_H: u16 = 24;
+
+    /// Render `app` once on the 80 x 24 frame and hand the cells and the
+    /// cursor to `check`. A panic is caught and reported as the failure, so
+    /// the caller's list names every site rather than the first.
+    fn render_and_check(
+        name: &str,
+        app: &App,
+        check: impl FnOnce(&Buffer, Position) -> Result<(), String>,
+    ) -> Option<String> {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut terminal = Terminal::new(TestBackend::new(FRAME_W, FRAME_H)).unwrap();
+            terminal
+                .draw(|frame| space::tui::ui::view(app, frame))
+                .unwrap();
+            let cursor = terminal.get_cursor_position().unwrap();
+            check(terminal.backend().buffer(), cursor)
+        }));
+        let problem = match outcome {
+            Ok(Ok(())) => return None,
+            Ok(Err(e)) => e,
+            Err(payload) => {
+                let msg = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_default();
+                format!("panicked: {}", msg)
+            }
+        };
+        Some(format!("{}: {}", name, problem))
+    }
+
+    fn row_text(buffer: &Buffer, x: u16, y: u16, width: u16) -> String {
+        (x..x + width).map(|x| buffer[(x, y)].symbol()).collect()
+    }
+
+    fn dialog_rect(buffer: &Buffer, title: &str, expected: Rect) -> Result<(), String> {
+        let found = super::dialog_size_tests::find_dialog(buffer, title)?;
+        if found == expected {
+            Ok(())
+        } else {
+            Err(format!("drawn at {:?}, expected {:?}", found, expected))
+        }
+    }
+
+    /// 60 distinct characters, longer than the 52-column text area, so the
+    /// visible window is the tail of this and nothing else.
+    const TAIL: &str = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWX";
+
+    fn name_input_app(chars: usize) -> App {
+        let mut app = test_app(vec![], vec![]);
+        let mut st = CreateState::new(vec![], vec![]);
+        st.stage = CreateStage::EnterName;
+        let value = format!("{}{}", "x".repeat(chars - TAIL.len()), TAIL);
+        assert_eq!(value.chars().count(), chars);
+        st.ws_name = Input::default().with_value(value);
+        app.screen = Screen::CreateWorkspace(st);
+        app
+    }
+
+    /// The text input dialog is 56 wide on an 80-column frame (70%, min 50),
+    /// so its text area is 52 columns between the two indicator cells. With
+    /// the cursor at the end, tui-input scrolls by `chars - 52`. On master the
+    /// scroll and the width were `u16`, and their sum overflowed for any
+    /// length from 65,536 to 65,587; from 65,588 every value had wrapped and
+    /// the dialog drew the wrong window (at 70,000, the characters from
+    /// column 4,412) with no `›`.
+    #[test]
+    fn text_input_past_65535_characters_shows_the_tail_before_the_cursor() {
+        let mut failures = Vec::new();
+        for chars in [65_560usize, 70_000] {
+            let app = name_input_app(chars);
+            let name = format!("text input with {} characters", chars);
+            failures.extend(render_and_check(&name, &app, |buffer, cursor| {
+                let dialog = super::dialog_size_tests::find_dialog(buffer, " Workspace Name ")?;
+                if dialog != Rect::new(12, 8, 56, 7) {
+                    return Err(format!("dialog drawn at {:?}", dialog));
+                }
+                let y = dialog.y + 2;
+                let text_x = dialog.x + 2;
+                let text_w = dialog.width - 4;
+                let shown = row_text(buffer, text_x, y, text_w);
+                let want: String = TAIL
+                    .chars()
+                    .skip(TAIL.len() - usize::from(text_w))
+                    .collect();
+                if shown != want {
+                    return Err(format!("text area shows {:?}, expected {:?}", shown, want));
+                }
+                let left = buffer[(dialog.x + 1, y)].symbol();
+                if left != "\u{2039}" {
+                    return Err(format!("left indicator is {:?}, expected \u{2039}", left));
+                }
+                let right = buffer[(dialog.x + dialog.width - 2, y)].symbol();
+                if right != " " {
+                    return Err(format!("right indicator is {:?}, expected blank", right));
+                }
+                let want_cursor = Position::new(text_x + text_w - 1, y);
+                if cursor != want_cursor {
+                    return Err(format!(
+                        "cursor at {:?}, expected {:?}",
+                        cursor, want_cursor
+                    ));
+                }
+                Ok(())
+            }));
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    fn name_input_with_cursor(value: &str, cursor: usize) -> App {
+        let mut app = test_app(vec![], vec![]);
+        let mut st = CreateState::new(vec![], vec![]);
+        st.stage = CreateStage::EnterName;
+        st.ws_name = Input::default()
+            .with_value(value.to_string())
+            .with_cursor(cursor);
+        app.screen = Screen::CreateWorkspace(st);
+        app
+    }
+
+    /// The fix draws the value from the scroll column instead of scrolling
+    /// the Paragraph, so at ordinary lengths the window, both indicators and
+    /// the cursor must be what they were: the last 52 columns when the cursor
+    /// is at the end of a long value, the first 52 with `›` when the cursor
+    /// is near the start, and whole wide characters when the scroll lands on
+    /// them.
+    #[test]
+    fn text_input_window_and_indicators_follow_the_cursor_at_ordinary_lengths() {
+        let ascii: String = (0..70u8).map(|i| (b'a' + i % 26) as char).collect();
+        let wide = "\u{754c}".repeat(30); // 60 columns
+        struct Case {
+            name: &'static str,
+            app: App,
+            text: String,
+            left: &'static str,
+            right: &'static str,
+            cursor_offset: u16,
+        }
+        let cases = [
+            Case {
+                name: "cursor at the end of 70 characters",
+                app: name_input_with_cursor(&ascii, 70),
+                text: ascii.chars().skip(18).collect(),
+                left: "\u{2039}",
+                right: " ",
+                cursor_offset: 51,
+            },
+            Case {
+                name: "cursor at 10 of 70 characters",
+                app: name_input_with_cursor(&ascii, 10),
+                text: ascii.chars().take(52).collect(),
+                left: " ",
+                right: "\u{203a}",
+                cursor_offset: 10,
+            },
+            Case {
+                name: "cursor at the end of 30 wide characters",
+                app: name_input_with_cursor(&wide, 30),
+                // Each wide character owns two cells: its symbol and a blank.
+                text: "\u{754c} ".repeat(26),
+                left: "\u{2039}",
+                right: " ",
+                cursor_offset: 51,
+            },
+        ];
+        let mut failures = Vec::new();
+        for case in &cases {
+            failures.extend(render_and_check(case.name, &case.app, |buffer, cursor| {
+                let dialog = super::dialog_size_tests::find_dialog(buffer, " Workspace Name ")?;
+                let y = dialog.y + 2;
+                let text_x = dialog.x + 2;
+                let text_w = dialog.width - 4;
+                let shown = row_text(buffer, text_x, y, text_w);
+                if shown != case.text {
+                    return Err(format!(
+                        "text area shows {:?}, expected {:?}",
+                        shown, case.text
+                    ));
+                }
+                let left = buffer[(dialog.x + 1, y)].symbol();
+                if left != case.left {
+                    return Err(format!(
+                        "left indicator is {:?}, expected {:?}",
+                        left, case.left
+                    ));
+                }
+                let right = buffer[(dialog.x + dialog.width - 2, y)].symbol();
+                if right != case.right {
+                    return Err(format!(
+                        "right indicator is {:?}, expected {:?}",
+                        right, case.right
+                    ));
+                }
+                let want_cursor = Position::new(text_x + case.cursor_offset, y);
+                if cursor != want_cursor {
+                    return Err(format!(
+                        "cursor at {:?}, expected {:?}",
+                        cursor, want_cursor
+                    ));
+                }
+                Ok(())
+            }));
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    /// The text area row of the name dialog on the 80 x 24 frame: 52 cells
+    /// from column 14 of row 10.
+    fn name_dialog_text_row(buffer: &Buffer) -> Result<Vec<String>, String> {
+        let dialog = super::dialog_size_tests::find_dialog(buffer, " Workspace Name ")?;
+        let y = dialog.y + 2;
+        Ok((dialog.x + 2..dialog.x + dialog.width - 2)
+            .map(|x| buffer[(x, y)].symbol().to_string())
+            .collect())
+    }
+
+    /// The cells a Paragraph scrolled by `scroll` columns draws for `value`
+    /// on a `width`-cell row: the mechanism the dialog used before the fix,
+    /// and the oracle for what it must still draw.
+    fn scrolled_paragraph_row(value: &str, scroll: u16, width: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new(value).scroll((0, scroll)),
+                    frame.area(),
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..width)
+            .map(|x| buffer[(x, 0)].symbol().to_string())
+            .collect()
+    }
+
+    /// Render `app` on a `width` x 24 frame and return the name dialog's
+    /// text row. On the 80-column frame the dialog is found by its border;
+    /// on a frame narrower than its 50-column minimum the dialog is the
+    /// frame's width, at column 0, so the row is worked out from that: the
+    /// border and the left indicator take two cells, the right indicator
+    /// and the border two more, and the input row is the dialog's third,
+    /// with the 7-row dialog centred at row 8.
+    fn name_dialog_text_row_at(app: &App, width: u16) -> Result<(Vec<String>, u16), String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, FRAME_H)).unwrap();
+        terminal
+            .draw(|frame| space::tui::ui::view(app, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        if width >= 50 {
+            let row = name_dialog_text_row(buffer)?;
+            let text_w = u16::try_from(row.len()).unwrap();
+            return Ok((row, text_w));
+        }
+        let text_w = width - 4;
+        let y = 8 + 2;
+        Ok((
+            (2..2 + text_w)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect(),
+            text_w,
+        ))
+    }
+
+    /// The independent reviewer's case: two flags (each two regional
+    /// indicators, drawn as one two-cell cluster) then filler, cursor after
+    /// 53 characters. tui-input counts the four indicators as one column
+    /// each, so the scroll is 1, which lands inside the first flag. A
+    /// scrolled Paragraph keeps a straddled cluster whole, so the row reads
+    /// US flag, GB flag, then 48 `y`; a cut between the indicators would
+    /// pair the wrong two into a different flag.
+    #[test]
+    fn text_input_scrolled_into_a_flag_keeps_the_flag_whole() {
+        let value = format!("\u{1f1fa}\u{1f1f8}\u{1f1ec}\u{1f1e7}{}", "y".repeat(60));
+        let app = name_input_with_cursor(&value, 53);
+        let mut want = vec!["\u{1f1fa}\u{1f1f8}".to_string(), " ".to_string()];
+        want.push("\u{1f1ec}\u{1f1e7}".to_string());
+        want.push(" ".to_string());
+        want.extend(std::iter::repeat_n("y".to_string(), 48));
+        let failure = render_and_check("text input scrolled into a flag", &app, |buffer, _| {
+            let shown = name_dialog_text_row(buffer)?;
+            if shown != want {
+                return Err(format!("row is {:?}, expected {:?}", shown, want));
+            }
+            Ok(())
+        });
+        assert!(failure.is_none(), "{}", failure.unwrap_or_default());
+    }
+
+    /// At every ordinary length the dialog must draw exactly the cells a
+    /// Paragraph scrolled by tui-input's scroll drew before the fix. Each
+    /// value opens with the clusters (single wide characters, flags, an
+    /// emoji sequence joined with zero-width joiners, combining marks, and
+    /// one cluster of 56 columns, a consonant with 55 spacing vowel signs,
+    /// wider than the 52-column text area) and ends with enough filler
+    /// that, as the cursor walks the whole value, the scroll lands on every
+    /// boundary inside them. A value whose clusters sit past the reachable
+    /// scroll would test nothing. The walk runs on the 80-column frame
+    /// (52-column text area) and on a 5-column frame, where the text area
+    /// is one cell and every wide character is wider than it.
+    #[test]
+    fn text_input_draws_what_a_scrolled_paragraph_drew_at_every_cursor() {
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let values = [
+            format!("{}{}", "ab\u{65e5}\u{672c}".repeat(5), "z".repeat(60)),
+            format!(
+                "\u{1f1fa}\u{1f1f8}\u{1f1ec}\u{1f1e7}\u{1f1e9}\u{1f1ea}{}",
+                "y".repeat(60)
+            ),
+            format!("{}{}{}", family, family, "r".repeat(60)),
+            format!("e\u{301}e\u{301}\u{65e5}{}", "n".repeat(60)),
+            format!("\u{915}{}{}", "\u{93e}".repeat(55), "w".repeat(60)),
+        ];
+        let mut failures = Vec::new();
+        for frame_w in [FRAME_W, 5u16] {
+            let text_w = if frame_w >= 50 { 52 } else { frame_w - 4 };
+            for value in &values {
+                let chars = value.chars().count();
+                for cursor in 0..=chars {
+                    let input = Input::default()
+                        .with_value(value.clone())
+                        .with_cursor(cursor);
+                    let scroll = input.visual_scroll(usize::from(text_w));
+                    let want =
+                        scrolled_paragraph_row(value, u16::try_from(scroll).unwrap(), text_w);
+                    let app = name_input_with_cursor(value, cursor);
+                    let name = format!(
+                        "frame {} wide, value {:?} at cursor {}",
+                        frame_w, value, cursor
+                    );
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        name_dialog_text_row_at(&app, frame_w)
+                    }));
+                    let problem = match outcome {
+                        Ok(Ok((shown, w))) if w == text_w && shown == want => continue,
+                        Ok(Ok((shown, w))) => {
+                            format!("row ({} wide) is {:?}, expected {:?}", w, shown, want)
+                        }
+                        Ok(Err(e)) => e,
+                        Err(_) => "panicked".to_string(),
+                    };
+                    failures.push(format!("{}: {}", name, problem));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    fn config_editing_app(chars: usize) -> App {
+        let mut app = test_app(vec![], vec![]);
+        let mut st = ConfigState::from_config(&SpaceConfig::default());
+        st.start_editing();
+        st.input = Input::default().with_value("x".repeat(chars));
+        app.screen = Screen::ConfigEditor(st);
+        app
+    }
+
+    /// The editor fills the frame, so the value row starts at column 1 and
+    /// the cursor is asked for at 1 plus the cursor index. On master that
+    /// index was cast to `u16` first: 65,535 characters overflowed the
+    /// addition, and 70,000 wrapped to column 4,465. The row has no
+    /// horizontal scroll, so any long value already puts the cursor past the
+    /// frame for the terminal to clamp; the fix saturates at 65,535 rather
+    /// than wrapping.
+    #[test]
+    fn config_editor_cursor_past_65535_characters_saturates() {
+        let mut failures = Vec::new();
+        for chars in [65_535usize, 70_000] {
+            let app = config_editing_app(chars);
+            let name = format!("config editor with {} characters", chars);
+            failures.extend(render_and_check(&name, &app, |_, cursor| {
+                let want = Position::new(u16::MAX, 2);
+                if cursor != want {
+                    return Err(format!("cursor at {:?}, expected {:?}", cursor, want));
+                }
+                Ok(())
+            }));
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    fn repo_search_app(chars: usize) -> App {
+        let mut app = test_app(vec![], vec![]);
+        let mut st = SearchState::new(vec![]);
+        st.picker.input = Input::default().with_value("x".repeat(chars));
+        app.screen = Screen::RepoSearch(st);
+        app
+    }
+
+    /// The repo search picker asks for its cursor at the row's left edge plus
+    /// 2 plus the cursor index, the config editor's shape in
+    /// `widgets/fuzzy_picker.rs`. On master the index was cast to `u16`
+    /// first, so a few lengths just under 65,536 overflowed the addition and
+    /// 70,000 wrapped. The row it lands on is read from a short query.
+    #[test]
+    fn repo_search_cursor_past_65535_characters_saturates() {
+        let mut row = None;
+        let short = render_and_check(
+            "repo search with 5 characters",
+            &repo_search_app(5),
+            |_, cursor| {
+                row = Some(cursor.y);
+                Ok(())
+            },
+        );
+        assert!(short.is_none(), "{}", short.unwrap_or_default());
+        let row = row.expect("the short query renders a cursor");
+        let mut failures = Vec::new();
+        for chars in [65_535usize, 70_000] {
+            let app = repo_search_app(chars);
+            let name = format!("repo search with {} characters", chars);
+            failures.extend(render_and_check(&name, &app, |_, cursor| {
+                let want = Position::new(u16::MAX, row);
+                if cursor != want {
+                    return Err(format!("cursor at {:?}, expected {:?}", cursor, want));
+                }
+                Ok(())
+            }));
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    fn committing_app(staged: usize) -> App {
+        let mut app = test_app(vec![], vec![]);
+        let mut st = GitOpsState::new(
+            "repo-a".to_string(),
+            PathBuf::from("/nonexistent/ticket-35/repo-a"),
+        );
+        st.stage = GitOpsStage::Committing;
+        st.staged_files = (0..staged).map(|i| format!("f{}", i)).collect();
+        app.screen = Screen::GitOps(st);
+        app
+    }
+
+    /// The Committing dialog is as tall as its staged list plus five rows of
+    /// chrome, capped at the frame minus 2. On master the count was cast to
+    /// `u16` first: 65,535 overflowed the additions; 65,537 wrapped to 1 and
+    /// gave a 9-row dialog; 70,000 wrapped to 4,464 and still filled the
+    /// frame, so that size alone proves nothing.
+    #[test]
+    fn committing_dialog_past_65535_staged_files_fills_the_frame() {
+        let mut failures = Vec::new();
+        for staged in [65_535usize, 65_537, 70_000] {
+            let app = committing_app(staged);
+            let name = format!("committing with {} staged files", staged);
+            failures.extend(render_and_check(&name, &app, |buffer, _| {
+                dialog_rect(buffer, " Git: repo-a (?) ", Rect::new(16, 1, 48, 22))
+            }));
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    fn branches(n: usize) -> Vec<BranchInfo> {
+        (0..n)
+            .map(|i| BranchInfo {
+                name: format!("b{}", i),
+                is_remote: false,
+                is_current: false,
+                last_commit_time: 0,
+            })
+            .collect()
+    }
+
+    /// Both strategy pickers list the recent branches and add rows of chrome
+    /// to their count. The app caps the list at 5, so these sizes are not
+    /// reachable through it; the fields are public and the cast is the same
+    /// shape as the Committing dialog's. On master 65,533 branches overflowed
+    /// both height sums; 65,537 wraps to 1 and would give an 8-row dialog.
+    #[test]
+    fn strategy_pickers_past_65535_recent_branches_fill_the_frame() {
+        let mut failures = Vec::new();
+        for n in [65_533usize, 65_537] {
+            let mut create = test_app(vec![], vec![]);
+            let mut st = CreateState::new(vec![], vec![]);
+            st.stage = CreateStage::PickBranchStrategy;
+            st.recent_branches = branches(n);
+            create.screen = Screen::CreateWorkspace(st);
+
+            let mut switch = test_app(vec![], vec![]);
+            let mut st = SwitchBranchState::new(
+                "my-repo".to_string(),
+                PathBuf::from("/nonexistent/ticket-35/my-repo"),
+            );
+            st.recent_branches = branches(n);
+            switch.screen = Screen::SwitchBranch(st);
+
+            failures.extend(render_and_check(
+                &format!("branch strategy with {} recent branches", n),
+                &create,
+                |buffer, _| dialog_rect(buffer, " Branch Strategy ", Rect::new(9, 0, 62, 24)),
+            ));
+            failures.extend(render_and_check(
+                &format!("switch branch with {} recent branches", n),
+                &switch,
+                |buffer, _| {
+                    dialog_rect(buffer, " Switch Branch: my-repo ", Rect::new(10, 1, 60, 22))
+                },
+            ));
+        }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     }
 }
