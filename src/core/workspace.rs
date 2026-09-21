@@ -3142,6 +3142,10 @@ mod tests {
     fn run_git_unattended_pins_lc_all_to_c_for_the_child() {
         const MARKER: &str = "SPACE_TEST_LC_ALL_INNER";
         if std::env::var_os(MARKER).is_none() {
+            // libtest names a test by its path inside the crate, so the crate
+            // segment goes; the lib and the bin target both compile this
+            // module and both are named `space`, so the rest is the same
+            // name in either binary. A renamed target fails loudly below.
             let (_, in_crate) = module_path!().split_once("::").unwrap();
             let test_name = format!(
                 "{}::run_git_unattended_pins_lc_all_to_c_for_the_child",
@@ -3186,11 +3190,13 @@ mod tests {
         git(&["remote", "add", "origin", &origin_url], &local);
         let script = tmp.path().join("upload-pack-prints-lc-all.sh");
         std::fs::write(&script, "echo \"LC_ALL=[$LC_ALL]\" >&2\nexit 1\n").unwrap();
+        // git hands the value to `sh -c`, so the path is quoted against a
+        // TMPDIR with a space in it.
         git(
             &[
                 "config",
                 "remote.origin.uploadpack",
-                &format!("/bin/sh {}", script.display()),
+                &format!("/bin/sh '{}'", script.display()),
             ],
             &local,
         );
