@@ -3798,29 +3798,66 @@ fn a_near_miss_copy_is_kept_on_the_retry_after_its_original_goes() {
     );
 }
 
-/// git writes a worktree's gitdir as `<common>/worktrees/<id>`, absolute,
-/// with no `..` and no line break. A `.git` naming anything else was written
-/// by hand (or is a `--separate-git-dir` checkout, which space never makes),
-/// so where its source repo would be cannot be read from it, and a
-/// `NotFound` on it is not proof the source repo is gone. Each is kept even
-/// when nothing on the path exists: one under a directory that is not
-/// `worktrees`, one whose `..` walks through the `worktrees` directory git
-/// has already removed, and one whose second line (git reads a gitfile's
-/// interior newline as part of the path) ends in `worktrees/<id>`, which the
-/// code review of PR #61 found deleted, and the same after a bare carriage
-/// return, which the near-miss check does not split on (skeptical review). Each sits alone in its own space: an
-/// orphan is deleted only with its space, which a kept neighbour would hold
-/// back. The reason leads with what is wrong, and the path, which may be
-/// long, stays off the summary line.
+/// git writes an absolute worktree gitdir as `<common>/worktrees/<id>`, with
+/// no `..` and no line break, never inside another git directory. A `.git`
+/// naming anything else was written by hand (or is a `--separate-git-dir`
+/// checkout, which space never makes), so where its source repo would be
+/// cannot be read from it, and a `NotFound` on it is not proof the source
+/// repo is gone. Each shape here is kept even when nothing on the path
+/// exists, and each sits alone in its own space: an orphan is deleted only
+/// with its space, which a kept neighbour would hold back.
+///
+/// Two rules keep them, and each is pinned by a shape only it catches. The
+/// allow-list (`common_dir_in_gits_shape`): a last directory that is not
+/// `worktrees`; a `..` through a directory that is not there; an old path on
+/// the first line and the new one on the second, split by `\n` or by a bare
+/// `\r`, which the near-miss check does not split on. The nesting rule (a
+/// made-up `<common>` inside a directory that is a repository): a note after
+/// the live repo's admin path on the same line (skeptical review of PR #61).
+/// The shapes the reviews reproduced, a `..` through the `worktrees`
+/// directory git has already removed and a second line after the live
+/// repo's admin path (code review of PR #61), run through the live repo's
+/// git directory, so both rules hold them. The reason leads with what is
+/// wrong, and the path, which may be long, stays off the summary line.
 #[test]
 fn a_gitdir_not_in_gits_own_shape_is_kept_when_it_names_nothing() {
     let env = TestEnv::new();
     let repo = absolute_repo(&env, "alpha");
+    let live_admin = repo.join(".git").join("worktrees").join("alpha");
+    let old_admin = env
+        .dir
+        .path()
+        .join("old-home")
+        .join("alpha")
+        .join(".git")
+        .join("worktrees")
+        .join("alpha");
+    let joined = |sep: &str, first: &Path, second: &Path| {
+        PathBuf::from(format!("{}{}{}", first.display(), sep, second.display()))
+    };
     let shapes = [
         (
             "not-worktrees",
             env.dir.path().join("gone").join("deeper").join("alpha"),
         ),
+        (
+            "dot-dot-missing",
+            env.dir
+                .path()
+                .join("missing")
+                .join("..")
+                .join("repos")
+                .join("alpha")
+                .join(".git")
+                .join("worktrees")
+                .join("alpha"),
+        ),
+        ("two-lines-moved", joined("\n", &old_admin, &live_admin)),
+        (
+            "carriage-return-moved",
+            joined("\r", &old_admin, &live_admin),
+        ),
+        ("same-line", joined(" # was ", &live_admin, &old_admin)),
         (
             "dot-dot",
             repo.join(".git")
@@ -3829,35 +3866,14 @@ fn a_gitdir_not_in_gits_own_shape_is_kept_when_it_names_nothing() {
                 .join("worktrees")
                 .join("alpha"),
         ),
-        (
-            "two-lines",
-            PathBuf::from(format!(
-                "{}\n# was {}",
-                repo.join(".git").join("worktrees").join("alpha").display(),
-                env.dir
-                    .path()
-                    .join("old")
-                    .join(".git")
-                    .join("worktrees")
-                    .join("alpha")
-                    .display()
-            )),
-        ),
-        (
-            "carriage-return",
-            PathBuf::from(format!(
-                "{}\r{}",
-                repo.join(".git").join("worktrees").join("alpha").display(),
-                env.dir
-                    .path()
-                    .join("old")
-                    .join(".git")
-                    .join("worktrees")
-                    .join("alpha")
-                    .display()
-            )),
-        ),
+        ("two-lines", joined("\n# was ", &live_admin, &old_admin)),
+        ("carriage-return", joined("\r", &live_admin, &old_admin)),
     ];
+    assert_eq!(
+        env.dir.path().join("repos").join("alpha"),
+        repo,
+        "fixture: `missing/../repos/alpha` would name the live repo"
+    );
     assert!(
         !repo.join(".git").join("worktrees").exists(),
         "fixture: the repo has no worktrees, so `worktrees/..` names nothing"

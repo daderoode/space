@@ -2766,8 +2766,10 @@ fn classify_space_entry(dir: &Path) -> SpaceEntry {
 /// made-up `<common>` (the code review of PR #61 found such a copy deleted).
 /// Both are kept.
 ///
-/// A `<common>` that is there is said to be the source repo only when it is
-/// a repository; anything else there is kept with what it is. After the
+/// A `<common>` that is `NotFound` inside a directory that is itself a
+/// repository is kept too. A `<common>` that is there is said to be the
+/// source repo only when it is a repository; anything else there is kept
+/// with what it is. After the
 /// admin directory itself answered `NotFound`, every directory on its path
 /// down to the missing one was searchable, so `<common>` answers `Ok` or
 /// `NotFound` but for a race; any other error keeps, as everywhere a
@@ -2782,6 +2784,22 @@ fn absent_admin(admin: PathBuf) -> SpaceEntry {
         ));
     };
     match std::fs::symlink_metadata(common) {
+        // git directories do not nest, bar a submodule's under
+        // `<host>/.git/modules/`, so a `<common>` inside one that is there
+        // was not written by git: a note on the gitfile's line after the
+        // live repo's own admin path reads like this (skeptical review of PR
+        // #61). A worktree of a deleted submodule git dir is kept with it.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && common.ancestors().skip(1).any(is_repository_dir) =>
+        {
+            SpaceEntry::Unreadable(format!(
+                "its .git file names a worktree of a git directory that does not exist, \
+                 inside one that does, in a form git does not write for a worktree\n\
+                 the path is {:?}",
+                admin
+            ))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => SpaceEntry::Orphan,
         Ok(_) if is_repository_dir(common) => SpaceEntry::Unregistered { admin },
         Ok(_) => SpaceEntry::Unreadable(format!(
