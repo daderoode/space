@@ -2206,15 +2206,19 @@ fn add_worktree(
     Ok(wt_path.to_path_buf())
 }
 
-/// Whether `refname` resolves in `repo_path`. Callers pass a fully qualified
-/// name (`refs/heads/x`, `refs/remotes/origin/x`): `rev-parse --verify` on a
-/// bare name resolves a tag before a branch, which is how a same-named tag
-/// used to be taken for a branch (ticket 24). `--quiet` only silences the
-/// "needed a single revision" line; the exit status is the answer either way.
+/// Whether the ref named exactly `refname` exists in `repo_path`. Callers
+/// pass a fully qualified name (`refs/heads/x`, `refs/remotes/origin/x`).
+/// `show-ref --verify` is an exact lookup; `rev-parse --verify` is not, even
+/// on a qualified name: it resolves a bare name to a tag before a branch
+/// (how a same-named tag used to be taken for a branch, ticket 24), and it
+/// falls back from an absent `refs/heads/x` to a tag named
+/// `refs/tags/refs/heads/x` (git 2.50.1, pinned by
+/// `new_branch_ignores_a_tag_named_like_a_qualified_ref`). `--quiet` only
+/// silences the not-found line; the exit status is the answer either way.
 fn ref_exists(repo_path: &Path, refname: &str) -> bool {
     spawn::output(
         Command::new("git")
-            .args(["rev-parse", "--verify", "--quiet", refname])
+            .args(["show-ref", "--verify", "--quiet", refname])
             .current_dir(repo_path),
     )
     .map(|o| o.status.success())
@@ -4743,6 +4747,32 @@ mod tests {
 
         assert!(head_is_detached(&wt));
         assert_eq!(get_sha(&wt, "HEAD"), source_head);
+    }
+
+    /// T10: a tag whose own name is `refs/heads/x` (git allows it; a remote
+    /// can publish one). `rev-parse --verify refs/heads/x` falls back to
+    /// `refs/tags/refs/heads/x` when no branch `x` exists (git 2.50.1), so a
+    /// qualified name is not enough on its own: the probe has to be an exact
+    /// lookup (`show-ref --verify`), or the add of the bare `x` fails with
+    /// `invalid reference`.
+    #[test]
+    fn new_branch_ignores_a_tag_named_like_a_qualified_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (repo, _) = gated_repo(tmp.path(), "repo");
+        let decoy = decoy_sha(&repo);
+        git(&["tag", "refs/heads/x", &decoy], &repo);
+
+        let wt = attempt(
+            &repo,
+            &tmp.path().join("ws"),
+            BranchStrategy::NewBranch("x".into()),
+        );
+
+        assert_eq!(git::current_branch(&wt).unwrap(), "x");
+        assert_eq!(
+            get_sha(&wt, "HEAD"),
+            get_sha(&repo, "refs/remotes/origin/main")
+        );
     }
 
     /// T7: `origin/feat` is read as `refs/remotes/origin/feat`, so a tag
