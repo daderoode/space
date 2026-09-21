@@ -1967,16 +1967,49 @@ pub fn branch_slot_name<'a>(
     remotes: &[String],
     repo_path: Option<&Path>,
 ) -> Option<&'a str> {
+    let split = match (strategy, repo_path) {
+        (BranchStrategy::ExistingBranch(name), Some(repo)) => {
+            split_remote_branch_in(repo, name, remotes)
+        }
+        (BranchStrategy::ExistingBranch(name), None) => split_remote_branch(name, remotes),
+        _ => None,
+    };
+    slot_for(strategy, split)
+}
+
+/// The `-b` slot name for a strategy whose existing-branch split has
+/// already been settled (`split` is `split_remote_branch_in`'s answer, or
+/// `None` for the other strategies). `create_worktree_cancellable` settles
+/// the split once, before the pre-create fetch, and hands the same value
+/// to this guard, to the skip rule and to the add, so the name the guard
+/// accepted is the name the add uses by construction: the fetch can delete
+/// a local branch (a refspec writing under `refs/heads/` with
+/// `fetch.prune`), and re-deriving after it turned an accepted `alice/-M`
+/// into `-b -M` (reproduced: the source repo's checked-out branch was
+/// renamed).
+fn slot_for<'a>(
+    strategy: &'a BranchStrategy,
+    split: Option<(&'a str, &'a str)>,
+) -> Option<&'a str> {
     match strategy {
         BranchStrategy::NewBranch(name) => Some(name),
         BranchStrategy::ExistingBranch(name) => {
-            let split = match repo_path {
-                Some(repo) => split_remote_branch_in(repo, name, remotes),
-                None => split_remote_branch(name, remotes),
-            };
             Some(split.map_or(name.as_str(), |(_, local)| local))
         }
         BranchStrategy::DetachedHead => None,
+    }
+}
+
+/// `split_remote_branch_in` for an `ExistingBranch` strategy, `None` for
+/// the others: the one derivation an attempt makes.
+fn existing_split<'a>(
+    repo_path: &Path,
+    strategy: &'a BranchStrategy,
+    remotes: &[String],
+) -> Option<(&'a str, &'a str)> {
+    match strategy {
+        BranchStrategy::ExistingBranch(name) => split_remote_branch_in(repo_path, name, remotes),
+        _ => None,
     }
 }
 
@@ -2031,16 +2064,15 @@ pub fn create_worktree_cancellable(
     // and path slots are protected by `--` in `add_worktree` instead. Same
     // sentence as git's so the caller sees one wording whichever layer
     // refused.
-    // The guard runs before the pre-create fetch on purpose: the fetch is
-    // the only step of this call that can create a local branch (a refspec
-    // writing into `refs/heads/*`), and a local branch created after the
-    // guard derived its name could turn a refused `-M` into an accepted
-    // `alice/-M`; deriving here, on the state the fetch has not touched,
-    // keeps the guard ahead of it. The add re-derives after the fetch, and
-    // the only divergence left (a local branch deleted mid-call) needs an
-    // actor writing to the source repo, who can run git themselves.
+    // The split is derived exactly once, here, before the pre-create
+    // fetch, and the same value reaches the guard, the skip rule and the
+    // add (`slot_for`): the fetch can create or delete a local branch (a
+    // refspec writing into `refs/heads/*`, with `fetch.prune`), so a
+    // derivation on either side of it could disagree with this one and
+    // hand `-b` a name the guard never saw.
     let remotes = remote_names(repo_path);
-    if let Some(branch) = branch_slot_name(strategy, &remotes, Some(repo_path)) {
+    let split = existing_split(repo_path, strategy, &remotes);
+    if let Some(branch) = slot_for(strategy, split) {
         if branch.starts_with('-') {
             return WorktreeAttempt {
                 fetch: None,
@@ -2070,7 +2102,7 @@ pub fn create_worktree_cancellable(
     let fetch = match fetch {
         PreCreateFetch::Run(_) if cancel.load(Ordering::Relaxed) => None,
         PreCreateFetch::Skip => None,
-        PreCreateFetch::Run(_) if !strategy_reads_origin(repo_path, strategy, &remotes) => None,
+        PreCreateFetch::Run(_) if !strategy_reads_origin(repo_path, strategy, split) => None,
         PreCreateFetch::Run(limit) => Some(fetch_origin_unattended(repo_path, limit)),
     };
 
@@ -2085,7 +2117,7 @@ pub fn create_worktree_cancellable(
 
     WorktreeAttempt {
         fetch,
-        created: add_worktree(repo_path, &wt_path, base_branch, strategy, &remotes),
+        created: add_worktree(repo_path, &wt_path, base_branch, strategy, split),
     }
 }
 
@@ -2122,19 +2154,21 @@ pub fn create_worktree_cancellable(
 /// fetches whatever the strategy; the other-remote arm asks the same guard
 /// about `refs/remotes/<remote>/` as well. A repo git2 cannot open is
 /// treated as reading origin, the side that fetches.
-fn strategy_reads_origin(repo_path: &Path, strategy: &BranchStrategy, remotes: &[String]) -> bool {
+fn strategy_reads_origin(
+    repo_path: &Path,
+    strategy: &BranchStrategy,
+    split: Option<(&str, &str)>,
+) -> bool {
     // The remote-tracking namespace the add reads (the other-remote arm
     // only), and the local branch whose presence keeps the add off origin
     // (the plain-name arm only).
     let (tracking_under, local_name): (Option<String>, Option<&str>) = match strategy {
         BranchStrategy::NewBranch(_) => return true,
-        BranchStrategy::ExistingBranch(name) => {
-            match split_remote_branch_in(repo_path, name, remotes) {
-                Some((remote, _)) if remote == DEFAULT_REMOTE => return true,
-                Some((remote, _)) => (Some(format!("refs/remotes/{}/", remote)), None),
-                None => (None, Some(name.as_str())),
-            }
-        }
+        BranchStrategy::ExistingBranch(name) => match split {
+            Some((remote, _)) if remote == DEFAULT_REMOTE => return true,
+            Some((remote, _)) => (Some(format!("refs/remotes/{}/", remote)), None),
+            None => (None, Some(name.as_str())),
+        },
         BranchStrategy::DetachedHead => (None, None),
     };
     let Ok(repo) = git2::Repository::open(repo_path) else {
@@ -2244,14 +2278,15 @@ fn refspec_writes_under(spec: &str, prefix: &str) -> bool {
 /// the whole usage text). `--` does not protect the value of `-b`; that slot
 /// is guarded in `create_worktree_cancellable` before this runs, on the same
 /// derived name (`branch_slot_name`) the `ExistingBranch` arm strips here.
-/// `remotes` is the repo's configured remotes (`remote_names`), read once by
-/// the caller so the guard and this arm split the name the same way.
+/// `split` is the `ExistingBranch` name's settled split (`existing_split`),
+/// derived once by the caller before the fetch so the guard and this arm
+/// use one name; this function derives nothing itself.
 fn add_worktree(
     repo_path: &Path,
     wt_path: &Path,
     base_branch: String,
     strategy: &BranchStrategy,
-    remotes: &[String],
+    split: Option<(&str, &str)>,
 ) -> Result<PathBuf> {
     let wt = wt_path.to_string_lossy();
 
@@ -2311,7 +2346,7 @@ fn add_worktree(
         }
 
         BranchStrategy::ExistingBranch(branch_name) => {
-            if let Some((remote, local)) = split_remote_branch_in(repo_path, branch_name, remotes) {
+            if let Some((remote, local)) = split {
                 // A remote-tracking name from the picker, `origin/<x>` or
                 // any other configured remote's: a new local `<x>` tracking
                 // the remote-tracking ref itself, so a tag named
@@ -7546,7 +7581,7 @@ mod tests {
                 Path::new("-dashout"),
                 "main".to_string(),
                 &strategy,
-                &[],
+                None,
             )
             .unwrap_or_else(|e| {
                 panic!(
@@ -7597,7 +7632,7 @@ mod tests {
             Path::new("-dashdir"),
             "main".to_string(),
             &BranchStrategy::NewBranch("topic".to_string()),
-            &[],
+            None,
         )
         .expect("with -- before the path, -dashdir is a path");
         assert_eq!(created, Path::new("-dashdir"));
@@ -7644,7 +7679,7 @@ mod tests {
             ),
         ];
         for (label, base, strategy, expected) in cases {
-            let err = add_worktree(&repo, &wt_path, base, &strategy, &[])
+            let err = add_worktree(&repo, &wt_path, base, &strategy, None)
                 .expect_err("a dash commit-ish cannot resolve");
             let text = err.to_string();
             assert!(

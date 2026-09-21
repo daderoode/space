@@ -3515,3 +3515,66 @@ fn a_local_branch_named_like_another_remotes_branch_skips_the_fetch() {
     );
     assert_eq!(head_symref(&wt), "refs/heads/alice/fix");
 }
+
+/// T20 (skeptical review). The pre-create fetch can delete the local
+/// branch the guard relied on: an origin refspec writing under
+/// `refs/heads/alice/` with `fetch.prune` removes a local `alice/-M` that
+/// origin does not have. The name is derived once, before the fetch, so the
+/// add still runs the form the guard accepted (the whole name after `--`)
+/// and `-M` never reaches `-b`: the source repo's checked-out branch keeps
+/// its name whatever the add then does. Positive evidence that the prune
+/// path was exercised: the local branch is gone afterwards.
+#[test]
+fn a_local_branch_pruned_by_the_fetch_cannot_turn_into_a_dash_option() {
+    use space::core::workspace::{create_worktree_with_fetch, FetchOutcome, PreCreateFetch};
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    with_alice(&f);
+    git_ok(&f.repo, &["push", "-q", "upstream", "main:-M"]);
+    git_ok(&f.repo, &["fetch", "-q", "alice"]);
+    git_ok(&f.repo, &["branch", "-q", "alice/-M", "main"]);
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/heads/alice/*",
+        ],
+    );
+    git_ok(&f.repo, &["config", "fetch.prune", "true"]);
+
+    let attempt = create_worktree_with_fetch(
+        &f.repo,
+        &env.workspaces_dir,
+        "t20",
+        &BranchStrategy::ExistingBranch("alice/-M".to_string()),
+        PreCreateFetch::Run(std::time::Duration::from_secs(20)),
+    );
+
+    assert_eq!(attempt.fetch, Some(FetchOutcome::Ok), "the fetch ran");
+    let pruned = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/alice/-M"])
+        .current_dir(&f.repo)
+        .status()
+        .unwrap();
+    assert!(
+        !pruned.success(),
+        "the fetch pruned the local branch, the window this pins"
+    );
+    assert_eq!(
+        head_symref(&f.repo),
+        "refs/heads/main",
+        "the source repo's checked-out branch keeps its name: {:?}",
+        attempt
+            .created
+            .as_ref()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    );
+    let renamed = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", "refs/heads/-M"])
+        .current_dir(&f.repo)
+        .status()
+        .unwrap();
+    assert!(!renamed.success(), "no branch named -M was created");
+}
