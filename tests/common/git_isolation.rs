@@ -5,10 +5,10 @@
 //! the user's global file does not override it. CI's clean home hid all of it.
 //!
 //! Compiled into every integration test binary through `mod common` (every
-//! `tests/*.rs` declares it, and `every_test_binary_declares_mod_common`
-//! checks that), and into the lib and bin unit-test binaries through a
-//! `#[cfg(test)]` include in `src/lib.rs` and `src/main.rs`.
-#![allow(clippy::disallowed_methods)] // the guards start git and this binary directly (ADR 0002)
+//! `tests/*.rs` declares it, `tests/common/mod.rs` declares this module, and
+//! `every_test_binary_reaches_git_isolation` checks both), and into the lib
+//! and bin unit-test binaries through a `#[cfg(test)]` include in
+//! `src/lib.rs` and `src/main.rs`.
 
 use git2::opts::{get_search_path, set_search_path};
 use git2::ConfigLevel;
@@ -130,6 +130,7 @@ const HOSTILE_VARS: &str = "SPACE_TEST_HOSTILE_VARS";
 /// `a_hostile_invoking_environment_is_cleared_before_main` runs it again in a
 /// child whose environment sets that key through every channel.
 #[test]
+#[allow(clippy::disallowed_methods)] // short git commands, as fixtures start them (ADR 0002)
 fn git_config_outside_the_repository_is_out_of_reach() {
     assert_eq!(std::env::var("HOME").as_deref(), Ok("/dev/null"));
     assert_eq!(
@@ -257,7 +258,10 @@ fn a_hostile_invoking_environment_is_cleared_before_main() {
     for (var, value) in cleared {
         child.env(var, value);
     }
-    let out = child.output().unwrap();
+    // The child is a whole test binary that runs git itself, longer-lived
+    // than a fixture's git call, so it starts through the spawn gate (ADR
+    // 0002), as `run_git_unattended_pins_lc_all_to_c_for_the_child` does.
+    let out = space::core::spawn::output(&mut child).unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success() && stdout.contains("test result: ok. 1 passed"),
@@ -267,29 +271,50 @@ fn a_hostile_invoking_environment_is_cleared_before_main() {
     );
 }
 
-/// Isolation reaches an integration test binary only through `mod common`,
-/// so every `tests/*.rs` declares it, the two that run no git included. A new
-/// file without it would run on the invoking user's config with nothing to
-/// say so.
+/// Isolation reaches an integration test binary through two links: the
+/// binary's root declares `mod common`, and `tests/common/mod.rs` declares
+/// this module. Every test binary root (`tests/*.rs` and `tests/*/main.rs`,
+/// the two forms Cargo builds) is checked, the ones that run no git
+/// included, and so is the second link, which nothing else names. The lib
+/// and bin unit-test binaries run this too, and they include this file
+/// without either link, so it still fails there if the second link goes.
 #[test]
-fn every_test_binary_declares_mod_common() {
+fn every_test_binary_reaches_git_isolation() {
+    let declares = |path: &std::path::Path, line: &str| {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .any(|l| l.trim() == line)
+    };
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
-    let mut seen = Vec::new();
-    let mut missing = Vec::new();
+    let mut roots = Vec::new();
     for entry in std::fs::read_dir(&dir).unwrap() {
         let path = entry.unwrap().path();
-        if path.extension().is_some_and(|e| e == "rs") {
-            let text = std::fs::read_to_string(&path).unwrap();
-            if !text.lines().any(|l| l.trim() == "mod common;") {
-                missing.push(path.display().to_string());
+        if path.is_dir() {
+            if path.join("main.rs").is_file() {
+                roots.push(path.join("main.rs"));
             }
-            seen.push(path);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            roots.push(path);
         }
     }
-    assert!(!seen.is_empty(), "no test files under {}", dir.display());
+    assert!(
+        !roots.is_empty(),
+        "no test binaries under {}",
+        dir.display()
+    );
+    let missing: Vec<_> = roots
+        .iter()
+        .filter(|root| !declares(root, "mod common;"))
+        .map(|root| root.display().to_string())
+        .collect();
     assert!(
         missing.is_empty(),
         "these test binaries do not declare `mod common;`, so git_isolation never runs in them: {:?}",
         missing
+    );
+    assert!(
+        declares(&dir.join("common/mod.rs"), "mod git_isolation;"),
+        "tests/common/mod.rs no longer declares `mod git_isolation;`, so no integration test binary is isolated"
     );
 }
