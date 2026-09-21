@@ -37,8 +37,7 @@ pub struct CreateWorkspaceParams {
     /// Branch strategy: "new" (default), "existing", or "detached".
     #[serde(default = "default_strategy")]
     pub strategy: String,
-    /// Branch name. Required when strategy is "new" or "existing".
-    /// Defaults to the workspace name when strategy is "new".
+    /// Branch name. Defaults to the workspace name for "new". Required for "existing".
     pub branch: Option<String>,
 }
 
@@ -55,7 +54,7 @@ pub struct AddReposParams {
     /// Branch strategy: "new" (default), "existing", or "detached".
     #[serde(default = "default_strategy")]
     pub strategy: String,
-    /// Branch name. Required when strategy is "new" or "existing".
+    /// Branch name. Defaults to the workspace name for "new". Required for "existing".
     pub branch: Option<String>,
 }
 
@@ -421,7 +420,7 @@ impl SpaceServer {
     /// Add repos to an existing workspace. A repo already in it is left as it
     /// is and listed under `already_added` (`place_repos`).
     #[tool(
-        description = "Add git worktrees for additional repos to an existing workspace. A repo whose worktree is already in the workspace is left as it is, on the branch it already has (this call's strategy and branch do not apply to it; workspace_status shows it), and is listed under already_added, not added. The call stops at the first repo that fails; once the cause is fixed, retrying the same call adds the rest."
+        description = "Add git worktrees for additional repos to an existing workspace. Strategy: 'new' (create branch named after the workspace unless branch is given, default), 'existing' (checkout existing branch; branch is required), or 'detached' (detached HEAD). A repo whose worktree is already in the workspace is left as it is, on the branch it already has (this call's strategy and branch do not apply to it; workspace_status shows it), and is listed under already_added, not added. The call stops at the first repo that fails; once the cause is fixed, retrying the same call adds the rest."
     )]
     pub fn add_repos(
         &self,
@@ -449,10 +448,15 @@ impl SpaceServer {
         let repo_paths =
             resolve_repos(&params.repos, &cache).map_err(|e| McpError::invalid_params(e, None))?;
 
-        // Determine branch from existing workspace repos or params
-        let branch_name = params.branch.unwrap_or_else(|| params.workspace.clone());
-        let strategy = build_strategy(&params.strategy, Some(&branch_name), &params.workspace)
-            .map_err(|e| McpError::invalid_params(e, None))?;
+        // The same rule as `create_workspace`: `new` defaults to the
+        // workspace name, `existing` must name its branch. Nothing here reads
+        // the repos already in the workspace.
+        let strategy = build_strategy(
+            &params.strategy,
+            params.branch.as_deref(),
+            &params.workspace,
+        )
+        .map_err(|e| McpError::invalid_params(e, None))?;
         checked_branch(&strategy)?;
 
         let placed = place_repos(&repo_paths, ws_dir, &params.workspace, &strategy, "add")?;
