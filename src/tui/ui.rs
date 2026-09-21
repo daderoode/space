@@ -743,10 +743,18 @@ fn render_text_input_dialog(
         height: 1,
     };
 
-    // Compute horizontal scroll to keep cursor in the visible text area
-    let scroll = input.visual_scroll(text_area_w as usize) as u16;
-    let cursor_col = input.visual_cursor() as u16;
-    let value_vis_w = UnicodeWidthStr::width(input.value()) as u16;
+    // Horizontal scroll that keeps the cursor in the text area, in columns.
+    // All of this stays `usize`: a pasted value can be longer than `u16::MAX`,
+    // and `Paragraph::scroll` takes a `u16`, so instead of scrolling the
+    // Paragraph the scrolled-off prefix is cut from the value and the rest is
+    // drawn from column 0. `skip_display_width` runs the loop `visual_scroll`
+    // ran to find `scroll`, so it stops on the same character and the cells
+    // are the ones the scrolled Paragraph drew before.
+    let text_area_cols = usize::from(text_area_w);
+    let scroll = input.visual_scroll(text_area_cols);
+    let cursor_col = input.visual_cursor();
+    let value_vis_w = UnicodeWidthStr::width(input.value());
+    let visible = skip_display_width(input.value(), scroll);
 
     // Left indicator: ‹ when text is scrolled (content hidden on left)
     let left_text = if scroll > 0 { "\u{2039}" } else { " " }; // ‹
@@ -755,16 +763,14 @@ fn render_text_input_dialog(
         left_ind_area,
     );
 
-    // Text with horizontal scroll
+    // The text from the scroll column on.
     frame.render_widget(
-        Paragraph::new(input.value())
-            .style(theme::input_style())
-            .scroll((0, scroll)),
+        Paragraph::new(visible).style(theme::input_style()),
         text_area,
     );
 
     // Right indicator: › when content extends beyond the visible right edge.
-    let right_text = if value_vis_w > text_area_w + scroll {
+    let right_text = if value_vis_w > text_area_cols.saturating_add(scroll) {
         "\u{203a}" // ›
     } else {
         " "
@@ -774,9 +780,12 @@ fn render_text_input_dialog(
         right_ind_area,
     );
 
-    // Cursor: position within the visible text area (clamped to bounds)
-    let cursor_x = (text_area.x + cursor_col.saturating_sub(scroll))
-        .min(text_area.x + text_area_w.saturating_sub(1));
+    // Cursor: its column inside the text area, at most the last cell, so the
+    // cast after the `min` cannot overflow.
+    let cursor_offset = cursor_col
+        .saturating_sub(scroll)
+        .min(text_area_cols.saturating_sub(1));
+    let cursor_x = text_area.x + fit_u16(cursor_offset);
     if show_cursor {
         frame.set_cursor_position((cursor_x, text_area.y));
     }
@@ -819,9 +828,18 @@ fn render_branch_strategy_picker(
     use ratatui::widgets::Clear;
     let has_error = error.is_some();
     let n = recent_branches.len();
-    let branch_rows = if n > 0 { 1 + n as u16 + 1 } else { 1 };
-    let content_rows = 3 + branch_rows;
-    let height: u16 = content_rows + 2 + if has_error { 3 } else { 1 };
+    // Rows: if n > 0, the "Pick a branch..." header, n branches and "Show
+    // more"; else one placeholder row. The count saturates rather than
+    // wrapping past `u16::MAX`; `centered_rect_fixed` clamps it to the frame.
+    let branch_rows = if n > 0 {
+        fit_u16(n).saturating_add(2)
+    } else {
+        1
+    };
+    let content_rows = branch_rows.saturating_add(3);
+    let height: u16 = content_rows
+        .saturating_add(2)
+        .saturating_add(if has_error { 3 } else { 1 });
     let dialog_w = percent_of(frame.area().width, 70, 62);
     let area = centered_rect_fixed(dialog_w, height, frame.area());
     frame.render_widget(Clear, area);
@@ -930,6 +948,15 @@ fn render_branch_strategy_picker(
 fn percent_of(dim: u16, pct: u16, min: u16) -> u16 {
     let share = u32::from(dim) * u32::from(pct) / 100;
     share.max(u32::from(min)).min(u32::from(dim)) as u16
+}
+
+/// A content length (staged files, recent branches, a cursor index) as a
+/// `u16` row or column count: `n` where it fits, else `u16::MAX`. A plain
+/// `as u16` wraps at 65,536, and the addition after it overflows just below
+/// that; with this and `saturating_add` the count saturates instead, and the
+/// frame clamps it from there. Shared with the fuzzy picker's cursor.
+pub(crate) fn fit_u16(n: usize) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
 }
 
 /// Shared dialog geometry for the Syncing and Creating stages: 70% of the
@@ -1352,6 +1379,15 @@ mod tests {
         // Policy: snap forward — skip the entire wide char, return "bc".
         assert_eq!(skip_display_width("日bc", 1), "bc");
     }
+
+    /// Past `u16::MAX` a count saturates; below it, it is the count.
+    #[test]
+    fn fit_u16_saturates_at_the_maximum() {
+        assert_eq!(fit_u16(0), 0);
+        assert_eq!(fit_u16(65_535), u16::MAX);
+        assert_eq!(fit_u16(65_536), u16::MAX);
+        assert_eq!(fit_u16(70_000), u16::MAX);
+    }
 }
 
 fn render_config_editor(
@@ -1431,7 +1467,13 @@ fn render_config_editor(
             );
             // Set terminal cursor position, unless help is drawn over us.
             if show_cursor {
-                let cursor_x = value_area.x + state.input.visual_cursor() as u16;
+                // The value row has no horizontal scroll, so a long value
+                // asks for a cursor past the frame and the terminal clamps
+                // it; past `u16::MAX` the column saturates rather than
+                // wrapping back to the start of the row.
+                let cursor_x = value_area
+                    .x
+                    .saturating_add(fit_u16(state.input.visual_cursor()));
                 let cursor_y = value_area.y;
                 frame.set_cursor_position((cursor_x, cursor_y));
             }
@@ -1652,9 +1694,16 @@ fn render_switch_strategy_picker(
 
     let has_error = error.is_some();
     let n = recent_branches.len();
-    // Rows: "New branch..." (1) + if n>0: "Recent:" header (1) + n branches + "Show more" (1); else "Pick a branch..." (1)
-    let branch_rows: u16 = 1 + if n > 0 { 1 + n as u16 + 1 } else { 1 };
-    let height: u16 = (branch_rows + 2 + if has_error { 3 } else { 1 })
+    // Rows: "New branch..." (1) + if n>0: "Recent:" header (1) + n branches + "Show more" (1); else "Pick a branch..." (1).
+    // The count saturates rather than wrapping past `u16::MAX`.
+    let branch_rows: u16 = if n > 0 {
+        fit_u16(n).saturating_add(3)
+    } else {
+        2
+    };
+    let height: u16 = branch_rows
+        .saturating_add(2)
+        .saturating_add(if has_error { 3 } else { 1 })
         .min(frame.area().height.saturating_sub(2));
     let dialog_w = percent_of(frame.area().width, 70, 60);
     let area = centered_rect_fixed(dialog_w, height, frame.area());
@@ -1962,13 +2011,16 @@ fn render_gitops_overlay(
     // Committing stage: staged-file summary above a single-line message input.
     if state.stage == crate::tui::screens::gitops::GitOpsStage::Committing {
         let dialog_w = percent_of(frame.area().width, 60, 48);
-        let staged_n = state.staged_files.len() as u16;
+        // The count saturates rather than wrapping past `u16::MAX`; the
+        // frame caps the height below anyway.
+        let staged_n = fit_u16(state.staged_files.len());
         // header + staged list + prompt + input + status row, plus the border.
         // The status row is always reserved because the layout below always
         // allocates it; counting it conditionally clipped the staged list by
         // one row whenever no status was shown.
-        let content_rows = 1 + staged_n.max(1) + 1 + 1 + 1;
-        let dialog_h = (content_rows + 2)
+        let content_rows = staged_n.max(1).saturating_add(4);
+        let dialog_h = content_rows
+            .saturating_add(2)
             .max(9)
             .min(frame.area().height.saturating_sub(2));
         let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);

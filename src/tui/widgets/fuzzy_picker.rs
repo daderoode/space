@@ -410,7 +410,13 @@ pub fn render(picker: &FuzzyPicker, show_cursor: bool, frame: &mut Frame) {
     frame.render_widget(Paragraph::new(input_text).style(theme::text()), sections[0]);
     // Show cursor at correct position (offset +2 for "> " prefix)
     if show_cursor {
-        let cursor_x = sections[0].x + 2 + picker.input.visual_cursor() as u16;
+        // A query longer than the row already puts the cursor past the frame
+        // for the terminal to clamp; past `u16::MAX` it saturates rather
+        // than wrapping back to the start of the row.
+        let cursor_x = sections[0]
+            .x
+            .saturating_add(2)
+            .saturating_add(crate::tui::ui::fit_u16(picker.input.visual_cursor()));
         let cursor_y = sections[0].y;
         frame.set_cursor_position((cursor_x, cursor_y));
     }
