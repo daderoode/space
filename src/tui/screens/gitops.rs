@@ -124,6 +124,10 @@ impl GitOpsState {
             })
             .unwrap_or_default();
         let has_staged = !staged_files.is_empty();
+        // Read together and kept together: the routing in `fire` trusts
+        // `push_target` only while `has_upstream` is set, so whoever
+        // refreshes one after an op in the same overlay must refresh both,
+        // or an origin push after `push -u` would ask as if unreadable.
         let has_upstream = crate::core::git::has_upstream(&repo_path);
         let push_target = crate::core::git::push_target(&repo_path);
         Self {

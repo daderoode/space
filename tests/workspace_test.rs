@@ -3467,3 +3467,51 @@ fn a_local_dash_branch_named_like_another_remotes_is_checked_out_safely() {
         "the source branch keeps its name"
     );
 }
+
+/// T19 (independent review). The skip rule derives through the same
+/// repo-aware split as the add: a local `alice/fix` makes `alice/fix` the
+/// plain-name arm, which reads no origin ref, so the fetch is skipped even
+/// when origin's refspec writes under `refs/remotes/alice/` (which the
+/// tracking arm would have to fetch for). Positive evidence: origin gains a
+/// branch after the clone and the repo never learns of it under the
+/// refspec that would have written it.
+#[test]
+fn a_local_branch_named_like_another_remotes_branch_skips_the_fetch() {
+    use space::core::workspace::{create_worktree_with_fetch, PreCreateFetch};
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    with_alice(&f);
+    git_ok(&f.repo, &["branch", "-q", "alice/fix", "main"]);
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/alice/*",
+        ],
+    );
+    git_ok(
+        &f.origin,
+        &["update-ref", "refs/heads/newb", &f.origin_feat],
+    );
+
+    let attempt = create_worktree_with_fetch(
+        &f.repo,
+        &env.workspaces_dir,
+        "t19",
+        &BranchStrategy::ExistingBranch("alice/fix".to_string()),
+        PreCreateFetch::Run(std::time::Duration::from_secs(20)),
+    );
+    let wt = attempt.created.expect("the local branch is checked out");
+    assert_eq!(attempt.fetch, None, "the fetch is skipped");
+    let seen = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", "refs/remotes/alice/newb"])
+        .current_dir(&f.repo)
+        .status()
+        .unwrap();
+    assert!(
+        !seen.success(),
+        "no fetch reached origin: alice/newb is unknown"
+    );
+    assert_eq!(head_symref(&wt), "refs/heads/alice/fix");
+}

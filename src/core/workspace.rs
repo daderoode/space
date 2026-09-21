@@ -2031,6 +2031,14 @@ pub fn create_worktree_cancellable(
     // and path slots are protected by `--` in `add_worktree` instead. Same
     // sentence as git's so the caller sees one wording whichever layer
     // refused.
+    // The guard runs before the pre-create fetch on purpose: the fetch is
+    // the only step of this call that can create a local branch (a refspec
+    // writing into `refs/heads/*`), and a local branch created after the
+    // guard derived its name could turn a refused `-M` into an accepted
+    // `alice/-M`; deriving here, on the state the fetch has not touched,
+    // keeps the guard ahead of it. The add re-derives after the fetch, and
+    // the only divergence left (a local branch deleted mid-call) needs an
+    // actor writing to the source repo, who can run git themselves.
     let remotes = remote_names(repo_path);
     if let Some(branch) = branch_slot_name(strategy, &remotes, Some(repo_path)) {
         if branch.starts_with('-') {
