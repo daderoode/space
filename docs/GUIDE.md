@@ -271,7 +271,7 @@ Multi-select fuzzy picker powered by nucleo. Type to filter, `Tab` to toggle sel
 
 **Scope filtering:** Type `orgname/` to filter repos whose parent directory contains "orgname", then fuzzy-match on the rest. Or press `Ctrl-S` to cycle through parent directory scopes.
 
-If `space create repo-a repo-b` was used, those names pre-populate the search.
+If `space create repo-a repo-b` was used, the picker opens with `repo-a` and `repo-b` already toggled on and the query row empty. Each name must be one repo's directory name exactly as `space repos` lists it (case-sensitive); the shell completion offers those names. A name that matches no repo stops the command before the TUI opens; so does a name that matches several (two roots holding a repo of the same name), listing their paths. The names are not a search: to filter, run `space create` and type in the picker.
 
 ### Stage 3: Sync Report
 
@@ -302,7 +302,7 @@ Progress log showing each repo with a checkmark or error. A repo whose place in 
 
 ## Add Repos Flow
 
-5-stage wizard (same as Create minus the naming step). Launched by pressing `a` or running `space add <workspace> <repos>`. The fuzzy picker automatically excludes repos already in the workspace.
+5-stage wizard (same as Create minus the naming step). Launched by pressing `a` or running `space add <workspace> <repos>`; the repo names follow the same exact-name rule as `space create` and open the picker with those repos toggled on; a name the workspace already holds stops the command before the TUI opens. The fuzzy picker automatically excludes repos already in the workspace.
 
 ---
 
@@ -352,8 +352,8 @@ Navigation: `j`/`k` between fields, `Enter` to edit, `Esc` to cancel edit, `Ctrl
 | `space ls` | `list` | `-v`/`--verbose` | List workspaces. Verbose shows per-repo branch + status |
 | `space go` | -- | `[name]` | cd into workspace. No name opens fuzzy picker |
 | `space status` | `st` | `<name>` | Detailed per-repo status (branch, dirty state, ahead/behind) |
-| `space create` | -- | `[repos...]` | Create workspace. Optional repo names pre-populate picker |
-| `space add` | -- | `<workspace> <repos...>` | Add repos to existing workspace |
+| `space create` | -- | `[repos...]` | Create workspace. Optional exact repo names (as `space repos` lists them) open the picker with those repos selected |
+| `space add` | -- | `<workspace> <repos...>` | Add repos to existing workspace. Same exact-name rule as `space create` |
 | `space rm` | `remove` | `<name>` `-f`/`--force` | Remove workspace. Force skips confirmation |
 | `space repos` | -- | `-r`/`--refresh` | List discovered repos. Refresh rescans filesystem |
 | `space config` | -- | -- | Open TUI config editor |
@@ -405,7 +405,7 @@ Used in: repo picker, workspace picker, branch picker, and repo search.
 space create api-service shared-lib web-frontend
 ```
 
-The TUI walks you through naming the workspace (e.g. `feature-auth-upgrade`) and choosing a branch strategy. With "new branch", all three repos get a `feature-auth-upgrade` branch created from `origin/<base>` in each repo, or from `<base>` itself where the clone has no `origin/<base>` ref, `<base>` being the branch that repo has checked out (see [Creating a Workspace](#creating-a-workspace)).
+The three names are the repos' directory names, exactly as `space repos` lists them (tab completion offers them). The TUI walks you through naming the workspace (e.g. `feature-auth-upgrade`), shows the picker with those three repos already selected, and asks for a branch strategy. With "new branch", all three repos get a `feature-auth-upgrade` branch created from `origin/<base>` in each repo, or from `<base>` itself where the clone has no `origin/<base>` ref, `<base>` being the branch that repo has checked out (see [Creating a Workspace](#creating-a-workspace)).
 
 ```
 ~/workspaces/feature-auth-upgrade/

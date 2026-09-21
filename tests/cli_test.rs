@@ -474,3 +474,132 @@ fn rm_force_prints_only_its_own_line() {
         "the printing git must be the one that removed the worktree, got {ran:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// create / add -- repo names on the command line (ticket 23)
+//
+// Each name must equal one cached repo's directory name, as on disk and
+// case-sensitive. A name that matches nothing, several repos, or a repo the
+// workspace already holds stops the command before the TUI is started, so
+// these run through the real binary on a pipe and never need a terminal.
+// ---------------------------------------------------------------------------
+
+/// Cache `names` as bare directories under `repos_dir`, returning their paths.
+fn cache_dirs(env: &TestEnv, names: &[&str]) -> Vec<std::path::PathBuf> {
+    let paths: Vec<std::path::PathBuf> = names
+        .iter()
+        .map(|n| {
+            let p = env.repos_dir.join(n);
+            std::fs::create_dir_all(&p).unwrap();
+            p
+        })
+        .collect();
+    env.write_cache(&paths);
+    paths
+}
+
+#[test]
+fn create_unknown_name_refuses_before_the_tui() {
+    let env = TestEnv::new();
+    cache_dirs(&env, &["api", "web"]);
+
+    space(&env)
+        .args(["create", "api", "nope"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no repo named 'nope' in the repo list",
+        ))
+        .stderr(predicate::str::contains("space repos --refresh"))
+        .stdout(predicate::str::contains("__SPACE_CD__").not());
+}
+
+#[test]
+fn create_scope_argument_is_refused_as_not_a_name() {
+    let env = TestEnv::new();
+    cache_dirs(&env, &["api"]);
+
+    space(&env)
+        .args(["create", "repos/"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("'repos/' is not a repo name;"))
+        .stderr(predicate::str::contains("rescan").not());
+}
+
+#[test]
+fn create_case_mismatch_refuses_and_names_the_exact_one() {
+    let env = TestEnv::new();
+    cache_dirs(&env, &["api"]);
+
+    space(&env)
+        .args(["create", "Api"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no repo named 'Api'"))
+        .stderr(predicate::str::contains("case-sensitive"))
+        .stderr(predicate::str::contains("did you mean 'api'?"));
+}
+
+#[test]
+fn create_ambiguous_name_lists_both_paths() {
+    let env = TestEnv::new();
+    let paths = cache_dirs(&env, &["a/api", "b/api"]);
+
+    space(&env)
+        .args(["create", "api"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("'api' names 2 repos:"))
+        .stderr(predicate::str::contains(paths[0].display().to_string()))
+        .stderr(predicate::str::contains(paths[1].display().to_string()))
+        .stderr(predicate::str::contains("pick it in the picker instead"));
+}
+
+#[test]
+fn add_name_already_in_the_workspace_says_so() {
+    let env = TestEnv::new();
+    let alpha = env.create_repo("alpha");
+    let beta = env.repos_dir.join("beta");
+    std::fs::create_dir_all(&beta).unwrap();
+    env.write_cache(&[alpha.clone(), beta]);
+    create_worktree(
+        &alpha,
+        &env.workspaces_dir,
+        "ws",
+        &BranchStrategy::NewBranch("ws".to_string()),
+    )
+    .unwrap();
+
+    space(&env)
+        .args(["add", "ws", "alpha"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "repo 'alpha' is already in workspace 'ws'",
+        ))
+        .stderr(predicate::str::contains("no repo named").not());
+}
+
+#[test]
+fn add_unknown_name_refuses_before_the_tui() {
+    let env = TestEnv::new();
+    let alpha = env.create_repo("alpha");
+    env.write_cache(std::slice::from_ref(&alpha));
+    create_worktree(
+        &alpha,
+        &env.workspaces_dir,
+        "ws",
+        &BranchStrategy::NewBranch("ws".to_string()),
+    )
+    .unwrap();
+
+    space(&env)
+        .args(["add", "ws", "nope"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no repo named 'nope' in the repo list",
+        ))
+        .stdout(predicate::str::contains("__SPACE_CD__").not());
+}

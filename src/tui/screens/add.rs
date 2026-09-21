@@ -33,22 +33,16 @@ pub struct AddState {
 }
 
 impl AddState {
-    pub fn new(
-        ws_name: String,
-        available_repos: Vec<PathBuf>,
-        initial_queries: Vec<String>,
-    ) -> Self {
+    /// `preselected` are the repos named on the command line, resolved to
+    /// cached paths; they open the picker toggled on, with an empty query.
+    pub fn new(ws_name: String, available_repos: Vec<PathBuf>, preselected: Vec<PathBuf>) -> Self {
         let items = super::repo_items(available_repos);
         let mut picker = FuzzyPicker::new(
             "Add repos  TAB=toggle  ENTER=confirm  ESC=cancel",
             items,
             true,
         );
-        // Pre-populate query if args were passed
-        if !initial_queries.is_empty() {
-            picker.input = picker.input.with_value(initial_queries.join(" "));
-            picker.refilter();
-        }
+        picker.toggle_paths(&preselected);
         Self {
             stage: AddStage::PickRepos,
             workspace_name: ws_name,
