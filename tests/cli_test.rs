@@ -515,6 +515,19 @@ fn create_unknown_name_refuses_before_the_tui() {
 }
 
 #[test]
+fn create_scope_argument_is_refused_as_not_a_name() {
+    let env = TestEnv::new();
+    cache_dirs(&env, &["api"]);
+
+    space(&env)
+        .args(["create", "repos/"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("'repos/' is not a repo name;"))
+        .stderr(predicate::str::contains("rescan").not());
+}
+
+#[test]
 fn create_case_mismatch_refuses_and_names_the_exact_one() {
     let env = TestEnv::new();
     cache_dirs(&env, &["api"]);
