@@ -284,6 +284,18 @@ impl FuzzyPicker {
         self.refilter();
     }
 
+    /// Toggle on every item whose `full_path` is in `paths`: the repos named
+    /// on the command line, already resolved to exact cached paths by
+    /// `cli::resolve_repo_names`. A path not in the list is ignored. The query
+    /// is left empty, so the list shows every repo with these marked.
+    pub fn toggle_paths(&mut self, paths: &[PathBuf]) {
+        for (i, item) in self.all_items.iter().enumerate() {
+            if paths.contains(&item.full_path) {
+                self.toggled.insert(i);
+            }
+        }
+    }
+
     pub fn toggle_highlighted(&mut self) {
         if let Some(&item_idx) = self.filtered.get(self.highlighted) {
             if self.toggled.contains(&item_idx) {

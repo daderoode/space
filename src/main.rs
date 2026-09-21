@@ -48,10 +48,14 @@ pub enum Commands {
     #[command(alias = "st")]
     Status { name: String },
     /// Create a new workspace
-    Create { repos: Vec<String> },
+    Create {
+        /// Repos to pre-select, by exact directory name as `space repos` lists them (case-sensitive)
+        repos: Vec<String>,
+    },
     /// Add repos to an existing workspace
     Add {
         workspace: String,
+        /// Repos to pre-select, by exact directory name as `space repos` lists them (case-sensitive)
         repos: Vec<String>,
     },
     /// Remove a workspace

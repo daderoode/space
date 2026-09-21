@@ -52,18 +52,16 @@ impl std::fmt::Debug for CreateState {
 }
 
 impl CreateState {
-    pub fn new(all_repos: Vec<PathBuf>, initial_queries: Vec<String>) -> Self {
+    /// `preselected` are the repos named on the command line, resolved to
+    /// cached paths; they open the picker toggled on, with an empty query.
+    pub fn new(all_repos: Vec<PathBuf>, preselected: Vec<PathBuf>) -> Self {
         let items = super::repo_items(all_repos);
         let mut picker = FuzzyPicker::new(
             "Select repos  TAB=toggle  ENTER=confirm  ESC=cancel",
             items,
             true,
         );
-        // Pre-populate query if args were passed
-        if !initial_queries.is_empty() {
-            picker.input = picker.input.with_value(initial_queries.join(" "));
-            picker.refilter();
-        }
+        picker.toggle_paths(&preselected);
         Self {
             stage: CreateStage::EnterName,
             picker,
@@ -536,6 +534,15 @@ impl CreateState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn create_with_no_names_leaves_the_picker_alone() {
+        let st = super::CreateState::new(vec![std::path::PathBuf::from("/r/api")], vec![]);
+        assert!(st.picker.toggled.is_empty());
+        assert_eq!(st.picker.input.value(), "");
+        assert_eq!(st.picker.filtered.len(), 1);
+        assert!(st.error.is_none());
+    }
+
     use super::*;
     use crate::core::config::SpaceConfig;
     use crate::tui::actions::{ScreenAction, ScreenContext};
