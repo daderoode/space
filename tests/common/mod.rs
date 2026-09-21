@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod git_isolation;
 pub mod hold;
 
 use space::core::config::SpaceConfig;
@@ -76,7 +77,9 @@ pub fn init_repo(dir: &Path) {
 /// Creates a TempDir with three subdirectories (`config/`, `repos/`, `workspaces/`)
 /// and writes a `config.toml` pointing at the temp dirs.
 ///
-/// Does NOT set env vars automatically -- callers decide.
+/// Does NOT set env vars automatically -- callers decide. (Git config needs
+/// nothing from callers: `git_isolation` keeps the whole process off the
+/// invoking user's before `main`.)
 pub struct TestEnv {
     pub dir: TempDir,
     pub config_dir: PathBuf,

@@ -16,6 +16,11 @@ pub mod tui;
 #[doc(hidden)]
 pub static SPAWN_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+// Keeps this binary's tests off the invoking user's git config (ticket 43).
+#[cfg(test)]
+#[path = "../tests/common/git_isolation.rs"]
+mod git_isolation;
+
 #[cfg(test)]
 mod tests {
     /// `core::spawn` locks this static and not one of its own: held by name
