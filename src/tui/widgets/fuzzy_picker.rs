@@ -663,6 +663,16 @@ mod tests {
         );
     }
 
+    /// Two roots holding a repo of the same name: the command line named
+    /// one path, and only that one is toggled.
+    #[test]
+    fn toggle_paths_matches_the_full_path_not_the_name() {
+        let items = make_items(&["/a/api", "/b/api", "/a/web"]);
+        let mut picker = FuzzyPicker::new("test", items, true);
+        picker.toggle_paths(&[PathBuf::from("/b/api"), PathBuf::from("/nowhere/web")]);
+        assert_eq!(toggled_paths(&picker), vec!["/b/api".to_string()]);
+    }
+
     #[test]
     fn multi_select_toggle() {
         let items = make_items(&["/work/acme/a", "/work/acme/b"]);

@@ -271,7 +271,7 @@ Multi-select fuzzy picker powered by nucleo. Type to filter, `Tab` to toggle sel
 
 **Scope filtering:** Type `orgname/` to filter repos whose parent directory contains "orgname", then fuzzy-match on the rest. Or press `Ctrl-S` to cycle through parent directory scopes.
 
-If `space create repo-a repo-b` was used, the picker opens with `repo-a` and `repo-b` already toggled on and the query row empty. Each name must be one repo's directory name exactly as `space repos` lists it (case-sensitive); the shell completion offers those names. A name that matches no repo, matches several (two roots holding a repo of the same name), or is already in the workspace stops the command before the TUI opens, with the paths it saw. The names are not a search: to filter, run `space create` and type in the picker.
+If `space create repo-a repo-b` was used, the picker opens with `repo-a` and `repo-b` already toggled on and the query row empty. Each name must be one repo's directory name exactly as `space repos` lists it (case-sensitive); the shell completion offers those names. A name that matches no repo stops the command before the TUI opens; so does a name that matches several (two roots holding a repo of the same name), listing their paths. The names are not a search: to filter, run `space create` and type in the picker.
 
 ### Stage 3: Sync Report
 
@@ -302,7 +302,7 @@ Progress log showing each repo with a checkmark or error. A repo whose place in 
 
 ## Add Repos Flow
 
-5-stage wizard (same as Create minus the naming step). Launched by pressing `a` or running `space add <workspace> <repos>`; the repo names follow the same exact-name rule as `space create` and open the picker with those repos toggled on. The fuzzy picker automatically excludes repos already in the workspace.
+5-stage wizard (same as Create minus the naming step). Launched by pressing `a` or running `space add <workspace> <repos>`; the repo names follow the same exact-name rule as `space create` and open the picker with those repos toggled on; a name the workspace already holds stops the command before the TUI opens. The fuzzy picker automatically excludes repos already in the workspace.
 
 ---
 

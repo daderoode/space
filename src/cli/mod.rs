@@ -148,13 +148,7 @@ pub fn dispatch(cmd: Commands) -> Result<()> {
             let available: Vec<std::path::PathBuf> = app
                 .repos_cache
                 .iter()
-                .filter(|p| {
-                    let name = p
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    !existing_names.contains(&name)
-                })
+                .filter(|p| !existing_names.contains(&repo_name(p)))
                 .cloned()
                 .collect();
             app.screen = Screen::AddRepos(screens::add::AddState::new(
