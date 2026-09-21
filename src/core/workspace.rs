@@ -3596,21 +3596,169 @@ mod tests {
         }
     }
 
+    /// The sync test's verdict handling, kept out of the test so it can be
+    /// pinned without the network: `Refused` passes (returns true),
+    /// `Unreached` hands the skip line to `skip` and returns false, and
+    /// `Unexpected` panics with its reason.
+    fn refused_or_skip(verdict: PromptProbe, skip: &mut dyn FnMut(String)) -> bool {
+        match verdict {
+            PromptProbe::Refused => true,
+            PromptProbe::Unreached(reason) => {
+                skip(format!("skipping: github.com was not reached: {}", reason));
+                false
+            }
+            PromptProbe::Unexpected(reason) => panic!("{}", reason),
+        }
+    }
+
+    /// The create test's verdict handling: `Unexpected` panics first, so its
+    /// sharper reason is never masked by a creation failure; then
+    /// `assert_created` runs for a refused and an unreached fetch alike,
+    /// because a failed fetch of either kind must not fail the creation;
+    /// only then is the refusal check skipped, with a line that says the
+    /// creation half was still asserted. Returns true when the refusal was
+    /// observed.
+    fn created_then_refused_or_skip(
+        verdict: PromptProbe,
+        assert_created: impl FnOnce(),
+        skip: &mut dyn FnMut(String),
+    ) -> bool {
+        if let PromptProbe::Unexpected(reason) = &verdict {
+            panic!("{}", reason);
+        }
+        assert_created();
+        match verdict {
+            PromptProbe::Refused => true,
+            PromptProbe::Unreached(reason) => {
+                skip(format!(
+                    "skipping the refusal check (the worktree was still created from local refs): github.com was not reached: {}",
+                    reason
+                ));
+                false
+            }
+            PromptProbe::Unexpected(_) => unreachable!("handled above"),
+        }
+    }
+
+    #[test]
+    fn refused_or_skip_passes_on_refused_and_prints_nothing() {
+        let mut lines = Vec::new();
+        assert!(refused_or_skip(PromptProbe::Refused, &mut |l| lines.push(l)));
+        assert!(lines.is_empty(), "{:?}", lines);
+    }
+
+    #[test]
+    fn refused_or_skip_prints_the_reason_on_unreached() {
+        let mut lines = Vec::new();
+        let refused = refused_or_skip(
+            PromptProbe::Unreached("timed out after 20s".to_string()),
+            &mut |l| lines.push(l),
+        );
+        assert!(!refused);
+        assert_eq!(
+            lines,
+            ["skipping: github.com was not reached: timed out after 20s"]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "got Failed { exit_code: Some(1)")]
+    fn refused_or_skip_panics_on_unexpected() {
+        refused_or_skip(
+            PromptProbe::Unexpected("got Failed { exit_code: Some(1) ..".to_string()),
+            &mut |_| {},
+        );
+    }
+
+    #[test]
+    fn created_then_refused_or_skip_asserts_creation_then_passes_on_refused() {
+        let ran = std::cell::Cell::new(false);
+        let mut lines = Vec::new();
+        let refused =
+            created_then_refused_or_skip(PromptProbe::Refused, || ran.set(true), &mut |l| {
+                lines.push(l)
+            });
+        assert!(refused);
+        assert!(ran.get(), "the creation assertions must run on a pass");
+        assert!(lines.is_empty(), "{:?}", lines);
+    }
+
+    /// The order is the point: the creation assertions run before the skip
+    /// is decided, so a skip never retires them.
+    #[test]
+    fn created_then_refused_or_skip_asserts_creation_before_skipping() {
+        let ran = std::cell::Cell::new(false);
+        let mut lines = Vec::new();
+        let refused = created_then_refused_or_skip(
+            PromptProbe::Unreached(
+                "fatal: unable to access 'u': Could not resolve host: h".to_string(),
+            ),
+            || ran.set(true),
+            &mut |l| {
+                assert!(
+                    ran.get(),
+                    "the skip line must come after the creation assertions"
+                );
+                lines.push(l)
+            },
+        );
+        assert!(!refused);
+        assert!(ran.get(), "the creation assertions must run on a skip");
+        assert_eq!(
+            lines,
+            ["skipping the refusal check (the worktree was still created from local refs): github.com was not reached: fatal: unable to access 'u': Could not resolve host: h"]
+        );
+    }
+
+    /// `Unexpected` panics before the creation assertions, so its reason is
+    /// what the failure shows, not whatever the creation half would say.
+    #[test]
+    fn created_then_refused_or_skip_panics_on_unexpected_before_asserting_creation() {
+        let ran = std::cell::Cell::new(false);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            created_then_refused_or_skip(
+                PromptProbe::Unexpected("the sharper reason".to_string()),
+                || ran.set(true),
+                &mut |_| {},
+            )
+        }));
+        let payload = result.expect_err("Unexpected must panic");
+        let text = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default();
+        assert_eq!(text, "the sharper reason");
+        assert!(
+            !ran.get(),
+            "the creation assertions must not run before the panic"
+        );
+    }
+
     /// An HTTP status means the server was reached, so the refusal path was
     /// reachable and did not refuse: that is a failure for a person to read,
-    /// whether the probe URL rotted or the code changed.
+    /// whether the probe URL rotted or the code changed. git words a 404 as
+    /// `repository '<url>' not found` (no `unable to access`, so the
+    /// catch-all takes it) and every other status as `unable to access
+    /// '<url>': The requested URL returned error: <status>`.
     #[test]
     fn prompt_probe_http_status_is_unexpected() {
-        let fetch = FetchOutcome::Failed {
-            exit_code: Some(128),
-            stderr: "fatal: unable to access 'https://github.com/x/repo.git/': The requested URL returned error: 404\n".to_string(),
-            elapsed: Duration::from_millis(300),
-        };
-        match prompt_probe(&fetch) {
-            PromptProbe::Unexpected(reason) => {
-                assert!(reason.contains("returned error: 404"), "{}", reason)
+        let lines = [
+            ("returned error: 403", "fatal: unable to access 'https://github.com/x/repo.git/': The requested URL returned error: 403\n"),
+            ("not found", "fatal: repository 'https://github.com/x/repo.git/' not found\n"),
+        ];
+        for (needle, line) in lines {
+            let fetch = FetchOutcome::Failed {
+                exit_code: Some(128),
+                stderr: line.to_string(),
+                elapsed: Duration::from_millis(300),
+            };
+            match prompt_probe(&fetch) {
+                PromptProbe::Unexpected(reason) => {
+                    assert!(reason.contains(needle), "{}", reason)
+                }
+                other => panic!("{:?} must be Unexpected, got {:?}", line, other),
             }
-            other => panic!("expected Unexpected, got {:?}", other),
         }
     }
 
@@ -3661,9 +3809,10 @@ mod tests {
     /// `GIT_TERMINAL_PROMPT` only after the server's 401, so a run that never
     /// got an answer prints the same text and exit code with or without the
     /// fix. Fail: anything else, including any `The requested URL returned
-    /// error: <status>` line, since a status means github answered and the
-    /// refusal did not happen (git consumes its 401 in the credential path,
-    /// so that status never reaches this text).
+    /// error: <status>` line or git's own `repository '<url>' not found` for
+    /// a 404, since a status means github answered and the refusal did not
+    /// happen (git consumes its 401 in the credential path, so that status
+    /// never reaches this text).
     #[test]
     fn sync_repo_reports_refused_https_prompt_as_fetch_failed() {
         use std::net::{TcpStream, ToSocketAddrs};
@@ -3712,13 +3861,9 @@ mod tests {
 
         let result = sync_repo_with_timeout(tmp.path(), Duration::from_secs(20));
 
-        match prompt_probe(&result.fetch) {
-            PromptProbe::Refused => {}
-            PromptProbe::Unreached(reason) => {
-                eprintln!("skipping: github.com was not reached: {}", reason);
-            }
-            PromptProbe::Unexpected(reason) => panic!("{}", reason),
-        }
+        refused_or_skip(prompt_probe(&result.fetch), &mut |line| {
+            eprintln!("{}", line)
+        });
     }
 
     /// The pre-create fetch runs under the unattended-run policy, so a remote
@@ -3738,9 +3883,10 @@ mod tests {
     /// `GIT_TERMINAL_PROMPT` only after the server's 401, so a run that never
     /// got an answer prints the same text and exit code with or without the
     /// fix. Fail: anything else, including any `The requested URL returned
-    /// error: <status>` line, since a status means github answered and the
-    /// refusal did not happen (git consumes its 401 in the credential path,
-    /// so that status never reaches this text). The creation half holds for
+    /// error: <status>` line or git's own `repository '<url>' not found` for
+    /// a 404, since a status means github answered and the refusal did not
+    /// happen (git consumes its 401 in the credential path, so that status
+    /// never reaches this text). The creation half holds for
     /// a refused and an unreached fetch alike, so it is asserted before the
     /// skip: only the refusal check is skipped, and the skip message says so.
     #[test]
@@ -3806,32 +3952,30 @@ mod tests {
             .fetch
             .as_ref()
             .expect("PreCreateFetch::Run must record a fetch outcome");
-        let verdict = prompt_probe(fetch);
-        if let PromptProbe::Unexpected(reason) = &verdict {
-            panic!("{}", reason);
-        }
-        // Refused or unreached, the fetch failed, and a failed fetch must not
-        // fail the creation: the worktree exists and, with no `origin/main`
-        // to prefer, the branch starts at the local base tip.
-        let path = attempt
-            .created
-            .expect("a failed fetch must not fail the creation");
-        assert!(
-            path.exists(),
-            "the worktree must still be created: {}",
-            path.display()
+        created_then_refused_or_skip(
+            prompt_probe(fetch),
+            || {
+                // Refused or unreached, the fetch failed, and a failed fetch
+                // must not fail the creation: the worktree exists and, with
+                // no `origin/main` to prefer, the branch starts at the local
+                // base tip.
+                let path = attempt
+                    .created
+                    .as_ref()
+                    .expect("a failed fetch must not fail the creation");
+                assert!(
+                    path.exists(),
+                    "the worktree must still be created: {}",
+                    path.display()
+                );
+                assert_eq!(
+                    get_sha(&repo, "feature"),
+                    base_tip,
+                    "the new branch must start at the local base tip"
+                );
+            },
+            &mut |line| eprintln!("{}", line),
         );
-        assert_eq!(
-            get_sha(&repo, "feature"),
-            base_tip,
-            "the new branch must start at the local base tip"
-        );
-        if let PromptProbe::Unreached(reason) = verdict {
-            eprintln!(
-                "skipping the refusal check (the worktree was still created from local refs): github.com was not reached: {}",
-                reason
-            );
-        }
     }
 
     /// A remote that never answers must not block the creation for git's own
