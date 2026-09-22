@@ -4871,3 +4871,919 @@ fn a_pull_reads_the_last_value_of_a_remote_key_set_twice() {
     );
     assert_eq!(rev(&wt, "HEAD"), upstream_next, "at upstream's new tip");
 }
+
+// ---------------------------------------------------------------------------
+// Ticket 41: `switch_worktree_branch` asks for each ref exactly, and reads a
+// picked `<remote>/<x>` the way the create path does since ticket 25.
+// ---------------------------------------------------------------------------
+
+/// A worktree of the two-remote fixture, detached at `main`, for the switch
+/// to move.
+fn detached_wt(env: &TestEnv, f: &TwoRemotes, ws: &str) -> PathBuf {
+    create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        ws,
+        &BranchStrategy::DetachedHead,
+    )
+    .unwrap()
+}
+
+/// A commit that is no branch's tip, for a shadowing tag to point at.
+fn switch_decoy(f: &TwoRemotes) -> String {
+    let decoy = git_ok(
+        &f.repo,
+        &[
+            "commit-tree",
+            "HEAD^{tree}",
+            "-p",
+            "HEAD",
+            "-m",
+            "t41-decoy",
+        ],
+    )
+    .trim()
+    .to_string();
+    assert_ne!(
+        decoy, f.origin_feat,
+        "fixture: the decoy is not origin's feat"
+    );
+    assert_ne!(decoy, f.upstream_feat, "fixture: nor upstream's");
+    decoy
+}
+
+/// Whether `refname` exists exactly, the way `ref_exists` asks.
+fn has_ref(repo: &Path, refname: &str) -> bool {
+    Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", refname])
+        .current_dir(repo)
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// Whether `wt`'s HEAD is detached (no symbolic ref).
+fn is_detached(wt: &Path) -> bool {
+    !Command::new("git")
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .current_dir(wt)
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// T1, the local probe. A tag literally named `refs/heads/feat` is not a
+/// local branch `feat`. Master asked `rev-parse --verify refs/heads/feat`,
+/// which falls back to that tag, took the branch as present and ran `git
+/// switch -- feat`; git's own remote guess then failed because three
+/// remotes carry `feat` (with one it would have guessed right, which hid
+/// the bug). Asked exactly, the probe says no and `origin/feat` becomes a
+/// local `feat` tracking it, at origin's tip.
+#[test]
+fn switch_finds_no_local_branch_through_a_tag_named_like_its_ref() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let decoy = switch_decoy(&f);
+    git_ok(&f.repo, &["tag", "refs/heads/feat", &decoy]);
+    assert!(
+        !has_ref(&f.repo, "refs/heads/feat"),
+        "fixture: no local feat"
+    );
+    let wt = detached_wt(&env, &f, "t41-1");
+
+    space::core::workspace::switch_worktree_branch(&wt, "origin/feat", false)
+        .expect("origin/feat becomes a local tracking branch");
+
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/origin/feat");
+    let head = git_ok(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(head, f.origin_feat, "at origin's tip");
+}
+
+/// T2, the remote probe. A branch no remote has is not found through a tag
+/// of either name it could be read as: `origin/<x>` (master's bare probe
+/// resolved it and created `<x>` at the tag) or `refs/remotes/origin/<x>`
+/// (`rev-parse --verify` on the qualified name falls back to that tag, and
+/// `switch -c <x> refs/remotes/origin/<x>` then starts at it). Asked
+/// exactly, both say no and git reports the name; nothing is created.
+#[test]
+fn switch_finds_no_remote_branch_through_a_tag_of_either_name() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let decoy = switch_decoy(&f);
+    git_ok(&f.repo, &["tag", "origin/gone-bare", &decoy]);
+    git_ok(
+        &f.repo,
+        &["tag", "refs/remotes/origin/gone-qualified", &decoy],
+    );
+    let wt = detached_wt(&env, &f, "t41-2");
+
+    for name in ["gone-bare", "gone-qualified"] {
+        assert!(
+            !has_ref(&f.repo, &format!("refs/remotes/origin/{}", name)),
+            "fixture: origin has no {}",
+            name
+        );
+        let picked = format!("origin/{}", name);
+        let err = space::core::workspace::switch_worktree_branch(&wt, &picked, false)
+            .expect_err("no remote branch has this name")
+            .to_string();
+        assert!(
+            err.contains(name),
+            "git reports the name {}, got {:?}",
+            name,
+            err
+        );
+        assert!(
+            is_detached(&wt),
+            "the worktree has not moved for {}",
+            picked
+        );
+        assert!(
+            !has_ref(&f.repo, &format!("refs/heads/{}", name)),
+            "no local {} is created",
+            name
+        );
+    }
+}
+
+/// T3, the start point. A tag `origin/feat` beside the real remote branch
+/// made master's `git switch -c feat origin/feat` fail with `ambiguous
+/// object name`; the qualified start point names the remote-tracking ref
+/// alone, so `feat` starts at origin's tip, not the tag's, and tracks it.
+#[test]
+fn switch_starts_a_remote_branch_at_it_beside_a_tag_of_its_name() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let decoy = switch_decoy(&f);
+    git_ok(&f.repo, &["tag", "origin/feat", &decoy]);
+    let wt = detached_wt(&env, &f, "t41-3");
+
+    space::core::workspace::switch_worktree_branch(&wt, "origin/feat", false)
+        .expect("origin/feat becomes a local tracking branch beside the tag");
+
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/origin/feat");
+    let head = git_ok(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(head, f.origin_feat, "at origin's tip");
+    assert_ne!(head, decoy, "not the tag's commit");
+}
+
+/// T4, ticket 25's split. `upstream/feat` from the picker becomes a local
+/// `feat` tracking `refs/remotes/upstream/feat`, at upstream's tip and not
+/// origin's, as the create path makes it. Master stripped `origin/` only,
+/// so git was handed `upstream/feat` and refused with `a branch is
+/// expected, got remote branch`.
+#[test]
+fn switch_to_another_remotes_branch_tracks_that_remote() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = detached_wt(&env, &f, "t41-4");
+
+    space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect("upstream/feat becomes a local tracking branch");
+
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/upstream/feat");
+    let head = git_ok(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(head, f.upstream_feat, "at upstream's tip");
+    assert_ne!(head, f.origin_feat, "and not origin's");
+}
+
+/// T5, ticket 25's local-first rule. A local branch literally named
+/// `upstream/feat` wins over the remote one of that name: the switch checks
+/// it out, as master did, and makes no local `feat`.
+#[test]
+fn switch_to_a_local_branch_named_like_another_remotes_branch_checks_it_out() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let decoy = switch_decoy(&f);
+    git_ok(&f.repo, &["branch", "-q", "upstream/feat", &decoy]);
+    let wt = detached_wt(&env, &f, "t41-5");
+
+    space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect("the local branch is checked out");
+
+    assert_eq!(head_symref(&wt), "refs/heads/upstream/feat");
+    let head = git_ok(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(head, decoy, "at the local branch's own commit");
+    assert!(
+        !has_ref(&f.repo, "refs/heads/feat"),
+        "no local feat is created"
+    );
+}
+
+/// T6, the fallthrough. A picked `origin/only-up` that origin does not
+/// have (a prune elsewhere between the picker and Enter) is an error, not
+/// a branch tracking whichever remote git's guess finds. Master ran `git
+/// switch -- only-up`, and with `only-up` on upstream alone git guessed
+/// and tracked upstream, a remote nobody picked.
+#[test]
+fn switch_to_a_remote_branch_that_is_gone_guesses_no_other_remote() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(&f.repo, &["remote", "remove", "a/b"]);
+    assert!(
+        has_ref(&f.repo, "refs/remotes/upstream/only-up"),
+        "fixture: upstream has only-up"
+    );
+    assert!(
+        !has_ref(&f.repo, "refs/remotes/a/b/only-up")
+            && !has_ref(&f.repo, "refs/remotes/origin/only-up"),
+        "fixture: and no other remote does"
+    );
+    let wt = detached_wt(&env, &f, "t41-6");
+
+    let err = space::core::workspace::switch_worktree_branch(&wt, "origin/only-up", false)
+        .expect_err("origin has no only-up")
+        .to_string();
+
+    assert!(
+        err.contains("only-up"),
+        "git reports the name, got {:?}",
+        err
+    );
+    assert!(is_detached(&wt), "the worktree has not moved");
+    assert!(
+        !has_ref(&f.repo, "refs/heads/only-up"),
+        "no local only-up is created"
+    );
+}
+
+/// T7. For a remote other than origin, an existing local `feat` that tracks
+/// another line (here origin's) is not switched to in place of the picked
+/// `upstream/feat`: the switch is refused with a sentence naming the local
+/// branch (short enough for the status line), and nothing moves. Head `1edf10d` switched to it silently, so the dashboard
+/// showed origin's code under a pick of upstream's.
+#[test]
+fn switch_to_another_remotes_branch_refuses_a_local_branch_on_another_line() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.repo,
+        &[
+            "branch",
+            "-q",
+            "--track",
+            "feat",
+            "refs/remotes/origin/feat",
+        ],
+    );
+    let wt = detached_wt(&env, &f, "t41-7");
+
+    let err = space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("the local feat tracks origin, not upstream")
+        .to_string();
+
+    assert!(
+        err.contains("feat exists and does not track the picked branch"),
+        "the refusal says why, got {:?}",
+        err
+    );
+    assert!(is_detached(&wt), "the worktree has not moved");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/origin/feat");
+}
+
+/// T8. A local `feat` that already tracks `upstream/feat` (the first pick
+/// of the row made it) is where a second pick of that row goes, although
+/// the remote-tracking ref exists too.
+#[test]
+fn switch_to_another_remotes_branch_goes_to_the_local_branch_tracking_it() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.repo,
+        &[
+            "branch",
+            "-q",
+            "--track",
+            "feat",
+            "refs/remotes/upstream/feat",
+        ],
+    );
+    let wt = detached_wt(&env, &f, "t41-8");
+
+    space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect("the local feat tracking upstream/feat is checked out");
+
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/upstream/feat");
+}
+
+/// T9. `origin/<x>` keeps master's rule: an existing local `feat` is
+/// checked out whatever it tracks, here nothing, at its own commit, beside
+/// the remote-tracking ref of the same name.
+#[test]
+fn switch_to_origins_branch_checks_out_the_local_branch_whatever_it_tracks() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let decoy = switch_decoy(&f);
+    git_ok(&f.repo, &["branch", "-q", "--no-track", "feat", &decoy]);
+    let wt = detached_wt(&env, &f, "t41-9");
+
+    space::core::workspace::switch_worktree_branch(&wt, "origin/feat", false)
+        .expect("the local feat is checked out");
+
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    let head = git_ok(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(head, decoy, "at the local branch's own commit");
+    assert_eq!(upstream_of(&f.repo, "feat"), "", "still tracking nothing");
+}
+
+/// T10. The new branch tracks the picked remote-tracking ref whatever
+/// `branch.autoSetupMerge` says: `false` and `inherit` set no upstream from
+/// a remote-tracking start point unless `--track` is passed (probed on git
+/// 2.50.1), and a branch with no upstream would later be offered `push -u
+/// origin`, publishing upstream's commits there.
+#[test]
+fn switch_tracks_the_picked_remote_whatever_auto_setup_merge_says() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = detached_wt(&env, &f, "t41-10");
+
+    for (mode, picked, local) in [
+        ("false", "upstream/feat", "feat"),
+        ("inherit", "upstream/only-up", "only-up"),
+    ] {
+        git_ok(&f.repo, &["config", "branch.autoSetupMerge", mode]);
+        space::core::workspace::switch_worktree_branch(&wt, picked, false)
+            .unwrap_or_else(|e| panic!("{} under {}: {}", picked, mode, e));
+        assert_eq!(
+            upstream_of(&f.repo, local),
+            format!("refs/remotes/{}", picked),
+            "{} tracks {} under autoSetupMerge {}",
+            local,
+            picked,
+            mode
+        );
+    }
+}
+
+/// T11. A remote whose name holds a slash splits at the longest configured
+/// remote through the switch too: `a/b/feat` is `feat` on remote `a/b`
+/// (upstream's bare repo), tracking `refs/remotes/a/b/feat`.
+#[test]
+fn switch_splits_a_remote_named_with_a_slash_at_the_remote() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = detached_wt(&env, &f, "t41-11");
+
+    space::core::workspace::switch_worktree_branch(&wt, "a/b/feat", false)
+        .expect("a/b/feat becomes a local tracking branch");
+
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/a/b/feat");
+    let head = git_ok(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(head, f.upstream_feat, "at upstream's tip");
+}
+
+/// T12, the remote probe where nothing else stands behind it. With a
+/// configured remote, `switch -c <x> --track <ref>` also refuses a tag as
+/// its start point (`not a branch`), so T2 alone cannot tell an exact probe
+/// from `rev-parse --verify`. A repo with no `origin` configured still reads
+/// `origin/<x>` as origin's (the default remote), gets no `--track`, and
+/// there only the exact probe keeps a tag of either name, or of both, from
+/// becoming the new branch.
+#[test]
+fn switch_finds_no_remote_branch_through_a_tag_without_an_origin_remote() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("plain");
+    assert_eq!(git_ok(&repo, &["remote"]).trim(), "", "fixture: no remotes");
+    let decoy = git_ok(
+        &repo,
+        &[
+            "commit-tree",
+            "HEAD^{tree}",
+            "-p",
+            "HEAD",
+            "-m",
+            "t41-decoy",
+        ],
+    )
+    .trim()
+    .to_string();
+    git_ok(&repo, &["tag", "origin/gone-bare", &decoy]);
+    git_ok(
+        &repo,
+        &["tag", "refs/remotes/origin/gone-qualified", &decoy],
+    );
+    // Both at once: a bare probe finds the first, and the qualified start
+    // point then resolves to the second.
+    git_ok(&repo, &["tag", "origin/gone-both", &decoy]);
+    git_ok(&repo, &["tag", "refs/remotes/origin/gone-both", &decoy]);
+    let wt = create_worktree(
+        &repo,
+        &env.workspaces_dir,
+        "t41-12",
+        &BranchStrategy::DetachedHead,
+    )
+    .unwrap();
+
+    for name in ["gone-bare", "gone-qualified", "gone-both"] {
+        let picked = format!("origin/{}", name);
+        let err = space::core::workspace::switch_worktree_branch(&wt, &picked, false)
+            .expect_err("no remote branch has this name")
+            .to_string();
+        assert!(
+            err.contains(name),
+            "git reports the name {}, got {:?}",
+            name,
+            err
+        );
+        assert!(
+            is_detached(&wt),
+            "the worktree has not moved for {}",
+            picked
+        );
+        assert!(
+            !has_ref(&repo, &format!("refs/heads/{}", name)),
+            "no local {} is created",
+            name
+        );
+    }
+}
+
+/// A commit on `main` that adds `t41.txt`, so its tree differs from every
+/// fixture tip and a worktree half-switched to it shows in `git status`.
+/// Every other fixture commit shares one tree, which is why no earlier test
+/// could see a refusal that left files behind. Minted in a throwaway
+/// worktree, removed again.
+fn commit_adding_a_file(f: &TwoRemotes) -> String {
+    let mint = f._tmp.path().join("t41-mint");
+    git_ok(
+        &f.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            mint.to_str().unwrap(),
+            "main",
+        ],
+    );
+    std::fs::write(mint.join("t41.txt"), "from the remote\n").unwrap();
+    git_ok(&mint, &["add", "t41.txt"]);
+    git_ok(&mint, &["commit", "-q", "-m", "t41-tree"]);
+    let sha = git_ok(&mint, &["rev-parse", "HEAD"]).trim().to_string();
+    git_ok(
+        &f.repo,
+        &["worktree", "remove", "--force", mint.to_str().unwrap()],
+    );
+    sha
+}
+
+fn status_of(wt: &Path) -> String {
+    git_ok(wt, &["status", "--porcelain"]).trim().to_string()
+}
+
+/// T13. A configured remote whose fetch refspec does not map the picked ref
+/// (here narrowed to `main` after the fetch). For a remote other than
+/// origin the pick is refused before anything is written: the branch could
+/// track nothing, status, sync and pull would read it against origin, and
+/// master and the create path both refuse it. Origin keeps master's
+/// untracked branch. `--track` there is git's `starting point ... is not a
+/// branch`, which head `f0db95f` passed for any configured remote.
+#[test]
+fn switch_to_a_ref_no_refspec_maps_is_refused_except_for_origin() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    for remote in ["upstream", "origin"] {
+        git_ok(
+            &f.repo,
+            &[
+                "config",
+                "--replace-all",
+                &format!("remote.{}.fetch", remote),
+                &format!("+refs/heads/main:refs/remotes/{}/main", remote),
+            ],
+        );
+    }
+    let wt = detached_wt(&env, &f, "t41-13");
+
+    let err = space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("no fetch refspec of upstream maps upstream/feat")
+        .to_string();
+    assert!(
+        err.contains("upstream/feat is not fetched by upstream"),
+        "the refusal names the ref, got {:?}",
+        err
+    );
+    assert!(is_detached(&wt), "the worktree has not moved");
+    assert!(!has_ref(&f.repo, "refs/heads/feat"), "no branch is made");
+
+    space::core::workspace::switch_worktree_branch(&wt, "origin/feat", false)
+        .expect("origin/feat is still a branch to switch to");
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    let head = git_ok(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(head, f.origin_feat, "at origin's tip");
+    assert_eq!(upstream_of(&f.repo, "feat"), "", "tracking nothing");
+}
+
+/// T14. When two remotes' fetch refspecs map the picked ref, git refuses to
+/// track it (`ambiguous information`), and does so after it has made the
+/// branch and rewritten the worktree (probed). The switch refuses first:
+/// no branch, no file of the target, HEAD where it was.
+#[test]
+fn switch_to_a_ref_two_refspecs_map_is_refused_before_anything_is_written() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let target = commit_adding_a_file(&f);
+    git_ok(
+        &f.repo,
+        &["update-ref", "refs/remotes/upstream/feat", &target],
+    );
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "--add",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/upstream/*",
+        ],
+    );
+    let wt = detached_wt(&env, &f, "t41-14");
+
+    let err = space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("two remotes map refs/remotes/upstream/feat")
+        .to_string();
+
+    assert!(
+        err.contains("upstream/feat is fetched by several remotes"),
+        "the refusal names the ref, got {:?}",
+        err
+    );
+    assert!(is_detached(&wt), "the worktree has not moved");
+    assert!(!has_ref(&f.repo, "refs/heads/feat"), "no branch is left");
+    assert_eq!(status_of(&wt), "", "and no file of the target");
+}
+
+/// T15. A ref in the way of the new branch (`refs/heads/feat/sub` blocks
+/// `refs/heads/feat`) is refused by `git branch` before any file is touched.
+/// `git switch -c` refused it only after rewriting the worktree and index to
+/// the target, leaving them there with HEAD where it was (probed).
+#[test]
+fn switch_whose_new_branch_is_blocked_by_a_ref_leaves_the_worktree_as_it_was() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let target = commit_adding_a_file(&f);
+    git_ok(
+        &f.repo,
+        &["update-ref", "refs/remotes/upstream/feat", &target],
+    );
+    git_ok(&f.repo, &["branch", "-q", "feat/sub", "main"]);
+    let wt = detached_wt(&env, &f, "t41-15");
+
+    let err = space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("refs/heads/feat/sub is in the way")
+        .to_string();
+
+    assert!(err.contains("feat"), "git names the ref, got {:?}", err);
+    assert!(is_detached(&wt), "the worktree has not moved");
+    assert_eq!(status_of(&wt), "", "no file of the target is left behind");
+    assert!(!wt.join("t41.txt").exists());
+}
+
+/// T16. A switch git refuses for the worktree's own state (an untracked file
+/// the target would overwrite) takes the branch it had just made back out,
+/// so the next pick of the row is not refused as a local branch on another
+/// line, and the user's file is untouched.
+#[test]
+fn switch_refused_by_the_worktree_leaves_no_new_branch_behind() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let target = commit_adding_a_file(&f);
+    git_ok(
+        &f.repo,
+        &["update-ref", "refs/remotes/upstream/feat", &target],
+    );
+    let wt = detached_wt(&env, &f, "t41-16");
+    std::fs::write(wt.join("t41.txt"), "mine\n").unwrap();
+
+    space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("the untracked t41.txt would be overwritten");
+
+    assert!(is_detached(&wt), "the worktree has not moved");
+    assert!(!has_ref(&f.repo, "refs/heads/feat"), "no branch is left");
+    assert_eq!(
+        std::fs::read_to_string(wt.join("t41.txt")).unwrap(),
+        "mine\n",
+        "the user's file is untouched"
+    );
+    let remote_key = Command::new("git")
+        .args(["config", "--get", "branch.feat.remote"])
+        .current_dir(&f.repo)
+        .status()
+        .unwrap();
+    assert!(
+        !remote_key.success(),
+        "and no tracking config is left for a branch that is gone"
+    );
+    let merge_key = Command::new("git")
+        .args(["config", "--get", "branch.feat.merge"])
+        .current_dir(&f.repo)
+        .status()
+        .unwrap();
+    assert!(!merge_key.success(), "neither half of it");
+}
+
+/// T17. A remote carrying a negative fetch refspec (`^refs/heads/<x>`, read
+/// by git since 2.29) cannot be read by libgit2 at all, so the mapper count
+/// is unknown. Another remote's pick then passes `--track`: git tracks
+/// upstream's `feat` even under `branch.autoSetupMerge=false`, and refuses
+/// the `only-up` the negative refspec excludes (`not a branch`) with no
+/// branch made. Counting the unreadable remote as mapping nothing (head
+/// `9bbc48f`) made `feat` untracked; git's bare default (head `520c11f`)
+/// would have made both untracked under this config.
+#[test]
+fn switch_lets_git_decide_when_a_remotes_refspecs_cannot_be_read() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "--add",
+            "remote.upstream.fetch",
+            "^refs/heads/only-up",
+        ],
+    );
+    git_ok(&f.repo, &["config", "branch.autoSetupMerge", "false"]);
+    assert!(
+        git2::Repository::open(&f.repo)
+            .unwrap()
+            .find_remote("upstream")
+            .is_err(),
+        "fixture: libgit2 cannot read upstream's refspecs"
+    );
+    assert!(
+        has_ref(&f.repo, "refs/remotes/upstream/only-up"),
+        "fixture: the excluded ref is still there"
+    );
+    let wt = detached_wt(&env, &f, "t41-17");
+
+    space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect("git tracks upstream/feat");
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/upstream/feat");
+
+    space::core::workspace::switch_worktree_branch(&wt, "upstream/only-up", false)
+        .expect_err("no refspec of upstream maps the excluded only-up");
+    assert_eq!(
+        head_symref(&wt),
+        "refs/heads/feat",
+        "the worktree has not moved"
+    );
+    assert!(!has_ref(&f.repo, "refs/heads/only-up"), "no branch is made");
+}
+
+/// T18. Origin's pick under an unknown count keeps git's default, as on
+/// master; another remote carries a negative refspec, so the count is
+/// unknown. With origin not configured (a hand-made
+/// `refs/remotes/origin/feat`) the new `feat` is untracked, where `--track`
+/// would be git's `not a branch`. Once origin is configured and its refspec
+/// maps the ref, the default tracks it, where `--no-track` would not.
+#[test]
+fn switch_to_origin_under_an_unknown_count_keeps_gits_default() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("plain");
+    git_ok(&repo, &["remote", "add", "other", "/nonexistent/other"]);
+    git_ok(
+        &repo,
+        &["config", "--add", "remote.other.fetch", "^refs/heads/skip"],
+    );
+    assert!(
+        git2::Repository::open(&repo)
+            .unwrap()
+            .find_remote("other")
+            .is_err(),
+        "fixture: libgit2 cannot read other's refspecs"
+    );
+    let head = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+    git_ok(&repo, &["update-ref", "refs/remotes/origin/feat", &head]);
+    let wt = create_worktree(
+        &repo,
+        &env.workspaces_dir,
+        "t41-18",
+        &BranchStrategy::DetachedHead,
+    )
+    .unwrap();
+
+    space::core::workspace::switch_worktree_branch(&wt, "origin/feat", false)
+        .expect("origin/feat becomes a branch, as on master");
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&repo, "feat"), "", "tracking nothing");
+
+    git_ok(&repo, &["remote", "add", "origin", "/nonexistent/origin"]);
+    git_ok(&repo, &["update-ref", "refs/remotes/origin/feat2", &head]);
+    space::core::workspace::switch_worktree_branch(&wt, "origin/feat2", false)
+        .expect("origin/feat2 becomes a tracking branch");
+    assert_eq!(head_symref(&wt), "refs/heads/feat2");
+    assert_eq!(upstream_of(&repo, "feat2"), "refs/remotes/origin/feat2");
+}
+
+/// T19. An unreadable refspec on an unrelated remote (here `a/b`) makes the
+/// count unknown for every pick, so the no-mapper refusal cannot see that
+/// upstream's own refspec, narrowed to `main`, maps nothing. The pick still
+/// passes `--track`, and git refuses it (`not a branch`) with nothing made,
+/// as the known-count refusal would. Head `520c11f` used git's bare default
+/// here and made an untracked `feat` (the delta review of `520c11f`).
+#[test]
+fn switch_refuses_an_unmappable_pick_when_another_remote_is_unreadable() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "--replace-all",
+            "remote.upstream.fetch",
+            "+refs/heads/main:refs/remotes/upstream/main",
+        ],
+    );
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "--add",
+            "remote.a/b.fetch",
+            "^refs/heads/unrelated",
+        ],
+    );
+    assert!(
+        git2::Repository::open(&f.repo)
+            .unwrap()
+            .find_remote("a/b")
+            .is_err(),
+        "fixture: libgit2 cannot read a/b's refspecs"
+    );
+    let wt = detached_wt(&env, &f, "t41-19");
+
+    space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("no refspec maps upstream/feat");
+
+    assert!(is_detached(&wt), "the worktree has not moved");
+    assert!(!has_ref(&f.repo, "refs/heads/feat"), "no branch is made");
+}
+
+/// T20. The cleanup after a refused switch takes back only what it made. A
+/// `reference-transaction` hook plays another actor who advances the new
+/// `feat` to a commit of their own the moment `git branch` has made it; the
+/// switch to it is then refused (an untracked file the new tip would
+/// overwrite), and a delete by name would lose that commit from the ref.
+/// The cleanup deletes only while the ref still points where it was made,
+/// so the moved branch is kept and the error says so.
+#[test]
+fn switch_cleanup_keeps_a_new_branch_someone_moved_in_between() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let work = commit_adding_a_file(&f);
+    let wt = detached_wt(&env, &f, "t41-20");
+    std::fs::write(wt.join("t41.txt"), "mine\n").unwrap();
+    let marker = f._tmp.path().join("t41-20-race");
+    std::fs::write(&marker, "").unwrap();
+    let hook = f
+        .repo
+        .join(".git")
+        .join("hooks")
+        .join("reference-transaction");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\n[ \"$1\" = committed ] || exit 0\n\
+             [ -f '{m}' ] || exit 0\nrm -f '{m}'\ngit update-ref refs/heads/feat {w}\n",
+            m = marker.display(),
+            w = work
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let err = space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("the moved feat's tree would overwrite the untracked t41.txt")
+        .to_string();
+
+    assert!(!marker.exists(), "fixture: the other actor ran");
+    assert!(
+        err.contains("feat kept, it moved meanwhile"),
+        "the error says the branch was kept, got {:?}",
+        err
+    );
+    assert_eq!(
+        git_ok(&f.repo, &["rev-parse", "refs/heads/feat"]).trim(),
+        work,
+        "the other actor's commit is still on feat"
+    );
+    assert!(is_detached(&wt), "the worktree has not moved");
+    assert_eq!(
+        std::fs::read_to_string(wt.join("t41.txt")).unwrap(),
+        "mine\n",
+        "the user's file is untouched"
+    );
+}
+
+/// T21. A switch to a local branch that already exists never cleans
+/// anything up: here `feat` tracks the pick (so there is no early refusal),
+/// git refuses the switch for the worktree's own reason (an untracked file
+/// its tree would overwrite), and `feat` keeps its tip and its upstream.
+#[test]
+fn switch_to_an_existing_branch_git_refuses_leaves_the_branch_as_it_was() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let tip = commit_adding_a_file(&f);
+    git_ok(
+        &f.repo,
+        &[
+            "branch",
+            "-q",
+            "--track",
+            "feat",
+            "refs/remotes/upstream/feat",
+        ],
+    );
+    git_ok(&f.repo, &["update-ref", "refs/heads/feat", &tip]);
+    let wt = detached_wt(&env, &f, "t41-21");
+    std::fs::write(wt.join("t41.txt"), "mine\n").unwrap();
+
+    space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("feat's tree would overwrite the untracked t41.txt");
+
+    assert_eq!(
+        git_ok(&f.repo, &["rev-parse", "refs/heads/feat"]).trim(),
+        tip,
+        "feat keeps its tip"
+    );
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/upstream/feat");
+    assert!(is_detached(&wt), "the worktree has not moved");
+}
+
+/// T22. A branch typed as new starts from HEAD and tracks nothing, whatever
+/// `branch.autoSetupMerge` says. On a HEAD that tracks `upstream/feat`,
+/// master's `git switch -c` copied that upstream under `inherit` and
+/// tracked `feat` itself under `always` (probed on git 2.50.1).
+#[test]
+fn switch_to_a_new_branch_tracks_nothing_whatever_auto_setup_merge_says() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.repo,
+        &[
+            "branch",
+            "-q",
+            "--track",
+            "feat",
+            "refs/remotes/upstream/feat",
+        ],
+    );
+    let wt = detached_wt(&env, &f, "t41-22");
+
+    for (mode, name) in [("inherit", "t41-inherit"), ("always", "t41-always")] {
+        git_ok(&f.repo, &["config", "branch.autoSetupMerge", mode]);
+        git_ok(&wt, &["switch", "-q", "feat"]);
+        space::core::workspace::switch_worktree_branch(&wt, name, true)
+            .unwrap_or_else(|e| panic!("{} under {}: {}", name, mode, e));
+        assert_eq!(head_symref(&wt), format!("refs/heads/{}", name));
+        assert_eq!(
+            upstream_of(&f.repo, name),
+            "",
+            "{} tracks nothing under autoSetupMerge {}",
+            name,
+            mode
+        );
+    }
+}
+
+/// T23. The cleanup never deletes a branch a worktree has checked out. A
+/// post-checkout hook that exits 1 makes `git switch` report failure after
+/// it has switched: this worktree is then on the new `feat`, and deleting
+/// the ref (`update-ref -d` does not refuse a checked-out branch the way
+/// `git branch -D` does; probed) would leave HEAD on a missing ref. The
+/// branch is kept, HEAD stays on it, and the error says why.
+#[test]
+fn switch_cleanup_keeps_a_new_branch_that_is_checked_out() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = detached_wt(&env, &f, "t41-23");
+    let hook = f.repo.join(".git").join("hooks").join("post-checkout");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let err = space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("the post-checkout hook fails")
+        .to_string();
+
+    assert!(
+        err.contains("feat kept, it is checked out"),
+        "the error says the branch was kept, got {:?}",
+        err
+    );
+    assert_eq!(head_symref(&wt), "refs/heads/feat", "HEAD is on the branch");
+    assert_eq!(
+        git_ok(&f.repo, &["rev-parse", "refs/heads/feat"]).trim(),
+        f.upstream_feat,
+        "and the branch is still there"
+    );
+}
