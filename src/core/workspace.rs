@@ -3100,13 +3100,29 @@ fn classify_space_entry(dir: &Path) -> SpaceEntry {
 /// made-up `<common>` (the code review of PR #61 found such a copy deleted).
 /// Both are kept.
 ///
-/// A `<common>` that is `NotFound` and leaves the `worktrees` directory of a
-/// repository that is there into a name that is not there is kept too. A
-/// `<common>` that is there is said to be the source repo only when it is a
-/// repository; anything else there is kept with what it is. After the admin
-/// directory itself answered `NotFound`, every directory on its path down to
-/// the missing one was searchable, so `<common>` answers `Ok` or `NotFound` but
-/// for a race; any other error keeps, as everywhere a deletion is decided.
+/// A `<common>` that is `NotFound` is kept too when a live worktree path is
+/// glued into the line with no blank, which neither ticket 27's near misses
+/// nor the blank-separated words find (ticket 44). Live path first, the path
+/// leaves a repository's `worktrees` directory into a name that is not there
+/// or through a live worktree's admin directory (`nesting_under_worktrees`).
+/// Dead path first, `<common>` is formed from the live path's own
+/// `worktrees`, so what is left of the live path is text under a missing
+/// directory, not an ancestor of anything, and it is found only by reading
+/// the line again from a later `/` (`glued_worktree_path`). A `<common>` that
+/// is there is said to be the source repo only when it is a repository;
+/// anything else there is kept with what it is. After the admin directory
+/// itself answered `NotFound`, every directory on its path down to the
+/// missing one was searchable, so `<common>` answers `Ok` or `NotFound` but
+/// for a race, with one exception: `<common>` is asked without following a
+/// symbolic link, so a link whose target is gone answers `Ok` here though
+/// the kernel's walk through it did not, and is kept as a directory that is
+/// not a git repository. That is on purpose: followed, it would go on to the
+/// rules below and, when none keeps it, be deleted as an orphan, while git
+/// records real paths, so a genuine orphan's `<common>` is not a link
+/// (skeptical review of PR #66). Each check here is asked whichever way
+/// makes a dangling link keep the directory: `<common>` and `commondir`
+/// without following the link, `<A>` and the name under `worktrees` following
+/// it (U10, U11). Any other error keeps, as everywhere a deletion is decided.
 /// Paths stay off each reason's first line, which may become the summary the
 /// TUI shows.
 fn absent_admin(admin: PathBuf) -> SpaceEntry {
@@ -3117,39 +3133,41 @@ fn absent_admin(admin: PathBuf) -> SpaceEntry {
             admin
         ));
     };
+    // Not followed, on purpose: a dangling link here keeps (see above).
     match std::fs::symlink_metadata(common) {
-        // A missing `<common>` that leaves the `worktrees` directory of a
-        // repository that is there into a name that is not there: a note
-        // glued to the live repo's own admin path reads like this (skeptical
-        // review of PR #61). A genuine orphan's path runs through real
-        // directories down to its deleted repo, so it reads like this only
-        // when that repo lived inside another repository's own `worktrees`
-        // directory, created there by hand; it is kept, and the reason, which
-        // says only what is on disk, is true of it too (independent review).
-        // Wider tests kept genuine orphans in ordinary layouts: any
-        // `worktrees` ancestor, whose repos root lay under a folder of that
-        // name, and any ancestor that looked like a repository, beside a repo
-        // named `objects` (skeptical review, pass 3).
-        Err(e)
-            if e.kind() == std::io::ErrorKind::NotFound
-                && common.ancestors().zip(common.ancestors().skip(1)).any(
-                    |(child, worktrees)| {
-                        worktrees.file_name() == Some("worktrees".as_ref())
-                            && worktrees.parent().is_some_and(is_repository_dir)
-                            && matches!(
-                                std::fs::symlink_metadata(child),
-                                Err(e) if e.kind() == std::io::ErrorKind::NotFound
-                            )
-                    },
-                ) =>
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match nesting_under_worktrees(common)
         {
-            SpaceEntry::Unreadable(format!(
+            Some(Nesting::MissingName) => SpaceEntry::Unreadable(format!(
                 "its .git file names a missing git directory under another repository's \
                  worktrees directory\nthe path is {:?}",
                 admin
-            ))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SpaceEntry::Orphan,
+            )),
+            Some(Nesting::ThroughLiveAdmin) => SpaceEntry::Unreadable(format!(
+                "its .git file names a missing git directory inside a live worktree's admin \
+                 directory\nthe path is {:?}",
+                admin
+            )),
+            None => match glued_worktree_path(&admin) {
+                GluedReading::Repository(repo) => SpaceEntry::Unreadable(format!(
+                    "its .git file names a missing worktree path with a worktree path of a \
+                     repository that is there joined on after it\nthe path is {:?}; the \
+                     repository is {:?}",
+                    admin, repo
+                )),
+                GluedReading::Unreadable(reading, e) => SpaceEntry::Unreadable(format!(
+                    "its .git file names a missing worktree path with a path joined on after \
+                     it that cannot be checked for a repository\nthe path is {:?}; {:?} \
+                     cannot be read ({})",
+                    admin, reading, e
+                )),
+                GluedReading::TooMany => SpaceEntry::Unreadable(format!(
+                    "its .git file names a missing worktree path with too many parts to check \
+                     for a live one joined on after it\nthe path is {:?}",
+                    admin
+                )),
+                GluedReading::Nothing => SpaceEntry::Orphan,
+            },
+        },
         Ok(_) if is_repository_dir(common) => SpaceEntry::Unregistered { admin },
         Ok(_) => SpaceEntry::Unreadable(format!(
             "its .git file names a worktree of a directory that is not a git repository\n\
@@ -3164,10 +3182,228 @@ fn absent_admin(admin: PathBuf) -> SpaceEntry {
     }
 }
 
+/// How a missing `<common>` sits under a repository's `worktrees` directory.
+enum Nesting {
+    /// It leaves the `worktrees` directory into a name that is not there.
+    MissingName,
+    /// It runs through a live worktree's admin directory into anything but
+    /// the `modules` git keeps there.
+    ThroughLiveAdmin,
+}
+
+/// Whether a missing `<common>` leaves the `worktrees` directory of a
+/// repository that is there, either into a name that is not there or through
+/// a live worktree's admin directory (one holding `commondir`) into anything
+/// but its `modules`.
+///
+/// The first is a note glued to the live repo's own admin path (skeptical
+/// review of PR #61). A genuine orphan's path runs through real directories
+/// down to its deleted repo, so it reads like this only when that repo lived
+/// inside another repository's own `worktrees` directory, created there by
+/// hand; it is kept, and the reason, which says only what is on disk, is true
+/// of it too (independent review). Wider tests kept genuine orphans in
+/// ordinary layouts: any `worktrees` ancestor, whose repos root lay under a
+/// folder of that name, and any ancestor that looked like a repository,
+/// beside a repo named `objects` (skeptical review, pass 3). So is a worktree
+/// of a submodule inside a linked worktree once that linked worktree is gone
+/// too: its path leaves `<host>/.git/worktrees` into the missing `<id>`.
+///
+/// The second is a dead path glued on after the admin path of a worktree
+/// that is still registered, with nothing between them or with a `/` and a
+/// note (ticket 44; PR #61 had called the live-first order kept, which held
+/// only while the admin directory was gone or the glue was not a `/`). git
+/// itself keeps a linked worktree's submodule git dirs in the admin
+/// directory's `modules`, so a worktree of such a submodule whose `modules`
+/// was deleted runs through a live admin directory too, and is a genuine
+/// orphan (probed, git 2.50.1); a paste after `<admin>/modules` is therefore
+/// not recognised. A repository made by hand anywhere else in a live admin
+/// directory and then deleted is kept, with a reason that is true of it.
+///
+/// The name under `worktrees` is asked with symbolic links followed, as the
+/// kernel walked the path: a link whose target is gone is not there (skeptical
+/// review of PR #66).
+fn nesting_under_worktrees(common: &Path) -> Option<Nesting> {
+    common
+        .ancestors()
+        .zip(common.ancestors().skip(1))
+        .find_map(|(child, worktrees)| {
+            if worktrees.file_name() != Some("worktrees".as_ref())
+                || !worktrees.parent().is_some_and(is_repository_dir)
+            {
+                return None;
+            }
+            if matches!(
+                std::fs::metadata(child),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound
+            ) {
+                Some(Nesting::MissingName)
+            } else if runs_through_live_admin(common, child) {
+                Some(Nesting::ThroughLiveAdmin)
+            } else {
+                None
+            }
+        })
+}
+
+/// Whether `common` continues past `admin`, a live worktree's admin
+/// directory, into something other than the `modules` git keeps there.
+///
+/// `commondir` is asked without following a symbolic link, so a dangling
+/// link there still counts as a live admin directory, which keeps (U11). An
+/// error other than `NotFound` counts too, which also only keeps. It cannot
+/// happen but for a race: the missing path runs through `admin`, so `admin`
+/// was searchable when the kernel answered `NotFound` for it.
+fn runs_through_live_admin(common: &Path, admin: &Path) -> bool {
+    let next = common
+        .strip_prefix(admin)
+        .ok()
+        .and_then(|rest| rest.components().next());
+    matches!(next, Some(std::path::Component::Normal(name)) if name != "modules")
+        && !matches!(
+            std::fs::symlink_metadata(admin.join("commondir")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound
+        )
+}
+
+/// The most readings `glued_worktree_path` makes of one path before keeping
+/// it unread. A real line needs a few dozen, about one per name of the live
+/// path: ticket 44's glued shapes, built under a macOS temporary directory,
+/// need 11 with the live path on the end and 34 with it in the middle
+/// (measured). A path that gets this far is within the kernel's limit (1024
+/// bytes on macOS, 4096 on Linux), yet a line crafted of one-letter names and
+/// `worktrees` could otherwise ask for tens of thousands.
+const MAX_GLUED_READINGS: usize = 256;
+
+/// What reading an absent admin path again from its later `/`s found.
+enum GluedReading {
+    /// No reading is a repository, or there was nothing to read again.
+    Nothing,
+    /// A reading names this repository, which is there.
+    Repository(PathBuf),
+    /// No reading is a repository, and this one could not be checked.
+    Unreadable(PathBuf, std::io::Error),
+    /// More readings than `MAX_GLUED_READINGS`; none was made.
+    TooMany,
+}
+
+/// A worktree path of a repository that is there, glued on with no blank
+/// after an orphan's admin path (ticket 44): `<A>/worktrees/<x>` with `<A>`
+/// missing, then text, then `<live>/worktrees/<id>`. `absent_admin`'s
+/// `<common>` is formed from the live path's own `worktrees`, so the live
+/// path is never an ancestor of anything and is found only by reading the
+/// line again as an absolute path from a later `/`.
+///
+/// After the first `worktrees` whose `<A>` is missing, each later `/` starts a
+/// reading that runs to a later `worktrees` directory, the one a worktree path
+/// of the repository before it would have. The first starts at the dead id
+/// itself, since a live path pasted over the id takes its place (code review
+/// of PR #66). A reading counts when it is a repository, never merely when it
+/// exists, as for the blank-separated words, and one that cannot be checked
+/// (a permission or I/O error) keeps the directory with that said. Neither
+/// the live admin directory nor its `worktrees` has to be there. A `/`
+/// inside the note (a date) and the live path in the middle of the line are
+/// read too. `<A>` is asked with symbolic links followed, as the kernel
+/// walked the admin path: a link whose target is gone counts as missing, as
+/// it did there (skeptical review of PR #66), and so does any other error,
+/// which only keeps. The names are plain, with no line break, since
+/// `absent_admin` has already asked `common_dir_in_gits_shape`.
+///
+/// Readings start only after an orphan's admin path. Read from any `/` whose
+/// prefix is missing, a genuine orphan whose repo lived at a path ending in a
+/// live repo's path (`<mount>/Users/me/app` beside `/Users/me/app`) would be
+/// kept; read from the start too, a real ancestor that looks like a
+/// repository would keep a genuine orphan under a repos root beside `objects`,
+/// and git's own submodule worktree layout. A genuine orphan still reads like
+/// this when its repo lived under a folder named `worktrees` whose parent is
+/// gone too and a later part of its path, read alone, is a repository that is
+/// there; it is kept, with a reason that is true of it. Not found, and so
+/// gone as orphans: a live path glued on after a first part that is not an
+/// admin path (`/old-place#now<live>`), since git never writes that first
+/// part; and one glued on after an admin path whose `<A>` is still there but
+/// is no repository, which reads exactly like a genuine orphan that lived
+/// under a folder named `worktrees` beside a live repo's mirrored path.
+fn glued_worktree_path(admin: &Path) -> GluedReading {
+    let names: Vec<&std::ffi::OsStr> = admin
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect();
+    let rooted = |names: &[&std::ffi::OsStr]| {
+        let mut path = PathBuf::from("/");
+        path.extend(names);
+        path
+    };
+    // Every `worktrees` with a name after it: where a reading can end.
+    let ends: Vec<usize> = (0..names.len().saturating_sub(1))
+        .filter(|&i| names[i] == "worktrees")
+        .collect();
+    let Some(from) = ends
+        .iter()
+        .find(|&&i| std::fs::metadata(rooted(&names[..i])).is_err())
+        .map(|&i| i + 1)
+    else {
+        return GluedReading::Nothing;
+    };
+    // One reading per start and later end, counted from the ends alone.
+    let count: usize = ends
+        .iter()
+        .filter(|&&end| end > from)
+        .map(|&end| end - from)
+        .sum();
+    if count > MAX_GLUED_READINGS {
+        return GluedReading::TooMany;
+    }
+    let mut unreadable = None;
+    for start in from..names.len() {
+        for &end in ends.iter().filter(|&&end| end > start) {
+            let reading = rooted(&names[start..end]);
+            match repository_at(&reading) {
+                Ok(true) => return GluedReading::Repository(reading),
+                Ok(false) => {}
+                Err(e) => {
+                    unreadable.get_or_insert((reading, e));
+                }
+            }
+        }
+    }
+    match unreadable {
+        Some((reading, e)) => GluedReading::Unreadable(reading, e),
+        None => GluedReading::Nothing,
+    }
+}
+
+/// `is_repository_dir` with the error kept: `Err` when a check answered
+/// anything but that the name is there or is not (`NotFound`, or a
+/// `NotADirectory` on the way), so a reading that cannot be read is neither
+/// a repository nor proof of none.
+fn repository_at(dir: &Path) -> std::io::Result<bool> {
+    let is = |name: &str, want_dir: bool| match std::fs::metadata(dir.join(name)) {
+        Ok(meta) => Ok(if want_dir {
+            meta.is_dir()
+        } else {
+            meta.is_file()
+        }),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    };
+    Ok(is("objects", true)? || (is("config", false)? && is("HEAD", false)?))
+}
+
 /// `<common>` in an admin path of the form git writes for a linked worktree,
 /// `<common>/worktrees/<id>`, or `None` when the path is not of that form: an
 /// allow-list (the root, then plain names with no `\n` or `\r`), since what
-/// a hand edit can put in a gitfile is not a list anyone can finish.
+/// a hand edit can put in a gitfile is not a list anyone can finish. The
+/// `worktrees` taken is the last one, so a live path glued on after a dead
+/// one is consumed into `<common>` (`glued_worktree_path`).
 fn common_dir_in_gits_shape(admin: &Path) -> Option<&Path> {
     let plain = admin.components().all(|c| match c {
         std::path::Component::RootDir => true,

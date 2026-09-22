@@ -6370,3 +6370,497 @@ fn a_new_branch_stops_on_leftover_tracking_it_cannot_remove() {
         "nothing was created"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Ticket 44: a live worktree path glued on to a dead one, with no blank
+// between them, is read before a directory is deleted as an orphan. Dead
+// first, the live path is text under a missing directory and never an
+// ancestor of anything real, so it is found by reading the line again from
+// each later `/`; live first, the path runs through the live admin directory.
+// ---------------------------------------------------------------------------
+
+/// A directory holding `mine.txt` and a `.git` file naming `gitdir`, alone in
+/// space `name`: an orphan goes only with its space, which a kept neighbour
+/// would hold back.
+fn copy_alone(env: &TestEnv, name: &str, gitdir: &str) -> PathBuf {
+    let dir = env.workspaces_dir.join(name).join("alpha");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(".git"), format!("gitdir: {}\n", gitdir)).unwrap();
+    std::fs::write(dir.join("mine.txt"), "a day of work").unwrap();
+    dir
+}
+
+/// Remove space `name` and require that its one directory was kept with its
+/// work, with a summary that says `phrase` and leaves the path off.
+fn assert_kept_alone(env: &TestEnv, name: &str, dir: &Path, phrase: &str) {
+    let text = match remove_forced(env, name) {
+        Ok(()) => panic!("{}: its space was removed, so it went as an orphan", name),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        text.contains("1 of 1 repos in the space were kept"),
+        "{}: it is kept, not removed as an orphan, got {:?}",
+        name,
+        text
+    );
+    let summary = text.lines().next().unwrap_or_default();
+    let tmp = env.dir.path().canonicalize().unwrap();
+    assert!(
+        summary.contains(phrase)
+            && !summary.contains(&tmp.display().to_string())
+            && !summary.contains(&env.dir.path().display().to_string()),
+        "{}: the summary says {:?} and leaves the path off, got {:?}",
+        name,
+        phrase,
+        summary
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("mine.txt")).unwrap_or_default(),
+        "a day of work",
+        "{}: and its work is still there",
+        name
+    );
+}
+
+/// A worktree of `repo` in space `ws_name`, then `gone` deleted: a genuine
+/// orphan. Removing the space must remove it.
+fn assert_orphan_removed(env: &TestEnv, repo: &Path, ws_name: &str, gone: &Path) {
+    worktree_in_space(env, repo, ws_name);
+    std::fs::remove_dir_all(gone).unwrap();
+    assert!(!repo.exists(), "fixture: the source repo is gone");
+    remove_forced(env, ws_name).unwrap();
+    assert!(
+        !env.workspaces_dir.join(ws_name).exists(),
+        "it goes, as a genuine orphan does"
+    );
+}
+
+/// The canonical path of `repo`, as git writes it into a gitfile.
+fn real(path: &Path) -> String {
+    path.canonicalize().unwrap().display().to_string()
+}
+
+/// U1. The ticket's shape and its siblings: an old admin path whose source
+/// repo is gone, a note or nothing, then the live repo's admin path glued on
+/// with no blank. Each was deleted as an orphan with exit 0 while the source
+/// repo was there (master `9e1e1e9`). The live repo has no worktrees at all,
+/// so neither its admin directory nor its `worktrees` directory exists: the
+/// reading counts a worktree path of a repository that is there, as the
+/// blank-separated words do. A `/` inside the note (a date), the live path in
+/// the middle of the line, and the live path pasted over the dead id are read
+/// too.
+#[test]
+fn a_dead_admin_path_with_a_live_one_glued_on_is_kept() {
+    let env = TestEnv::new();
+    let repo = absolute_repo(&env, "alpha");
+    let live = format!("{}/.git/worktrees/alpha", real(&repo));
+    let dead = format!(
+        "{}/old-home/alpha/.git/worktrees/alpha",
+        real(env.dir.path())
+    );
+    assert!(
+        !repo.join(".git").join("worktrees").exists(),
+        "fixture: the live repo has no worktrees directory"
+    );
+    let shapes = [
+        ("glued-note", format!("{}#now{}", dead, live)),
+        ("glued-no-note", format!("{}{}", dead, live)),
+        ("glued-blank-in-note", format!("{}# now{}", dead, live)),
+        (
+            "glued-date-note",
+            format!("{}#moved 2026/09/21{}", dead, live),
+        ),
+        ("glued-middle", format!("{}#now{}#was{}", dead, live, dead)),
+        // The live path pasted over the dead id: `worktrees//<live>`. Its
+        // first name sits where the id was, so readings start there. The
+        // path is the one given, not the real one, so that dropping its first
+        // name finds nothing (on macOS `/private` dropped leaves `/var`, a
+        // link to the same place; code review of PR #66).
+        (
+            "glued-over-the-id",
+            format!(
+                "{}/worktrees/{}/.git/worktrees/alpha",
+                dead.trim_end_matches("/worktrees/alpha"),
+                repo.display()
+            ),
+        ),
+    ];
+    for (name, gitdir) in &shapes {
+        let dir = copy_alone(&env, name, gitdir);
+        assert_kept_alone(
+            &env,
+            name,
+            &dir,
+            "of a repository that is there joined on after it",
+        );
+    }
+}
+
+/// U2. The mirror order with the live admin directory there: the original
+/// worktree is still registered, and the dead path is glued on after its
+/// admin path by a `/`. PR #61's record called the live-first order kept; it
+/// is kept only while the admin directory is gone or the glue is not a `/`,
+/// and this was deleted with exit 0 (master `9e1e1e9`).
+#[test]
+fn a_live_admin_path_with_a_dead_one_glued_on_by_a_slash_is_kept() {
+    let env = TestEnv::new();
+    let repo = absolute_repo(&env, "alpha");
+    let original = worktree_in_space(&env, &repo, "other");
+    let live = admin_dir_of(&original);
+    assert!(
+        live.join("commondir").is_file(),
+        "fixture: the live admin directory is there"
+    );
+    let live = real(&live);
+    let dead = format!(
+        "{}/old-home/alpha/.git/worktrees/alpha",
+        real(env.dir.path())
+    );
+    let shapes = [
+        ("live-then-dead", format!("{}{}", live, dead)),
+        ("live-note-then-dead", format!("{}/note{}", live, dead)),
+    ];
+    for (name, gitdir) in &shapes {
+        let dir = copy_alone(&env, name, gitdir);
+        assert_kept_alone(&env, name, &dir, "inside a live worktree's admin directory");
+    }
+    assert!(original.exists(), "and the original is left alone");
+}
+
+/// U3. git keeps a linked worktree's submodule git dirs under the admin
+/// directory's `modules`, so a worktree of such a submodule has the gitdir
+/// `<host>/.git/worktrees/<id>/modules/<name>/worktrees/<id2>` (git 2.50.1).
+/// With `modules` deleted its source repo is gone: a genuine orphan, removed,
+/// though its path runs through a live admin directory.
+#[test]
+fn a_worktree_of_a_submodule_whose_modules_directory_is_gone_is_removed() {
+    let env = TestEnv::new();
+    let lib = absolute_repo(&env, "lib");
+    let host = absolute_repo(&env, "host");
+    let host_wt = env.dir.path().join("host-wt");
+    git_ok(
+        &host,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            host_wt.to_str().unwrap(),
+            "-b",
+            "hw",
+        ],
+    );
+    git_ok(
+        &host_wt,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            lib.to_str().unwrap(),
+            "lib",
+        ],
+    );
+    let sub = host_wt.join("lib");
+    git_ok(&sub, &["config", "worktree.useRelativePaths", "false"]);
+    let wt = env.workspaces_dir.join("sub").join("lib");
+    git_ok(
+        &sub,
+        &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "sw"],
+    );
+    let modules = host
+        .join(".git")
+        .join("worktrees")
+        .join("host-wt")
+        .join("modules");
+    assert!(
+        admin_dir_of(&wt).starts_with(modules.canonicalize().unwrap()),
+        "fixture: the gitdir runs through the live admin directory's modules, got {:?}",
+        admin_dir_of(&wt)
+    );
+    std::fs::remove_dir_all(&modules).unwrap();
+    assert!(
+        modules.parent().unwrap().join("commondir").is_file(),
+        "fixture: the admin directory it ran through is still there"
+    );
+
+    remove_forced(&env, "sub").unwrap();
+
+    assert!(
+        !env.workspaces_dir.join("sub").exists(),
+        "it goes, as a genuine orphan does"
+    );
+}
+
+/// U4. Reading the line again from a `/` is done only after an orphan's
+/// admin path (`<A>/worktrees/<x>` with `<A>` missing). Read from any `/`
+/// whose prefix is missing, a genuine orphan whose repo lived at a path
+/// ending in a live repo's path would be kept: here `<tmp>/mirror` followed
+/// by the live repo's own path, deleted with `<tmp>/mirror`.
+#[test]
+fn a_genuine_orphan_whose_path_ends_in_a_live_repos_path_is_removed() {
+    let env = TestEnv::new();
+    let live = absolute_repo(&env, "alpha");
+    let mirror = env.dir.path().join("mirror");
+    let dead = absolute_repo_at(&PathBuf::from(format!(
+        "{}{}",
+        mirror.display(),
+        real(&live)
+    )));
+    assert_orphan_removed(&env, &dead, "ws", &mirror);
+    assert!(live.exists(), "fixture: the live repo is still there");
+}
+
+/// U5. The same mirror under a folder named `worktrees` whose parent is still
+/// there: `<A>` exists, so `<A>/worktrees/<x>` is no orphan's admin path and
+/// nothing after it is read.
+#[test]
+fn a_genuine_orphan_mirroring_a_live_repo_under_a_worktrees_folder_is_removed() {
+    let env = TestEnv::new();
+    let live = absolute_repo(&env, "alpha");
+    let deep = env.dir.path().join("deep");
+    let folder = deep.join("worktrees");
+    let dead = absolute_repo_at(&PathBuf::from(format!(
+        "{}{}",
+        folder.join("x").display(),
+        real(&live)
+    )));
+    assert_orphan_removed(&env, &dead, "ws", &folder);
+    assert!(deep.is_dir(), "fixture: the folder's parent is still there");
+}
+
+/// U6. A reading counts only when it is a repository, never merely when it
+/// exists (the lesson of the word readings, PR #61). Here the reading after
+/// an orphan's admin path names `<tmp>/plain/.git`, an empty directory.
+#[test]
+fn a_genuine_orphan_whose_glued_reading_is_no_repository_is_removed() {
+    let env = TestEnv::new();
+    let plain = env.dir.path().join("plain");
+    std::fs::create_dir_all(plain.join(".git")).unwrap();
+    let gone = env.dir.path().join("gone");
+    let dead = absolute_repo_at(&PathBuf::from(format!(
+        "{}{}",
+        gone.join("worktrees").join("x").display(),
+        real(&plain)
+    )));
+    assert_orphan_removed(&env, &dead, "ws", &gone);
+}
+
+/// U7. The readings after an orphan's admin path are bounded: past 256 of
+/// them the directory is kept with a reason that says so, rather than read,
+/// so a crafted line costs a bounded number of checks and never a deletion.
+/// A real line needs a few dozen: the U1 shapes need 9 to 34 (measured),
+/// and this one needs 302.
+#[test]
+fn a_gitdir_with_too_many_parts_to_read_is_kept() {
+    let env = TestEnv::new();
+    let dead = format!(
+        "{}/old-home/alpha/.git/worktrees/alpha",
+        real(env.dir.path())
+    );
+    let gitdir = format!("{}{}/.git/worktrees/alpha", dead, "/a".repeat(300));
+    assert!(
+        gitdir.len() < 1024,
+        "fixture: within the kernel's path limit"
+    );
+    let dir = copy_alone(&env, "crafted", &gitdir);
+    assert_kept_alone(&env, "crafted", &dir, "too many parts to check");
+}
+
+/// U8. The cap's edge: 256 readings are still made, 257 are not. The live
+/// repo's worktree path is glued on after an orphan's admin path and `k`
+/// one-letter names. Readings start at the dead id, so they number `k`, plus
+/// the names of the live repo's git directory, plus one; at 256 the live
+/// path is found (the glued reason), at 257 the line is kept unread (the
+/// cap's reason). Both keep; only the reason tells the edge (independent
+/// review of PR #66). Built under `/tmp`, since a folder named `worktrees` in
+/// the temporary directory's path would add readings (code review of PR #66).
+#[test]
+fn the_cap_reads_256_readings_and_no_more() {
+    let env = TestEnv::new();
+    let tmp = TempDir::new_in("/tmp").unwrap();
+    let repo = absolute_repo_at(&tmp.path().join("alpha"));
+    let live_git = repo.canonicalize().unwrap().join(".git");
+    let dead = format!("{}/old-home/alpha/.git/worktrees/alpha", real(tmp.path()));
+    assert!(
+        !Path::new(&dead)
+            .components()
+            .rev()
+            .skip(2)
+            .any(|c| c.as_os_str() == "worktrees")
+            && !live_git.components().any(|c| c.as_os_str() == "worktrees"),
+        "fixture: no other folder named worktrees on either path, got {:?}",
+        dead
+    );
+    let names = live_git.components().count() - 1;
+    for (readings, phrase) in [
+        (256, "of a repository that is there joined on after it"),
+        (257, "too many parts to check"),
+    ] {
+        let gitdir = format!(
+            "{}{}{}/worktrees/alpha",
+            dead,
+            "/a".repeat(readings - names - 1),
+            live_git.display()
+        );
+        assert!(
+            gitdir.len() < 1024,
+            "fixture: within the kernel's path limit"
+        );
+        let name = format!("edge-{}", readings);
+        let dir = copy_alone(&env, &name, &gitdir);
+        assert_kept_alone(&env, &name, &dir, phrase);
+    }
+}
+
+/// U9. Keep when unsure: a reading that cannot be read counts as neither a
+/// repository nor its absence. The live repo sits in a directory with mode
+/// 000, so every reading that reaches it answers a permission error, which
+/// `is_repository_dir` alone reads as "not a repository", and a network
+/// mount that answers an I/O error would read the same (code review of PR
+/// #66). The directory is kept, and the reason says the reading could not
+/// be checked.
+#[test]
+fn a_glued_reading_that_cannot_be_read_is_kept() {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Gives the locked directory its mode back however the test ends, so
+    /// the temporary directory can be removed.
+    struct Restore(PathBuf, std::fs::Permissions);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, self.1.clone());
+        }
+    }
+
+    let env = TestEnv::new();
+    let locked = env.dir.path().join("locked");
+    let repo = absolute_repo_at(&locked.join("alpha"));
+    let live = format!("{}/.git/worktrees/alpha", real(&repo));
+    let dead = format!(
+        "{}/old-home/alpha/.git/worktrees/alpha",
+        real(env.dir.path())
+    );
+    let dir = copy_alone(&env, "locked-out", &format!("{}#now{}", dead, live));
+    let _restore = Restore(
+        locked.clone(),
+        std::fs::metadata(&locked).unwrap().permissions(),
+    );
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::symlink_metadata(locked.join("alpha")).is_ok() {
+        // Running as a user the mode does not apply to (root), so there is
+        // nothing to test here, and the test passes. The note shows only
+        // under `--nocapture`, since libtest captures a passing test's
+        // output; CI runs as an ordinary user on macOS, where the test runs
+        // (skeptical review of PR #66).
+        eprintln!("skipped: this user can read a directory with mode 000");
+        return;
+    }
+
+    assert_kept_alone(
+        &env,
+        "locked-out",
+        &dir,
+        "cannot be checked for a repository",
+    );
+}
+
+/// U10. A symbolic link whose target is gone, on the way to the admin path.
+/// The kernel follows the link, so the admin is `NotFound`, while the link
+/// itself is there; each rule asks the way the kernel walked (skeptical
+/// review of PR #66). Dead path first: the old repo's git directory was a
+/// link to a store since moved or deleted, and the ticket's own shape was
+/// deleted. Live path first: the live repo's admin entry is such a link.
+#[test]
+fn a_glue_through_a_dangling_link_is_kept() {
+    let env = TestEnv::new();
+    let repo = absolute_repo(&env, "alpha");
+    let old = env.dir.path().join("old-home").join("alpha");
+    std::fs::create_dir_all(&old).unwrap();
+    let gone = env.dir.path().join("gone-store");
+    std::os::unix::fs::symlink(gone.join("alpha.git"), old.join(".git")).unwrap();
+    let beta = absolute_repo(&env, "beta");
+    std::fs::create_dir_all(beta.join(".git").join("worktrees")).unwrap();
+    std::os::unix::fs::symlink(
+        gone.join("beta-admin"),
+        beta.join(".git").join("worktrees").join("beta"),
+    )
+    .unwrap();
+    for link in [old.join(".git"), beta.join(".git/worktrees/beta")] {
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok() && !link.exists(),
+            "fixture: {:?} is a dangling link",
+            link
+        );
+    }
+    let dead = format!("{}/.git/worktrees/alpha", real(&old));
+    let live = format!("{}/.git/worktrees/alpha", real(&repo));
+    let glued = "of a repository that is there joined on after it";
+    let shapes = [
+        ("dangling-note", format!("{}#now{}", dead, live), glued),
+        (
+            "dangling-over-the-id",
+            format!(
+                "{}/.git/worktrees/{}/.git/worktrees/alpha",
+                real(&old),
+                repo.display()
+            ),
+            glued,
+        ),
+        (
+            "live-link-then-dead",
+            format!("{}/.git/worktrees/beta{}", real(&beta), dead),
+            "under another repository's worktrees directory",
+        ),
+    ];
+    for (name, gitdir, phrase) in &shapes {
+        let dir = copy_alone(&env, name, gitdir);
+        assert_kept_alone(&env, name, &dir, phrase);
+    }
+}
+
+/// U11. The two checks asked without following a symbolic link, each where a
+/// dangling link there keeps the directory, while following it would delete
+/// it (skeptical review of PR #66, pass 3). `<common>`: an old repo's git
+/// directory that is a dangling link, with nothing glued on, is kept as a
+/// directory that is not a git repository; followed, it would be missing and
+/// go as an orphan. `commondir`: a live worktree's admin directory whose
+/// `commondir` is a dangling link still counts as live, so a dead path glued
+/// on after it is kept; followed, the admin would not count and the copy
+/// would go.
+#[test]
+fn a_dangling_link_where_a_rule_does_not_follow_it_keeps() {
+    let env = TestEnv::new();
+    let gone = env.dir.path().join("gone-store");
+    let old = env.dir.path().join("old-home").join("alpha");
+    std::fs::create_dir_all(&old).unwrap();
+    std::os::unix::fs::symlink(gone.join("alpha.git"), old.join(".git")).unwrap();
+    let gamma = absolute_repo(&env, "gamma");
+    let admin = gamma.join(".git").join("worktrees").join("gamma");
+    std::fs::create_dir_all(&admin).unwrap();
+    std::os::unix::fs::symlink(gone.join("commondir"), admin.join("commondir")).unwrap();
+    for link in [old.join(".git"), admin.join("commondir")] {
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok() && !link.exists(),
+            "fixture: {:?} is a dangling link",
+            link
+        );
+    }
+    let dead = format!("{}/old-home/beta/.git/worktrees/beta", real(env.dir.path()));
+    let shapes = [
+        (
+            "common-is-a-dangling-link",
+            format!("{}/.git/worktrees/alpha", real(&old)),
+            "not a git repository",
+        ),
+        (
+            "commondir-is-a-dangling-link",
+            format!("{}{}", real(&admin), dead),
+            "inside a live worktree's admin directory",
+        ),
+    ];
+    for (name, gitdir, phrase) in &shapes {
+        let dir = copy_alone(&env, name, gitdir);
+        assert_kept_alone(&env, name, &dir, phrase);
+    }
+}
