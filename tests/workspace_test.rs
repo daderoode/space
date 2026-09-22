@@ -6473,7 +6473,12 @@ fn a_dead_admin_path_with_a_live_one_glued_on_is_kept() {
     ];
     for (name, gitdir) in &shapes {
         let dir = copy_alone(&env, name, gitdir);
-        assert_kept_alone(&env, name, &dir, "joined on after it");
+        assert_kept_alone(
+            &env,
+            name,
+            &dir,
+            "of a repository that is there joined on after it",
+        );
     }
 }
 
@@ -6651,4 +6656,40 @@ fn a_gitdir_with_too_many_parts_to_read_is_kept() {
     );
     let dir = copy_alone(&env, "crafted", &gitdir);
     assert_kept_alone(&env, "crafted", &dir, "too many parts to check");
+}
+
+/// U8. The cap's edge: 256 readings are still made, 257 are not. The live
+/// repo's worktree path is glued on after an orphan's admin path and `k`
+/// one-letter names, so the readings number `k` plus the names of the live
+/// repo's git directory; at 256 the live path is found (the glued reason),
+/// at 257 the line is kept unread (the cap's reason). Both keep; only the
+/// reason tells the edge (independent review of PR #66).
+#[test]
+fn the_cap_reads_256_readings_and_no_more() {
+    let env = TestEnv::new();
+    let repo = absolute_repo(&env, "alpha");
+    let live_git = repo.canonicalize().unwrap().join(".git");
+    let names = live_git.components().count() - 1;
+    let dead = format!(
+        "{}/old-home/alpha/.git/worktrees/alpha",
+        real(env.dir.path())
+    );
+    for (readings, phrase) in [
+        (256, "of a repository that is there joined on after it"),
+        (257, "too many parts to check"),
+    ] {
+        let gitdir = format!(
+            "{}{}{}/worktrees/alpha",
+            dead,
+            "/a".repeat(readings - names),
+            live_git.display()
+        );
+        assert!(
+            gitdir.len() < 1024,
+            "fixture: within the kernel's path limit"
+        );
+        let name = format!("edge-{}", readings);
+        let dir = copy_alone(&env, &name, &gitdir);
+        assert_kept_alone(&env, &name, &dir, phrase);
+    }
 }
