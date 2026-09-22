@@ -3119,11 +3119,12 @@ fn classify_space_entry(dir: &Path) -> SpaceEntry {
 /// not a git repository. That is on purpose: followed, it would go on to the
 /// rules below and, when none keeps it, be deleted as an orphan, while git
 /// records real paths, so a genuine orphan's `<common>` is not a link
-/// (skeptical review of PR #66). The two questions the rules below ask,
-/// `<A>` and the name under `worktrees`, do follow links, since a link there
-/// answering `Ok` would delete instead. Any other error keeps, as everywhere
-/// a deletion is decided. Paths stay off each reason's first line, which may
-/// become the summary the TUI shows.
+/// (skeptical review of PR #66). Each check here is asked whichever way
+/// makes a dangling link keep the directory: `<common>` and `commondir`
+/// without following the link, `<A>` and the name under `worktrees` following
+/// it (U10, U11). Any other error keeps, as everywhere a deletion is decided.
+/// Paths stay off each reason's first line, which may become the summary the
+/// TUI shows.
 fn absent_admin(admin: PathBuf) -> SpaceEntry {
     let Some(common) = common_dir_in_gits_shape(&admin) else {
         return SpaceEntry::Unreadable(format!(
@@ -3247,10 +3248,11 @@ fn nesting_under_worktrees(common: &Path) -> Option<Nesting> {
 /// Whether `common` continues past `admin`, a live worktree's admin
 /// directory, into something other than the `modules` git keeps there.
 ///
-/// An error other than `NotFound` on `commondir` counts as a live admin
-/// directory, which only keeps. It cannot happen but for a race: the missing
-/// path runs through `admin`, so `admin` was searchable when the kernel
-/// answered `NotFound` for it.
+/// `commondir` is asked without following a symbolic link, so a dangling
+/// link there still counts as a live admin directory, which keeps (U11). An
+/// error other than `NotFound` counts too, which also only keeps. It cannot
+/// happen but for a race: the missing path runs through `admin`, so `admin`
+/// was searchable when the kernel answered `NotFound` for it.
 fn runs_through_live_admin(common: &Path, admin: &Path) -> bool {
     let next = common
         .strip_prefix(admin)

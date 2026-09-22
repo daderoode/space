@@ -6818,3 +6818,49 @@ fn a_glue_through_a_dangling_link_is_kept() {
         assert_kept_alone(&env, name, &dir, phrase);
     }
 }
+
+/// U11. The two checks asked without following a symbolic link, each where a
+/// dangling link there keeps the directory, while following it would delete
+/// it (skeptical review of PR #66, pass 3). `<common>`: an old repo's git
+/// directory that is a dangling link, with nothing glued on, is kept as a
+/// directory that is not a git repository; followed, it would be missing and
+/// go as an orphan. `commondir`: a live worktree's admin directory whose
+/// `commondir` is a dangling link still counts as live, so a dead path glued
+/// on after it is kept; followed, the admin would not count and the copy
+/// would go.
+#[test]
+fn a_dangling_link_where_a_rule_does_not_follow_it_keeps() {
+    let env = TestEnv::new();
+    let gone = env.dir.path().join("gone-store");
+    let old = env.dir.path().join("old-home").join("alpha");
+    std::fs::create_dir_all(&old).unwrap();
+    std::os::unix::fs::symlink(gone.join("alpha.git"), old.join(".git")).unwrap();
+    let gamma = absolute_repo(&env, "gamma");
+    let admin = gamma.join(".git").join("worktrees").join("gamma");
+    std::fs::create_dir_all(&admin).unwrap();
+    std::os::unix::fs::symlink(gone.join("commondir"), admin.join("commondir")).unwrap();
+    for link in [old.join(".git"), admin.join("commondir")] {
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok() && !link.exists(),
+            "fixture: {:?} is a dangling link",
+            link
+        );
+    }
+    let dead = format!("{}/old-home/beta/.git/worktrees/beta", real(env.dir.path()));
+    let shapes = [
+        (
+            "common-is-a-dangling-link",
+            format!("{}/.git/worktrees/alpha", real(&old)),
+            "not a git repository",
+        ),
+        (
+            "commondir-is-a-dangling-link",
+            format!("{}{}", real(&admin), dead),
+            "inside a live worktree's admin directory",
+        ),
+    ];
+    for (name, gitdir, phrase) in &shapes {
+        let dir = copy_alone(&env, name, gitdir);
+        assert_kept_alone(&env, name, &dir, phrase);
+    }
+}
