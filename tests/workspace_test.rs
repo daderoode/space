@@ -4650,30 +4650,45 @@ fn status_of(wt: &Path) -> String {
 }
 
 /// T13. A configured remote whose fetch refspec does not map the picked ref
-/// (here narrowed to `main` after the fetch) gives the branch no upstream,
-/// as master did; `--track` there is git's `starting point ... is not a
+/// (here narrowed to `main` after the fetch). For a remote other than
+/// origin the pick is refused before anything is written: the branch could
+/// track nothing, status, sync and pull would read it against origin, and
+/// master and the create path both refuse it. Origin keeps master's
+/// untracked branch. `--track` there is git's `starting point ... is not a
 /// branch`, which head `f0db95f` passed for any configured remote.
 #[test]
-fn switch_to_a_ref_no_refspec_maps_makes_an_untracked_branch() {
+fn switch_to_a_ref_no_refspec_maps_is_refused_except_for_origin() {
     let env = common::TestEnv::new();
     let f = two_remote_repo(&env);
-    git_ok(
-        &f.repo,
-        &[
-            "config",
-            "--replace-all",
-            "remote.upstream.fetch",
-            "+refs/heads/main:refs/remotes/upstream/main",
-        ],
-    );
+    for remote in ["upstream", "origin"] {
+        git_ok(
+            &f.repo,
+            &[
+                "config",
+                "--replace-all",
+                &format!("remote.{}.fetch", remote),
+                &format!("+refs/heads/main:refs/remotes/{}/main", remote),
+            ],
+        );
+    }
     let wt = detached_wt(&env, &f, "t41-13");
 
-    space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
-        .expect("upstream/feat is still a branch to switch to");
+    let err = space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("no fetch refspec of upstream maps upstream/feat")
+        .to_string();
+    assert!(
+        err.contains("no fetch refspec of upstream maps refs/remotes/upstream/feat"),
+        "the refusal names the ref, got {:?}",
+        err
+    );
+    assert!(is_detached(&wt), "the worktree has not moved");
+    assert!(!has_ref(&f.repo, "refs/heads/feat"), "no branch is made");
 
+    space::core::workspace::switch_worktree_branch(&wt, "origin/feat", false)
+        .expect("origin/feat is still a branch to switch to");
     assert_eq!(head_symref(&wt), "refs/heads/feat");
     let head = git_ok(&wt, &["rev-parse", "HEAD"]).trim().to_string();
-    assert_eq!(head, f.upstream_feat, "at upstream's tip");
+    assert_eq!(head, f.origin_feat, "at origin's tip");
     assert_eq!(upstream_of(&f.repo, "feat"), "", "tracking nothing");
 }
 
@@ -4767,4 +4782,39 @@ fn switch_refused_by_the_worktree_leaves_no_new_branch_behind() {
         "mine\n",
         "the user's file is untouched"
     );
+}
+
+/// T17. A remote carrying a negative fetch refspec (`^refs/heads/<x>`, read
+/// by git since 2.29) cannot be read by libgit2 at all, so the mapper count
+/// is unknown; git's own default then decides, as on master, and here it
+/// tracks. Counting the unreadable remote as mapping nothing (head
+/// `9bbc48f`) made the branch untracked; with the no-mapper refusal for
+/// other remotes it would refuse a pick git tracks.
+#[test]
+fn switch_lets_git_decide_when_a_remotes_refspecs_cannot_be_read() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "--add",
+            "remote.upstream.fetch",
+            "^refs/heads/only-up",
+        ],
+    );
+    assert!(
+        git2::Repository::open(&f.repo)
+            .unwrap()
+            .find_remote("upstream")
+            .is_err(),
+        "fixture: libgit2 cannot read upstream's refspecs"
+    );
+    let wt = detached_wt(&env, &f, "t41-17");
+
+    space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect("git tracks upstream/feat by default");
+
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/upstream/feat");
 }

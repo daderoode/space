@@ -379,10 +379,12 @@ fn run_git_in(cwd: &Path, args: &[&str]) -> Result<()> {
 ///   checked out, except that for a remote other than origin it must already track
 ///   `<remote>/<x>` (a second pick of the same row) and is refused otherwise, since it is
 ///   another line of work; origin keeps master's rule, local first whatever it tracks.
-///   With no local `<x>`, the remote-tracking ref becomes a new local `<x>` tracking it
-///   (untracked when no remote's fetch refspec maps the ref, refused when several do), made
-///   with `git branch` before the switch so a refusal leaves the worktree as it was; with
-///   neither, git reports the name and guesses no remote.
+///   With no local `<x>`, the remote-tracking ref becomes a new local `<x>` tracking it,
+///   made with `git branch` before the switch so a refusal leaves the worktree as it was.
+///   It is refused when several remotes' fetch refspecs map the ref, or when none does for
+///   a remote other than origin; origin with none gets an untracked branch, as on master,
+///   and so does git's own default decide when libgit2 cannot read a remote's refspecs.
+///   With neither ref, git reports the name and guesses no remote.
 ///
 /// Every ref is asked for exactly (`ref_exists`) and the start point is the qualified
 /// remote-tracking ref, because `rev-parse --verify` and a bare `<remote>/<x>` both let a
@@ -428,43 +430,56 @@ pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) ->
 
     if ref_exists(wt_path, &remote_ref) {
         // git sets up tracking only when exactly one remote's fetch refspec
-        // maps the ref: with none it refuses `--track` (`starting point ...
-        // is not a branch`: origin with no config, or a narrowed refspec),
-        // and with several it refuses whatever the flag (`ambiguous
-        // information`) after making the branch. So one mapper gets
-        // `--track`, whatever `branch.autoSetupMerge` says (`false` and
-        // `inherit` set no upstream from a remote-tracking start point);
-        // none gets `--no-track`, the untracked branch master made; several
-        // are refused here, before anything is written.
-        let mappers = git2::Repository::open(wt_path).map_or(0, |repo| {
-            remotes
-                .iter()
-                .filter(|name| {
-                    repo.find_remote(name).is_ok_and(|r| {
-                        r.refspecs().any(|s| {
-                            s.direction() == git2::Direction::Fetch && s.dst_matches(&remote_ref)
-                        })
-                    })
-                })
-                .count()
+        // maps the ref. With none, `--track` is refused (`starting point
+        // ... is not a branch`); with several, `--track` and the default are
+        // refused (`ambiguous information`) after the branch is made. So one
+        // mapper gets `--track`, whatever `branch.autoSetupMerge` says
+        // (`false` and `inherit` set no upstream from a remote-tracking
+        // start point). Several are refused here, before anything is
+        // written, and so is none for a remote other than origin: that
+        // branch could track nothing, and status, sync and pull would read
+        // it against origin (master refused every such pick, and so does
+        // the create path). Origin with none (no config, or a narrowed
+        // refspec) gets `--no-track`, the untracked branch master made.
+        //
+        // The count is unknown when libgit2 cannot read a remote's refspecs
+        // (it refuses the whole remote over one negative refspec,
+        // `^refs/heads/<x>`, which git has read since 2.29); then git decides
+        // with its default, as it did on master.
+        let mappers: Option<usize> = git2::Repository::open(wt_path).ok().and_then(|repo| {
+            remotes.iter().try_fold(0, |n, name| {
+                let maps =
+                    repo.find_remote(name).ok()?.refspecs().any(|s| {
+                        s.direction() == git2::Direction::Fetch && s.dst_matches(&remote_ref)
+                    });
+                Some(n + usize::from(maps))
+            })
         });
-        if mappers > 1 {
-            anyhow::bail!(
+        match mappers {
+            Some(n) if n > 1 => anyhow::bail!(
                 "not tracking: several remotes' fetch refspecs map {}",
                 remote_ref
-            );
+            ),
+            Some(0) if remote != DEFAULT_REMOTE => anyhow::bail!(
+                "not tracking: no fetch refspec of {} maps {}",
+                remote,
+                remote_ref
+            ),
+            _ => {}
         }
-        let track = if mappers == 1 {
-            "--track"
-        } else {
-            "--no-track"
-        };
+        let mut args = vec!["branch"];
+        match mappers {
+            Some(1) => args.push("--track"),
+            Some(_) => args.push("--no-track"),
+            None => {}
+        }
         // The branch first, then the switch to it. `git switch -c` rewrites
         // the worktree and index before it makes the ref, so a refusal there
         // (a ref in the way, such as `refs/heads/<x>/<y>`) left the files at
         // the target with HEAD where it was (probed). `git branch` writes
         // only the ref, and a refused switch takes the new branch back out.
-        run_git_in(wt_path, &["branch", track, "--", local_name, &remote_ref])?;
+        args.extend(["--", local_name, &remote_ref]);
+        run_git_in(wt_path, &args)?;
         return run_git_in(wt_path, &["switch", "--", local_name]).inspect_err(|_| {
             let _ = run_git_in(wt_path, &["branch", "-D", "--", local_name]);
         });
