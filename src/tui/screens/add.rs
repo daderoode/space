@@ -214,7 +214,7 @@ impl AddState {
             }
             KeyCode::Enter => {
                 if self.branch_strategy_idx == max_idx {
-                    // "Show more..." / "Pick a branch..." — open fuzzy picker
+                    // "Show more..." / "Pick a branch...": open fuzzy picker
                     let repo_path = self.selected_repos.first().cloned();
                     if let Some(repo_path) = repo_path {
                         let repo_name = repo_path

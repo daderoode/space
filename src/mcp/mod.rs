@@ -135,7 +135,7 @@ pub fn resolve_repos(
             1 => resolved.push(matches[0].clone()),
             n => {
                 return Err(format!(
-                    "repo '{}' is ambiguous — matched {} repos: {:?}",
+                    "repo '{}' is ambiguous (matched {} repos: {:?})",
                     name,
                     n,
                     matches

@@ -27,7 +27,7 @@ fn finds_git_repos_within_root() {
 #[test]
 fn respects_max_depth() {
     let tmp = TempDir::new().unwrap();
-    // depth 4 from root — should not be found at max_depth=2
+    // depth 4 from root; should not be found at max_depth=2
     let deep = tmp.path().join("a/b/c/d/deep-repo");
     make_git_repo(&deep);
 
@@ -37,7 +37,7 @@ fn respects_max_depth() {
 
 #[test]
 fn does_not_descend_into_git_dirs() {
-    // A repo inside a repo (git submodule pattern) — only outer should appear
+    // A repo inside a repo (git submodule pattern); only outer should appear
     let tmp = TempDir::new().unwrap();
     let outer = tmp.path().join("outer");
     make_git_repo(&outer);

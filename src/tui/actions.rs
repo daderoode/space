@@ -15,7 +15,7 @@ pub struct ScreenContext<'a> {
     pub creating_in_flight: bool,
 }
 
-/// Parameters for creating/adding worktrees — shared between Create and Add flows.
+/// Parameters for creating/adding worktrees, shared between Create and Add flows.
 #[derive(Clone)]
 pub struct WorktreeParams {
     pub workspace_name: String,

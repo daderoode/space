@@ -89,7 +89,7 @@ pub struct FuzzyPicker {
     pub scope: Option<String>,
     pub available_scopes: Vec<String>,
     pub scope_idx: usize,
-    pub match_indices: Vec<Vec<u32>>, // parallel to `filtered` — match char positions per item
+    pub match_indices: Vec<Vec<u32>>, // parallel to `filtered`; match char positions per item
 }
 
 impl FuzzyPicker {
@@ -640,7 +640,7 @@ mod tests {
 
     #[test]
     fn shorten_remote_url_at_in_path_not_treated_as_credential() {
-        // '@' after the first '/' is in the path, not the authority — must not be stripped
+        // '@' after the first '/' is in the path, not the authority; must not be stripped
         assert_eq!(
             shorten_remote_url("https://github.com/org/foo@v1"),
             "github.com/org/foo@v1"

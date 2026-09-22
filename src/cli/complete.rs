@@ -31,7 +31,7 @@ pub fn run(what: CompleteTarget) -> Result<()> {
 
     match what {
         CompleteTarget::Workspaces => {
-            // workspace_detail runs git-rev-parse per repo — acceptable for completion
+            // workspace_detail runs git-rev-parse per repo; acceptable for completion
             // latency but will be slow for workspaces with many repos.
             let workspaces = workspace::list_workspaces(&cfg.workspaces.dir)?;
             for ws in &workspaces {

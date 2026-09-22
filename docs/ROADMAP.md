@@ -25,7 +25,7 @@ returned `ScreenAction` values. Borrow-checker gymnastics eliminated.
 
 ## Keybinding Help Overlay ✓ Complete
 
-Standalone UX feature — not gated on any git manager work, low effort.
+Standalone UX feature, not gated on any git manager work, low effort.
 
 ### 3. Help overlay ✓
 
@@ -55,7 +55,7 @@ flow is name-first as specified.
 
 **Problem:** The current creation order is: select repos, enter workspace name,
 pick branch strategy. Users expect to name the workspace first, then select
-repos — the name provides context for the subsequent choices.
+repos: the name provides context for the subsequent choices.
 
 **Approach:**
 
@@ -82,7 +82,7 @@ Users want to specify a different branch name (e.g. `feature/DEV-1234`).
 
 - After selecting "New branch" in `PickBranchStrategy`, show an editable
   text field pre-filled with the workspace name.
-- `BranchStrategy::NewBranch(String)` already carries the name — wire the
+- `BranchStrategy::NewBranch(String)` already carries the name; wire the
   input value through instead of defaulting to the workspace name.
 - Same field applies in both Create and Add flows.
 
@@ -109,7 +109,7 @@ similar names under different organisations.
   URL) populated at picker construction time via `git2`.
 - Render metadata as a dimmed suffix or second column in the picker.
 - Optionally group repos by parent directory in a collapsible tree view.
-  Tree view is stretch — the metadata suffix alone is high value.
+  Tree view is stretch; the metadata suffix alone is high value.
 
 **Files:** `src/tui/widgets/fuzzy_picker.rs`, `src/tui/screens/create.rs`,
 `src/tui/screens/add.rs`, `src/tui/ui.rs`
@@ -160,10 +160,10 @@ cache is invalidated on staging operations. 9 integration tests cover the full
 flow.
 
 **Problem:** After seeing which files changed, users want to view the actual diff
-content and act on it — stage or unstage individual files — without leaving the
+content and act on it (stage or unstage individual files) without leaving the
 TUI.
 
-**Approach — Diff viewer:**
+**Approach (Diff viewer):**
 
 - `Enter` on a file row opens a scrollable diff overlay showing the full
   unified diff for that file (hunks with context lines).
@@ -172,7 +172,7 @@ TUI.
   context.
 - `↑`/`↓`/`j`/`k` scrolls within the diff. `Esc` returns to the repo list.
 
-**Approach — Stage/unstage:**
+**Approach (Stage/unstage):**
 
 - `s` on a file row in the expanded repo view toggles staging for that file.
   Staged files become unstaged, unstaged files become staged.
@@ -234,7 +234,7 @@ branch is always restored. See `docs/plans/2026-07-27-safe-rebase-flow-design.md
 
 ## Tier 4 -- Workflow
 
-Multi-repo productivity features — templates, automation, and sync.
+Multi-repo productivity features: templates, automation, and sync.
 
 ### 8. Repo groups / templates
 

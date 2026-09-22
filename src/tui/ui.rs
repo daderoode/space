@@ -986,7 +986,7 @@ fn render_branch_strategy_picker(
             items.push(ListItem::new("    Show more..."));
         }
     } else {
-        // No recent branches — "Pick a branch..." as selectable (idx 3)
+        // No recent branches: "Pick a branch..." as selectable (idx 3)
         if 3 == strategy_idx {
             items.push(ListItem::new("> Pick a branch...").style(theme::selected()));
         } else {
@@ -1441,7 +1441,7 @@ mod tests {
     #[test]
     fn skip_bisects_wide_char_snaps_forward() {
         // '日' width=2; skip=1 bisects the wide char.
-        // Policy: snap forward — skip the entire wide char, return "bc".
+        // Policy: snap forward (skip the entire wide char, return "bc").
         assert_eq!(skip_display_width("日bc", 1), "bc");
     }
 
@@ -1530,7 +1530,7 @@ fn render_config_editor(
     for (i, field) in state.fields.iter().enumerate() {
         let label_area = sections[i * 3];
         let value_area = sections[i * 3 + 1];
-        // sections[i * 3 + 2] is the gap row — intentionally empty
+        // sections[i * 3 + 2] is the gap row, intentionally empty
 
         let is_focused = i == state.focused;
 
@@ -2054,7 +2054,7 @@ fn render_gitops_overlay(
     if state.stage == crate::tui::screens::gitops::GitOpsStage::RebaseConfirm {
         let dialog_w = percent_of(frame.area().width, 60, 48);
         // Seven logical lines, but the preview, the abort note, and the push
-        // note each wrap to two rows at the minimum width — reserve room so
+        // note each wrap to two rows at the minimum width; reserve room so
         // [y/N] is never clipped.
         let dialog_h = 13u16.min(frame.area().height.saturating_sub(2));
         let title = format!(" Rebase: {} ({}) ", state.repo_name, state.branch);

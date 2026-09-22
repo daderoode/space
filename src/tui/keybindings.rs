@@ -485,7 +485,7 @@ const HELP_OVERLAY: BindingGroup = BindingGroup {
     ],
 };
 
-/// All binding groups — consumed by the help overlay.
+/// All binding groups, consumed by the help overlay.
 pub fn all_groups() -> &'static [BindingGroup] {
     static GROUPS: [BindingGroup; 15] = [
         NAVIGATION,
