@@ -131,7 +131,6 @@ impl FuzzyPicker {
         self
     }
 
-    #[allow(dead_code)]
     pub fn query(&self) -> &str {
         self.input.value()
     }
