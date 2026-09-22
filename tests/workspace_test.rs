@@ -4615,3 +4615,156 @@ fn switch_finds_no_remote_branch_through_a_tag_without_an_origin_remote() {
         );
     }
 }
+
+/// A commit on `main` that adds `t41.txt`, so its tree differs from every
+/// fixture tip and a worktree half-switched to it shows in `git status`.
+/// Every other fixture commit shares one tree, which is why no earlier test
+/// could see a refusal that left files behind. Minted in a throwaway
+/// worktree, removed again.
+fn commit_adding_a_file(f: &TwoRemotes) -> String {
+    let mint = f._tmp.path().join("t41-mint");
+    git_ok(
+        &f.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            mint.to_str().unwrap(),
+            "main",
+        ],
+    );
+    std::fs::write(mint.join("t41.txt"), "from the remote\n").unwrap();
+    git_ok(&mint, &["add", "t41.txt"]);
+    git_ok(&mint, &["commit", "-q", "-m", "t41-tree"]);
+    let sha = git_ok(&mint, &["rev-parse", "HEAD"]).trim().to_string();
+    git_ok(
+        &f.repo,
+        &["worktree", "remove", "--force", mint.to_str().unwrap()],
+    );
+    sha
+}
+
+fn status_of(wt: &Path) -> String {
+    git_ok(wt, &["status", "--porcelain"]).trim().to_string()
+}
+
+/// T13. A configured remote whose fetch refspec does not map the picked ref
+/// (here narrowed to `main` after the fetch) gives the branch no upstream,
+/// as master did; `--track` there is git's `starting point ... is not a
+/// branch`, which head `f0db95f` passed for any configured remote.
+#[test]
+fn switch_to_a_ref_no_refspec_maps_makes_an_untracked_branch() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "--replace-all",
+            "remote.upstream.fetch",
+            "+refs/heads/main:refs/remotes/upstream/main",
+        ],
+    );
+    let wt = detached_wt(&env, &f, "t41-13");
+
+    space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect("upstream/feat is still a branch to switch to");
+
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    let head = git_ok(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+    assert_eq!(head, f.upstream_feat, "at upstream's tip");
+    assert_eq!(upstream_of(&f.repo, "feat"), "", "tracking nothing");
+}
+
+/// T14. When two remotes' fetch refspecs map the picked ref, git refuses to
+/// track it (`ambiguous information`), and does so after it has made the
+/// branch and rewritten the worktree (probed). The switch refuses first:
+/// no branch, no file of the target, HEAD where it was.
+#[test]
+fn switch_to_a_ref_two_refspecs_map_is_refused_before_anything_is_written() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let target = commit_adding_a_file(&f);
+    git_ok(
+        &f.repo,
+        &["update-ref", "refs/remotes/upstream/feat", &target],
+    );
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "--add",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/upstream/*",
+        ],
+    );
+    let wt = detached_wt(&env, &f, "t41-14");
+
+    let err = space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("two remotes map refs/remotes/upstream/feat")
+        .to_string();
+
+    assert!(
+        err.contains("several remotes' fetch refspecs map refs/remotes/upstream/feat"),
+        "the refusal names the ref, got {:?}",
+        err
+    );
+    assert!(is_detached(&wt), "the worktree has not moved");
+    assert!(!has_ref(&f.repo, "refs/heads/feat"), "no branch is left");
+    assert_eq!(status_of(&wt), "", "and no file of the target");
+}
+
+/// T15. A ref in the way of the new branch (`refs/heads/feat/sub` blocks
+/// `refs/heads/feat`) is refused by `git branch` before any file is touched.
+/// `git switch -c` refused it only after rewriting the worktree and index to
+/// the target, leaving them there with HEAD where it was (probed).
+#[test]
+fn switch_whose_new_branch_is_blocked_by_a_ref_leaves_the_worktree_as_it_was() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let target = commit_adding_a_file(&f);
+    git_ok(
+        &f.repo,
+        &["update-ref", "refs/remotes/upstream/feat", &target],
+    );
+    git_ok(&f.repo, &["branch", "-q", "feat/sub", "main"]);
+    let wt = detached_wt(&env, &f, "t41-15");
+
+    let err = space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("refs/heads/feat/sub is in the way")
+        .to_string();
+
+    assert!(err.contains("feat"), "git names the ref, got {:?}", err);
+    assert!(is_detached(&wt), "the worktree has not moved");
+    assert_eq!(status_of(&wt), "", "no file of the target is left behind");
+    assert!(!wt.join("t41.txt").exists());
+}
+
+/// T16. A switch git refuses for the worktree's own state (an untracked file
+/// the target would overwrite) takes the branch it had just made back out,
+/// so the next pick of the row is not refused as a local branch on another
+/// line, and the user's file is untouched.
+#[test]
+fn switch_refused_by_the_worktree_leaves_no_new_branch_behind() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let target = commit_adding_a_file(&f);
+    git_ok(
+        &f.repo,
+        &["update-ref", "refs/remotes/upstream/feat", &target],
+    );
+    let wt = detached_wt(&env, &f, "t41-16");
+    std::fs::write(wt.join("t41.txt"), "mine\n").unwrap();
+
+    space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("the untracked t41.txt would be overwritten");
+
+    assert!(is_detached(&wt), "the worktree has not moved");
+    assert!(!has_ref(&f.repo, "refs/heads/feat"), "no branch is left");
+    assert_eq!(
+        std::fs::read_to_string(wt.join("t41.txt")).unwrap(),
+        "mine\n",
+        "the user's file is untouched"
+    );
+}
