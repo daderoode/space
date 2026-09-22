@@ -1829,3 +1829,68 @@ fn a_panic_under_the_env_lock_fails_only_its_own_test() {
     assert!(outcome.is_err(), "the body must have panicked");
     with_test_env(|env, _| assert!(env.config_dir.is_dir()));
 }
+
+/// Run git in `dir`, fail the test if git fails, and return its stdout.
+fn git_run(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// N4 (ticket 45). Over MCP a new branch tracks nothing too, from
+/// `create_workspace` and from `add_repos`: both start it from
+/// `refs/remotes/origin/main`, where git's default `branch.autoSetupMerge`
+/// would make it track the base.
+#[test]
+fn mcp_new_branches_track_nothing() {
+    with_test_env(|env, server| {
+        let (first, _) = common::repo_with_origin(env, "first");
+        let (second, _) = common::repo_with_origin(env, "second");
+        env.write_cache(&[first.clone(), second.clone()]);
+
+        server
+            .create_workspace(Parameters(CreateWorkspaceParams {
+                name: "fresh".to_string(),
+                repos: vec!["first".to_string()],
+                strategy: "new".to_string(),
+                branch: None,
+            }))
+            .unwrap();
+        server
+            .add_repos(Parameters(AddReposParams {
+                workspace: "fresh".to_string(),
+                repos: vec!["second".to_string()],
+                strategy: "new".to_string(),
+                branch: None,
+            }))
+            .unwrap();
+
+        for repo in [&first, &second] {
+            let wt = env
+                .workspaces_dir
+                .join("fresh")
+                .join(repo.file_name().unwrap());
+            assert_eq!(
+                git_run(&wt, &["rev-parse", "HEAD"]),
+                git_run(repo, &["rev-parse", "refs/remotes/origin/main"]),
+                "fixture: {} started from origin's base",
+                repo.display()
+            );
+            assert_eq!(
+                common::branch_keys(repo, "fresh"),
+                "",
+                "{}: the new branch tracks nothing",
+                repo.display()
+            );
+        }
+    });
+}

@@ -2090,17 +2090,28 @@ fn render_gitops_overlay(
         return;
     }
 
-    // ConfirmPush stage: confirm publishing a branch that has no upstream.
+    // ConfirmPush stage: confirm publishing a branch under its own name on
+    // origin, when it has no upstream or tracks another branch of origin.
     if state.stage == crate::tui::screens::gitops::GitOpsStage::ConfirmPush {
         let dialog_w = percent_of(frame.area().width, 60, 48);
         let dialog_h = 7u16.min(frame.area().height.saturating_sub(2));
         let title = format!(" Git: {} ({}) ", state.repo_name, state.branch);
         let inner = gitops_dialog(title, dialog_w, dialog_h, frame);
 
-        let prompt = format!(
-            "Branch {} has no upstream. Push and set upstream to origin/{}?  [y/N]",
-            state.branch, state.branch
-        );
+        let prompt = match state
+            .push_target
+            .as_ref()
+            .filter(|_| state.tracks_another_origin_branch())
+        {
+            Some(t) => format!(
+                "Branch {} tracks {}. Push to origin/{} and track it instead?  [y/N]",
+                state.branch, t.tracks, state.branch
+            ),
+            None => format!(
+                "Branch {} has no upstream. Push and set upstream to origin/{}?  [y/N]",
+                state.branch, state.branch
+            ),
+        };
         frame.render_widget(Paragraph::new(prompt).wrap(Wrap { trim: false }), inner);
         return;
     }
