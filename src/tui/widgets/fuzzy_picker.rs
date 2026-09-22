@@ -131,6 +131,7 @@ impl FuzzyPicker {
         self
     }
 
+    /// The typed query. Nothing in the app reads it; the tests do.
     pub fn query(&self) -> &str {
         self.input.value()
     }

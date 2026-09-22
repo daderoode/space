@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 // The library's modules, not copies of them: `cli` reaches them as `crate::`.
-use space::{core, mcp, shell, tui};
+use space::{core, logging, mcp, shell, tui};
 
 mod cli;
 
@@ -16,7 +16,7 @@ fn main() -> anyhow::Result<()> {
     // call to panic (subscriber already set). Skip file logging for Mcp.
     let _log_guard = match &cli_args.command {
         Some(Commands::Mcp) => None,
-        _ => space::logging::init(),
+        _ => logging::init(),
     };
     match cli_args.command {
         None => {
@@ -117,16 +117,21 @@ mod tests {
         TypeId::of::<T>()
     }
 
-    /// The binary takes `core`, `mcp`, `shell` and `tui` from the library
-    /// rather than compiling its own copies (ticket 29). A module compiled
-    /// twice gives each of its items two identities, so one item of each
-    /// module, reached as `crate::` and as `space::`, must be one type.
+    /// The binary takes `core`, `logging`, `mcp`, `shell` and `tui` from the
+    /// library rather than compiling its own copies (ticket 29). A module
+    /// compiled twice gives each of its items two identities, so one item of
+    /// each module, reached as `crate::` and as `space::`, must be one type.
     #[test]
     fn the_binary_uses_the_librarys_modules() {
         assert_eq!(
             TypeId::of::<crate::core::workspace::Workspace>(),
             TypeId::of::<space::core::workspace::Workspace>(),
             "the binary compiles its own copy of core"
+        );
+        assert_eq!(
+            type_of(&crate::logging::init),
+            type_of(&space::logging::init),
+            "the binary compiles its own copy of logging"
         );
         assert_eq!(
             TypeId::of::<crate::mcp::SpaceServer>(),

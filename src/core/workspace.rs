@@ -698,6 +698,9 @@ const _: () = assert!(
 /// with the fixed `UNATTENDED_FETCH_TIMEOUT`. When it does not succeed the outcome
 /// carries the failure and no branch work is attempted; the caller continues
 /// with local refs.
+///
+/// Nothing in the app calls this: the TUI's worker calls
+/// `sync_repo_cancellable`. The tests do.
 pub fn sync_repo(repo_path: &Path) -> SyncOutcome {
     sync_repo_with_timeout(repo_path, UNATTENDED_FETCH_TIMEOUT)
 }
@@ -4235,9 +4238,8 @@ mod tests {
         const MARKER: &str = "SPACE_TEST_LC_ALL_INNER";
         if std::env::var_os(MARKER).is_none() {
             // libtest names a test by its path inside the crate, so the crate
-            // segment goes; the rest is this test's name in the library's
-            // unit-test binary, the only one that compiles this module. A
-            // renamed target fails loudly below.
+            // segment goes. A name that matched nothing would run no test,
+            // which the second check below catches.
             let (_, in_crate) = module_path!().split_once("::").unwrap();
             let test_name = format!(
                 "{}::run_git_unattended_pins_lc_all_to_c_for_the_child",

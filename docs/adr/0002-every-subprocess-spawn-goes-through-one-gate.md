@@ -89,8 +89,8 @@ site that skips the gate shows up as one more clippy warning.
   - A test in `lib.rs` locks it by name from outside `spawn.rs` and checks
     that `core::spawn` cannot start a child meanwhile, so a `spawn.rs` that
     went back to a static of its own would fail it.
-  - A test in `main.rs` checks that the binary's `core`, `mcp`, `shell` and
-    `tui` are the library's, by comparing one type from each.
+  - A test in `main.rs` checks that the binary's `core`, `logging`, `mcp`,
+    `shell` and `tui` are the library's, by comparing one type from each.
 - **Test fixtures start git directly.** They allow the lint at their module or
   crate root, so the gate does not order them against anything. The effect
   runs both ways:

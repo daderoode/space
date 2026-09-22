@@ -194,6 +194,7 @@ pub fn recent_branches(repo_path: &std::path::Path, limit: usize) -> Vec<BranchI
 }
 
 /// Return the `origin` remote URL for a repo, or `None` if unavailable.
+/// Nothing in the app calls this; the integration tests do.
 pub fn remote_url(repo_path: &Path) -> Option<String> {
     let repo = Repository::open(repo_path).ok()?;
     let remote = repo.find_remote("origin").ok()?;
@@ -314,7 +315,8 @@ pub fn ahead_behind_from_repo(repo: &Repository) -> Result<(usize, usize)> {
 /// the current branch (`origin/<branch>`, or its namesake on the other
 /// remote it tracks), or against `origin/HEAD` on a detached HEAD.
 /// Returns (0, 0) when that ref is absent or refused, or the repo has no
-/// remote.
+/// remote. Nothing in the app calls this, since it reads through
+/// `ahead_behind_from_repo`; the tests do.
 pub fn ahead_behind(repo_path: &Path) -> Result<(usize, usize)> {
     let repo = Repository::open(repo_path)?;
     ahead_behind_from_repo(&repo)
