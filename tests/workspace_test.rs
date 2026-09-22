@@ -5928,11 +5928,13 @@ fn a_sync_leaves_a_branch_that_tracks_nothing_tracking_nothing() {
     );
 }
 
-/// S2. The sync keeps exactly the keys of each branch it forwards: a branch
-/// tracking origin's `main` (a space made before ticket 45, published from
-/// the shell) keeps tracking `main`, and a branch with two merge values
-/// keeps both. A plain `git branch -f` re-points the first at origin's
-/// namesake and appends a third merge value to the second.
+/// S2. The sync keeps exactly the keys of each branch it forwards, byte for
+/// byte: a branch tracking origin's `main` (a space made before ticket 45,
+/// published from the shell) keeps tracking `main`, a branch with two merge
+/// values keeps both, and a branch tracking its namesake on origin keeps its
+/// `pushRemote` and `rebase` beside its tracking, as does the first. A plain
+/// `git branch -f` re-points the first at origin's namesake and appends a
+/// third merge value to the second.
 #[test]
 fn a_sync_keeps_what_a_forwarded_branch_tracks() {
     let env = TestEnv::new();
@@ -5953,16 +5955,45 @@ fn a_sync_keeps_what_a_forwarded_branch_tracks() {
     for merge in ["refs/heads/twice", "refs/heads/other"] {
         git_ok(&f.repo, &["config", "--add", "branch.twice.merge", merge]);
     }
-    let before: Vec<String> = ["based", "twice"]
+    git_ok(&f.repo, &["branch", "-q", "--no-track", "pinned", &main]);
+    git_ok(&f.repo, &["config", "branch.pinned.remote", "origin"]);
+    git_ok(
+        &f.repo,
+        &["config", "branch.pinned.merge", "refs/heads/pinned"],
+    );
+    for branch in ["based", "pinned"] {
+        git_ok(
+            &f.repo,
+            &[
+                "config",
+                &format!("branch.{}.pushRemote", branch),
+                "upstream",
+            ],
+        );
+        git_ok(
+            &f.repo,
+            &["config", &format!("branch.{}.rebase", branch), "true"],
+        );
+    }
+    let branches = ["based", "pinned", "twice"];
+    let before: Vec<String> = branches
         .iter()
         .map(|b| common::branch_keys(&f.repo, b))
         .collect();
     assert_eq!(
-        before[0], "branch.based.remote origin\nbranch.based.merge refs/heads/main\n",
-        "fixture: based tracks origin's main"
+        before[0],
+        "branch.based.remote origin\nbranch.based.merge refs/heads/main\n\
+         branch.based.pushremote upstream\nbranch.based.rebase true\n",
+        "fixture: based tracks origin's main, pushes to upstream, rebases"
+    );
+    assert_eq!(
+        before[1],
+        "branch.pinned.remote origin\nbranch.pinned.merge refs/heads/pinned\n\
+         branch.pinned.pushremote upstream\nbranch.pinned.rebase true\n",
+        "fixture: pinned tracks its namesake, pushes to upstream, rebases"
     );
     let mut tips = vec![];
-    for branch in ["based", "twice"] {
+    for branch in branches {
         let next = mint(&f.repo, &main, &format!("{}-next", branch));
         publish(&f.repo, &f.origin, &next, branch);
         tips.push(next);
@@ -5973,24 +6004,26 @@ fn a_sync_keeps_what_a_forwarded_branch_tracks() {
 
     assert_eq!(
         result.forwarded,
-        vec!["based".to_string(), "twice".to_string()],
+        branches.map(String::from).to_vec(),
         "skipped: {:?}",
         result.skipped
     );
-    for (i, branch) in ["based", "twice"].iter().enumerate() {
+    for (i, branch) in branches.iter().enumerate() {
         assert_eq!(
             rev(&f.repo, &format!("refs/heads/{}", branch)),
             tips[i],
             "{} is at origin's tip",
             branch
         );
-        assert_eq!(
-            common::branch_keys(&f.repo, branch),
-            before[i],
-            "{} keeps exactly the keys it had",
-            branch
-        );
     }
+    // One comparison of all three, so a failure shows every branch: a plain
+    // `branch -f` keeps pinned's values but rewrites its merge key after
+    // `rebase` (git 2.50.1), which only a byte-for-byte read sees.
+    let after: Vec<String> = branches
+        .iter()
+        .map(|b| common::branch_keys(&f.repo, b))
+        .collect();
+    assert_eq!(after, before, "each branch keeps exactly the keys it had");
 }
 
 /// P1. The set-upstream push names its source exactly, so a tag of the
