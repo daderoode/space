@@ -6749,7 +6749,10 @@ fn a_glued_reading_that_cannot_be_read_is_kept() {
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
     if std::fs::symlink_metadata(locked.join("alpha")).is_ok() {
         // Running as a user the mode does not apply to (root), so there is
-        // nothing to test here. Say so rather than passing quietly.
+        // nothing to test here, and the test passes. The note shows only
+        // under `--nocapture`, since libtest captures a passing test's
+        // output; CI runs as an ordinary user on macOS, where the test runs
+        // (skeptical review of PR #66).
         eprintln!("skipped: this user can read a directory with mode 000");
         return;
     }
@@ -6760,4 +6763,58 @@ fn a_glued_reading_that_cannot_be_read_is_kept() {
         &dir,
         "cannot be checked for a repository",
     );
+}
+
+/// U10. A symbolic link whose target is gone, on the way to the admin path.
+/// The kernel follows the link, so the admin is `NotFound`, while the link
+/// itself is there; each rule asks the way the kernel walked (skeptical
+/// review of PR #66). Dead path first: the old repo's git directory was a
+/// link to a store since moved or deleted, and the ticket's own shape was
+/// deleted. Live path first: the live repo's admin entry is such a link.
+#[test]
+fn a_glue_through_a_dangling_link_is_kept() {
+    let env = TestEnv::new();
+    let repo = absolute_repo(&env, "alpha");
+    let old = env.dir.path().join("old-home").join("alpha");
+    std::fs::create_dir_all(&old).unwrap();
+    let gone = env.dir.path().join("gone-store");
+    std::os::unix::fs::symlink(gone.join("alpha.git"), old.join(".git")).unwrap();
+    let beta = absolute_repo(&env, "beta");
+    std::fs::create_dir_all(beta.join(".git").join("worktrees")).unwrap();
+    std::os::unix::fs::symlink(
+        gone.join("beta-admin"),
+        beta.join(".git").join("worktrees").join("beta"),
+    )
+    .unwrap();
+    for link in [old.join(".git"), beta.join(".git/worktrees/beta")] {
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok() && !link.exists(),
+            "fixture: {:?} is a dangling link",
+            link
+        );
+    }
+    let dead = format!("{}/.git/worktrees/alpha", real(&old));
+    let live = format!("{}/.git/worktrees/alpha", real(&repo));
+    let glued = "of a repository that is there joined on after it";
+    let shapes = [
+        ("dangling-note", format!("{}#now{}", dead, live), glued),
+        (
+            "dangling-over-the-id",
+            format!(
+                "{}/.git/worktrees/{}/.git/worktrees/alpha",
+                real(&old),
+                repo.display()
+            ),
+            glued,
+        ),
+        (
+            "live-link-then-dead",
+            format!("{}/.git/worktrees/beta{}", real(&beta), dead),
+            "under another repository's worktrees directory",
+        ),
+    ];
+    for (name, gitdir, phrase) in &shapes {
+        let dir = copy_alone(&env, name, gitdir);
+        assert_kept_alone(&env, name, &dir, phrase);
+    }
 }

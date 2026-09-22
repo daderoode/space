@@ -3208,6 +3208,10 @@ enum Nesting {
 /// orphan (probed, git 2.50.1); a paste after `<admin>/modules` is therefore
 /// not recognised. A repository made by hand anywhere else in a live admin
 /// directory and then deleted is kept, with a reason that is true of it.
+///
+/// The name under `worktrees` is asked with symbolic links followed, as the
+/// kernel walked the path: a link whose target is gone is not there (skeptical
+/// review of PR #66).
 fn nesting_under_worktrees(common: &Path) -> Option<Nesting> {
     common
         .ancestors()
@@ -3219,7 +3223,7 @@ fn nesting_under_worktrees(common: &Path) -> Option<Nesting> {
                 return None;
             }
             if matches!(
-                std::fs::symlink_metadata(child),
+                std::fs::metadata(child),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound
             ) {
                 Some(Nesting::MissingName)
@@ -3287,9 +3291,10 @@ enum GluedReading {
 /// (a permission or I/O error) keeps the directory with that said. Neither
 /// the live admin directory nor its `worktrees` has to be there. A `/`
 /// inside the note (a date) and the live path in the middle of the line are
-/// read too. `<A>` counts as missing unless it answers `Ok`, which only keeps
-/// and cannot differ but for a race, `<A>` being on the path the kernel
-/// answered `NotFound` for. The names are plain, with no line break, since
+/// read too. `<A>` is asked with symbolic links followed, as the kernel
+/// walked the admin path: a link whose target is gone counts as missing, as
+/// it did there (skeptical review of PR #66), and so does any other error,
+/// which only keeps. The names are plain, with no line break, since
 /// `absent_admin` has already asked `common_dir_in_gits_shape`.
 ///
 /// Readings start only after an orphan's admin path. Read from any `/` whose
@@ -3325,7 +3330,7 @@ fn glued_worktree_path(admin: &Path) -> GluedReading {
         .collect();
     let Some(from) = ends
         .iter()
-        .find(|&&i| std::fs::symlink_metadata(rooted(&names[..i])).is_err())
+        .find(|&&i| std::fs::metadata(rooted(&names[..i])).is_err())
         .map(|&i| i + 1)
     else {
         return GluedReading::Nothing;
