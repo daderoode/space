@@ -5787,3 +5787,285 @@ fn switch_cleanup_keeps_a_new_branch_that_is_checked_out() {
         "and the branch is still there"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Ticket 44: a live worktree path glued on to a dead one, with no blank
+// between them, is read before a directory is deleted as an orphan. Dead
+// first, the live path is text under a missing directory and never an
+// ancestor of anything real, so it is found by reading the line again from
+// each later `/`; live first, the path runs through the live admin directory.
+// ---------------------------------------------------------------------------
+
+/// A directory holding `mine.txt` and a `.git` file naming `gitdir`, alone in
+/// space `name`: an orphan goes only with its space, which a kept neighbour
+/// would hold back.
+fn copy_alone(env: &TestEnv, name: &str, gitdir: &str) -> PathBuf {
+    let dir = env.workspaces_dir.join(name).join("alpha");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(".git"), format!("gitdir: {}\n", gitdir)).unwrap();
+    std::fs::write(dir.join("mine.txt"), "a day of work").unwrap();
+    dir
+}
+
+/// Remove space `name` and require that its one directory was kept with its
+/// work, with a summary that says `phrase` and leaves the path off.
+fn assert_kept_alone(env: &TestEnv, name: &str, dir: &Path, phrase: &str) {
+    let text = match remove_forced(env, name) {
+        Ok(()) => panic!("{}: its space was removed, so it went as an orphan", name),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        text.contains("1 of 1 repos in the space were kept"),
+        "{}: it is kept, not removed as an orphan, got {:?}",
+        name,
+        text
+    );
+    let summary = text.lines().next().unwrap_or_default();
+    let tmp = env.dir.path().canonicalize().unwrap();
+    assert!(
+        summary.contains(phrase)
+            && !summary.contains(&tmp.display().to_string())
+            && !summary.contains(&env.dir.path().display().to_string()),
+        "{}: the summary says {:?} and leaves the path off, got {:?}",
+        name,
+        phrase,
+        summary
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("mine.txt")).unwrap_or_default(),
+        "a day of work",
+        "{}: and its work is still there",
+        name
+    );
+}
+
+/// A worktree of `repo` in space `ws_name`, then `gone` deleted: a genuine
+/// orphan. Removing the space must remove it.
+fn assert_orphan_removed(env: &TestEnv, repo: &Path, ws_name: &str, gone: &Path) {
+    worktree_in_space(env, repo, ws_name);
+    std::fs::remove_dir_all(gone).unwrap();
+    assert!(!repo.exists(), "fixture: the source repo is gone");
+    remove_forced(env, ws_name).unwrap();
+    assert!(
+        !env.workspaces_dir.join(ws_name).exists(),
+        "it goes, as a genuine orphan does"
+    );
+}
+
+/// The canonical path of `repo`, as git writes it into a gitfile.
+fn real(path: &Path) -> String {
+    path.canonicalize().unwrap().display().to_string()
+}
+
+/// U1. The ticket's shape and its siblings: an old admin path whose source
+/// repo is gone, a note or nothing, then the live repo's admin path glued on
+/// with no blank. Each was deleted as an orphan with exit 0 while the source
+/// repo was there (master `9e1e1e9`). The live repo has no worktrees at all,
+/// so neither its admin directory nor its `worktrees` directory exists: the
+/// reading counts a worktree path of a repository that is there, as the
+/// blank-separated words do. A `/` inside the note (a date) and the live path
+/// in the middle of the line are read too.
+#[test]
+fn a_dead_admin_path_with_a_live_one_glued_on_is_kept() {
+    let env = TestEnv::new();
+    let repo = absolute_repo(&env, "alpha");
+    let live = format!("{}/.git/worktrees/alpha", real(&repo));
+    let dead = format!(
+        "{}/old-home/alpha/.git/worktrees/alpha",
+        real(env.dir.path())
+    );
+    assert!(
+        !repo.join(".git").join("worktrees").exists(),
+        "fixture: the live repo has no worktrees directory"
+    );
+    let shapes = [
+        ("glued-note", format!("{}#now{}", dead, live)),
+        ("glued-no-note", format!("{}{}", dead, live)),
+        ("glued-blank-in-note", format!("{}# now{}", dead, live)),
+        (
+            "glued-date-note",
+            format!("{}#moved 2026/09/21{}", dead, live),
+        ),
+        ("glued-middle", format!("{}#now{}#was{}", dead, live, dead)),
+    ];
+    for (name, gitdir) in &shapes {
+        let dir = copy_alone(&env, name, gitdir);
+        assert_kept_alone(&env, name, &dir, "joined on after it");
+    }
+}
+
+/// U2. The mirror order with the live admin directory there: the original
+/// worktree is still registered, and the dead path is glued on after its
+/// admin path by a `/`. PR #61's record called the live-first order kept; it
+/// is kept only while the admin directory is gone or the glue is not a `/`,
+/// and this was deleted with exit 0 (master `9e1e1e9`).
+#[test]
+fn a_live_admin_path_with_a_dead_one_glued_on_by_a_slash_is_kept() {
+    let env = TestEnv::new();
+    let repo = absolute_repo(&env, "alpha");
+    let original = worktree_in_space(&env, &repo, "other");
+    let live = admin_dir_of(&original);
+    assert!(
+        live.join("commondir").is_file(),
+        "fixture: the live admin directory is there"
+    );
+    let live = real(&live);
+    let dead = format!(
+        "{}/old-home/alpha/.git/worktrees/alpha",
+        real(env.dir.path())
+    );
+    let shapes = [
+        ("live-then-dead", format!("{}{}", live, dead)),
+        ("live-note-then-dead", format!("{}/note{}", live, dead)),
+    ];
+    for (name, gitdir) in &shapes {
+        let dir = copy_alone(&env, name, gitdir);
+        assert_kept_alone(
+            &env,
+            name,
+            &dir,
+            "under another repository's worktrees directory",
+        );
+    }
+    assert!(original.exists(), "and the original is left alone");
+}
+
+/// U3. git keeps a linked worktree's submodule git dirs under the admin
+/// directory's `modules`, so a worktree of such a submodule has the gitdir
+/// `<host>/.git/worktrees/<id>/modules/<name>/worktrees/<id2>` (git 2.50.1).
+/// With `modules` deleted its source repo is gone: a genuine orphan, removed,
+/// though its path runs through a live admin directory.
+#[test]
+fn a_worktree_of_a_submodule_whose_modules_directory_is_gone_is_removed() {
+    let env = TestEnv::new();
+    let lib = absolute_repo(&env, "lib");
+    let host = absolute_repo(&env, "host");
+    let host_wt = env.dir.path().join("host-wt");
+    git_ok(
+        &host,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            host_wt.to_str().unwrap(),
+            "-b",
+            "hw",
+        ],
+    );
+    git_ok(
+        &host_wt,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            lib.to_str().unwrap(),
+            "lib",
+        ],
+    );
+    let sub = host_wt.join("lib");
+    git_ok(&sub, &["config", "worktree.useRelativePaths", "false"]);
+    let wt = env.workspaces_dir.join("sub").join("lib");
+    git_ok(
+        &sub,
+        &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "sw"],
+    );
+    let modules = host
+        .join(".git")
+        .join("worktrees")
+        .join("host-wt")
+        .join("modules");
+    assert!(
+        admin_dir_of(&wt).starts_with(modules.canonicalize().unwrap()),
+        "fixture: the gitdir runs through the live admin directory's modules, got {:?}",
+        admin_dir_of(&wt)
+    );
+    std::fs::remove_dir_all(&modules).unwrap();
+    assert!(
+        modules.parent().unwrap().join("commondir").is_file(),
+        "fixture: the admin directory it ran through is still there"
+    );
+
+    remove_forced(&env, "sub").unwrap();
+
+    assert!(
+        !env.workspaces_dir.join("sub").exists(),
+        "it goes, as a genuine orphan does"
+    );
+}
+
+/// U4. Reading the line again from a `/` is done only after an orphan's
+/// admin path (`<A>/worktrees/<x>` with `<A>` missing). Read from any `/`
+/// whose prefix is missing, a genuine orphan whose repo lived at a path
+/// ending in a live repo's path would be kept: here `<tmp>/mirror` followed
+/// by the live repo's own path, deleted with `<tmp>/mirror`.
+#[test]
+fn a_genuine_orphan_whose_path_ends_in_a_live_repos_path_is_removed() {
+    let env = TestEnv::new();
+    let live = absolute_repo(&env, "alpha");
+    let mirror = env.dir.path().join("mirror");
+    let dead = absolute_repo_at(&PathBuf::from(format!(
+        "{}{}",
+        mirror.display(),
+        real(&live)
+    )));
+    assert_orphan_removed(&env, &dead, "ws", &mirror);
+    assert!(live.exists(), "fixture: the live repo is still there");
+}
+
+/// U5. The same mirror under a folder named `worktrees` whose parent is still
+/// there: `<A>` exists, so `<A>/worktrees/<x>` is no orphan's admin path and
+/// nothing after it is read.
+#[test]
+fn a_genuine_orphan_mirroring_a_live_repo_under_a_worktrees_folder_is_removed() {
+    let env = TestEnv::new();
+    let live = absolute_repo(&env, "alpha");
+    let deep = env.dir.path().join("deep");
+    let folder = deep.join("worktrees");
+    let dead = absolute_repo_at(&PathBuf::from(format!(
+        "{}{}",
+        folder.join("x").display(),
+        real(&live)
+    )));
+    assert_orphan_removed(&env, &dead, "ws", &folder);
+    assert!(deep.is_dir(), "fixture: the folder's parent is still there");
+}
+
+/// U6. A reading counts only when it is a repository, never merely when it
+/// exists (the lesson of the word readings, PR #61). Here the reading after
+/// an orphan's admin path names `<tmp>/plain/.git`, an empty directory.
+#[test]
+fn a_genuine_orphan_whose_glued_reading_is_no_repository_is_removed() {
+    let env = TestEnv::new();
+    let plain = env.dir.path().join("plain");
+    std::fs::create_dir_all(plain.join(".git")).unwrap();
+    let gone = env.dir.path().join("gone");
+    let dead = absolute_repo_at(&PathBuf::from(format!(
+        "{}{}",
+        gone.join("worktrees").join("x").display(),
+        real(&plain)
+    )));
+    assert_orphan_removed(&env, &dead, "ws", &gone);
+}
+
+/// U7. The readings after an orphan's admin path are bounded: past 256 of
+/// them the directory is kept with a reason that says so, rather than read,
+/// so a crafted line costs a bounded number of checks and never a deletion.
+/// A real line needs a few dozen: the U1 shapes need 10 to 32 (measured),
+/// and this one needs 301.
+#[test]
+fn a_gitdir_with_too_many_parts_to_read_is_kept() {
+    let env = TestEnv::new();
+    let dead = format!(
+        "{}/old-home/alpha/.git/worktrees/alpha",
+        real(env.dir.path())
+    );
+    let gitdir = format!("{}{}/.git/worktrees/alpha", dead, "/a".repeat(300));
+    assert!(
+        gitdir.len() < 1024,
+        "fixture: within the kernel's path limit"
+    );
+    let dir = copy_alone(&env, "crafted", &gitdir);
+    assert_kept_alone(&env, "crafted", &dir, "too many parts to check");
+}
