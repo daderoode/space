@@ -352,7 +352,6 @@ fn git_worktree_add(args: &[&str], cwd: &Path) -> Result<()> {
 
 /// Helper: run a git command inside `cwd`, capturing stderr.
 /// On non-zero exit, returns an error with the first meaningful git error line.
-#[allow(dead_code)] // used by switch_worktree_branch; bin crate has private mod core
 fn run_git_in(cwd: &Path, args: &[&str]) -> Result<()> {
     let out = spawn::output(Command::new("git").args(args).current_dir(cwd))
         .with_context(|| "failed to spawn git")?;
@@ -371,54 +370,174 @@ fn run_git_in(cwd: &Path, args: &[&str]) -> Result<()> {
 
 /// Switch an existing worktree to a different branch.
 ///
-/// - `new_branch = true`:  creates the branch from the current HEAD (`git switch -c <branch>`).
-///   This works even from detached HEAD.
-/// - `new_branch = false`: checks for a local branch first; if absent, looks for
-///   `origin/<branch>` and creates a local tracking branch; if neither, passes through
-///   to git (which will error with a clear message).
-#[allow(dead_code)] // public API; called from integration tests and future callers
+/// - `new_branch = true`:  creates the branch from the current HEAD, tracking nothing
+///   (`git switch --no-track -c <branch>`). This works even from detached HEAD.
+/// - `new_branch = false`: a `<remote>/<x>` name from the branch picker is split the way
+///   the create path splits it (`split_remote_branch_in`: any configured remote, the
+///   longest first, and for any remote but origin a local branch named by the whole string
+///   wins); any other name is a local branch or origin's. A local `<x>` that exists is
+///   checked out, except that for a remote other than origin it must already track
+///   `<remote>/<x>` (a second pick of the same row) and is refused otherwise, since it is
+///   another line of work; origin keeps master's rule, local first whatever it tracks.
+///   With no local `<x>`, the remote-tracking ref becomes a new local `<x>` tracking it,
+///   made with `git branch` before the switch so a refusal leaves the worktree as it was.
+///   It is refused when several remotes' fetch refspecs map the ref, or when none does for
+///   a remote other than origin; origin with none gets an untracked branch, as on master.
+///   When libgit2 cannot read a remote's refspecs, another remote's pick is made with
+///   `--track` (git tracks it or refuses it) and origin's with git's default, as on master.
+///   With neither ref, git reports the name and guesses no remote.
+///
+/// Every ref is asked for exactly (`ref_exists`) and the start point is the qualified
+/// remote-tracking ref, because `rev-parse --verify` and a bare `<remote>/<x>` both let a
+/// same-named tag answer instead (ticket 41): a tag named `refs/heads/<x>` passed for a
+/// local branch, a tag `origin/<x>` made `switch -c` ambiguous or started the branch at
+/// the tag, and a tag named `refs/remotes/origin/<x>` shadows even the qualified name.
 pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) -> Result<()> {
     if new_branch {
-        return run_git_in(wt_path, &["switch", "-c", branch]);
+        // `--no-track`: from HEAD, `branch.autoSetupMerge=inherit` copies
+        // HEAD's upstream and `always` tracks HEAD's own branch (probed); a
+        // branch typed as new starts with no upstream.
+        return run_git_in(wt_path, &["switch", "--no-track", "-c", branch]);
     }
 
-    // Normalize: if the caller passes "origin/<name>" (from the full branch picker),
-    // strip the prefix so we check/create the local name and avoid "origin/origin/<name>".
-    let (local_name, remote_ref) = if let Some(name) = branch.strip_prefix("origin/") {
-        (name, branch.to_string())
-    } else {
-        (branch, format!("origin/{}", branch))
-    };
-
-    // Check local branch (refs/heads/ scopes the lookup to branches only, not tags)
+    // The picker's `<remote>/<x>` rows name the local `<x>` to check out or
+    // create; a name that does not split is looked for on origin.
+    let remotes = remote_names(wt_path);
+    let (remote, local_name) =
+        split_remote_branch_in(wt_path, branch, &remotes).unwrap_or((DEFAULT_REMOTE, branch));
     let local_ref = format!("refs/heads/{}", local_name);
-    let local_exists = spawn::output(
-        Command::new("git")
-            .args(["rev-parse", "--verify", &local_ref])
-            .current_dir(wt_path),
-    )
-    .map(|o| o.status.success())
-    .unwrap_or(false);
+    let remote_ref = remote_tracking_ref(remote, local_name);
 
-    if local_exists {
+    if ref_exists(wt_path, &local_ref) {
+        // `for-each-ref` reads the configured upstream even when its ref
+        // is gone, and prints nothing for a branch that tracks nothing.
+        let tracks_the_pick = || {
+            spawn::output(
+                Command::new("git")
+                    .args(["for-each-ref", "--format=%(upstream)", &local_ref])
+                    .current_dir(wt_path),
+            )
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == remote_ref)
+        };
+        // The three refusals below are sized for the status line, one row
+        // at the 80-column minimum after "Switch failed: ": a remote of about
+        // ten characters and a branch of about twenty fit.
+        if remote != DEFAULT_REMOTE && !tracks_the_pick() {
+            anyhow::bail!("{} exists and does not track the picked branch", local_name);
+        }
+        // The bare name in the switch slot, deliberately: `git switch --
+        // refs/heads/<x>` refuses (`a branch is expected`), while the bare
+        // name checks out the branch even beside a tag of that name.
         return run_git_in(wt_path, &["switch", "--", local_name]);
     }
 
-    // Check remote branch
-    let remote_exists = spawn::output(
-        Command::new("git")
-            .args(["rev-parse", "--verify", &remote_ref])
-            .current_dir(wt_path),
-    )
-    .map(|o| o.status.success())
-    .unwrap_or(false);
-
-    if remote_exists {
-        return run_git_in(wt_path, &["switch", "-c", local_name, &remote_ref]);
+    if ref_exists(wt_path, &remote_ref) {
+        // git sets up tracking only when exactly one remote's fetch refspec
+        // maps the ref. With none, `--track` is refused (`starting point
+        // ... is not a branch`); with several, `--track` and the default are
+        // refused (`ambiguous information`) after the branch is made. So one
+        // mapper gets `--track`, whatever `branch.autoSetupMerge` says
+        // (`false` and `inherit` set no upstream from a remote-tracking
+        // start point). Several are refused here, before anything is
+        // written, and so is none for a remote other than origin: that
+        // branch could track nothing, and status, sync and pull would read
+        // it against origin (master refused every such pick, and so does
+        // the create path). Origin with none (no config, or a narrowed
+        // refspec) gets `--no-track`, the untracked branch master made.
+        //
+        // The count is unknown when libgit2 cannot read any one remote's
+        // refspecs (it refuses the whole remote over one negative refspec,
+        // `^refs/heads/<x>`, which git has read since 2.29). Then another
+        // remote's pick passes `--track`, so git tracks it whatever
+        // `branch.autoSetupMerge` says, or refuses it cleanly (`not a
+        // branch`) when no refspec maps the ref; origin's pick gets git's
+        // default, as it did on master.
+        let mappers: Option<usize> = git2::Repository::open(wt_path).ok().and_then(|repo| {
+            remotes.iter().try_fold(0, |n, name| {
+                let maps =
+                    repo.find_remote(name).ok()?.refspecs().any(|s| {
+                        s.direction() == git2::Direction::Fetch && s.dst_matches(&remote_ref)
+                    });
+                Some(n + usize::from(maps))
+            })
+        });
+        match mappers {
+            Some(n) if n > 1 => anyhow::bail!("{} is fetched by several remotes", branch),
+            Some(0) if remote != DEFAULT_REMOTE => {
+                anyhow::bail!("{} is not fetched by {}", branch, remote)
+            }
+            _ => {}
+        }
+        let mut args = vec!["branch"];
+        match mappers {
+            Some(1) => args.push("--track"),
+            Some(_) => args.push("--no-track"),
+            None if remote != DEFAULT_REMOTE => args.push("--track"),
+            None => {}
+        }
+        // The branch first, then the switch to it. `git switch -c` rewrites
+        // the worktree and index before it makes the ref, so a refusal there
+        // (a ref in the way, such as `refs/heads/<x>/<y>`) left the files at
+        // the target with HEAD where it was (probed). `git branch` writes
+        // only the ref, and a refused switch takes the new branch back out.
+        //
+        // Taken back only by what was made, not by name: the commit the new
+        // branch starts at is read first, and the ref is deleted only while
+        // it still points there (`update-ref -d <ref> <oid>` is git's
+        // compare-and-swap). Someone who moved the branch in between, with
+        // work of their own, keeps it, and the error says so.
+        let start = spawn::output(
+            Command::new("git")
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{}^{{commit}}", remote_ref),
+                ])
+                .current_dir(wt_path),
+        )
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .with_context(|| format!("cannot read {}", branch))?;
+        args.extend(["--", local_name, &remote_ref]);
+        run_git_in(wt_path, &args)?;
+        return run_git_in(wt_path, &["switch", "--", local_name]).map_err(|e| {
+            // Nor while any worktree has it checked out, `git branch -D`'s
+            // own rule, which `update-ref -d` does not keep (probed: it left
+            // HEAD on a missing ref). A switch git reports as failed after it
+            // has switched (a failing post-checkout hook) is on it, and so is
+            // anyone who checked it out meanwhile. Unreadable means kept.
+            let checked_out = spawn::output(
+                Command::new("git")
+                    .args(["worktree", "list", "--porcelain"])
+                    .current_dir(wt_path),
+            )
+            .map_or(true, |o| {
+                let line = format!("branch {}", local_ref);
+                !o.status.success()
+                    || String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .any(|l| l == line)
+            });
+            if checked_out {
+                return anyhow::anyhow!("{} kept, it is checked out: {}", local_name, e);
+            }
+            if run_git_in(wt_path, &["update-ref", "-d", &local_ref, &start]).is_err() {
+                return anyhow::anyhow!("{} kept, it moved meanwhile: {}", local_name, e);
+            }
+            // What `git branch -D` would also drop: the keys `--track` wrote.
+            for key in ["remote", "merge"] {
+                let key = format!("branch.{}.{}", local_name, key);
+                let _ = run_git_in(wt_path, &["config", "--unset-all", &key]);
+            }
+            e
+        });
     }
 
-    // Let git provide the error message
-    run_git_in(wt_path, &["switch", "--", local_name])
+    // Let git provide the error message. `--no-guess`, so git does not
+    // create a branch tracking some other remote that carries `<x>`.
+    run_git_in(wt_path, &["switch", "--no-guess", "--", local_name])
 }
 
 /// Why a branch that was strictly behind the branch it is read against
@@ -2053,8 +2172,8 @@ fn split_remote_branch<'a>(name: &'a str, remotes: &[String]) -> Option<(&'a str
 /// (a coworker's fork added as remote `alice` beside branches named
 /// `alice/<x>` is the realistic collision). `origin/<x>` is always the
 /// tracking form, as it has been since ticket 13, whatever local branch
-/// exists. `add_worktree`, the skip rule and the `-b` guard all derive
-/// through this one function.
+/// exists. `add_worktree`, the skip rule, the `-b` guard and
+/// `switch_worktree_branch` all derive through this one function.
 fn split_remote_branch_in<'a>(
     repo_path: &Path,
     name: &'a str,
@@ -2625,9 +2744,11 @@ fn ref_exists(repo_path: &Path, refname: &str) -> bool {
 }
 
 /// The remote-tracking ref for `<remote>/<name>`, fully qualified, for the
-/// commit-ish slot of `git worktree add` and the probes before it. The
-/// remote is a parameter because the `ExistingBranch` arm names whichever
-/// remote the picked branch belongs to (ticket 25).
+/// commit-ish slot of `git worktree add`, the start point of the `git branch`
+/// that `switch_worktree_branch` runs before its bare `git switch`, and the
+/// probes before both.
+/// The remote is a parameter because the `ExistingBranch` arm and the switch
+/// name whichever remote the picked branch belongs to (ticket 25).
 fn remote_tracking_ref(remote: &str, name: &str) -> String {
     format!("refs/remotes/{}/{}", remote, name)
 }
