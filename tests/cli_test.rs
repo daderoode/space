@@ -603,3 +603,83 @@ fn add_unknown_name_refuses_before_the_tui() {
         ))
         .stdout(predicate::str::contains("__SPACE_CD__").not());
 }
+
+/// U+2014 as UTF-8. Spelled as bytes so this file does not hold it.
+const EM_DASH: [u8; 3] = [0xE2, 0x80, 0x94];
+
+/// Whether `line` holds U+2014, raw or as a Rust `\u{...}` escape of it
+/// (any case, leading zeros or underscores).
+fn holds_em_dash(line: &[u8]) -> bool {
+    if line.windows(3).any(|w| w == EM_DASH) {
+        return true;
+    }
+    line.windows(3)
+        .enumerate()
+        .filter(|(_, w)| *w == b"\\u{")
+        .any(|(i, _)| {
+            let rest = &line[i + 3..];
+            let len = rest
+                .iter()
+                .take_while(|b| b.is_ascii_hexdigit() || **b == b'_')
+                .count();
+            let hex: String = rest[..len]
+                .iter()
+                .filter(|b| **b != b'_')
+                .map(|b| *b as char)
+                .collect();
+            rest.get(len) == Some(&b'}') && u32::from_str_radix(&hex, 16) == Ok(0x2014)
+        })
+}
+
+/// House style: no tracked file holds an em dash (ticket 17). Reads every file
+/// `git ls-files` lists, from the working tree, and names each `path:line`.
+#[test]
+fn no_tracked_file_holds_an_em_dash() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let out = std::process::Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git ls-files failed in {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let files: Vec<String> = out
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect();
+    assert!(
+        files.iter().any(|f| f == "tests/cli_test.rs"),
+        "git ls-files in {} did not list this test's own file",
+        root.display()
+    );
+    let mut hits = Vec::new();
+    for file in &files {
+        let bytes = match std::fs::read(root.join(file)) {
+            Ok(bytes) => bytes,
+            // Deleted in the working tree, not yet staged.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => panic!("cannot read {file}: {e}"),
+        };
+        for (n, line) in bytes.split(|b| *b == b'\n').enumerate() {
+            if holds_em_dash(line) {
+                hits.push(format!(
+                    "{file}:{}: {}",
+                    n + 1,
+                    String::from_utf8_lossy(line).trim()
+                ));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "{} tracked line(s) hold U+2014 (em dash); use a comma, colon, semicolon or parentheses:\n{}",
+        hits.len(),
+        hits.join("\n")
+    );
+}
