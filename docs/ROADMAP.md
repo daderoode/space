@@ -163,7 +163,7 @@ flow.
 content and act on it (stage or unstage individual files) without leaving the
 TUI.
 
-**Approach, Diff viewer:**
+**Approach (Diff viewer):**
 
 - `Enter` on a file row opens a scrollable diff overlay showing the full
   unified diff for that file (hunks with context lines).
@@ -172,7 +172,7 @@ TUI.
   context.
 - `↑`/`↓`/`j`/`k` scrolls within the diff. `Esc` returns to the repo list.
 
-**Approach, Stage/unstage:**
+**Approach (Stage/unstage):**
 
 - `s` on a file row in the expanded repo view toggles staging for that file.
   Staged files become unstaged, unstaged files become staged.

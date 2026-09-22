@@ -902,7 +902,7 @@ The server runs on stdio (stdin/stdout). Logs go to stderr at INFO level. No add
 | macOS | `~/Library/Application Support/space/space.log.YYYY-MM-DD` |
 | Linux | `~/.local/share/space/space.log.YYYY-MM-DD` |
 
-The last 3 days of logs are kept. Logs include workspace load timings, navigation events, and errors; no workspace names, file paths, or file content.
+The last 3 days of logs are kept. Logs include workspace load timings, navigation events, and errors: no workspace names, file paths, or file content.
 
 **Environment variables:**
 
