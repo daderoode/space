@@ -87,9 +87,9 @@ pub(crate) mod tests {
     /// here), and a gated one cannot create it at all until the gap has
     /// closed, so a gated test always runs the whole gap. Every other gated
     /// spawn in the test binary waits it out. Only the library's unit-test
-    /// binary compiles these tests, and it has four such tests: the three
+    /// binary compiles these tests, and it has three such tests: the two
     /// gated model tests, plus the by-name test in `lib.rs`. Together they
-    /// cost up to 0.8s of gate time. Timing bounds elsewhere in the suite
+    /// cost up to 0.6s of gate time. Timing bounds elsewhere in the suite
     /// leave room for that, and tightening one of them should account for it.
     /// A machine too loaded to start a child within the gap lets an ungated
     /// entry point pass one run, but never fails a gated one.
@@ -212,7 +212,7 @@ pub(crate) mod tests {
         assert!(!held, "a child started through `output` kept the pipe open");
     }
 
-    /// The control for the three tests above: with no gate at all, a child
+    /// The control for the two tests above: with no gate at all, a child
     /// started in the gap keeps the pipe, so the harness can see what they
     /// assert is absent. The gap may run to `HOLD_LIMIT` here because an
     /// ungated child starts, and closes the gap, within milliseconds. The
