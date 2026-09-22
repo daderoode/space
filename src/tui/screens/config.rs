@@ -26,7 +26,6 @@ pub fn tilde_expand(path: &str) -> String {
 #[derive(Debug)]
 pub struct ConfigField {
     pub label: &'static str,
-    #[allow(dead_code)]
     pub hint: &'static str, // grey subtext shown next to label, empty string if none
     pub value: String,
 }

@@ -308,7 +308,6 @@ impl ListJump {
 }
 
 /// A row in the flattened repo table (repo header or file entry).
-#[allow(dead_code)] // fields consumed by renderer (Task 5) and tests
 pub enum RepoRow<'a> {
     Repo {
         index: usize,

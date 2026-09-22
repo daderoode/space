@@ -19,7 +19,6 @@ pub struct Workspace {
 pub struct WorkspaceRepo {
     pub name: String,
     /// Absolute path to the worktree on disk. Used by the TUI (v0.2.0).
-    #[allow(dead_code)]
     pub path: PathBuf,
     pub branch: String,
     pub status: RepoStatus,
@@ -699,14 +698,15 @@ const _: () = assert!(
 /// with the fixed `UNATTENDED_FETCH_TIMEOUT`. When it does not succeed the outcome
 /// carries the failure and no branch work is attempted; the caller continues
 /// with local refs.
-#[allow(dead_code)] // public API; the TUI worker calls sync_repo_cancellable
+///
+/// Nothing in the app calls this: the TUI's worker calls
+/// `sync_repo_cancellable`. The tests do.
 pub fn sync_repo(repo_path: &Path) -> SyncOutcome {
     sync_repo_with_timeout(repo_path, UNATTENDED_FETCH_TIMEOUT)
 }
 
 /// `sync_repo` with an explicit fetch limit. The limit is a parameter so tests
 /// can use a short one; the user-facing value is `UNATTENDED_FETCH_TIMEOUT`.
-#[allow(dead_code)] // public API; the TUI worker calls sync_repo_cancellable
 pub fn sync_repo_with_timeout(repo_path: &Path, timeout: Duration) -> SyncOutcome {
     sync_repo_cancellable(repo_path, timeout, &AtomicBool::new(false))
 }
@@ -4238,9 +4238,8 @@ mod tests {
         const MARKER: &str = "SPACE_TEST_LC_ALL_INNER";
         if std::env::var_os(MARKER).is_none() {
             // libtest names a test by its path inside the crate, so the crate
-            // segment goes; the lib and the bin target both compile this
-            // module and both are named `space`, so the rest is the same
-            // name in either binary. A renamed target fails loudly below.
+            // segment goes. A name that matched nothing would run no test,
+            // which the second check below catches.
             let (_, in_crate) = module_path!().split_once("::").unwrap();
             let test_name = format!(
                 "{}::run_git_unattended_pins_lc_all_to_c_for_the_child",

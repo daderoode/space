@@ -45,7 +45,6 @@ pub fn find_repos_in(roots: &[PathBuf], max_depth: u32) -> Vec<PathBuf> {
 }
 
 /// Fuzzy-matches repo paths against a query string. Used in tests.
-#[allow(dead_code)]
 pub fn fuzzy_match(query: &str, repos: &[PathBuf]) -> Vec<PathBuf> {
     if query.is_empty() {
         return repos.to_vec();

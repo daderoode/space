@@ -131,7 +131,7 @@ impl FuzzyPicker {
         self
     }
 
-    #[allow(dead_code)]
+    /// The typed query. Nothing in the app reads it; the tests do.
     pub fn query(&self) -> &str {
         self.input.value()
     }

@@ -51,12 +51,10 @@ pub struct DiffLine {
 
 #[derive(Debug, Clone)]
 pub struct FileDiff {
-    #[allow(dead_code)]
     // returned by file_content_diff; renderer uses DiffViewerState.file_path instead
     pub path: String,
-    #[allow(dead_code)] // available for future rename display in the diff overlay
+    // available for future rename display in the diff overlay
     pub old_path: Option<String>,
-    #[allow(dead_code)]
     // renderer detects binary files via DiffLineKind::Binary lines, not this field
     pub is_binary: bool,
     pub lines: Vec<DiffLine>,
@@ -108,7 +106,6 @@ pub fn detect_base_branch(repo_path: &Path) -> String {
 }
 
 /// Count modified, staged, and untracked files using git2.
-#[allow(dead_code)] // used by integration tests (space::core::git); bin crate has private mod core
 pub fn repo_status(repo_path: &Path) -> Result<RepoStatus> {
     let repo = Repository::open(repo_path)
         .with_context(|| format!("opening repo at {}", repo_path.display()))?;
@@ -197,7 +194,7 @@ pub fn recent_branches(repo_path: &std::path::Path, limit: usize) -> Vec<BranchI
 }
 
 /// Return the `origin` remote URL for a repo, or `None` if unavailable.
-#[allow(dead_code)] // public API; called from integration tests and future callers
+/// Nothing in the app calls this; the integration tests do.
 pub fn remote_url(repo_path: &Path) -> Option<String> {
     let repo = Repository::open(repo_path).ok()?;
     let remote = repo.find_remote("origin").ok()?;
@@ -228,7 +225,6 @@ pub fn repo_display_info(repo_path: &Path) -> (Option<String>, Option<String>) {
 }
 
 /// Return the current checked-out branch name (or short hash for detached HEAD).
-#[allow(dead_code)] // used by integration tests (space::core::git); bin crate has private mod core
 pub fn current_branch(repo_path: &Path) -> Result<String> {
     let repo = Repository::open(repo_path)?;
     let head = repo.head()?;
@@ -319,8 +315,8 @@ pub fn ahead_behind_from_repo(repo: &Repository) -> Result<(usize, usize)> {
 /// the current branch (`origin/<branch>`, or its namesake on the other
 /// remote it tracks), or against `origin/HEAD` on a detached HEAD.
 /// Returns (0, 0) when that ref is absent or refused, or the repo has no
-/// remote.
-#[allow(dead_code)] // used by integration tests (space::core::git); bin crate has private mod core
+/// remote. Nothing in the app calls this, since it reads through
+/// `ahead_behind_from_repo`; the tests do.
 pub fn ahead_behind(repo_path: &Path) -> Result<(usize, usize)> {
     let repo = Repository::open(repo_path)?;
     ahead_behind_from_repo(&repo)
