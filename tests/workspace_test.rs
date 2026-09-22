@@ -4790,7 +4790,8 @@ fn a_pull_follows_a_namesake_on_a_remote_with_a_negative_refspec() {
 
 /// T18. A tag named like the branch makes `git symbolic-ref --short HEAD`
 /// answer `heads/feat`, a name with no `branch.heads/feat.*` keys; the pull
-/// still reads the branch's own tracking and fast-forwards to upstream.
+/// still reads the branch's own tracking, fast-forwards to upstream, and
+/// names the branch `feat`.
 #[test]
 fn a_pull_follows_a_namesake_though_a_tag_shares_the_branch_name() {
     let env = TestEnv::new();
@@ -4807,6 +4808,10 @@ fn a_pull_follows_a_namesake_though_a_tag_shares_the_branch_name() {
         PullOutcome::FastForwarded,
         "{}",
         result.message
+    );
+    assert_eq!(
+        result.message, "Fast-forwarded feat to upstream/feat (1 commit(s)).",
+        "named feat, not heads/feat"
     );
     assert_eq!(rev(&wt, "HEAD"), upstream_next, "at upstream's new tip");
 }
@@ -4833,4 +4838,36 @@ fn a_pull_refuses_a_branch_whose_remote_key_has_no_value() {
          nothing was pulled."
     );
     assert_eq!(rev(&wt, "HEAD"), f.upstream_feat, "feat is where it was");
+}
+
+/// T20. A `branch.<name>.remote` set twice is read as git reads it, by its
+/// last value: `origin` then `upstream` pulls from upstream, whose `feat`
+/// has moved on, and not from origin, whose `feat` has diverged.
+#[test]
+fn a_pull_reads_the_last_value_of_a_remote_key_set_twice() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = upstream_feat_space(&env, &f);
+    git_ok(
+        &f.repo,
+        &["config", "--replace-all", "branch.feat.remote", "origin"],
+    );
+    git_ok(
+        &f.repo,
+        &["config", "--add", "branch.feat.remote", "upstream"],
+    );
+    let origin_only = mint(&f.repo, &f.origin_feat, "origin-only");
+    publish(&f.repo, &f.origin, &origin_only, "feat");
+    let upstream_next = mint(&f.repo, &f.upstream_feat, "upstream-next");
+    publish(&f.repo, &upstream_bare(&f), &upstream_next, "feat");
+
+    let result = pull_repo(&wt);
+
+    assert_eq!(
+        result.outcome,
+        PullOutcome::FastForwarded,
+        "{}",
+        result.message
+    );
+    assert_eq!(rev(&wt, "HEAD"), upstream_next, "at upstream's new tip");
 }

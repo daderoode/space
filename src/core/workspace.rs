@@ -1067,6 +1067,27 @@ fn merge_in_progress(repo_path: &Path) -> std::io::Result<bool> {
     Ok(repo_path.join(path).exists())
 }
 
+/// The branch `HEAD` is on, named exactly (`refs/heads/` stripped), or
+/// `None` when it is on none. Not `current_branch_name`, whose `--short`
+/// answers `heads/<name>` when a tag shares the name: the pull names the
+/// branch in every message, and `git::head_upstream_at` reads its config
+/// keys by the exact name.
+fn head_branch_name(repo_path: &Path) -> Option<String> {
+    let out = spawn::output(
+        Command::new("git")
+            .args(["symbolic-ref", "--quiet", "HEAD"])
+            .current_dir(repo_path),
+    )
+    .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .strip_prefix("refs/heads/")
+        .map(String::from)
+}
+
 /// Whether `a` and `b` name the same commit in `repo_path`, as git's own
 /// lookup resolves each. False when either does not resolve.
 fn same_commit(repo_path: &Path, a: &str, b: &str) -> bool {
@@ -1110,7 +1131,7 @@ fn same_commit(repo_path: &Path, a: &str, b: &str) -> bool {
 pub fn pull_repo(repo_path: &Path) -> PullResult {
     // Detached HEAD is checked BEFORE the fetch: a detached-HEAD pull must
     // report without acting at all (not even mutating remote-tracking refs).
-    let branch = match current_branch_name(repo_path) {
+    let branch = match head_branch_name(repo_path) {
         Some(b) => b,
         None => {
             return PullResult {
