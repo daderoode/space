@@ -2956,6 +2956,9 @@ fn addable_repos(repos: &[PathBuf], ws: &Workspace) -> Vec<PathBuf> {
 /// `label` is the picker-title verb phrase naming what the selection does
 /// (e.g. "Branch" for switch/checkout flows, "Rebase onto" for the rebase
 /// target picker), so the title states the consequence of pressing Enter.
+/// A `/` in its query is part of the branch name (`SlashRule::Literal`):
+/// `upstream/feat` finds that remote-tracking branch, and a local branch
+/// named like a remote one stays listed beside it.
 pub(crate) fn build_branch_picker(
     repo_path: &std::path::Path,
     repo_name: &str,
@@ -2986,11 +2989,14 @@ pub(crate) fn build_branch_picker(
         })
         .collect();
 
-    Some(FuzzyPicker::new(
-        format!("{}  ({})  ENTER=select  ESC=back", label, repo_name),
-        items,
-        false,
-    ))
+    Some(
+        FuzzyPicker::new(
+            format!("{}  ({})  ENTER=select  ESC=back", label, repo_name),
+            items,
+            false,
+        )
+        .with_literal_slash(),
+    )
 }
 
 fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {

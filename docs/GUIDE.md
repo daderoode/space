@@ -291,7 +291,7 @@ The branches listed here and in the picker come from one repo: the selected repo
 
 ### Stage 5: Branch Name or Pick Branch (conditional)
 
-`New branch` opens a text input (`New branch name:`), filled in with the space name. While the field reads the space name, or nothing, it follows the space name: going back to Stage 1 and renaming the space renames the branch too, and a field you emptied is filled in again. A branch name you typed that differs from the space name is kept. `Show more...` (or `Pick a branch...` with no local branches) opens a fuzzy picker of all local and remote branches of that one repo. The branch picked is used in every repo. A branch picked as `<remote>/<name>`, from `origin` or any other remote the repo has configured (`upstream/<name>`), is checked out as a new local `<name>` tracking it, which git refuses in a repo that already has a local `<name>`, whichever remote that one tracks; pick `<name>` itself when the picker lists it. When the picker lists a local branch of that whole name too (`alice/fix` beside a remote `alice`), the local branch wins for any remote but origin: both rows check out the local branch, and the tracking form is not reachable from the picker in that repo (`git checkout -b fix --track refs/remotes/alice/fix` is the route; the bare `alice/fix` is ambiguous there and git refuses it).
+`New branch` opens a text input (`New branch name:`), filled in with the space name. While the field reads the space name, or nothing, it follows the space name: going back to Stage 1 and renaming the space renames the branch too, and a field you emptied is filled in again. A branch name you typed that differs from the space name is kept. `Show more...` (or `Pick a branch...` with no local branches) opens a fuzzy picker of all local and remote branches of that one repo; a `/` in its filter is part of the branch name, so a remote-tracking branch is found as `upstream/feat` (no `remotes/` in front) and a local one as `fix/login`. The branch picked is used in every repo. A branch picked as `<remote>/<name>`, from `origin` or any other remote the repo has configured (`upstream/<name>`), is checked out as a new local `<name>` tracking it, which git refuses in a repo that already has a local `<name>`, whichever remote that one tracks; pick `<name>` itself when the picker lists it. When the picker lists a local branch of that whole name too (`alice/fix` beside a remote `alice`), the local branch wins for any remote but origin: both rows check out the local branch, and the tracking form is not reachable from the picker in that repo (`git checkout -b fix --track refs/remotes/alice/fix` is the route; the bare `alice/fix` is ambiguous there and git refuses it).
 
 ### Stage 6: Creating
 
@@ -371,7 +371,7 @@ Powered by **nucleo 0.5** (the engine behind the Helix editor):
 - Smart case matching (case-insensitive until you type uppercase)
 - Smart Unicode normalization
 - Character-level match highlighting in the UI
-- Scope filtering by parent directory (`orgname/` prefix or `Ctrl-S` cycling)
+- Scope filtering by parent directory in the repo pickers and repo search (`orgname/` prefix, or `Ctrl-S` cycling in the repo pickers); in a branch picker a `/` is part of the branch name
 - Multi-select with `Tab` toggle
 
 **Navigating while filtering:** `↑`/`↓` are the only keys that move the
