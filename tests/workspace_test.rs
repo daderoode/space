@@ -5136,7 +5136,7 @@ fn switch_to_another_remotes_branch_refuses_a_local_branch_on_another_line() {
         .to_string();
 
     assert!(
-        err.contains("already exists and does not track upstream/feat"),
+        err.contains("feat exists and does not track upstream"),
         "the refusal names the pick, got {:?}",
         err
     );
@@ -5364,7 +5364,7 @@ fn switch_to_a_ref_no_refspec_maps_is_refused_except_for_origin() {
         .expect_err("no fetch refspec of upstream maps upstream/feat")
         .to_string();
     assert!(
-        err.contains("no fetch refspec of upstream maps refs/remotes/upstream/feat"),
+        err.contains("upstream/feat is not fetched by upstream"),
         "the refusal names the ref, got {:?}",
         err
     );
@@ -5408,7 +5408,7 @@ fn switch_to_a_ref_two_refspecs_map_is_refused_before_anything_is_written() {
         .to_string();
 
     assert!(
-        err.contains("several remotes' fetch refspecs map refs/remotes/upstream/feat"),
+        err.contains("upstream/feat is fetched by several remotes"),
         "the refusal names the ref, got {:?}",
         err
     );
@@ -5468,6 +5468,15 @@ fn switch_refused_by_the_worktree_leaves_no_new_branch_behind() {
         std::fs::read_to_string(wt.join("t41.txt")).unwrap(),
         "mine\n",
         "the user's file is untouched"
+    );
+    let remote_key = Command::new("git")
+        .args(["config", "--get", "branch.feat.remote"])
+        .current_dir(&f.repo)
+        .status()
+        .unwrap();
+    assert!(
+        !remote_key.success(),
+        "and no tracking config is left for a branch that is gone"
     );
 }
 
@@ -5608,4 +5617,133 @@ fn switch_refuses_an_unmappable_pick_when_another_remote_is_unreadable() {
 
     assert!(is_detached(&wt), "the worktree has not moved");
     assert!(!has_ref(&f.repo, "refs/heads/feat"), "no branch is made");
+}
+
+/// T20. The cleanup after a refused switch takes back only what it made. A
+/// `reference-transaction` hook plays another actor who advances the new
+/// `feat` to a commit of their own the moment `git branch` has made it; the
+/// switch to it is then refused (an untracked file the new tip would
+/// overwrite), and a delete by name would lose that commit from the ref.
+/// The cleanup deletes only while the ref still points where it was made,
+/// so the moved branch is kept and the error says so.
+#[test]
+fn switch_cleanup_keeps_a_new_branch_someone_moved_in_between() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let work = commit_adding_a_file(&f);
+    let wt = detached_wt(&env, &f, "t41-20");
+    std::fs::write(wt.join("t41.txt"), "mine\n").unwrap();
+    let marker = f._tmp.path().join("t41-20-race");
+    std::fs::write(&marker, "").unwrap();
+    let hook = f
+        .repo
+        .join(".git")
+        .join("hooks")
+        .join("reference-transaction");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\n[ \"$1\" = committed ] || exit 0\n\
+             [ -f '{m}' ] || exit 0\nrm -f '{m}'\ngit update-ref refs/heads/feat {w}\n",
+            m = marker.display(),
+            w = work
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let err = space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("the moved feat's tree would overwrite the untracked t41.txt")
+        .to_string();
+
+    assert!(!marker.exists(), "fixture: the other actor ran");
+    assert!(
+        err.contains("feat kept, it moved meanwhile"),
+        "the error says the branch was kept, got {:?}",
+        err
+    );
+    assert_eq!(
+        git_ok(&f.repo, &["rev-parse", "refs/heads/feat"]).trim(),
+        work,
+        "the other actor's commit is still on feat"
+    );
+    assert!(is_detached(&wt), "the worktree has not moved");
+    assert_eq!(
+        std::fs::read_to_string(wt.join("t41.txt")).unwrap(),
+        "mine\n",
+        "the user's file is untouched"
+    );
+}
+
+/// T21. A switch to a local branch that already exists never cleans
+/// anything up: here `feat` tracks the pick (so there is no early refusal),
+/// git refuses the switch for the worktree's own reason (an untracked file
+/// its tree would overwrite), and `feat` keeps its tip and its upstream.
+#[test]
+fn switch_to_an_existing_branch_git_refuses_leaves_the_branch_as_it_was() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let tip = commit_adding_a_file(&f);
+    git_ok(
+        &f.repo,
+        &[
+            "branch",
+            "-q",
+            "--track",
+            "feat",
+            "refs/remotes/upstream/feat",
+        ],
+    );
+    git_ok(&f.repo, &["update-ref", "refs/heads/feat", &tip]);
+    let wt = detached_wt(&env, &f, "t41-21");
+    std::fs::write(wt.join("t41.txt"), "mine\n").unwrap();
+
+    space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("feat's tree would overwrite the untracked t41.txt");
+
+    assert_eq!(
+        git_ok(&f.repo, &["rev-parse", "refs/heads/feat"]).trim(),
+        tip,
+        "feat keeps its tip"
+    );
+    assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/upstream/feat");
+    assert!(is_detached(&wt), "the worktree has not moved");
+}
+
+/// T22. A branch typed as new starts from HEAD and tracks nothing, whatever
+/// `branch.autoSetupMerge` says. On a HEAD that tracks `upstream/feat`,
+/// master's `git switch -c` copied that upstream under `inherit` and
+/// tracked `feat` itself under `always` (probed on git 2.50.1).
+#[test]
+fn switch_to_a_new_branch_tracks_nothing_whatever_auto_setup_merge_says() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.repo,
+        &[
+            "branch",
+            "-q",
+            "--track",
+            "feat",
+            "refs/remotes/upstream/feat",
+        ],
+    );
+    let wt = detached_wt(&env, &f, "t41-22");
+
+    for (mode, name) in [("inherit", "t41-inherit"), ("always", "t41-always")] {
+        git_ok(&f.repo, &["config", "branch.autoSetupMerge", mode]);
+        git_ok(&wt, &["switch", "-q", "feat"]);
+        space::core::workspace::switch_worktree_branch(&wt, name, true)
+            .unwrap_or_else(|e| panic!("{} under {}: {}", name, mode, e));
+        assert_eq!(head_symref(&wt), format!("refs/heads/{}", name));
+        assert_eq!(
+            upstream_of(&f.repo, name),
+            "",
+            "{} tracks nothing under autoSetupMerge {}",
+            name,
+            mode
+        );
+    }
 }

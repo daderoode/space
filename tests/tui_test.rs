@@ -11688,3 +11688,150 @@ mod push_remote_confirmation_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Ticket 41: the switch-branch refusals read in full on the status line.
+// ---------------------------------------------------------------------------
+
+fn t41_git(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Each of `switch_worktree_branch`'s three refusals, picked through the
+/// switch-branch picker of a real repo and shown by the app's own handler
+/// ("Switch failed: <reason>"), must read in full at the dashboard's
+/// documented 80-column minimum. `render_status_message` is an unwrapped
+/// one-row `Paragraph`, and the first wording of these refusals (84 to 91
+/// columns with these names) lost the reason off the end. The names are
+/// the sizes the wording is budgeted for: a remote of ten characters and a
+/// branch of twenty.
+#[test]
+fn switch_refusals_read_in_full_at_eighty_columns() {
+    use space::tui::screens::switch_branch::SwitchBranchStage;
+    const REMOTE: &str = "upstream-x";
+    const NAME: &str = "release-2026-09-rc1x";
+    let pick = format!("{}/{}", REMOTE, NAME);
+
+    for (shape, reason) in [
+        (
+            "local",
+            format!("{} exists and does not track {}", NAME, REMOTE),
+        ),
+        (
+            "unfetched",
+            format!("{} is not fetched by {}", pick, REMOTE),
+        ),
+        ("several", format!("{} is fetched by several remotes", pick)),
+    ] {
+        let env = TestEnv::new();
+        let repo = env.create_repo("switch-80-repo");
+        let bare = env.dir.path().join("remote.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        t41_git(&bare, &["init", "-q", "--bare", "-b", "main"]);
+        t41_git(&repo, &["remote", "add", REMOTE, bare.to_str().unwrap()]);
+        t41_git(&repo, &["push", "-q", REMOTE, &format!("main:{}", NAME)]);
+        t41_git(&repo, &["fetch", "-q", REMOTE]);
+        match shape {
+            "local" => t41_git(&repo, &["branch", "-q", "--no-track", NAME, "main"]),
+            "unfetched" => t41_git(
+                &repo,
+                &[
+                    "config",
+                    "--replace-all",
+                    &format!("remote.{}.fetch", REMOTE),
+                    &format!("+refs/heads/main:refs/remotes/{}/main", REMOTE),
+                ],
+            ),
+            _ => {
+                t41_git(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
+                t41_git(
+                    &repo,
+                    &[
+                        "config",
+                        "--add",
+                        "remote.origin.fetch",
+                        &format!("+refs/heads/*:refs/remotes/{}/*", REMOTE),
+                    ],
+                );
+            }
+        }
+
+        let ws = Workspace {
+            name: "switch-80-ws".to_string(),
+            path: env.workspaces_dir.clone(),
+            repos: vec![WorkspaceRepo {
+                name: "switch-80-repo".to_string(),
+                path: repo.clone(),
+                branch: "main".to_string(),
+                status: RepoStatus::default(),
+                ahead: 0,
+                behind: 0,
+            }],
+        };
+        let mut app = test_app_with_config(config_from_env(&env), vec![ws], vec![repo.clone()]);
+        app.load_selected_workspace_detail();
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('b')));
+        if let Screen::SwitchBranch(ref mut st) = app.screen {
+            st.strategy_idx = st.max_idx();
+        } else {
+            panic!("expected the switch-branch screen");
+        }
+        app.handle_key(key(KeyCode::Enter));
+        match app.screen {
+            Screen::SwitchBranch(ref st) => assert_eq!(st.stage, SwitchBranchStage::PickBranch),
+            _ => panic!("expected the switch-branch picker"),
+        }
+        // The remote's name alone, with no `/`: the picker reads a `/` in its
+        // query as a scope (`query_scope`), and the branch rows carry none.
+        for c in REMOTE.chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        match app.screen {
+            Screen::SwitchBranch(ref st) => {
+                let bp = st.branch_picker.as_ref().expect("branch picker present");
+                let highlighted = bp
+                    .filtered
+                    .get(bp.highlighted)
+                    .map(|&i| &bp.all_items[i].name);
+                assert_eq!(
+                    highlighted,
+                    Some(&pick),
+                    "fixture: the remote row is highlighted"
+                );
+            }
+            _ => panic!("expected the switch-branch picker"),
+        }
+        app.handle_key(key(KeyCode::Enter));
+
+        let expected = format!("Switch failed: {}", reason);
+        assert!(
+            expected.chars().count() <= 80,
+            "fixture: {:?} is within the budget",
+            expected
+        );
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some(expected.as_str()),
+            "the {} shape sets this status",
+            shape
+        );
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains(&expected),
+            "{:?} must read in full at 80 columns:\n{}",
+            expected,
+            rendered
+        );
+    }
+}
