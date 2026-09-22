@@ -607,10 +607,22 @@ fn add_unknown_name_refuses_before_the_tui() {
 /// U+2014 as UTF-8. Spelled as bytes so this file does not hold it.
 const EM_DASH: [u8; 3] = [0xE2, 0x80, 0x94];
 
-/// Whether `line` holds U+2014, raw or as a Rust `\u{...}` escape of it
-/// (any case, leading zeros or underscores).
+/// Other spellings that a tracked file type here turns into U+2014, in lower
+/// case and split so this file does not hold them: the four-digit escape of
+/// JSON, TOML and zsh, and the three HTML entities GitHub renders in Markdown.
+const EM_DASH_SPELLINGS: [&str; 4] = [
+    concat!("\\", "u2014"),
+    concat!("&", "mdash;"),
+    concat!("&", "#8212;"),
+    concat!("&", "#x2014;"),
+];
+
+/// Whether `line` holds U+2014: raw, as one of `EM_DASH_SPELLINGS` in any
+/// case, or as a Rust `\u{...}` escape of it (leading zeros or underscores).
 fn holds_em_dash(line: &[u8]) -> bool {
-    if line.windows(3).any(|w| w == EM_DASH) {
+    let lower = line.to_ascii_lowercase();
+    let holds = |needle: &[u8]| lower.windows(needle.len()).any(|w| w == needle);
+    if holds(&EM_DASH) || EM_DASH_SPELLINGS.iter().any(|s| holds(s.as_bytes())) {
         return true;
     }
     line.windows(3)
@@ -631,45 +643,71 @@ fn holds_em_dash(line: &[u8]) -> bool {
         })
 }
 
-/// House style: no tracked file holds an em dash (ticket 17). Reads every file
-/// `git ls-files` lists, from the working tree, and names each `path:line`.
+/// House style: no tracked file holds an em dash, in its name or its text
+/// (ticket 17). Reads every file `git ls-files` lists, from the working tree,
+/// and names each `path:line`.
 #[test]
 fn no_tracked_file_holds_an_em_dash() {
+    use std::os::unix::ffi::OsStrExt;
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let out = std::process::Command::new("git")
         .args(["ls-files", "-z"])
         .current_dir(root)
         .output()
-        .unwrap();
+        .unwrap_or_else(|e| panic!("cannot run git ls-files in {}: {e}", root.display()));
     assert!(
         out.status.success(),
         "git ls-files failed in {}: {}",
         root.display(),
         String::from_utf8_lossy(&out.stderr)
     );
-    let files: Vec<String> = out
+    let mut files: Vec<&[u8]> = out
         .stdout
         .split(|b| *b == 0)
         .filter(|p| !p.is_empty())
-        .map(|p| String::from_utf8_lossy(p).into_owned())
         .collect();
+    // A conflicted path is listed once per stage, next to each other.
+    files.dedup();
     assert!(
-        files.iter().any(|f| f == "tests/cli_test.rs"),
+        files.iter().any(|f| *f == b"tests/cli_test.rs"),
         "git ls-files in {} did not list this test's own file",
         root.display()
     );
     let mut hits = Vec::new();
-    for file in &files {
-        let bytes = match std::fs::read(root.join(file)) {
-            Ok(bytes) => bytes,
+    for file in files {
+        let name = String::from_utf8_lossy(file);
+        if holds_em_dash(file) {
+            hits.push(format!("{name}: (the file name)"));
+        }
+        // The name as git wrote it, bytes and all.
+        let path = root.join(std::ffi::OsStr::from_bytes(file));
+        match std::fs::symlink_metadata(&path) {
             // Deleted in the working tree, not yet staged.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => panic!("cannot read {file}: {e}"),
-        };
+            Err(e) => panic!("cannot stat {name}: {e}"),
+            // Git keeps a symlink as the text of its target, dangling or not.
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let target = std::fs::read_link(&path)
+                    .unwrap_or_else(|e| panic!("cannot read the link {name}: {e}"));
+                if holds_em_dash(target.as_os_str().as_bytes()) {
+                    hits.push(format!("{name}: (the symlink's target)"));
+                }
+                continue;
+            }
+            // A directory where a file was: no text of its own to read.
+            Ok(meta) if !meta.is_file() => continue,
+            Ok(_) => {}
+        }
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {name}: {e}"));
+        // Git's own test for a binary file: an image can hold the three bytes
+        // by chance.
+        if bytes[..bytes.len().min(8000)].contains(&0) {
+            continue;
+        }
         for (n, line) in bytes.split(|b| *b == b'\n').enumerate() {
             if holds_em_dash(line) {
                 hits.push(format!(
-                    "{file}:{}: {}",
+                    "{name}:{}: {}",
                     n + 1,
                     String::from_utf8_lossy(line).trim()
                 ));
