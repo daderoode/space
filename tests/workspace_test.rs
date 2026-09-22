@@ -5747,3 +5747,37 @@ fn switch_to_a_new_branch_tracks_nothing_whatever_auto_setup_merge_says() {
         );
     }
 }
+
+/// T23. The cleanup never deletes a branch a worktree has checked out. A
+/// post-checkout hook that exits 1 makes `git switch` report failure after
+/// it has switched: this worktree is then on the new `feat`, and deleting
+/// the ref (`update-ref -d` does not refuse a checked-out branch the way
+/// `git branch -D` does; probed) would leave HEAD on a missing ref. The
+/// branch is kept, HEAD stays on it, and the error says why.
+#[test]
+fn switch_cleanup_keeps_a_new_branch_that_is_checked_out() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = detached_wt(&env, &f, "t41-23");
+    let hook = f.repo.join(".git").join("hooks").join("post-checkout");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let err = space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("the post-checkout hook fails")
+        .to_string();
+
+    assert!(
+        err.contains("feat kept, it is checked out"),
+        "the error says the branch was kept, got {:?}",
+        err
+    );
+    assert_eq!(head_symref(&wt), "refs/heads/feat", "HEAD is on the branch");
+    assert_eq!(
+        git_ok(&f.repo, &["rev-parse", "refs/heads/feat"]).trim(),
+        f.upstream_feat,
+        "and the branch is still there"
+    );
+}

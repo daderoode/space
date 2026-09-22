@@ -503,6 +503,26 @@ pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) ->
         args.extend(["--", local_name, &remote_ref]);
         run_git_in(wt_path, &args)?;
         return run_git_in(wt_path, &["switch", "--", local_name]).map_err(|e| {
+            // Nor while any worktree has it checked out, `git branch -D`'s
+            // own rule, which `update-ref -d` does not keep (probed: it left
+            // HEAD on a missing ref). A switch git reports as failed after it
+            // has switched (a failing post-checkout hook) is on it, and so is
+            // anyone who checked it out meanwhile. Unreadable means kept.
+            let checked_out = spawn::output(
+                Command::new("git")
+                    .args(["worktree", "list", "--porcelain"])
+                    .current_dir(wt_path),
+            )
+            .map_or(true, |o| {
+                let line = format!("branch {}", local_ref);
+                !o.status.success()
+                    || String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .any(|l| l == line)
+            });
+            if checked_out {
+                return anyhow::anyhow!("{} kept, it is checked out: {}", local_name, e);
+            }
             if run_git_in(wt_path, &["update-ref", "-d", &local_ref, &start]).is_err() {
                 return anyhow::anyhow!("{} kept, it moved meanwhile: {}", local_name, e);
             }
