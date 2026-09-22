@@ -1846,35 +1846,6 @@ fn git_run(dir: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// A repo `name` whose `main` is published to a bare origin and fetched,
-/// so a new branch starts from `refs/remotes/origin/main`.
-fn repo_with_origin(env: &TestEnv, name: &str) -> PathBuf {
-    let repo = env.create_repo(name);
-    let bare = env.dir.path().join(format!("{}-origin.git", name));
-    std::fs::create_dir_all(&bare).unwrap();
-    git_run(&bare, &["init", "-q", "--bare", "-b", "main"]);
-    git_run(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
-    git_run(&repo, &["push", "-q", "origin", "main"]);
-    git_run(&repo, &["fetch", "-q", "origin"]);
-    repo
-}
-
-/// Every `branch.<name>.*` key in `repo`; empty when there is none (git
-/// exits 1 for no match).
-fn branch_keys(repo: &std::path::Path, branch: &str) -> String {
-    let out = std::process::Command::new("git")
-        .args(["config", "--get-regexp", &format!(r"^branch\.{}\.", branch)])
-        .current_dir(repo)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success() || out.status.code() == Some(1),
-        "git config --get-regexp failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
 /// N4 (ticket 45). Over MCP a new branch tracks nothing too, from
 /// `create_workspace` and from `add_repos`: both start it from
 /// `refs/remotes/origin/main`, where git's default `branch.autoSetupMerge`
@@ -1882,8 +1853,8 @@ fn branch_keys(repo: &std::path::Path, branch: &str) -> String {
 #[test]
 fn mcp_new_branches_track_nothing() {
     with_test_env(|env, server| {
-        let first = repo_with_origin(env, "first");
-        let second = repo_with_origin(env, "second");
+        let (first, _) = common::repo_with_origin(env, "first");
+        let (second, _) = common::repo_with_origin(env, "second");
         env.write_cache(&[first.clone(), second.clone()]);
 
         server
@@ -1915,7 +1886,7 @@ fn mcp_new_branches_track_nothing() {
                 repo.display()
             );
             assert_eq!(
-                branch_keys(repo, "fresh"),
+                common::branch_keys(repo, "fresh"),
                 "",
                 "{}: the new branch tracks nothing",
                 repo.display()

@@ -64,7 +64,9 @@ pub struct GitOpsState {
     /// Single-line commit message entered in the Committing stage.
     pub message_input: Input,
     /// Whether the current branch already has a configured upstream. Drives the
-    /// push routing: plain push when true, ConfirmPush (set upstream) when false.
+    /// push routing with `push_target`: ConfirmPush (set upstream) when false;
+    /// when true, a plain push, ConfirmPushRemote, or ConfirmPush for a branch
+    /// that tracks another branch of origin (`tracks_another_origin_branch`).
     pub has_upstream: bool,
     /// Where a bare `git push` of the current branch goes and what the branch
     /// tracks (`git::push_target`), when it has an upstream. A destination

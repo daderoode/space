@@ -2396,8 +2396,8 @@ fn run_gitop_worker(
                 success: result.success(),
             });
         }
-        // Push publishes the current branch (with `-u origin <branch>` when it
-        // has no upstream), reporting git's summary/rejection plus the flag.
+        // Push publishes the current branch (setting its upstream on origin
+        // when `set_upstream`), reporting git's summary/rejection plus the flag.
         crate::tui::actions::GitOp::Push { set_upstream } => {
             let result = crate::core::workspace::push_repo(&repo_path, set_upstream);
             // Push rejections are multi-line; send each line separately.

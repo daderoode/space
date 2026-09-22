@@ -363,8 +363,9 @@ pub fn is_on_branch(repo_path: &Path) -> bool {
 /// Returns true iff the current branch has a configured upstream tracking
 /// branch (`branch.upstream()` resolves). Returns false on detached HEAD, no
 /// upstream, a missing branch, or any error (e.g. the path is not a git repo).
-/// Used to decide whether a push must set the upstream with `-u origin
-/// <branch>` or can be a plain `git push`.
+/// Read with `push_target` to route a push: no upstream sets one on origin
+/// (`push_repo` with `set_upstream`); an upstream goes on to `push_target`,
+/// which can still route it there (ticket 45).
 pub fn has_upstream(repo_path: &Path) -> bool {
     let Ok(repo) = Repository::open(repo_path) else {
         return false;
@@ -401,17 +402,11 @@ pub fn has_upstream(repo_path: &Path) -> bool {
 /// treats an unknown destination on a branch with an upstream as a reason
 /// to ask, never as origin.
 ///
-/// `tracks_another_origin_branch` (ticket 45) is true when the branch
-/// tracks a branch of another name on origin (`branch.<name>.remote` is
-/// origin and `branch.<name>.merge` is not exactly one value,
-/// `refs/heads/<name>`) and its push goes to origin too. Every new-branch
-/// space made before ticket 45 is so (git set it to track its base). A bare
-/// push there is refused under `push.default=simple` and goes into that
-/// other branch under `upstream`, so the overlay offers `push -u origin
-/// <name>` instead. A branch whose push goes to another remote pushes under
-/// its own name (git's triangular push) and keeps the flag false, as does
-/// one tracking another remote that pushes to origin. A merge key that
-/// cannot be read makes the whole target unknown (`None`).
+/// `tracks_another_origin_branch` (ticket 45): the push goes to origin and
+/// `tracks_another_origin_branch_config` says a bare push there would be
+/// refused or would update a branch of another name. Every new-branch space
+/// made before ticket 45 is so (git set it to track its base), and the
+/// overlay offers to publish it under its own name instead.
 pub struct PushTarget {
     pub remote: String,
     pub tracks: String,
@@ -434,11 +429,10 @@ pub fn push_target(repo_path: &Path) -> Option<PushTarget> {
         .ok()??
         .to_string();
     let config = repo.config().ok()?;
-    let tracked_remote_key = format!("branch.{}.remote", name);
     let keys = [
         format!("branch.{}.pushRemote", name),
         "remote.pushDefault".to_string(),
-        tracked_remote_key.clone(),
+        format!("branch.{}.remote", name),
     ];
     let mut destination = None;
     for key in &keys {
@@ -452,18 +446,55 @@ pub fn push_target(repo_path: &Path) -> Option<PushTarget> {
         }
     }
     let remote = destination?;
-    // The upstream resolved, so the branch has a remote; one that cannot be
-    // read now, or a merge value that cannot, is unknown, not a namesake.
-    let tracked_remote = config.get_string(&tracked_remote_key).ok()?;
-    let merges = config_values(&config, &format!("branch.{}.merge", name)).ok()?;
-    let tracks_another_origin_branch = remote == "origin"
-        && tracked_remote == "origin"
-        && merges != [format!("refs/heads/{}", name)];
+    let tracks_another_origin_branch =
+        remote == "origin" && tracks_another_origin_branch_config(&config, &name)?;
     Some(PushTarget {
         remote,
         tracks,
         tracks_another_origin_branch,
     })
+}
+
+/// Whether a bare `git push` of `branch` to origin would be refused by git
+/// or would update a branch of another name there, read from the keys git's
+/// push reads (ticket 45). True when all of these hold:
+/// - the branch tracks origin (`branch.<name>.remote`, its last value);
+/// - it tracks exactly one branch there, and not its namesake: under
+///   `push.default=simple` git refuses to push to an upstream of another
+///   name, and under `upstream` it pushes into it. Several merge values are
+///   git's own refusal (`multiple upstream branches`), and `push -u` cannot
+///   replace them (it adds one more), so they are left to git;
+/// - `remote.origin.push` is not set: with it, a bare push follows those
+///   refspecs whatever `push.default` says;
+/// - `push.default` is not `current`, which pushes under the branch's own
+///   name.
+///
+/// The caller has already found that the push goes to origin. `None` when a
+/// key it reads cannot be read (not UTF-8, or set with no value), so the
+/// target is unknown and the overlay asks, never pushes.
+fn tracks_another_origin_branch_config(config: &git2::Config, branch: &str) -> Option<bool> {
+    let remote = config_values(config, &format!("branch.{}.remote", branch))
+        .ok()?
+        .pop();
+    if remote.as_deref() != Some("origin") {
+        return Some(false);
+    }
+    let merges = config_values(config, &format!("branch.{}.merge", branch)).ok()?;
+    if merges.len() != 1 || is_namesake(&merges, branch) {
+        return Some(false);
+    }
+    if !config_values(config, "remote.origin.push").ok()?.is_empty() {
+        return Some(false);
+    }
+    let push_default = config_values(config, "push.default").ok()?.pop();
+    Some(push_default.as_deref() != Some("current"))
+}
+
+/// Whether a branch's merge values name exactly its namesake,
+/// `refs/heads/<branch>`, and nothing else. Shared by `branch_upstream` and
+/// the push check so the rule cannot drift between pull and push.
+fn is_namesake(merges: &[String], branch: &str) -> bool {
+    merges == [format!("refs/heads/{}", branch)]
 }
 
 /// What pull, sync and status compare a local branch with (ticket 42).
@@ -528,7 +559,7 @@ pub fn branch_upstream(repo: &Repository, branch: &str) -> Upstream {
                 Ok(merges) => merges,
                 Err(reason) => return Upstream::Unreadable { reason },
             };
-            let namesake = merges == [format!("refs/heads/{}", branch)];
+            let namesake = is_namesake(&merges, branch);
             // A configured remote only: `git fetch -- <name>` reads any
             // other name as a path or URL. Asked of the list of names, not
             // `find_remote`, which fails to load a remote with a negative

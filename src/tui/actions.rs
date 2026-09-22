@@ -64,8 +64,9 @@ impl WorktreeParams {
 
 /// A git operation dispatched to the background git-ops worker.
 /// `Fetch` streams git's progress; `Pull` summarizes the classify/merge result;
-/// `Push { set_upstream }` publishes the current branch (with `-u origin
-/// <branch>` when it has no upstream yet); `Rebase { onto }` replays the current
+/// `Push { set_upstream }` publishes the current branch (setting an upstream on
+/// origin under the branch's own name when it has none, or tracks another
+/// branch of origin); `Rebase { onto }` replays the current
 /// branch onto `onto`, auto-aborting on conflict.
 ///
 /// Not `Copy`: `Rebase` carries an owned target, so call sites clone where they

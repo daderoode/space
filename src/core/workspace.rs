@@ -1437,11 +1437,11 @@ pub struct PushResult {
 
 /// Push the current branch of `repo_path`.
 ///
-/// - `set_upstream == true`  → `git push -u origin
-///   refs/heads/<branch>:refs/heads/<branch>` (first publish of a branch with
-///   no upstream, or of one tracking a branch of another name on origin;
-///   also records `origin/<branch>` as its upstream). The branch is named
-///   exactly, never `heads/<branch>`.
+/// - `set_upstream == true`  → `git -c push.default=current push -u origin
+///   refs/heads/<branch>` (first publish of a branch with no upstream, or of
+///   one tracking a branch of another name on origin; also records what it
+///   pushed to as the upstream). The branch is named exactly, never
+///   `heads/<branch>`.
 /// - `set_upstream == false` → `git push` (branch already has an upstream),
 ///   which git routes to the branch's own push destination
 ///   (`git::push_target`): origin for a branch that tracks origin, another
@@ -1464,16 +1464,22 @@ pub fn push_repo(repo_path: &Path, set_upstream: bool) -> PushResult {
     };
 
     let args: Vec<String> = if set_upstream {
-        // Both sides named (ticket 45): a refspec with no destination is
-        // resolved through `push.default`, and under `upstream` a branch
-        // that tracks origin's `main` would go into `main` even though the
-        // command names the branch. The source is qualified so a tag of the
-        // branch's name cannot make it ambiguous.
+        // git gives a refspec with no destination one in this order: from
+        // `remote.origin.push` when that maps the branch (a personal
+        // namespace such as `refs/heads/me/*`, which must still apply), else
+        // from `push.default=upstream` the branch it tracks, else its own
+        // name. Under `upstream` a branch tracking origin's `main` would go
+        // into `main` though the command names the branch (ticket 45), so
+        // this one push runs with `current`, which maps nothing. The source
+        // is qualified so a tag of the branch's name cannot make it
+        // ambiguous.
         vec![
+            "-c".to_string(),
+            "push.default=current".to_string(),
             "push".to_string(),
             "-u".to_string(),
             "origin".to_string(),
-            format!("refs/heads/{0}:refs/heads/{0}", branch),
+            format!("refs/heads/{}", branch),
         ]
     } else {
         vec!["push".to_string()]
@@ -2454,6 +2460,7 @@ fn add_worktree(
                 } else {
                     &local_base
                 };
+                unset_leftover_tracking(repo_path, branch_name)?;
                 // `--no-track` from either start point (ticket 45): the new
                 // branch tracks nothing until its first push sets its own
                 // name on origin. Under git's `branch.autoSetupMerge` it
@@ -2515,6 +2522,53 @@ fn add_worktree(
     }
 
     Ok(wt_path.to_path_buf())
+}
+
+/// Remove `branch.<name>.remote` and `branch.<name>.merge` for a branch the
+/// New-branch arm is about to create, having found no `refs/heads/<name>`
+/// (ticket 45). A branch deleted without `git branch -D`, such as by a
+/// `fetch --prune` through a refspec that writes `refs/heads/`, leaves them
+/// behind, and git hands them to a new branch of that name whatever
+/// `--no-track` says, so the new branch would track that old upstream and
+/// pull could merge it in. They belong to no branch, so they go. Other
+/// `branch.<name>.*` keys stay.
+///
+/// Asked of the config through git2 first, so the usual case (nothing left
+/// over) runs no git at all, and a path that is not a repository is left
+/// to the add, which reports why in git's own words. A key that is present,
+/// or whose presence cannot be read, is unset with `git config --unset-all`
+/// (exit 5 is git's "not set"); any other failure stops the add before
+/// anything is created, since the new branch would otherwise track it.
+fn unset_leftover_tracking(repo_path: &Path, branch: &str) -> Result<()> {
+    let Ok(repo) = git2::Repository::open(repo_path) else {
+        return Ok(());
+    };
+    let config = repo.config().ok();
+    for key in ["remote", "merge"] {
+        let key = format!("branch.{}.{}", branch, key);
+        let present = match config.as_ref().map(|c| c.multivar(&key, None)) {
+            Some(Ok(mut entries)) => entries.next().is_some(),
+            Some(Err(e)) if e.code() == git2::ErrorCode::NotFound => false,
+            _ => true,
+        };
+        if !present {
+            continue;
+        }
+        let out = spawn::output(
+            Command::new("git")
+                .args(["config", "--unset-all", &key])
+                .current_dir(repo_path),
+        )
+        .with_context(|| format!("failed to run git config --unset-all {}", key))?;
+        if !matches!(out.status.code(), Some(0) | Some(5)) {
+            anyhow::bail!(
+                "could not remove {} left by a deleted branch: {}",
+                key,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Whether the ref named exactly `refname` exists in `repo_path`. Callers
