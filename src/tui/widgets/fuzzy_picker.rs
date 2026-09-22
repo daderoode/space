@@ -69,7 +69,8 @@ fn shorten_remote_url(url: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlashRule {
     /// The text before the last `/` is a parent-directory scope: `acme/api`
-    /// is the `api` under `acme`. The repo pickers, repo search and go.
+    /// is the `api` under `acme`. The default from `new`: meant for the repo
+    /// pickers and repo search, and kept as it was by go and the space filter.
     Scope,
     /// A `/` is part of the name and is matched like any other character:
     /// `upstream/feat` and `fix/x` are branch names. The branch pickers.
@@ -701,6 +702,34 @@ mod tests {
         let mut picker = FuzzyPicker::new("test", items, true);
         picker.toggle_paths(&[PathBuf::from("/b/api"), PathBuf::from("/nowhere/web")]);
         assert_eq!(toggled_paths(&picker), vec!["/b/api".to_string()]);
+    }
+
+    /// The builder applies its rule to a query already typed, so a caller
+    /// that switches the rule after filtering does not keep stale rows.
+    #[test]
+    fn with_literal_slash_refilters_a_query_already_typed() {
+        let items = ["upstream/feat", "origin/feat"]
+            .iter()
+            .map(|name| PickerItem {
+                name: name.to_string(),
+                parent: "remote".to_string(),
+                full_path: PathBuf::new(),
+                branch: None,
+                remote_url: None,
+            })
+            .collect();
+        let mut picker = FuzzyPicker::new("test", items, false);
+        picker.input = picker.input.with_value("upstream/feat".into());
+        picker.refilter();
+        assert!(picker.filtered.is_empty(), "the scope rule finds nothing");
+
+        let picker = picker.with_literal_slash();
+        let names: Vec<&str> = picker
+            .filtered
+            .iter()
+            .map(|&i| picker.all_items[i].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["upstream/feat"]);
     }
 
     #[test]

@@ -12138,12 +12138,6 @@ mod branch_picker_slash_tests {
         app
     }
 
-    fn type_text(app: &mut App, text: &str) {
-        for c in text.chars() {
-            app.handle_key(key(KeyCode::Char(c)));
-        }
-    }
-
     /// Ctrl-U, then `text`: a fresh query typed into the open picker.
     fn retype(app: &mut App, text: &str) {
         app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
