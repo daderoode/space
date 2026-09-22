@@ -1,10 +1,8 @@
 use clap::{Parser, Subcommand};
+// The library's modules, not copies of them: `cli` reaches them as `crate::`.
+use space::{core, mcp, shell, tui};
 
 mod cli;
-mod core;
-mod mcp;
-mod shell;
-mod tui;
 
 // Keeps this binary's tests off the invoking user's git config (ticket 43).
 #[cfg(test)]
@@ -112,15 +110,38 @@ pub enum CompleteTarget {
 
 #[cfg(test)]
 mod tests {
-    /// The binary compiles its own copy of `core`. Its `core::spawn` must lock
-    /// the library's gate, the one the library's own copy locks, or a process
-    /// that reached both copies would have two gates.
+    use std::any::{Any, TypeId};
+
+    /// The `TypeId` of `value`'s type, which for a function is its own item type.
+    fn type_of<T: Any>(_value: &T) -> TypeId {
+        TypeId::of::<T>()
+    }
+
+    /// The binary takes `core`, `mcp`, `shell` and `tui` from the library
+    /// rather than compiling its own copies (ticket 29). A module compiled
+    /// twice gives each of its items two identities, so one item of each
+    /// module, reached as `crate::` and as `space::`, must be one type.
     #[test]
-    fn the_binarys_core_spawn_waits_on_the_library_gate() {
-        let gate = space::SPAWN_GATE.lock().unwrap_or_else(|e| e.into_inner());
-        assert!(
-            !crate::core::spawn::tests::a_spawn_starts_while(gate),
-            "a spawn started while space::SPAWN_GATE was held"
+    fn the_binary_uses_the_librarys_modules() {
+        assert_eq!(
+            TypeId::of::<crate::core::workspace::Workspace>(),
+            TypeId::of::<space::core::workspace::Workspace>(),
+            "the binary compiles its own copy of core"
+        );
+        assert_eq!(
+            TypeId::of::<crate::mcp::SpaceServer>(),
+            TypeId::of::<space::mcp::SpaceServer>(),
+            "the binary compiles its own copy of mcp"
+        );
+        assert_eq!(
+            type_of(&crate::shell::print_init),
+            type_of(&space::shell::print_init),
+            "the binary compiles its own copy of shell"
+        );
+        assert_eq!(
+            TypeId::of::<crate::tui::app::App>(),
+            TypeId::of::<space::tui::app::App>(),
+            "the binary compiles its own copy of tui"
         );
     }
 }

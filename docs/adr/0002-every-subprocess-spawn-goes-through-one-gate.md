@@ -79,18 +79,18 @@ site that skips the gate shows up as one more clippy warning.
   piped whatever the caller set, because a `Command` cannot report what was
   set. Callers set no stdio of their own.
 - **There is one gate per process by construction.** The gate is
-  `space::SPAWN_GATE`, a static in `lib.rs`. `main.rs` compiles its own copy of
-  `core` rather than using the library's, so one process can hold two copies
-  of `spawn.rs`.
-  - Both copies lock the gate through the crate name. The library aliases
+  `space::SPAWN_GATE`, a static in `lib.rs`, and a process holds one copy of
+  `spawn.rs`: the binary takes `core` from the library.
+  - `spawn.rs` locks the gate through the crate name. The library aliases
     itself to that name (`extern crate self as space`), so the name resolves
-    to the library from either copy, and both lock the same static.
+    to the library from inside it as well as from the binary and the tests.
   - The model tests hold the gate by that name, so an entry point that locked
     anything else would fail them.
-  - Two more tests lock it by name from outside `spawn.rs`, one in `lib.rs` and
-    one in `main.rs`. Each checks that `core::spawn` cannot start a child
-    meanwhile, so a copy that went back to a static of its own would fail in
-    the library or in the binary.
+  - A test in `lib.rs` locks it by name from outside `spawn.rs` and checks
+    that `core::spawn` cannot start a child meanwhile, so a `spawn.rs` that
+    went back to a static of its own would fail it.
+  - A test in `main.rs` checks that the binary's `core`, `mcp`, `shell` and
+    `tui` are the library's, by comparing one type from each.
 - **Test fixtures start git directly.** They allow the lint at their module or
   crate root, so the gate does not order them against anything. The effect
   runs both ways:
@@ -145,3 +145,16 @@ spawn now goes through `spawn::output` (stdin null, both streams piped) or the
 unattended run's `spawn`, so no child writes to the terminal or the MCP stream.
 A caller that needs inherited streams adds the entry back behind the gate, with
 its reason, rather than calling `Command::status` directly.
+
+## Status update, 2026-09-22
+
+Until ticket 29, `main.rs` compiled its own copy of `core`, `mcp`, `shell` and
+`tui`, so one process could hold two copies of `spawn.rs`. The binary's unit
+tests did, once `tests/common/git_isolation.rs` (ticket 43) started its child
+through the library's copy. The gate was put in `lib.rs` and locked through the
+crate name so that both copies would lock one static. The binary now uses the
+library's modules and holds no copy of its own. The gate stays where it is,
+still locked through the crate name. The alias also stays, because
+`git_isolation.rs`, included in the library's unit tests, names
+`space::core::spawn`. `main.rs`'s by-name test reached a test helper that the
+library does not compile as a dependency, so a type check replaces it.

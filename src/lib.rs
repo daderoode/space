@@ -1,7 +1,7 @@
-// `core::spawn` locks `::space::SPAWN_GATE`. The binary compiles its own copy
-// of `core` rather than using this library's. In the binary, Cargo makes the
-// name `space` mean this library; this alias makes it mean this library here
-// too, so both copies of `core::spawn` lock the one static below.
+// Lets code compiled into this library name it `space`, as the binary and the
+// integration tests do. `core::spawn` locks `::space::SPAWN_GATE`, and
+// `tests/common/git_isolation.rs`, included below in this library's unit
+// tests, starts its child through `space::core::spawn`.
 extern crate self as space;
 
 pub mod core;
@@ -10,9 +10,9 @@ pub mod mcp;
 pub mod shell;
 pub mod tui;
 
-/// The one spawn gate in the process; see `core::spawn`. It lives in the one
-/// file only the library compiles, so both copies of `core::spawn` lock this
-/// same static.
+/// The one spawn gate in the process; see `core::spawn`. The binary takes
+/// `core` from this library rather than compiling its own copy (ticket 29),
+/// so a process holds one `core::spawn`, and it locks this static by name.
 #[doc(hidden)]
 pub static SPAWN_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -24,8 +24,7 @@ mod git_isolation;
 #[cfg(test)]
 mod tests {
     /// `core::spawn` locks this static and not one of its own: held by name
-    /// here, in the one file only the library compiles, it keeps a spawn from
-    /// starting.
+    /// here, outside `spawn.rs`, it keeps a spawn from starting.
     #[test]
     fn core_spawn_waits_on_the_library_gate() {
         let gate = crate::SPAWN_GATE.lock().unwrap_or_else(|e| e.into_inner());
