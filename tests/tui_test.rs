@@ -12248,7 +12248,8 @@ mod branch_picker_slash_tests {
 
     /// T2. The create flow's branch picker (Stage 5, `Show more...`),
     /// reached with real keys: Enter hands the typed row to the worker and
-    /// the space is created on it.
+    /// the space is created on a `feat` that tracks `upstream`, not origin
+    /// (both remotes carry `feat`).
     #[test]
     fn create_picker_finds_a_remote_branch_typed_with_its_slash() {
         let env = TestEnv::new();
@@ -12273,16 +12274,25 @@ mod branch_picker_slash_tests {
             _ => panic!("expected the create flow to be running"),
         }
         pump_creating(&mut app);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Created workspace 't46-create'")
+        );
         let worktree = env.workspaces_dir.join("t46-create").join(REPO);
         assert_eq!(
             git_out(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
             "feat"
         );
+        assert_eq!(
+            git_out(&worktree, &["config", "branch.feat.remote"]),
+            "upstream",
+            "the worktree's branch tracks the typed remote, not origin"
+        );
     }
 
     /// T3. The add flow's branch picker (`Show more...`), reached with real
     /// keys: Enter hands the typed row to the worker and the repo is added
-    /// on it.
+    /// on a `feat` that tracks `upstream`, not origin.
     #[test]
     fn add_picker_finds_a_remote_branch_typed_with_its_slash() {
         let env = TestEnv::new();
@@ -12311,10 +12321,19 @@ mod branch_picker_slash_tests {
             _ => panic!("expected the add flow to be running"),
         }
         pump_creating(&mut app);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Added repos to workspace 't46-add'")
+        );
         let worktree = env.workspaces_dir.join("t46-add").join(REPO);
         assert_eq!(
             git_out(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
             "feat"
+        );
+        assert_eq!(
+            git_out(&worktree, &["config", "branch.feat.remote"]),
+            "upstream",
+            "the worktree's branch tracks the typed remote, not origin"
         );
     }
 
