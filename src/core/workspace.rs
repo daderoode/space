@@ -2541,9 +2541,11 @@ fn add_worktree(
 /// refuses it. A key that is present, or whose presence cannot be read, is
 /// unset with `git config --unset-all` (exit 5 is git's "not set"), which
 /// edits the repository's own config only, so the keys are read again
-/// afterwards: one still set (in the global config or an included file) or
-/// one git could not remove stops the add before anything is created, since
-/// the new branch would otherwise track it.
+/// afterwards: one still set (in the system or global config, an included
+/// file, or a `config.worktree`) or one git could not remove stops the add
+/// before anything is created, since the new branch could otherwise track
+/// it. A repository git2 cannot open (a config it cannot parse, a reftable
+/// ref store) skips all of this, as it skips a path that is no repository.
 fn unset_leftover_tracking(repo_path: &Path, branch: &str) -> Result<()> {
     let Ok(repo) = git2::Repository::open(repo_path) else {
         return Ok(());
@@ -2592,8 +2594,8 @@ fn unset_leftover_tracking(repo_path: &Path, branch: &str) -> Result<()> {
     if let Some(key) = set_keys(&reopened).first() {
         anyhow::bail!(
             "{} is left by a deleted branch in a config outside this repository's own \
-             (the global config or an included file), so the new branch would track it; \
-             remove it there first",
+             .git/config (the system or global config, an included file, or a \
+             config.worktree), so the new branch could track it; remove it there first",
             key
         );
     }

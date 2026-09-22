@@ -367,10 +367,12 @@ impl GitOpsState {
     }
 
     /// Fire the menu item at `idx`, moving the highlight to it. Fetch/pull/push
-    /// run through the async Running stage (push confirms first unless the
-    /// branch tracks its namesake on origin and pushes there); commit and log
-    /// open their own stages synchronously; rebase opens the guarded
-    /// pre-flight/target/confirm sub-flow.
+    /// run through the async Running stage. Push confirms first when the
+    /// branch has no upstream, when its push destination is not origin or
+    /// cannot be read, or when `tracks_another_origin_branch` is set, and
+    /// otherwise pushes straight away; commit and log open their own stages
+    /// synchronously; rebase opens the guarded pre-flight/target/confirm
+    /// sub-flow.
     fn fire(&mut self, idx: usize) -> ScreenAction {
         self.selected = idx;
         match idx {

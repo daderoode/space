@@ -5355,6 +5355,10 @@ fn a_new_branch_never_drops_the_tracking_of_a_branch_it_cannot_read() {
     let loose = f.repo.join(".git").join("refs").join("heads").join("newb");
     assert!(loose.is_file(), "fixture: newb is a loose ref");
     std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o000)).unwrap();
+    assert!(
+        std::fs::File::open(&loose).is_err(),
+        "fixture: the ref file cannot be read (a run as root can read it)"
+    );
 
     let created = create_worktree(
         &f.repo,
