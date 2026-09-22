@@ -4786,10 +4786,12 @@ fn switch_refused_by_the_worktree_leaves_no_new_branch_behind() {
 
 /// T17. A remote carrying a negative fetch refspec (`^refs/heads/<x>`, read
 /// by git since 2.29) cannot be read by libgit2 at all, so the mapper count
-/// is unknown; git's own default then decides, as on master, and here it
-/// tracks. Counting the unreadable remote as mapping nothing (head
-/// `9bbc48f`) made the branch untracked; with the no-mapper refusal for
-/// other remotes it would refuse a pick git tracks.
+/// is unknown. Another remote's pick then passes `--track`: git tracks
+/// upstream's `feat` even under `branch.autoSetupMerge=false`, and refuses
+/// the `only-up` the negative refspec excludes (`not a branch`) with no
+/// branch made. Counting the unreadable remote as mapping nothing (head
+/// `9bbc48f`) made `feat` untracked; git's bare default (head `520c11f`)
+/// would have made both untracked under this config.
 #[test]
 fn switch_lets_git_decide_when_a_remotes_refspecs_cannot_be_read() {
     let env = common::TestEnv::new();
@@ -4803,6 +4805,7 @@ fn switch_lets_git_decide_when_a_remotes_refspecs_cannot_be_read() {
             "^refs/heads/only-up",
         ],
     );
+    git_ok(&f.repo, &["config", "branch.autoSetupMerge", "false"]);
     assert!(
         git2::Repository::open(&f.repo)
             .unwrap()
@@ -4810,11 +4813,112 @@ fn switch_lets_git_decide_when_a_remotes_refspecs_cannot_be_read() {
             .is_err(),
         "fixture: libgit2 cannot read upstream's refspecs"
     );
+    assert!(
+        has_ref(&f.repo, "refs/remotes/upstream/only-up"),
+        "fixture: the excluded ref is still there"
+    );
     let wt = detached_wt(&env, &f, "t41-17");
 
     space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
-        .expect("git tracks upstream/feat by default");
-
+        .expect("git tracks upstream/feat");
     assert_eq!(head_symref(&wt), "refs/heads/feat");
     assert_eq!(upstream_of(&f.repo, "feat"), "refs/remotes/upstream/feat");
+
+    space::core::workspace::switch_worktree_branch(&wt, "upstream/only-up", false)
+        .expect_err("no refspec of upstream maps the excluded only-up");
+    assert_eq!(
+        head_symref(&wt),
+        "refs/heads/feat",
+        "the worktree has not moved"
+    );
+    assert!(!has_ref(&f.repo, "refs/heads/only-up"), "no branch is made");
+}
+
+/// T18. Origin's pick under an unknown count keeps git's default, as on
+/// master; another remote carries a negative refspec, so the count is
+/// unknown. With origin not configured (a hand-made
+/// `refs/remotes/origin/feat`) the new `feat` is untracked, where `--track`
+/// would be git's `not a branch`. Once origin is configured and its refspec
+/// maps the ref, the default tracks it, where `--no-track` would not.
+#[test]
+fn switch_to_origin_under_an_unknown_count_keeps_gits_default() {
+    let env = common::TestEnv::new();
+    let repo = env.create_repo("plain");
+    git_ok(&repo, &["remote", "add", "other", "/nonexistent/other"]);
+    git_ok(
+        &repo,
+        &["config", "--add", "remote.other.fetch", "^refs/heads/skip"],
+    );
+    assert!(
+        git2::Repository::open(&repo)
+            .unwrap()
+            .find_remote("other")
+            .is_err(),
+        "fixture: libgit2 cannot read other's refspecs"
+    );
+    let head = git_ok(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+    git_ok(&repo, &["update-ref", "refs/remotes/origin/feat", &head]);
+    let wt = create_worktree(
+        &repo,
+        &env.workspaces_dir,
+        "t41-18",
+        &BranchStrategy::DetachedHead,
+    )
+    .unwrap();
+
+    space::core::workspace::switch_worktree_branch(&wt, "origin/feat", false)
+        .expect("origin/feat becomes a branch, as on master");
+    assert_eq!(head_symref(&wt), "refs/heads/feat");
+    assert_eq!(upstream_of(&repo, "feat"), "", "tracking nothing");
+
+    git_ok(&repo, &["remote", "add", "origin", "/nonexistent/origin"]);
+    git_ok(&repo, &["update-ref", "refs/remotes/origin/feat2", &head]);
+    space::core::workspace::switch_worktree_branch(&wt, "origin/feat2", false)
+        .expect("origin/feat2 becomes a tracking branch");
+    assert_eq!(head_symref(&wt), "refs/heads/feat2");
+    assert_eq!(upstream_of(&repo, "feat2"), "refs/remotes/origin/feat2");
+}
+
+/// T19. An unreadable refspec on an unrelated remote (here `a/b`) makes the
+/// count unknown for every pick, so the no-mapper refusal cannot see that
+/// upstream's own refspec, narrowed to `main`, maps nothing. The pick still
+/// passes `--track`, and git refuses it (`not a branch`) with nothing made,
+/// as the known-count refusal would. Head `520c11f` used git's bare default
+/// here and made an untracked `feat` (the delta review of `520c11f`).
+#[test]
+fn switch_refuses_an_unmappable_pick_when_another_remote_is_unreadable() {
+    let env = common::TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "--replace-all",
+            "remote.upstream.fetch",
+            "+refs/heads/main:refs/remotes/upstream/main",
+        ],
+    );
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "--add",
+            "remote.a/b.fetch",
+            "^refs/heads/unrelated",
+        ],
+    );
+    assert!(
+        git2::Repository::open(&f.repo)
+            .unwrap()
+            .find_remote("a/b")
+            .is_err(),
+        "fixture: libgit2 cannot read a/b's refspecs"
+    );
+    let wt = detached_wt(&env, &f, "t41-19");
+
+    space::core::workspace::switch_worktree_branch(&wt, "upstream/feat", false)
+        .expect_err("no refspec maps upstream/feat");
+
+    assert!(is_detached(&wt), "the worktree has not moved");
+    assert!(!has_ref(&f.repo, "refs/heads/feat"), "no branch is made");
 }

@@ -382,8 +382,9 @@ fn run_git_in(cwd: &Path, args: &[&str]) -> Result<()> {
 ///   With no local `<x>`, the remote-tracking ref becomes a new local `<x>` tracking it,
 ///   made with `git branch` before the switch so a refusal leaves the worktree as it was.
 ///   It is refused when several remotes' fetch refspecs map the ref, or when none does for
-///   a remote other than origin; origin with none gets an untracked branch, as on master,
-///   and so does git's own default decide when libgit2 cannot read a remote's refspecs.
+///   a remote other than origin; origin with none gets an untracked branch, as on master.
+///   When libgit2 cannot read a remote's refspecs, another remote's pick is made with
+///   `--track` (git tracks it or refuses it) and origin's with git's default, as on master.
 ///   With neither ref, git reports the name and guesses no remote.
 ///
 /// Every ref is asked for exactly (`ref_exists`) and the start point is the qualified
@@ -442,10 +443,13 @@ pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) ->
         // the create path). Origin with none (no config, or a narrowed
         // refspec) gets `--no-track`, the untracked branch master made.
         //
-        // The count is unknown when libgit2 cannot read a remote's refspecs
-        // (it refuses the whole remote over one negative refspec,
-        // `^refs/heads/<x>`, which git has read since 2.29); then git decides
-        // with its default, as it did on master.
+        // The count is unknown when libgit2 cannot read any one remote's
+        // refspecs (it refuses the whole remote over one negative refspec,
+        // `^refs/heads/<x>`, which git has read since 2.29). Then another
+        // remote's pick passes `--track`, so git tracks it whatever
+        // `branch.autoSetupMerge` says, or refuses it cleanly (`not a
+        // branch`) when no refspec maps the ref; origin's pick gets git's
+        // default, as it did on master.
         let mappers: Option<usize> = git2::Repository::open(wt_path).ok().and_then(|repo| {
             remotes.iter().try_fold(0, |n, name| {
                 let maps =
@@ -471,6 +475,7 @@ pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) ->
         match mappers {
             Some(1) => args.push("--track"),
             Some(_) => args.push("--no-track"),
+            None if remote != DEFAULT_REMOTE => args.push("--track"),
             None => {}
         }
         // The branch first, then the switch to it. `git switch -c` rewrites
