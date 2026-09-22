@@ -12014,8 +12014,8 @@ fn switch_refusals_read_in_full_at_eighty_columns() {
             Screen::SwitchBranch(ref st) => assert_eq!(st.stage, SwitchBranchStage::PickBranch),
             _ => panic!("expected the switch-branch picker"),
         }
-        // The remote's name alone, with no `/`: the picker reads a `/` in its
-        // query as a scope (`query_scope`), and the branch rows carry none.
+        // The remote's name alone singles out its one row; the full
+        // `<remote>/<name>` would too, since ticket 46.
         for c in REMOTE.chars() {
             app.handle_key(key(KeyCode::Char(c)));
         }
@@ -12053,6 +12053,381 @@ fn switch_refusals_read_in_full_at_eighty_columns() {
             rendered.contains(&expected),
             "{:?} must read in full at 80 columns:\n{}",
             expected,
+            rendered
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ticket 46: a `/` in a branch picker's query is part of the branch name.
+// ---------------------------------------------------------------------------
+
+mod branch_picker_slash_tests {
+    use super::*;
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+    use space::tui::screens::add::AddStage;
+    use space::tui::screens::create::CreateStage;
+    use space::tui::screens::gitops::GitOpsStage;
+    use space::tui::screens::switch_branch::SwitchBranchStage;
+    use space::tui::widgets::fuzzy_picker::FuzzyPicker;
+
+    const REPO: &str = "t46-repo";
+
+    fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A repo whose branch pickers list five rows: `main` (current),
+    /// `fix/local-x` (a local branch with a slash), and `origin/feat`,
+    /// `origin/main` and `upstream/feat`. Both remotes carry `feat`, so a
+    /// query that names one remote must not list the other's row.
+    fn two_remote_repo(env: &TestEnv) -> PathBuf {
+        let repo = env.create_repo(REPO);
+        for (remote, refspecs) in [
+            ("origin", &["main:feat", "main:main"][..]),
+            ("upstream", &["main:feat"][..]),
+        ] {
+            let bare = env.dir.path().join(format!("{}.git", remote));
+            std::fs::create_dir_all(&bare).unwrap();
+            t41_git(&bare, &["init", "-q", "--bare", "-b", "main"]);
+            t41_git(&repo, &["remote", "add", remote, bare.to_str().unwrap()]);
+            for refspec in refspecs {
+                t41_git(&repo, &["push", "-q", remote, refspec]);
+            }
+            t41_git(&repo, &["fetch", "-q", remote]);
+        }
+        t41_git(&repo, &["branch", "-q", "fix/local-x", "main"]);
+        repo
+    }
+
+    fn space_holding(env: &TestEnv, repo: &std::path::Path) -> Workspace {
+        Workspace {
+            name: "t46-ws".to_string(),
+            path: env.workspaces_dir.clone(),
+            repos: vec![WorkspaceRepo {
+                name: REPO.to_string(),
+                path: repo.to_path_buf(),
+                branch: "main".to_string(),
+                status: RepoStatus::default(),
+                ahead: 0,
+                behind: 0,
+            }],
+        }
+    }
+
+    /// The dashboard with the repo row focused, as `b` and `G` need it.
+    fn repo_pane_app(env: &TestEnv, repo: &std::path::Path) -> App {
+        let mut app = test_app_with_config(
+            config_from_env(env),
+            vec![space_holding(env, repo)],
+            vec![repo.to_path_buf()],
+        );
+        app.load_selected_workspace_detail();
+        app.focus = Pane::Right;
+        app
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    /// Ctrl-U, then `text`: a fresh query typed into the open picker.
+    fn retype(app: &mut App, text: &str) {
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        type_text(app, text);
+    }
+
+    /// Down past the last row of a strategy list (it clamps there, on
+    /// `Show more...` or `Pick a branch...`), then Enter.
+    fn open_branch_picker_from_strategies(app: &mut App) {
+        for _ in 0..20 {
+            app.handle_key(key(KeyCode::Down));
+        }
+        app.handle_key(key(KeyCode::Enter));
+    }
+
+    /// Whichever branch picker the app is showing.
+    fn branch_picker(app: &App) -> &FuzzyPicker {
+        let picker = match &app.screen {
+            Screen::SwitchBranch(st) if st.stage == SwitchBranchStage::PickBranch => {
+                st.branch_picker.as_ref()
+            }
+            Screen::CreateWorkspace(st) if st.stage == CreateStage::PickBranch => {
+                st.branch_picker.as_ref()
+            }
+            Screen::AddRepos(st) if st.stage == AddStage::PickBranch => st.branch_picker.as_ref(),
+            Screen::GitOps(st) if st.stage == GitOpsStage::RebasePickTarget => {
+                st.rebase_picker.as_ref()
+            }
+            _ => None,
+        };
+        picker.expect("a branch picker is open")
+    }
+
+    /// The listed rows, top first, as `name (label)`.
+    fn rows(picker: &FuzzyPicker) -> Vec<String> {
+        picker
+            .filtered
+            .iter()
+            .map(|&i| {
+                let item = &picker.all_items[i];
+                format!("{} ({})", item.name, item.parent)
+            })
+            .collect()
+    }
+
+    /// The typed remote branch is the one row, drawn at 80x24 with its count
+    /// and with no scope line (a branch picker binds no `Ctrl-S` and has no
+    /// scope to show).
+    fn assert_upstream_feat_alone(app: &App, flow: &str) {
+        assert_eq!(
+            rows(branch_picker(app)),
+            vec!["upstream/feat (remote)".to_string()],
+            "{}: `upstream/feat` lists that remote-tracking branch alone",
+            flow
+        );
+        let rendered = render_text(app, 80, 24);
+        assert!(
+            rendered.contains("> upstream/feat") && rendered.contains("1/5 matched"),
+            "{}: the query and its one match are drawn at 80x24:\n{}",
+            flow,
+            rendered
+        );
+        assert!(
+            !rendered.contains("scope:"),
+            "{}: a branch picker draws no scope line:\n{}",
+            flow,
+            rendered
+        );
+    }
+
+    /// T1. The switch-branch picker (`b`, `Pick a branch...`) finds a
+    /// remote-tracking branch typed as git prints it, and a local branch
+    /// with a slash; Enter switches to the typed row through the app's own
+    /// handler.
+    #[test]
+    fn switch_picker_finds_a_branch_typed_with_its_slash() {
+        let env = TestEnv::new();
+        let repo = two_remote_repo(&env);
+        let mut app = repo_pane_app(&env, &repo);
+        app.handle_key(key(KeyCode::Char('b')));
+        open_branch_picker_from_strategies(&mut app);
+
+        type_text(&mut app, "fix/local-x");
+        assert_eq!(
+            rows(branch_picker(&app)),
+            vec!["fix/local-x (local)".to_string()],
+            "a local branch with a slash is found by its name"
+        );
+
+        retype(&mut app, "upstream/feat");
+        assert_upstream_feat_alone(&app, "switch");
+
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Switched t46-repo to upstream/feat")
+        );
+        assert_eq!(
+            git_out(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feat"
+        );
+        assert_eq!(
+            git_out(&repo, &["config", "branch.feat.remote"]),
+            "upstream",
+            "the new local branch tracks the typed remote, not origin"
+        );
+    }
+
+    /// T2. The create flow's branch picker (Stage 5, `Show more...`),
+    /// reached with real keys: Enter hands the typed row to the worker and
+    /// the space is created on it.
+    #[test]
+    fn create_picker_finds_a_remote_branch_typed_with_its_slash() {
+        let env = TestEnv::new();
+        let repo = two_remote_repo(&env);
+        let mut app = test_app_with_config(config_from_env(&env), vec![], vec![repo.clone()]);
+        app.handle_key(key(KeyCode::Char('c')));
+        type_text(&mut app, "t46-create");
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Enter));
+        drain_sync(&mut app);
+        open_branch_picker_from_strategies(&mut app);
+
+        type_text(&mut app, "upstream/feat");
+        assert_upstream_feat_alone(&app, "create");
+
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(st.picked_branch.as_deref(), Some("upstream/feat"));
+            }
+            _ => panic!("expected the create flow to be running"),
+        }
+        pump_creating(&mut app);
+        let worktree = env.workspaces_dir.join("t46-create").join(REPO);
+        assert_eq!(
+            git_out(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feat"
+        );
+    }
+
+    /// T3. The add flow's branch picker (`Show more...`), reached with real
+    /// keys: Enter hands the typed row to the worker and the repo is added
+    /// on it.
+    #[test]
+    fn add_picker_finds_a_remote_branch_typed_with_its_slash() {
+        let env = TestEnv::new();
+        let repo = two_remote_repo(&env);
+        std::fs::create_dir_all(env.workspaces_dir.join("t46-add")).unwrap();
+        let space = Workspace {
+            name: "t46-add".to_string(),
+            path: env.workspaces_dir.join("t46-add"),
+            repos: vec![],
+        };
+        let mut app = test_app_with_config(config_from_env(&env), vec![space], vec![repo.clone()]);
+        app.handle_key(key(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Enter));
+        drain_sync(&mut app);
+        open_branch_picker_from_strategies(&mut app);
+
+        type_text(&mut app, "upstream/feat");
+        assert_upstream_feat_alone(&app, "add");
+
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::AddRepos(st) => {
+                assert_eq!(st.picked_branch.as_deref(), Some("upstream/feat"));
+            }
+            _ => panic!("expected the add flow to be running"),
+        }
+        pump_creating(&mut app);
+        let worktree = env.workspaces_dir.join("t46-add").join(REPO);
+        assert_eq!(
+            git_out(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "feat"
+        );
+    }
+
+    /// T4. The rebase target picker (`G`, `r`, Enter): Enter takes the typed
+    /// row to the confirmation. The rebase itself is not run.
+    #[test]
+    fn rebase_onto_picker_finds_a_remote_branch_typed_with_its_slash() {
+        let env = TestEnv::new();
+        let repo = two_remote_repo(&env);
+        let mut app = repo_pane_app(&env, &repo);
+        app.handle_key(key(KeyCode::Char('G')));
+        app.handle_key(key(KeyCode::Char('r')));
+        app.handle_key(key(KeyCode::Enter));
+
+        type_text(&mut app, "upstream/feat");
+        assert_upstream_feat_alone(&app, "rebase onto");
+
+        app.handle_key(key(KeyCode::Enter));
+        match &app.screen {
+            Screen::GitOps(st) => {
+                assert_eq!(st.stage, GitOpsStage::RebaseConfirm);
+                assert_eq!(st.rebase_onto.as_deref(), Some("upstream/feat"));
+            }
+            _ => panic!("expected the git ops overlay"),
+        }
+    }
+
+    /// T5. A local branch may be named like a remote-tracking one (a local
+    /// `upstream/feat` beside the remote `upstream`'s `feat`). Typing that
+    /// name lists both rows: a leading `<remote>/` is not a filter to that
+    /// remote's rows, which would hide the local branch exactly when its
+    /// full name is typed.
+    #[test]
+    fn a_local_branch_named_like_a_remote_branch_stays_listed() {
+        let env = TestEnv::new();
+        let repo = env.create_repo(REPO);
+        let bare = env.dir.path().join("upstream.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        t41_git(&bare, &["init", "-q", "--bare", "-b", "main"]);
+        t41_git(
+            &repo,
+            &["remote", "add", "upstream", bare.to_str().unwrap()],
+        );
+        t41_git(&repo, &["push", "-q", "upstream", "main:feat"]);
+        t41_git(&repo, &["fetch", "-q", "upstream"]);
+        t41_git(&repo, &["branch", "-q", "upstream/feat", "main"]);
+
+        let mut app = repo_pane_app(&env, &repo);
+        app.handle_key(key(KeyCode::Char('b')));
+        open_branch_picker_from_strategies(&mut app);
+        type_text(&mut app, "upstream/feat");
+
+        let mut listed = rows(branch_picker(&app));
+        listed.sort();
+        assert_eq!(
+            listed,
+            vec![
+                "upstream/feat (local)".to_string(),
+                "upstream/feat (remote)".to_string()
+            ]
+        );
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("upstream/feat  (local)")
+                && rendered.contains("upstream/feat  (remote)")
+                && rendered.contains("2/3 matched"),
+            "both rows are drawn at 80x24:\n{}",
+            rendered
+        );
+    }
+
+    /// T6. The repo picker keeps its parent-directory scope: `acme/api` is
+    /// the `api` under `acme`, not the `api` under `other`, and the scope
+    /// line says so.
+    #[test]
+    fn repo_picker_still_reads_a_slash_as_a_parent_directory_scope() {
+        let env = TestEnv::new();
+        let acme_api = env.create_repo("acme/api");
+        let other_api = env.create_repo("other/api");
+        let acme_web = env.create_repo("acme/web");
+        let mut app = test_app_with_config(
+            config_from_env(&env),
+            vec![],
+            vec![acme_api.clone(), other_api, acme_web],
+        );
+        app.handle_key(key(KeyCode::Char('c')));
+        type_text(&mut app, "t46-repos");
+        app.handle_key(key(KeyCode::Enter));
+        type_text(&mut app, "acme/api");
+
+        match &app.screen {
+            Screen::CreateWorkspace(st) => {
+                assert_eq!(st.stage, CreateStage::PickRepos);
+                let listed: Vec<&PathBuf> = st
+                    .picker
+                    .filtered
+                    .iter()
+                    .map(|&i| &st.picker.all_items[i].full_path)
+                    .collect();
+                assert_eq!(listed, vec![&acme_api]);
+            }
+            _ => panic!("expected the create flow's repo picker"),
+        }
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains("scope: acme/") && rendered.contains("1/3 matched"),
+            "the scope line and the one match are drawn at 80x24:\n{}",
             rendered
         );
     }

@@ -65,6 +65,17 @@ fn shorten_remote_url(url: &str) -> String {
     url.to_string()
 }
 
+/// What a `/` in the query means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlashRule {
+    /// The text before the last `/` is a parent-directory scope: `acme/api`
+    /// is the `api` under `acme`. The repo pickers, repo search and go.
+    Scope,
+    /// A `/` is part of the name and is matched like any other character:
+    /// `upstream/feat` and `fix/x` are branch names. The branch pickers.
+    Literal,
+}
+
 pub struct FuzzyPicker {
     pub prompt: String,
     pub input: Input,
@@ -73,6 +84,7 @@ pub struct FuzzyPicker {
     pub highlighted: usize,      // index into filtered
     pub toggled: HashSet<usize>, // indices into all_items
     pub multi: bool,
+    pub slash: SlashRule,
     pub scope: Option<String>,
     pub available_scopes: Vec<String>,
     pub scope_idx: usize,
@@ -99,6 +111,7 @@ impl FuzzyPicker {
             highlighted: 0,
             toggled: HashSet::new(),
             multi,
+            slash: SlashRule::Scope,
             scope: None,
             available_scopes: scopes,
             scope_idx: 0,
@@ -108,14 +121,27 @@ impl FuzzyPicker {
         picker
     }
 
+    /// Read a `/` in the query as part of the name (`SlashRule::Literal`), as
+    /// a branch picker must: its rows are branch names such as
+    /// `upstream/feat`, and a local branch may be named like a remote one.
+    pub fn with_literal_slash(mut self) -> Self {
+        self.slash = SlashRule::Literal;
+        self.refilter();
+        self
+    }
+
     #[allow(dead_code)]
     pub fn query(&self) -> &str {
         self.input.value()
     }
 
-    /// Returns the query stripped of any scope prefix (text after last `/`)
+    /// Returns the query stripped of any scope prefix (text after last `/`);
+    /// the whole query under `SlashRule::Literal`.
     fn fuzzy_query(&self) -> &str {
         let q = self.input.value();
+        if self.slash == SlashRule::Literal {
+            return q;
+        }
         if let Some(pos) = q.rfind('/') {
             &q[pos + 1..]
         } else {
@@ -123,8 +149,12 @@ impl FuzzyPicker {
         }
     }
 
-    /// Extract scope from query (text before and including last `/`)
+    /// Extract scope from query (text before and including last `/`); never
+    /// one under `SlashRule::Literal`.
     pub fn query_scope(&self) -> Option<String> {
+        if self.slash == SlashRule::Literal {
+            return None;
+        }
         let q = self.input.value();
         if let Some(pos) = q.rfind('/') {
             let scope_part = &q[..pos];
