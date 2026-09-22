@@ -11711,10 +11711,11 @@ fn t41_git(dir: &std::path::Path, args: &[&str]) {
 /// switch-branch picker of a real repo and shown by the app's own handler
 /// ("Switch failed: <reason>"), must read in full at the dashboard's
 /// documented 80-column minimum. `render_status_message` is an unwrapped
-/// one-row `Paragraph`, and the first wording of these refusals (84 to 91
-/// columns with these names) lost the reason off the end. The names are
-/// the sizes the wording is budgeted for: a remote of ten characters and a
-/// branch of twenty.
+/// one-row `Paragraph`, and the first wording of these refusals lost the
+/// reason off the end (84 to 91 columns already with a remote `upstream`
+/// and a branch `feat`). The names here are the sizes the wording is
+/// budgeted for, a remote of ten characters and a branch of twenty; the
+/// longest line is then 79 columns.
 #[test]
 fn switch_refusals_read_in_full_at_eighty_columns() {
     use space::tui::screens::switch_branch::SwitchBranchStage;
