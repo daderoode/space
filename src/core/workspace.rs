@@ -692,7 +692,8 @@ const _: () = assert!(
 /// since only origin is fetched here. A branch that tracks anything else on
 /// a remote other than origin is left alone. Branches with local commits
 /// ahead, diverged, or currently checked out are left untouched and the
-/// refusals are reported as skips.
+/// refusals are reported as skips. A forwarded branch keeps what it tracks,
+/// including nothing.
 ///
 /// The fetch runs under the unattended-run policy (see `fetch_origin_unattended`)
 /// with the fixed `UNATTENDED_FETCH_TIMEOUT`. When it does not succeed the outcome
@@ -745,12 +746,17 @@ pub fn sync_repo_cancellable(
         }
         // `target` is the ref the comparison read, fully qualified, so the
         // branch moves to exactly what it was found behind (ticket 42).
+        // `--no-track` keeps every `branch.<name>.*` key as it was (ticket
+        // 45): without it git re-applies `branch.autoSetupMerge` to the
+        // remote-tracking target, so a branch that tracks nothing would
+        // track it, one tracking origin's base would be re-pointed, and a
+        // second merge value would gain a third.
         // `LC_ALL=C` pins git's output language so `parse_skip_reason` sees
         // the English refusal; a localized git would turn every skip into
         // `Other`.
         let out = spawn::output(
             Command::new("git")
-                .args(["branch", "-f", &branch, &target])
+                .args(["branch", "-f", "--no-track", &branch, &target])
                 .env("LC_ALL", "C")
                 .current_dir(repo_path),
         );
@@ -1550,8 +1556,11 @@ pub struct PushResult {
 
 /// Push the current branch of `repo_path`.
 ///
-/// - `set_upstream == true`  → `git push -u origin <branch>` (first publish of a
-///   branch with no upstream; also records the tracking ref).
+/// - `set_upstream == true`  → `git -c push.default=current push -u origin
+///   refs/heads/<branch>` (first publish of a branch with no upstream, or of
+///   one tracking a branch of another name on origin; also records what it
+///   pushed to as the upstream). The branch is named exactly, never
+///   `heads/<branch>`.
 /// - `set_upstream == false` → `git push` (branch already has an upstream),
 ///   which git routes to the branch's own push destination
 ///   (`git::push_target`): origin for a branch that tracks origin, another
@@ -1563,7 +1572,7 @@ pub struct PushResult {
 /// `success == false` with git's rejection text in `message`, so callers can
 /// surface why the push was refused (typically: pull first).
 pub fn push_repo(repo_path: &Path, set_upstream: bool) -> PushResult {
-    let branch = match current_branch_name(repo_path) {
+    let branch = match head_branch_name(repo_path) {
         Some(b) => b,
         None => {
             return PushResult {
@@ -1574,11 +1583,22 @@ pub fn push_repo(repo_path: &Path, set_upstream: bool) -> PushResult {
     };
 
     let args: Vec<String> = if set_upstream {
+        // git gives a refspec with no destination one in this order: from
+        // `remote.origin.push` when that maps the branch (a personal
+        // namespace such as `refs/heads/me/*`, which must still apply), else
+        // from `push.default=upstream` the branch it tracks, else its own
+        // name. Under `upstream` a branch tracking origin's `main` would go
+        // into `main` though the command names the branch (ticket 45), so
+        // this one push runs with `current`, which maps nothing. The source
+        // is qualified so a tag of the branch's name cannot make it
+        // ambiguous.
         vec![
+            "-c".to_string(),
+            "push.default=current".to_string(),
             "push".to_string(),
             "-u".to_string(),
             "origin".to_string(),
-            branch.clone(),
+            format!("refs/heads/{}", branch),
         ]
     } else {
         vec!["push".to_string()]
@@ -2559,8 +2579,25 @@ fn add_worktree(
                 } else {
                     &local_base
                 };
+                unset_leftover_tracking(repo_path, branch_name)?;
+                // `--no-track` from either start point (ticket 45): the new
+                // branch tracks nothing until its first push sets its own
+                // name on origin. Under git's `branch.autoSetupMerge` it
+                // would track the base (`origin/<base>` by default; with
+                // `always` the local base, with `inherit` whatever the base
+                // tracks), and a bare `git push` of it is then refused, or
+                // under `push.default=upstream` goes into the base.
                 git_worktree_add(
-                    &["worktree", "add", "-b", branch_name, "--", &wt, start_point],
+                    &[
+                        "worktree",
+                        "add",
+                        "--no-track",
+                        "-b",
+                        branch_name,
+                        "--",
+                        &wt,
+                        start_point,
+                    ],
                     repo_path,
                 )?;
             }
@@ -2604,6 +2641,84 @@ fn add_worktree(
     }
 
     Ok(wt_path.to_path_buf())
+}
+
+/// Remove `branch.<name>.remote` and `branch.<name>.merge` for a branch the
+/// New-branch arm is about to create (ticket 45). A branch deleted without
+/// `git branch -D`, such as by a `fetch --prune` through a refspec that
+/// writes `refs/heads/`, leaves them behind, and git hands them to a new
+/// branch of that name whatever `--no-track` says, so the new branch would
+/// track that old upstream and pull could merge it in. They belong to no
+/// branch, so they go. Other `branch.<name>.*` keys stay.
+///
+/// Read through git2, so the usual case (nothing left over) runs no git at
+/// all, and a path that is not a repository is left to the add, which
+/// reports why in git's own words. Keys go only when git2 confirms
+/// `refs/heads/<name>` is absent: the arm's own probe (`ref_exists`) reads
+/// any failure as absence, and a branch git cannot read (an unreadable
+/// loose ref) is still a branch whose tracking must stay; the add then
+/// refuses it. A key that is present, or whose presence cannot be read, is
+/// unset with `git config --unset-all` (exit 5 is git's "not set"), which
+/// edits the repository's own config only, so the keys are read again
+/// afterwards: one still set (in the system or global config, an included
+/// file, or a `config.worktree`) or one git could not remove stops the add
+/// before anything is created, since the new branch could otherwise track
+/// it. A repository git2 cannot open (a config it cannot parse, a reftable
+/// ref store) skips all of this, as it skips a path that is no repository.
+fn unset_leftover_tracking(repo_path: &Path, branch: &str) -> Result<()> {
+    let Ok(repo) = git2::Repository::open(repo_path) else {
+        return Ok(());
+    };
+    match repo.find_reference(&format!("refs/heads/{}", branch)) {
+        Err(e) if e.code() == git2::ErrorCode::NotFound => {}
+        _ => return Ok(()),
+    }
+    let keys = [
+        format!("branch.{}.remote", branch),
+        format!("branch.{}.merge", branch),
+    ];
+    let set_keys = |repo: &git2::Repository| -> Vec<String> {
+        let config = repo.config().ok();
+        keys.iter()
+            .filter(|key| match config.as_ref().map(|c| c.multivar(key, None)) {
+                Some(Ok(mut entries)) => entries.next().is_some(),
+                Some(Err(e)) if e.code() == git2::ErrorCode::NotFound => false,
+                _ => true,
+            })
+            .cloned()
+            .collect()
+    };
+    let leftover = set_keys(&repo);
+    if leftover.is_empty() {
+        return Ok(());
+    }
+    for key in &leftover {
+        let out = spawn::output(
+            Command::new("git")
+                .args(["config", "--unset-all", key])
+                .current_dir(repo_path),
+        )
+        .with_context(|| format!("failed to run git config --unset-all {}", key))?;
+        if !matches!(out.status.code(), Some(0) | Some(5)) {
+            anyhow::bail!(
+                "could not remove {} left by a deleted branch: {}",
+                key,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+    // A fresh open, so nothing cached from before the unset is read.
+    let reopened = git2::Repository::open(repo_path)
+        .with_context(|| format!("failed to reopen {}", repo_path.display()))?;
+    if let Some(key) = set_keys(&reopened).first() {
+        anyhow::bail!(
+            "{} is left by a deleted branch in a config outside this repository's own \
+             .git/config (the system or global config, an included file, or a \
+             config.worktree), so the new branch could track it; remove it there first",
+            key
+        );
+    }
+    Ok(())
 }
 
 /// Whether the ref named exactly `refname` exists in `repo_path`. Callers
@@ -5328,9 +5443,10 @@ mod tests {
     }
 
     /// T3: tags named like the base and like `origin/<base>` do not shadow
-    /// the start point; the branch starts at `origin/main` and tracks it,
-    /// as it does with no tags (git sets upstream from a remote-tracking
-    /// start point).
+    /// the start point; the branch starts at `origin/main` and tracks
+    /// nothing, as it does with no tags (the add passes `--no-track`, so
+    /// git's `branch.autoSetupMerge` does not make it track the base,
+    /// ticket 45).
     #[test]
     fn new_branch_starts_at_the_base_branch_not_a_tag_of_its_name() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5352,8 +5468,8 @@ mod tests {
         );
         assert_eq!(
             upstream_of(&wt, "fresh"),
-            "refs/remotes/origin/main",
-            "the local branch tracks origin/main"
+            "",
+            "the local branch tracks nothing"
         );
     }
 
@@ -8114,7 +8230,7 @@ mod tests {
             );
             // Which argv form ran is pinned by the upstream it left: the
             // `--track` forms set it to origin/feat, while the new-branch
-            // form off the base would set origin/main. Without this the
+            // form off the base sets none (ticket 45). Without this the
             // new-branch arm could silently drift to the base form and
             // still pass. The plain form is not distinguished: git's DWIM
             // treats a branch that exists only as one remote-tracking ref

@@ -257,3 +257,60 @@ pub fn key(code: ratatui::crossterm::event::KeyCode) -> ratatui::crossterm::even
 pub fn shift_key(code: ratatui::crossterm::event::KeyCode) -> ratatui::crossterm::event::KeyEvent {
     ratatui::crossterm::event::KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::SHIFT)
 }
+
+/// Every `branch.<branch>.*` key in `repo` and its value, one `key value`
+/// line each, in the order git lists them; empty when there is none. Read
+/// from `git config --list -z` and matched on the exact subsection, so a
+/// branch `a` does not collect `a.b`'s keys and no name is read as a regex.
+pub fn branch_keys(repo: &Path, branch: &str) -> String {
+    let out = Command::new("git")
+        .args(["config", "--list", "-z"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git config --list failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let prefix = format!("branch.{}.", branch);
+    String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter_map(|entry| entry.split_once('\n'))
+        .filter(|(key, _)| {
+            key.strip_prefix(&prefix)
+                .is_some_and(|variable| !variable.contains('.'))
+        })
+        .map(|(key, value)| format!("{} {}\n", key, value))
+        .collect()
+}
+
+/// A repo `name` under the env's repos dir whose `main` is published to a
+/// bare origin beside it and fetched, so a new branch there starts from
+/// `refs/remotes/origin/main`. Returns the repo and the bare origin.
+pub fn repo_with_origin(env: &TestEnv, name: &str) -> (PathBuf, PathBuf) {
+    let repo = env.create_repo(name);
+    let origin = env.dir.path().join(format!("{}-origin.git", name));
+    std::fs::create_dir_all(&origin).unwrap();
+    let run = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    run(&origin, &["init", "-q", "--bare", "-b", "main"]);
+    run(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    run(&repo, &["push", "-q", "origin", "main"]);
+    run(&repo, &["fetch", "-q", "origin"]);
+    (repo, origin)
+}
