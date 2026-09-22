@@ -457,7 +457,7 @@ space checks out the branch in each repo; where the repo has no local `feature/p
 space rm review-payment-v2
 ```
 
-`space rm` removes the worktrees, not branches, so the local `feature/payment-v2` stays in each repo until you delete it. Delete it before a later review if the branch may have been rebased or force-pushed since: the sync fast-forwards a local branch only when it is strictly behind origin, so a rebased one keeps its old commits.
+`space rm` removes the worktrees, not branches, so the local `feature/payment-v2` stays in each repo until you delete it. Delete it before a later review if the branch may have been rebased or force-pushed since: the sync fast-forwards a local branch only when it is strictly behind the remote branch it is compared with (origin's, or for a branch made from another remote's branch, that remote's), so a rebased one keeps its old commits.
 
 ---
 

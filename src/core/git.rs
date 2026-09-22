@@ -478,13 +478,11 @@ pub fn branch_upstream(repo: &Repository, branch: &str) -> Upstream {
             }
         }
     };
-    let read = |key: String| match config.get_string(&key) {
-        Ok(value) => Ok(Some(value)),
-        Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
-        Err(e) => Err(format!("{}: {}", key, e.message())),
-    };
-    let remote = match read(format!("branch.{}.remote", branch)) {
-        Ok(remote) => remote,
+    // The last value, as git reads it; a value that cannot be read, or a
+    // key with no value at all, is unreadable (`get_string` would read a
+    // bare `remote` line as a remote named nothing).
+    let remote = match config_values(&config, &format!("branch.{}.remote", branch)) {
+        Ok(mut values) => values.pop(),
         Err(reason) => return Upstream::Unreadable { reason },
     };
     let remote = match remote {
@@ -502,8 +500,14 @@ pub fn branch_upstream(repo: &Repository, branch: &str) -> Upstream {
             };
             let namesake = merges == [format!("refs/heads/{}", branch)];
             // A configured remote only: `git fetch -- <name>` reads any
-            // other name as a path or URL.
-            if namesake && repo.find_remote(&remote).is_ok() {
+            // other name as a path or URL. Asked of the list of names, not
+            // `find_remote`, which fails to load a remote with a negative
+            // fetch refspec (libgit2 1.8) though git has it.
+            let configured = repo
+                .remotes()
+                .map(|names| names.iter().flatten().any(|name| name == remote))
+                .unwrap_or(false);
+            if namesake && configured {
                 remote
             } else {
                 return Upstream::Refused {
@@ -518,13 +522,24 @@ pub fn branch_upstream(repo: &Repository, branch: &str) -> Upstream {
     }
 }
 
-/// `branch_upstream` for a path; a repo that does not open is unreadable.
-pub fn branch_upstream_at(repo_path: &Path, branch: &str) -> Upstream {
-    match Repository::open(repo_path) {
-        Ok(repo) => branch_upstream(&repo, branch),
-        Err(e) => Upstream::Unreadable {
-            reason: e.message().to_string(),
-        },
+/// `branch_upstream` for the branch `HEAD` is on in `repo_path`, named the
+/// way its config keys are (`refs/heads/` stripped). Not `symbolic-ref
+/// --short`, which answers `heads/<name>` when a tag shares the name. A
+/// repo that does not open, or a `HEAD` that is not on a branch, is
+/// unreadable.
+pub fn head_upstream_at(repo_path: &Path) -> Upstream {
+    let unreadable = |reason: String| Upstream::Unreadable { reason };
+    let repo = match Repository::open(repo_path) {
+        Ok(repo) => repo,
+        Err(e) => return unreadable(e.message().to_string()),
+    };
+    let head = match repo.head() {
+        Ok(head) => head,
+        Err(e) => return unreadable(e.message().to_string()),
+    };
+    match head.shorthand() {
+        Some(name) if head.is_branch() => branch_upstream(&repo, name),
+        _ => unreadable("HEAD is not on a branch".to_string()),
     }
 }
 

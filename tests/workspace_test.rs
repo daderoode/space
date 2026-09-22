@@ -4381,7 +4381,12 @@ fn a_pull_refuses_an_upstream_of_another_name_on_another_remote() {
     assert_eq!(rev(&wt, "HEAD"), main, "fix is where it was");
     assert!(
         !ref_present(&f.repo, "refs/remotes/origin/fix"),
-        "and nothing was fetched"
+        "and nothing was fetched from origin"
+    );
+    assert!(
+        !wt.join(git_ok(&wt, &["rev-parse", "--git-path", "FETCH_HEAD"]).trim())
+            .exists(),
+        "or from anywhere"
     );
 }
 
@@ -4717,6 +4722,114 @@ fn a_pull_refuses_a_branch_whose_merge_key_has_no_value() {
     assert_eq!(
         result.message,
         "Could not read what feat tracks (branch.feat.merge: set with no value); \
+         nothing was pulled."
+    );
+    assert_eq!(rev(&wt, "HEAD"), f.upstream_feat, "feat is where it was");
+}
+
+/// T16. A local branch named `upstream/feat` (the guide's `alice/fix` beside
+/// a remote `alice`) wins git's lookup of the short name over
+/// `refs/remotes/upstream/feat`, so the merge arm must not hand git the
+/// short name when it names another commit: upstream's commit is merged,
+/// the local branch's is not.
+#[test]
+fn a_pull_merges_the_remote_branch_though_a_local_branch_shares_its_short_name() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = upstream_feat_space(&env, &f);
+    let decoy = mint(&f.repo, &f.origin_feat, "local-decoy");
+    git_ok(&f.repo, &["branch", "upstream/feat", &decoy]);
+    let upstream_next = mint(&f.repo, &f.upstream_feat, "upstream-next");
+    publish(&f.repo, &upstream_bare(&f), &upstream_next, "feat");
+    git_ok(&wt, &["commit", "-q", "--allow-empty", "-m", "mine"]);
+
+    let result = pull_repo(&wt);
+
+    assert_eq!(result.outcome, PullOutcome::Merged, "{}", result.message);
+    assert!(
+        is_ancestor(&wt, &upstream_next, "HEAD"),
+        "upstream's commit is merged"
+    );
+    assert!(
+        !is_ancestor(&wt, &decoy, "HEAD"),
+        "the local branch named upstream/feat is not"
+    );
+}
+
+/// T17. A remote whose fetch refspecs include a negative one
+/// (`^refs/heads/wip/*`, which git accepts) is still a remote the repo has:
+/// libgit2 cannot load it (`find_remote` fails), but it is listed, and a
+/// branch tracking its namesake there is pulled from it.
+#[test]
+fn a_pull_follows_a_namesake_on_a_remote_with_a_negative_refspec() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = upstream_feat_space(&env, &f);
+    git_ok(
+        &f.repo,
+        &[
+            "config",
+            "--add",
+            "remote.upstream.fetch",
+            "^refs/heads/wip/*",
+        ],
+    );
+    let upstream_next = mint(&f.repo, &f.upstream_feat, "upstream-next");
+    publish(&f.repo, &upstream_bare(&f), &upstream_next, "feat");
+
+    let result = pull_repo(&wt);
+
+    assert_eq!(
+        result.outcome,
+        PullOutcome::FastForwarded,
+        "{}",
+        result.message
+    );
+    assert_eq!(rev(&wt, "HEAD"), upstream_next, "at upstream's new tip");
+}
+
+/// T18. A tag named like the branch makes `git symbolic-ref --short HEAD`
+/// answer `heads/feat`, a name with no `branch.heads/feat.*` keys; the pull
+/// still reads the branch's own tracking and fast-forwards to upstream.
+#[test]
+fn a_pull_follows_a_namesake_though_a_tag_shares_the_branch_name() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = upstream_feat_space(&env, &f);
+    git_ok(&f.repo, &["tag", "feat", &f.origin_feat]);
+    let upstream_next = mint(&f.repo, &f.upstream_feat, "upstream-next");
+    publish(&f.repo, &upstream_bare(&f), &upstream_next, "feat");
+
+    let result = pull_repo(&wt);
+
+    assert_eq!(
+        result.outcome,
+        PullOutcome::FastForwarded,
+        "{}",
+        result.message
+    );
+    assert_eq!(rev(&wt, "HEAD"), upstream_next, "at upstream's new tip");
+}
+
+/// T19. A `branch.<name>.remote` written with no value (a bare `remote`
+/// line after the real one, which git reads last) cannot be read: the pull
+/// says so, rather than describing a remote named nothing.
+#[test]
+fn a_pull_refuses_a_branch_whose_remote_key_has_no_value() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = upstream_feat_space(&env, &f);
+    let config = f.repo.join(".git").join("config");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("[branch \"feat\"]\n\tremote\n");
+    std::fs::write(&config, text).unwrap();
+
+    let result = pull_repo(&wt);
+
+    assert_eq!(result.outcome, PullOutcome::Failed, "{}", result.message);
+    assert_eq!(
+        result.message,
+        "Could not read what feat tracks (branch.feat.remote: set with no value); \
          nothing was pulled."
     );
     assert_eq!(rev(&wt, "HEAD"), f.upstream_feat, "feat is where it was");

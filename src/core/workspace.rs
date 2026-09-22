@@ -1067,6 +1067,30 @@ fn merge_in_progress(repo_path: &Path) -> std::io::Result<bool> {
     Ok(repo_path.join(path).exists())
 }
 
+/// Whether `a` and `b` name the same commit in `repo_path`, as git's own
+/// lookup resolves each. False when either does not resolve.
+fn same_commit(repo_path: &Path, a: &str, b: &str) -> bool {
+    let resolve = |name: &str| {
+        spawn::output(
+            Command::new("git")
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{}^{{commit}}", name),
+                ])
+                .current_dir(repo_path),
+        )
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| o.stdout)
+    };
+    match (resolve(a), resolve(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// Pull the current branch of `repo_path` from the branch
 /// `git::branch_upstream` reads for it: `origin/<branch>` for a branch that
 /// tracks nothing or tracks origin, or `<remote>/<branch>` for one that tracks
@@ -1130,7 +1154,7 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
     // and both merges read this same ref (ticket 42). A branch that tracks
     // something space does not pull is refused here, before anything runs,
     // and so is one whose tracking cannot be read.
-    let (remote, refname) = match git::branch_upstream_at(repo_path, &branch) {
+    let (remote, refname) = match git::head_upstream_at(repo_path) {
         git::Upstream::Tracked { remote, refname } => (remote, refname),
         git::Upstream::Refused { tracks } => {
             return PullResult {
@@ -1249,13 +1273,21 @@ pub fn pull_repo(repo_path: &Path) -> PullResult {
     if ahead > 0 && behind > 0 {
         // `LC_ALL=C` keeps git's text English for the readers of the merge's
         // and the abort's stderr: the report shown in the overlay, and the
-        // tests that assert on its wording. The short name, not `refname`:
-        // git titles the merge commit with the name it was given, so the
-        // qualified one would read `Merge remote-tracking branch
-        // 'refs/remotes/origin/<b>'` where it has always read `'origin/<b>'`.
+        // tests that assert on its wording. The short name where it names
+        // the same commit as `refname`: git titles the merge commit with the
+        // name it was given, so the qualified one would read `Merge
+        // remote-tracking branch 'refs/remotes/origin/<b>'` where it has
+        // always read `'origin/<b>'`. A local branch or tag of the short name
+        // wins git's lookup of it, though, and then only `refname` merges
+        // what was counted.
+        let merge_arg = if same_commit(repo_path, &remote_ref, &refname) {
+            &remote_ref
+        } else {
+            &refname
+        };
         let merge = spawn::output(
             Command::new("git")
-                .args(["merge", "--no-edit", &remote_ref])
+                .args(["merge", "--no-edit", merge_arg])
                 .env("LC_ALL", "C")
                 .current_dir(repo_path),
         );
