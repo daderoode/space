@@ -2525,38 +2525,56 @@ fn add_worktree(
 }
 
 /// Remove `branch.<name>.remote` and `branch.<name>.merge` for a branch the
-/// New-branch arm is about to create, having found no `refs/heads/<name>`
-/// (ticket 45). A branch deleted without `git branch -D`, such as by a
-/// `fetch --prune` through a refspec that writes `refs/heads/`, leaves them
-/// behind, and git hands them to a new branch of that name whatever
-/// `--no-track` says, so the new branch would track that old upstream and
-/// pull could merge it in. They belong to no branch, so they go. Other
-/// `branch.<name>.*` keys stay.
+/// New-branch arm is about to create (ticket 45). A branch deleted without
+/// `git branch -D`, such as by a `fetch --prune` through a refspec that
+/// writes `refs/heads/`, leaves them behind, and git hands them to a new
+/// branch of that name whatever `--no-track` says, so the new branch would
+/// track that old upstream and pull could merge it in. They belong to no
+/// branch, so they go. Other `branch.<name>.*` keys stay.
 ///
-/// Asked of the config through git2 first, so the usual case (nothing left
-/// over) runs no git at all, and a path that is not a repository is left
-/// to the add, which reports why in git's own words. A key that is present,
-/// or whose presence cannot be read, is unset with `git config --unset-all`
-/// (exit 5 is git's "not set"); any other failure stops the add before
-/// anything is created, since the new branch would otherwise track it.
+/// Read through git2, so the usual case (nothing left over) runs no git at
+/// all, and a path that is not a repository is left to the add, which
+/// reports why in git's own words. Keys go only when git2 confirms
+/// `refs/heads/<name>` is absent: the arm's own probe (`ref_exists`) reads
+/// any failure as absence, and a branch git cannot read (an unreadable
+/// loose ref) is still a branch whose tracking must stay; the add then
+/// refuses it. A key that is present, or whose presence cannot be read, is
+/// unset with `git config --unset-all` (exit 5 is git's "not set"), which
+/// edits the repository's own config only, so the keys are read again
+/// afterwards: one still set (in the global config or an included file) or
+/// one git could not remove stops the add before anything is created, since
+/// the new branch would otherwise track it.
 fn unset_leftover_tracking(repo_path: &Path, branch: &str) -> Result<()> {
     let Ok(repo) = git2::Repository::open(repo_path) else {
         return Ok(());
     };
-    let config = repo.config().ok();
-    for key in ["remote", "merge"] {
-        let key = format!("branch.{}.{}", branch, key);
-        let present = match config.as_ref().map(|c| c.multivar(&key, None)) {
-            Some(Ok(mut entries)) => entries.next().is_some(),
-            Some(Err(e)) if e.code() == git2::ErrorCode::NotFound => false,
-            _ => true,
-        };
-        if !present {
-            continue;
-        }
+    match repo.find_reference(&format!("refs/heads/{}", branch)) {
+        Err(e) if e.code() == git2::ErrorCode::NotFound => {}
+        _ => return Ok(()),
+    }
+    let keys = [
+        format!("branch.{}.remote", branch),
+        format!("branch.{}.merge", branch),
+    ];
+    let set_keys = |repo: &git2::Repository| -> Vec<String> {
+        let config = repo.config().ok();
+        keys.iter()
+            .filter(|key| match config.as_ref().map(|c| c.multivar(key, None)) {
+                Some(Ok(mut entries)) => entries.next().is_some(),
+                Some(Err(e)) if e.code() == git2::ErrorCode::NotFound => false,
+                _ => true,
+            })
+            .cloned()
+            .collect()
+    };
+    let leftover = set_keys(&repo);
+    if leftover.is_empty() {
+        return Ok(());
+    }
+    for key in &leftover {
         let out = spawn::output(
             Command::new("git")
-                .args(["config", "--unset-all", &key])
+                .args(["config", "--unset-all", key])
                 .current_dir(repo_path),
         )
         .with_context(|| format!("failed to run git config --unset-all {}", key))?;
@@ -2567,6 +2585,17 @@ fn unset_leftover_tracking(repo_path: &Path, branch: &str) -> Result<()> {
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
+    }
+    // A fresh open, so nothing cached from before the unset is read.
+    let reopened = git2::Repository::open(repo_path)
+        .with_context(|| format!("failed to reopen {}", repo_path.display()))?;
+    if let Some(key) = set_keys(&reopened).first() {
+        anyhow::bail!(
+            "{} is left by a deleted branch in a config outside this repository's own \
+             (the global config or an included file), so the new branch would track it; \
+             remove it there first",
+            key
+        );
     }
     Ok(())
 }

@@ -5338,3 +5338,82 @@ fn push_target_is_unknown_when_a_merge_value_cannot_be_read() {
 
     assert!(space::core::git::push_target(&repo).is_none());
 }
+
+/// N6. A branch git cannot read (its loose ref file unreadable) is still a
+/// branch: the arm's probe reads it as absent and goes to the base form,
+/// but its tracking keys are not the leftovers of a deleted branch and stay.
+/// The add then fails on the branch it cannot read.
+#[test]
+fn a_new_branch_never_drops_the_tracking_of_a_branch_it_cannot_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(&f.repo, &["branch", "-q", "--no-track", "newb", "main"]);
+    git_ok(&f.repo, &["config", "branch.newb.remote", "upstream"]);
+    git_ok(&f.repo, &["config", "branch.newb.merge", "refs/heads/newb"]);
+    let before = common::branch_keys(&f.repo, "newb");
+    let loose = f.repo.join(".git").join("refs").join("heads").join("newb");
+    assert!(loose.is_file(), "fixture: newb is a loose ref");
+    std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let created = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "s",
+        &BranchStrategy::NewBranch("newb".to_string()),
+    );
+    std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert!(
+        created.is_err(),
+        "git cannot create over a branch it cannot read"
+    );
+    assert_eq!(
+        common::branch_keys(&f.repo, "newb"),
+        before,
+        "the live branch keeps what it tracks"
+    );
+}
+
+/// N7. Leftover tracking keys that live outside the repository's own
+/// config (here an included file, which `git config --unset-all` does not
+/// edit) stop the add with a sentence naming the key, rather than a new
+/// branch that tracks the old upstream.
+#[test]
+fn a_new_branch_stops_on_leftover_tracking_it_cannot_remove() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let included = env.dir.path().join("included.gitconfig");
+    std::fs::write(
+        &included,
+        "[branch \"newb\"]\n\tremote = upstream\n\tmerge = refs/heads/newb\n",
+    )
+    .unwrap();
+    git_ok(
+        &f.repo,
+        &["config", "include.path", included.to_str().unwrap()],
+    );
+    assert!(
+        common::branch_keys(&f.repo, "newb").contains("branch.newb.remote upstream"),
+        "fixture: git sees the included keys"
+    );
+
+    let err = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "s",
+        &BranchStrategy::NewBranch("newb".to_string()),
+    )
+    .unwrap_err();
+
+    let message = format!("{:#}", err);
+    assert!(
+        message.contains("branch.newb.remote") && message.contains("outside this repository's own"),
+        "the refusal names the key and where it lives: {}",
+        message
+    );
+    assert!(
+        !ref_present(&f.repo, "refs/heads/newb"),
+        "nothing was created"
+    );
+}
