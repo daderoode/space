@@ -3113,9 +3113,17 @@ fn classify_space_entry(dir: &Path) -> SpaceEntry {
 /// anything else there is kept with what it is. After the admin directory
 /// itself answered `NotFound`, every directory on its path down to the
 /// missing one was searchable, so `<common>` answers `Ok` or `NotFound` but
-/// for a race; any other error keeps, as everywhere a deletion is decided.
-/// Paths stay off each reason's first line, which may become the summary the
-/// TUI shows.
+/// for a race, with one exception: `<common>` is asked without following a
+/// symbolic link, so a link whose target is gone answers `Ok` here though
+/// the kernel's walk through it did not, and is kept as a directory that is
+/// not a git repository. That is on purpose: followed, it would go on to the
+/// rules below and, when none keeps it, be deleted as an orphan, while git
+/// records real paths, so a genuine orphan's `<common>` is not a link
+/// (skeptical review of PR #66). The two questions the rules below ask,
+/// `<A>` and the name under `worktrees`, do follow links, since a link there
+/// answering `Ok` would delete instead. Any other error keeps, as everywhere
+/// a deletion is decided. Paths stay off each reason's first line, which may
+/// become the summary the TUI shows.
 fn absent_admin(admin: PathBuf) -> SpaceEntry {
     let Some(common) = common_dir_in_gits_shape(&admin) else {
         return SpaceEntry::Unreadable(format!(
@@ -3124,6 +3132,7 @@ fn absent_admin(admin: PathBuf) -> SpaceEntry {
             admin
         ));
     };
+    // Not followed, on purpose: a dangling link here keeps (see above).
     match std::fs::symlink_metadata(common) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => match nesting_under_worktrees(common)
         {
