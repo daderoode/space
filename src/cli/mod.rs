@@ -165,7 +165,7 @@ pub fn dispatch(cmd: Commands) -> Result<()> {
 
         Commands::Add { workspace, repos } => {
             let mut app = App::new()?;
-            // Find workspace index — bail early if not found
+            // Find workspace index; bail early if not found
             let Some(idx) = app.workspaces.iter().position(|w| w.name == workspace) else {
                 anyhow::bail!("workspace '{}' not found", workspace);
             };

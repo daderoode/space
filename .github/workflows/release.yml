@@ -57,7 +57,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          # Retry up to 5 times — release assets may take a moment to propagate
+          # Retry up to 5 times: release assets may take a moment to propagate
           for i in 1 2 3 4 5; do
             if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.sha256'; then
               break
@@ -84,7 +84,7 @@ jobs:
             exit 1
           fi
 
-          # Generate the formula — no secrets in this step
+          # Generate the formula (no secrets in this step)
           cat > space.rb <<FORMULA
           class Space < Formula
             desc "Workspace manager for multi-repo git worktrees"

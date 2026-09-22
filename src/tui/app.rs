@@ -407,7 +407,7 @@ impl App {
                 }
                 // Always send a result so the app can clear ws_loading.
                 // workspace is None when workspace_detail returns Err (e.g. directory
-                // deleted, transient git error) — the app surfaces a status message.
+                // deleted, transient git error); the app surfaces a status message.
                 let workspace =
                     crate::core::workspace::workspace_detail(&req.ws_dir, &req.name).ok();
                 let _ = result_tx.send(LoadResult {
@@ -472,7 +472,7 @@ impl App {
     /// # Invariant
     /// Every `SectionHeader` row is always immediately followed by at least one
     /// `File` row (empty sections are never emitted). The first and last rows of
-    /// the list are therefore always `Repo` or `File` rows — never `SectionHeader`.
+    /// the list are therefore always `Repo` or `File` rows, never `SectionHeader`.
     /// `skip_headers` and `reposition_after_section_change` rely on this.
     pub fn flattened_rows(&self) -> Vec<RepoRow<'_>> {
         let repos = match self.selected_workspace() {
@@ -629,11 +629,11 @@ impl App {
                     // Channel is full (32 unprocessed requests). Reset nav_pending so
                     // check_debounce_timer retries on the next frame rather than
                     // leaving ws_loading stuck. Requires sustained rapid scrolling
-                    // while git is very slow — rare, but must not freeze the UI.
+                    // while git is very slow; rare, but must not freeze the UI.
                     self.nav_pending = Some(Instant::now() - Duration::from_millis(200));
                 }
                 Err(mpsc::TrySendError::Disconnected(_)) => {
-                    // Worker thread died — clear loading state so the spinner
+                    // Worker thread died; clear loading state so the spinner
                     // doesn't freeze. poll_background_result handles the same
                     // case via TryRecvError::Disconnected on the receive side.
                     tracing::error!("background loader thread disconnected on send");
@@ -649,7 +649,7 @@ impl App {
     /// the 150ms debounce timer. The background load fires once the user pauses.
     ///
     /// Increments `ws_generation` immediately to invalidate any in-flight result
-    /// from the previous workspace — the new generation won't match until
+    /// from the previous workspace: the new generation won't match until
     /// `check_debounce_timer` fires and sends a fresh request.
     pub fn begin_workspace_load(&mut self) {
         tracing::info!(ws_index = self.selected_ws, "workspace navigation");
@@ -704,7 +704,7 @@ impl App {
             );
             return;
         }
-        // Always clear loading state — the request for this generation is done
+        // Always clear loading state: the request for this generation is done
         // regardless of whether it succeeded or failed.
         self.ws_loading = false;
         self.ws_loading_since = None;
@@ -741,7 +741,7 @@ impl App {
                     return;
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    // Worker thread died — clear loading state so the UI does not
+                    // Worker thread died; clear loading state so the UI does not
                     // freeze with a permanent spinner. Channel is dead; do not restore.
                     tracing::error!("background loader thread disconnected unexpectedly");
                     self.ws_loading = false;
@@ -749,7 +749,7 @@ impl App {
                     return;
                 }
                 Err(mpsc::TryRecvError::Empty) => {
-                    // Normal — no result yet, keep waiting.
+                    // Normal: no result yet, keep waiting.
                 }
             }
         }
@@ -763,9 +763,9 @@ impl App {
     ///
     /// `ws_generation` is incremented in **two** places by design:
     ///
-    /// 1. `begin_workspace_load` — increments immediately on navigation to
+    /// 1. `begin_workspace_load`: increments immediately on navigation to
     ///    invalidate any in-flight result from the *previous* workspace.
-    /// 2. `check_debounce_timer` (here) — increments again just before firing
+    /// 2. `check_debounce_timer` (here): increments again just before firing
     ///    the actual load request, so the result the worker sends back carries
     ///    the generation value the app will be waiting for.
     ///
@@ -824,8 +824,8 @@ impl App {
 
     /// Fetch file diffs for all repos in the selected workspace and populate
     /// `repo_file_cache`. Called on explicit refresh (`RefreshRepos`) and when
-    /// a repo is expanded (`ToggleRepoExpand`). Not called on workspace navigation
-    /// — file diffs are deferred until the user actually expands a repo.
+    /// a repo is expanded (`ToggleRepoExpand`). Not called on workspace navigation:
+    /// file diffs are deferred until the user actually expands a repo.
     pub fn refresh_file_diff_cache(&mut self) {
         self.repo_file_cache.clear();
         self.diff_content_cache.clear();
@@ -905,7 +905,7 @@ impl App {
                         self.repo_file_cache.insert(repo_index, entries);
                     }
                     Err(_) => {
-                        // Keep stale cache entry — better than empty UI
+                        // Keep stale cache entry: better than empty UI
                         let verb = if currently_staged {
                             "Unstaged"
                         } else {
@@ -1639,7 +1639,7 @@ impl App {
                         }
                     }
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        // Worker gone (e.g. cancelled) without a Done — stop polling.
+                        // Worker gone (e.g. cancelled) without a Done; stop polling.
                         self.gitop_cancel = None;
                         break;
                     }
@@ -1677,7 +1677,7 @@ impl App {
                 self.refresh_if_leaving_creating_stage();
                 // Closing a *successful* git op early (Esc before the ~3s
                 // auto-close) must leave the same refreshed repo pane the
-                // auto-close path produces — otherwise the dashboard shows
+                // auto-close path produces; otherwise the dashboard shows
                 // stale ahead/behind/file state.
                 let leaving_successful_gitop = matches!(
                     &self.screen,
@@ -1836,7 +1836,7 @@ impl App {
                     self.begin_workspace_load_immediate();
                 } else {
                     self.set_status(
-                        "Not in any workspace — use 'c' to create one",
+                        "Not in any workspace, use 'c' to create one",
                         StatusKind::Info,
                     );
                 }
@@ -2314,7 +2314,7 @@ fn run_sync_worker(
 ///
 /// Cancellation is honored only at entry: if `cancel` is already set the worker
 /// returns immediately WITHOUT sending `Done`. An in-flight git subprocess
-/// cannot be interrupted, so cancellation takes effect at this boundary — the
+/// cannot be interrupted, so cancellation takes effect at this boundary, the
 /// same semantics as `run_sync_worker`.
 fn run_gitop_worker(
     repo_path: PathBuf,
@@ -2326,7 +2326,7 @@ fn run_gitop_worker(
     use std::process::{Command, Stdio};
 
     if cancel.load(Ordering::Relaxed) {
-        return; // do NOT send Done — user cancelled before we started
+        return; // do NOT send Done: user cancelled before we started
     }
 
     match op {
@@ -2426,7 +2426,7 @@ fn run_gitop_worker(
 ///
 /// # Invariant
 /// `flattened_rows()` guarantees every `SectionHeader` is immediately followed
-/// (or preceded) by at least one `Repo` or `File` row — empty sections are never
+/// (or preceded) by at least one `Repo` or `File` row: empty sections are never
 /// emitted. The boundary escape paths therefore always land on a non-header row.
 /// The `debug_assert` below catches any future violation in debug builds.
 fn skip_headers(rows: &[RepoRow<'_>], from: usize, down: bool) -> usize {
@@ -2454,7 +2454,7 @@ fn skip_headers(rows: &[RepoRow<'_>], from: usize, down: bool) -> usize {
     }
     debug_assert!(
         !matches!(rows.get(pos), Some(RepoRow::SectionHeader { .. })),
-        "skip_headers boundary landed on SectionHeader at {pos} — flattened_rows invariant violated"
+        "skip_headers boundary landed on SectionHeader at {pos}; flattened_rows invariant violated"
     );
     pos
 }
@@ -2462,7 +2462,7 @@ fn skip_headers(rows: &[RepoRow<'_>], from: usize, down: bool) -> usize {
 /// After a staging operation, cursor may rest on a SectionHeader.
 /// Try advancing forward to the next non-header row; if none, retreat backward.
 ///
-/// See the invariant note on `skip_headers` — the `flattened_rows()` guarantee
+/// See the invariant note on `skip_headers`: the `flattened_rows()` guarantee
 /// ensures this always resolves to a non-header. The `debug_assert` catches
 /// violations in debug builds.
 fn reposition_after_section_change(rows: &[RepoRow<'_>], cursor: usize) -> usize {
@@ -2482,7 +2482,7 @@ fn reposition_after_section_change(rows: &[RepoRow<'_>], cursor: usize) -> usize
     }
     debug_assert!(
         !matches!(rows.get(pos), Some(RepoRow::SectionHeader { .. })),
-        "reposition_after_section_change landed on SectionHeader at {pos} — invariant violated"
+        "reposition_after_section_change landed on SectionHeader at {pos}; invariant violated"
     );
     pos
 }
@@ -2758,7 +2758,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                             app.repo_file_cache.insert(repo_index, entries);
                         }
                         Err(_) => {
-                            // Keep stale cache entry — better than empty UI
+                            // Keep stale cache entry: better than empty UI
                             let verb = if stage { "Staged" } else { "Unstaged" };
                             app.set_status(
                                 format!("{} {} file(s) -- refresh failed, press r", verb, count),
@@ -2773,7 +2773,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 Err(err) => {
                     let verb = if stage { "Stage" } else { "Unstage" };
                     app.set_status(format!("{} failed: {}", verb, err), StatusKind::Error);
-                    // Operation failed — section structure unchanged, no reposition needed.
+                    // Operation failed: section structure unchanged, no reposition needed.
                     return None;
                 }
             }
@@ -2826,7 +2826,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
 
             // Check if the specific working-tree file has changed
             if !staged {
-                // Only relevant for unstaged diffs — staged diffs depend on the index, already covered
+                // Only relevant for unstaged diffs: staged diffs depend on the index, already covered
                 let file_full_path = repo_path.join(&path);
                 let current_file_mtime = std::fs::metadata(&file_full_path)
                     .and_then(|m| m.modified())
@@ -2834,7 +2834,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
                 let cached_file_mtime = app.file_mtime_cache.get(&cache_key);
                 let file_stale = match (current_file_mtime, cached_file_mtime) {
                     (Some(current), Some(cached)) => &current != cached,
-                    (Some(_), None) => false, // first time — not stale, will be recorded after caching
+                    (Some(_), None) => false, // first time: not stale, will be recorded after caching
                     _ => false,
                 };
                 if file_stale {
@@ -2890,7 +2890,7 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
     }
 }
 
-/// Entry point — initialise terminal, run event loop, restore terminal.
+/// Entry point: initialise terminal, run event loop, restore terminal.
 /// Returns a path to cd into, if the user pressed enter on a workspace.
 pub fn run(app: &mut App) -> Result<()> {
     color_eyre::install().ok();
@@ -2974,7 +2974,7 @@ pub(crate) fn build_branch_picker(
     let items: Vec<PickerItem> = branches
         .into_iter()
         .map(|b| PickerItem {
-            // `name` is what gets passed to git — must be the clean branch name.
+            // `name` is what gets passed to git; must be the clean branch name.
             // Indicate the current branch via the `parent` field shown in the picker.
             name: b.name,
             parent: match (b.is_remote, b.is_current) {
@@ -3001,7 +3001,7 @@ pub(crate) fn build_branch_picker(
 fn run_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
     use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
-    // Drain any stale input that accumulated before the TUI started —
+    // Drain any stale input that accumulated before the TUI started,
     // e.g. keystrokes typed during a previous frozen/crashed session that
     // left the terminal in raw mode.  Without this, buffered events replay
     // immediately into the first field, corrupting it.
@@ -3273,7 +3273,7 @@ mod tests {
         );
         assert!(
             app.nav_pending.is_none(),
-            "nav_pending must NOT be set — there is no scroll gesture to debounce"
+            "nav_pending must NOT be set: there is no scroll gesture to debounce"
         );
         assert!(app.ws_loading, "ws_loading must be set");
     }
@@ -3281,7 +3281,7 @@ mod tests {
     #[test]
     fn check_debounce_timer_no_op_before_150ms() {
         let mut app = make_app(vec![]);
-        // Set nav_pending to "just now" — well within the 150ms window
+        // Set nav_pending to "just now", well within the 150ms window
         app.nav_pending = Some(Instant::now());
         let generation_before = app.ws_generation;
 
@@ -3367,7 +3367,7 @@ mod tests {
         app.ws_generation = 5;
         app.ws_loading = true;
 
-        // Result with an old generation (stale — should be discarded)
+        // Result with an old generation (stale, should be discarded)
         let stale = LoadResult {
             generation: 3,
             workspace: Some(Workspace {
@@ -3431,7 +3431,7 @@ mod tests {
     fn poll_background_result_no_op_with_no_channel() {
         let mut app = make_app(vec![]);
         app.ws_loading = true;
-        // ws_result_rx is None (set by make_app) — poll must be a no-op
+        // ws_result_rx is None (set by make_app); poll must be a no-op
         app.poll_background_result();
         assert!(
             app.ws_loading,
@@ -3445,7 +3445,7 @@ mod tests {
         app.ws_loading = true;
         app.ws_loading_since = Some(Instant::now());
 
-        // Create a channel, drop the sender immediately — simulates worker panic
+        // Create a channel, drop the sender immediately (simulates worker panic)
         let (tx, rx) = mpsc::sync_channel::<LoadResult>(4);
         drop(tx);
         app.ws_result_rx = Some(rx);
@@ -3520,7 +3520,7 @@ mod tests {
         };
         let mut app = make_app(vec![ws0, ws1]);
 
-        // Press j (SelectWorkspaceDown) — switches from workspace 0 to 1
+        // Press j (SelectWorkspaceDown): switches from workspace 0 to 1
         app.handle_key(ratatui::crossterm::event::KeyEvent::new(
             KeyCode::Char('j'),
             ratatui::crossterm::event::KeyModifiers::NONE,
@@ -3583,7 +3583,7 @@ mod tests {
     #[test]
     fn poll_sync_result_drops_rx_when_not_syncing() {
         let mut app = make_app(vec![]);
-        // Dashboard screen — not in Syncing stage
+        // Dashboard screen, not in Syncing stage
         let (_tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
         app.sync_rx = Some(rx);
         app.poll_sync_result();
@@ -3607,7 +3607,7 @@ mod tests {
         );
         assert!(
             rx.try_recv().is_err(),
-            "no Step or Done must be sent when cancel is preset — repos skipped"
+            "no Step or Done must be sent when cancel is preset: repos skipped"
         );
     }
 
@@ -3664,7 +3664,7 @@ mod tests {
     #[test]
     fn poll_gitop_result_drops_rx_when_not_running() {
         let mut app = make_app(vec![]);
-        // Dashboard screen — not in the GitOps Running stage.
+        // Dashboard screen, not in the GitOps Running stage.
         let (_tx, rx) = mpsc::sync_channel::<GitOpProgress>(4);
         app.gitop_rx = Some(rx);
         app.poll_gitop_result();
@@ -3686,14 +3686,14 @@ mod tests {
         );
         assert!(
             rx.try_recv().is_err(),
-            "no Line or Done must be sent when cancel is preset — worker returns at the boundary"
+            "no Line or Done must be sent when cancel is preset: worker returns at the boundary"
         );
     }
 
     #[test]
     fn poll_sync_result_signals_cancel_when_leaving_syncing_stage() {
         let mut app = make_app(vec![]);
-        // Dashboard screen — not in Syncing stage
+        // Dashboard screen, not in Syncing stage
         let flag = Arc::new(AtomicBool::new(false));
         let (_tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
         app.sync_rx = Some(rx);

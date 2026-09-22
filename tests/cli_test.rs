@@ -39,7 +39,7 @@ fn ls_shows_workspace_names() {
     let ws_path = env.workspaces_dir.join("my-feature");
     let repo_in_ws = ws_path.join("some-repo");
     std::fs::create_dir_all(&repo_in_ws).unwrap();
-    // A .git *file* (not directory) is enough — list.rs checks .join(".git").exists()
+    // A .git *file* (not directory) is enough: list.rs checks .join(".git").exists()
     std::fs::write(repo_in_ws.join(".git"), "gitdir: /dev/null").unwrap();
 
     space(&env)

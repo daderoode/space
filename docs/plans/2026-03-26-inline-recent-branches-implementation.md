@@ -1,4 +1,4 @@
-# Inline Recent Branches — Implementation Plan
+# Inline Recent Branches: Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
@@ -154,7 +154,7 @@ mod tests {
 **Step 2: Run tests to verify they fail**
 
 Run: `cargo test -p space --lib git::tests`
-Expected: FAIL — `relative_time` not found
+Expected: FAIL (`relative_time` not found)
 
 **Step 3: Write the implementation**
 
@@ -283,7 +283,7 @@ fn create_populates_recent_branches_on_strategy_entry() {
         st.ws_name = tui_input::Input::default().with_value("test-ws".to_string());
     }
 
-    // Press Enter to advance to PickBranchStrategy — should populate recent_branches
+    // Press Enter to advance to PickBranchStrategy; should populate recent_branches
     app.handle_key(key(KeyCode::Enter));
 
     if let Screen::CreateWorkspace(ref st) = app.screen {
@@ -309,7 +309,7 @@ fn create_populates_recent_branches_on_strategy_entry() {
 **Step 2: Run test to verify it fails**
 
 Run: `cargo test create_populates_recent_branches`
-Expected: FAIL — `recent_branches` field doesn't exist
+Expected: FAIL (`recent_branches` field doesn't exist)
 
 **Step 3: Add field to CreateState**
 
@@ -327,7 +327,7 @@ recent_branches: vec![],
 
 **Step 4: Add field to AddState**
 
-In `src/tui/screens/add.rs`, same changes — add field to struct (after `picked_branch`) and initialize to `vec![]` in constructor.
+In `src/tui/screens/add.rs`, same changes: add field to struct (after `picked_branch`) and initialize to `vec![]` in constructor.
 
 **Step 5: Populate in CreateState::handle_name_workspace**
 
@@ -491,7 +491,7 @@ fn create_branch_strategy_navigation_with_recent_branches() {
 **Step 3: Run tests to verify they fail**
 
 Run: `cargo test create_select_recent_branch create_branch_strategy_navigation`
-Expected: FAIL — max index still clamped at 3, Enter on idx 3 opens picker instead of selecting branch
+Expected: FAIL (max index still clamped at 3, Enter on idx 3 opens picker instead of selecting branch)
 
 **Step 4: Update CreateState::handle_branch_strategy**
 
@@ -531,7 +531,7 @@ fn handle_branch_strategy(
         }
         KeyCode::Enter => {
             if self.branch_strategy_idx == max_idx {
-                // "Show more..." / "Pick a branch..." — open fuzzy picker
+                // "Show more..." / "Pick a branch...": open fuzzy picker
                 let repo_path = self.selected_repos.first().cloned();
                 if let Some(repo_path) = repo_path {
                     let repo_name = repo_path
@@ -567,7 +567,7 @@ fn handle_branch_strategy(
                     is_new: true,
                 })
             } else {
-                // idx 0, 1, or 2 — fixed options
+                // idx 0, 1, or 2: fixed options
                 self.stage = CreateStage::Creating;
                 ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
                     workspace_name: self.ws_name.value().to_string(),
@@ -829,7 +829,7 @@ Replace the body of `render_branch_strategy_picker` with:
             items.push(ListItem::new("    Show more..."));
         }
     } else {
-        // No recent branches — show "Pick a branch..." as selectable (idx 3)
+        // No recent branches: show "Pick a branch..." as selectable (idx 3)
         if 3 == strategy_idx {
             items.push(
                 ListItem::new("> Pick a branch...").style(theme::selected()),
@@ -887,12 +887,12 @@ Address anything found.
 **Step 3: Manual smoke test**
 
 Run `cargo run` and:
-1. Create a workspace — verify recent branches appear in the dialog with relative times
-2. Navigate up/down through the full list — verify no skips or panics
-3. Select a recent branch — verify correct worktree created
-4. Select "Show more..." — verify fuzzy picker opens
-5. Select a fixed option (New branch) — verify it still works
-6. Test with a repo that has no branches (or list_branches failure) — verify graceful fallback
+1. Create a workspace; verify recent branches appear in the dialog with relative times
+2. Navigate up/down through the full list; verify no skips or panics
+3. Select a recent branch; verify correct worktree created
+4. Select "Show more..."; verify fuzzy picker opens
+5. Select a fixed option (New branch); verify it still works
+6. Test with a repo that has no branches (or list_branches failure); verify graceful fallback
 
 **Step 4: Final commit if any cleanup was needed**
 

@@ -937,7 +937,7 @@ fn create_empty_name_rejected() {
     let mut app = test_app(vec![], vec![]);
     app.handle_key(key(KeyCode::Char('c')));
 
-    // EnterName is the initial stage — press Enter immediately with empty name
+    // EnterName is the initial stage; press Enter immediately with empty name
     app.handle_key(key(KeyCode::Enter));
 
     if let Screen::CreateWorkspace(ref st) = app.screen {
@@ -1949,7 +1949,7 @@ fn cursor_repositions_after_staging() {
         ],
     );
     // rows after: [Repo(0), SectionHeader("Unstaged"), File(b.rs at 2), SectionHeader("Staged"), File(a.rs at 4)]
-    // cursor_row=2 was a.rs (now b.rs is at row 2) — cursor stays valid
+    // cursor_row=2 was a.rs (now b.rs is at row 2); cursor stays valid
     // Apply the reposition logic manually by calling Down then verifying sensible state
     // The key invariant: cursor must NOT be on a SectionHeader
     let rows = app.flattened_rows();
@@ -3302,7 +3302,7 @@ fn conflicted_staged_entry_appears_only_in_conflicts_section() {
         vec![FileEntry {
             path: "conflict.rs".into(),
             status: FileStatus::Conflicted,
-            staged: true, // hypothetical — should NOT land in Staged section
+            staged: true, // hypothetical; should NOT land in Staged section
             insertions: 0,
             deletions: 0,
         }],
@@ -3336,7 +3336,7 @@ fn conflicted_staged_entry_appears_only_in_conflicts_section() {
 fn external_file_edit_invalidates_cached_unstaged_diff() {
     let (_env, repo_path, mut app) = setup_real_repo_app();
 
-    // Open diff viewer — populates diff_content_cache and file_mtime_cache
+    // Open diff viewer: populates diff_content_cache and file_mtime_cache
     app.handle_key(key(KeyCode::Enter));
     assert!(
         matches!(app.screen, Screen::DiffViewer(_)),
@@ -3357,7 +3357,7 @@ fn external_file_edit_invalidates_cached_unstaged_diff() {
         "file_mtime_cache should be populated after viewing an unstaged diff"
     );
 
-    // Externally modify the file (without staging — .git/index mtime doesn't change).
+    // Externally modify the file (without staging; .git/index mtime doesn't change).
     // Poll until the filesystem mtime actually advances before writing, so the test
     // is not sensitive to mtime granularity (ext4 = 1s, APFS = 1ns).
     let pre_mtime = std::fs::metadata(repo_path.join("file.txt"))
@@ -3373,12 +3373,12 @@ fn external_file_edit_invalidates_cached_unstaged_diff() {
             break;
         }
         if std::time::Instant::now() >= deadline {
-            break; // proceed anyway — assert below will catch if cache wasn't invalidated
+            break; // proceed anyway; assert below will catch if cache wasn't invalidated
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    // Open diff viewer again — file mtime staleness check should invalidate the cache
+    // Open diff viewer again; file mtime staleness check should invalidate the cache
     app.handle_key(key(KeyCode::Enter));
     assert!(
         matches!(app.screen, Screen::DiffViewer(_)),
@@ -3531,7 +3531,7 @@ fn create_new_branch_enters_name_stage() {
 
 #[test]
 fn create_new_branch_name_preserved_on_reentry() {
-    // User types a custom name, Escs back, re-selects "New branch" — input must be preserved.
+    // User types a custom name, Escs back, re-selects "New branch"; input must be preserved.
     let mut app = test_app(vec![], vec![]);
     app.handle_key(key(KeyCode::Char('c')));
     if let Screen::CreateWorkspace(ref mut st) = app.screen {
@@ -5118,7 +5118,7 @@ mod gitops_tests {
         }
         app.expanded_repos.insert(0);
 
-        // Story 12: Esc closes a successful op sooner than the ~3s timer —
+        // Story 12: Esc closes a successful op sooner than the ~3s timer,
         // and must leave the same refreshed state the auto-close produces.
         app.handle_key(key(KeyCode::Esc));
 

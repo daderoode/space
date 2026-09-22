@@ -1119,7 +1119,7 @@ fn leader_state(pid: libc::pid_t) -> Leader {
 pub enum PullOutcome {
     /// `git fetch` failed (offline / no remote).
     FetchFailed,
-    /// No current branch (detached HEAD) — nothing to pull onto.
+    /// No current branch (detached HEAD): nothing to pull onto.
     DetachedHead,
     /// The current branch has no upstream space pulls from: the branch
     /// `git::branch_upstream` reads (`origin/<branch>`, or its namesake on
@@ -1128,7 +1128,7 @@ pub enum PullOutcome {
     NoUpstream,
     /// Local already matches upstream (0 ahead, 0 behind).
     UpToDate,
-    /// Local is only ahead of upstream — nothing to pull.
+    /// Local is only ahead of upstream: nothing to pull.
     Ahead,
     /// Local was behind and was fast-forwarded to the upstream.
     FastForwarded,
@@ -1679,7 +1679,7 @@ pub fn commit_repo(repo_path: &Path, message: &str) -> CommitResult {
 /// The classification of what `rebase_repo` did (or why it did nothing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RebaseOutcome {
-    /// HEAD is detached — no branch to rebase (defensive; the TUI pre-flight
+    /// HEAD is detached: no branch to rebase (defensive; the TUI pre-flight
     /// already blocks this).
     DetachedHead,
     /// The branch was replayed onto the target.
@@ -3922,7 +3922,7 @@ mod tests {
         git(&["commit", "--allow-empty", "-m", "dev-remote"], &helper);
         git(&["push", "origin", "dev"], &helper);
 
-        // Do NOT fetch in local — sync_repo's internal fetch handles that
+        // Do NOT fetch in local: sync_repo's internal fetch handles that
         (tmp, local)
     }
 
@@ -3952,7 +3952,7 @@ mod tests {
 
     /// Clone `origin.git` (already created by `origin_and_local`) into a fresh
     /// `helper` worktree on `main`, run `edit` to stage/commit a change, and
-    /// push it to `origin/main` — advancing the remote so `local` falls behind.
+    /// push it to `origin/main`, advancing the remote so `local` falls behind.
     fn advance_origin(tmp: &Path, edit: impl FnOnce(&Path)) {
         let helper = tmp.join("helper");
         Cmd::new("git")
@@ -6952,7 +6952,7 @@ mod tests {
         let (_tmp, local) = origin_and_local();
         let init_sha = get_sha(&local, "main");
 
-        // Local advances but does not push — 1 ahead, 0 behind.
+        // Local advances but does not push: 1 ahead, 0 behind.
         git(&["commit", "--allow-empty", "-m", "local-only"], &local);
         let ahead_sha = get_sha(&local, "main");
 
@@ -7542,7 +7542,7 @@ mod tests {
         git(&["checkout", "--detach"], &local);
         let sha_before = get_sha(&local, "HEAD");
         // The remote advances after we detach; a detached-HEAD pull must
-        // report WITHOUT acting (story 37), so not even the fetch may run —
+        // report WITHOUT acting (story 37), so not even the fetch may run:
         // local's origin/main remote-tracking ref must stay where it was.
         let origin_ref_before = get_sha(&local, "origin/main");
         advance_origin(tmp.path(), |helper| {
@@ -7568,7 +7568,7 @@ mod tests {
         assert_eq!(
             origin_ref_before,
             get_sha(&local, "origin/main"),
-            "detached-HEAD pull must not act at all — no fetch, so the \
+            "detached-HEAD pull must not act at all: no fetch, so the \
              remote-tracking ref must be unchanged"
         );
     }
@@ -7781,7 +7781,7 @@ mod tests {
         let (tmp, local) = origin_and_local();
 
         // Remote advances main with a new file; local advances main with a
-        // different, non-conflicting file — a diverge that rebases cleanly.
+        // different, non-conflicting file: a diverge that rebases cleanly.
         advance_origin(tmp.path(), |helper| {
             std::fs::write(helper.join("helper.txt"), "helper\n").unwrap();
             git(&["add", "."], helper);

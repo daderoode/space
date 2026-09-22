@@ -3,7 +3,7 @@
 A CLI workspace manager for multi-repo git worktrees.
 
 `space` lets you create named workspaces that group multiple repositories into
-git worktrees checked out on the same branch — so you can switch between feature
+git worktrees checked out on the same branch, so you can switch between feature
 work across many repos in a single `space go` command.
 
 Running `space` with no arguments opens the TUI dashboard.
@@ -55,7 +55,7 @@ changes (`+N -M` in green/red) per file and in aggregate.
 Press `Enter` on a file row to open a scrollable diff viewer. Stage/unstage
 files with `s`/`space`, or bulk stage/unstage all files in the selected repo with `S`/`U`.
 
-**Key bindings — Workspaces pane:**
+**Key bindings, Workspaces pane:**
 
 | Key | Action |
 |-----|--------|
@@ -71,7 +71,7 @@ files with `s`/`space`, or bulk stage/unstage all files in the selected repo wit
 | `/` | Filter spaces (selects in place) |
 | `S` | Open config editor |
 
-**Key bindings — Repos pane:**
+**Key bindings, Repos pane:**
 
 | Key | Action |
 |-----|--------|
@@ -208,7 +208,7 @@ also the default branch name, and branch names are checked with
 breaks either rule is refused with the reason (in the dialog, or as
 `invalid_params` over MCP); it is never rewritten.
 
-There is no metadata database — the filesystem is the state.
+There is no metadata database: the filesystem is the state.
 
 ## Diagnostics
 

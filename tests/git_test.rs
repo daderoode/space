@@ -809,14 +809,14 @@ fn stage_file_after_git_mv_is_already_staged() {
     // `git mv` stages both the delete of old_name.txt and the add of new_name.txt.
     // Without `find_similar()` on the diff, git2 reports these as separate staged
     // entries (Deleted + Added) rather than a single Renamed entry.
-    // This correctly reflects the index state — both sides are staged.
+    // This correctly reflects the index state: both sides are staged.
     let new_entry = entries
         .iter()
         .find(|e| e.path == "new_name.txt")
         .expect("new_name.txt should appear in diff entries");
     assert!(
         new_entry.staged,
-        "git mv stages the new file — should be staged"
+        "git mv stages the new file; should be staged"
     );
 
     let old_entry = entries
@@ -825,7 +825,7 @@ fn stage_file_after_git_mv_is_already_staged() {
         .expect("old_name.txt should appear as deleted in diff entries");
     assert!(
         old_entry.staged,
-        "git mv stages the deletion — should be staged"
+        "git mv stages the deletion; should be staged"
     );
     assert_eq!(
         old_entry.status,
@@ -864,7 +864,7 @@ fn manual_rename_shows_as_separate_add_and_delete() {
         .unwrap();
     assert!(out.status.success(), "git commit failed");
 
-    // Manual rename (NOT git mv) — filesystem only
+    // Manual rename (NOT git mv): filesystem only
     std::fs::rename(
         tmp.path().join("original.txt"),
         tmp.path().join("renamed.txt"),
@@ -873,7 +873,7 @@ fn manual_rename_shows_as_separate_add_and_delete() {
 
     let entries = file_diff(tmp.path()).unwrap();
 
-    // Manual rename is NOT detected as a rename — it appears as two separate entries:
+    // Manual rename is NOT detected as a rename; it appears as two separate entries:
     // 1. original.txt is Deleted (working-tree deletion, unstaged)
     // 2. renamed.txt is Untracked (new file, unstaged)
     let original_entry = entries
@@ -1004,7 +1004,7 @@ fn file_diff_detects_conflicted_file() {
         .unwrap();
     assert!(out.status.success(), "git commit on main failed");
 
-    // Attempt merge — this should fail with a conflict
+    // Attempt merge; this should fail with a conflict
     let out = Command::new("git")
         .args(["merge", "feature"])
         .current_dir(tmp.path())
@@ -1131,7 +1131,7 @@ fn stage_all_unstaged_skips_conflicted_files() {
         .output()
         .unwrap();
 
-    // Merge feature branch — should fail with conflict
+    // Merge feature branch; should fail with conflict
     let merge_output = Command::new("git")
         .args(["merge", "feature"])
         .current_dir(tmp.path())
@@ -1264,7 +1264,7 @@ fn repo_status_counts_conflicted_files() {
         .unwrap();
     assert!(out.status.success(), "git commit on main failed");
 
-    // Attempt merge — this should fail with a conflict
+    // Attempt merge; this should fail with a conflict
     let out = Command::new("git")
         .args(["merge", "feature"])
         .current_dir(tmp.path())

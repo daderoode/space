@@ -49,10 +49,10 @@ Execution reuses the existing `Running` stage (`running_op = GitOp::Rebase`).
 
 ### New `GitOpsState` fields
 
-- `rebase_block: Option<String>` — `Some(reason)` when pre-flight fails.
+- `rebase_block: Option<String>`: `Some(reason)` when pre-flight fails.
 - `rebase_picker: Option<FuzzyPicker>`.
-- `rebase_onto: Option<String>` — the picked target.
-- `rebase_ahead_behind: Option<(usize, usize)>` — confirm-stage preview.
+- `rebase_onto: Option<String>`: the picked target.
+- `rebase_ahead_behind: Option<(usize, usize)>`: confirm-stage preview.
 
 ### `GitOp` becomes non-Copy
 

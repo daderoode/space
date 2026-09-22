@@ -157,7 +157,7 @@ impl ConfigState {
                 .map(|s| std::path::PathBuf::from(tilde_expand(s.trim())))
                 .collect();
         }
-        // Field 2: max depth — return error if not a valid number
+        // Field 2: max depth (return error if not a valid number)
         if let Some(f) = self.fields.get(2) {
             config.repos.max_depth = f
                 .value

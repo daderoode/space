@@ -167,7 +167,7 @@ Press `Enter` on a file row in the expanded repo list to open a full-screen scro
 - **Staging:** Press `s` or `space` to stage or unstage the viewed file. The viewer returns to the dashboard after staging.
 - **Closing:** `Esc` or `q` returns to the dashboard.
 
-### Key Bindings — Workspaces Pane
+### Key Bindings, Workspaces Pane
 
 | Key | Action |
 |-----|--------|
@@ -192,7 +192,7 @@ do nothing on the repos pane. `r` is not a workspace-pane key: it rescans the
 repo list and reloads the repos pane, so it works from either pane and is listed
 under the general bindings below.
 
-### Key Bindings — Repos Pane
+### Key Bindings, Repos Pane
 
 | Key | Action |
 |-----|--------|
@@ -230,7 +230,7 @@ under the general bindings below.
 | `q` | Quit |
 | `Ctrl-C` | Force quit (works on all screens) |
 
-### Key Bindings — Diff Viewer
+### Key Bindings, Diff Viewer
 
 | Key | Action |
 |-----|--------|
@@ -802,11 +802,11 @@ eval "$(space init zsh)"
 
 This sets up two things:
 
-1. **Shell wrapper** — intercepts TUI/cd commands so `space go` can change your working directory and TUI commands render correctly
-2. **Tab completions** — registers the zsh completion function for all subcommands
+1. **Shell wrapper**: intercepts TUI/cd commands so `space go` can change your working directory and TUI commands render correctly
+2. **Tab completions**: registers the zsh completion function for all subcommands
 
 If you installed via Homebrew, completions are also installed to
-`$(brew --prefix)/share/zsh/site-functions/_space` — they work without
+`$(brew --prefix)/share/zsh/site-functions/_space`; they work without
 the `eval` line if that directory is on your `$fpath`.
 
 ### How the wrapper works
@@ -816,7 +816,7 @@ sets `__SPACE_CD_FILE__` in the environment, runs the binary, then `cd`s to
 whatever path the binary wrote to that file.
 
 For read-only commands (`ls`, `status`, `repos`, etc.) the wrapper passes
-through directly — no temp file needed.
+through directly: no temp file needed.
 
 ### Manual completions install
 
@@ -902,7 +902,7 @@ The server runs on stdio (stdin/stdout). Logs go to stderr at INFO level. No add
 | macOS | `~/Library/Application Support/space/space.log.YYYY-MM-DD` |
 | Linux | `~/.local/share/space/space.log.YYYY-MM-DD` |
 
-The last 3 days of logs are kept. Logs include workspace load timings, navigation events, and errors — no workspace names, file paths, or file content.
+The last 3 days of logs are kept. Logs include workspace load timings, navigation events, and errors; no workspace names, file paths, or file content.
 
 **Environment variables:**
 

@@ -859,7 +859,7 @@ fn collect_entries(diff: &git2::Diff, staged: bool) -> Result<Vec<FileEntry>> {
         .collect();
 
     // Second pass: count +/- lines per file via foreach line callback.
-    // TODO: O(n²) path lookup — replace with HashMap<&str, usize> if diffs
+    // TODO: O(n²) path lookup; replace with HashMap<&str, usize> if diffs
     // with 500+ files cause noticeable latency in the TUI.
     let mut line_counts: Vec<(usize, usize)> = vec![(0, 0); file_stats.len()];
     {
@@ -1048,11 +1048,11 @@ pub fn file_content_diff(repo_path: &Path, file_path: &str, staged: bool) -> Res
 ///
 /// - **`git mv` renames** are already fully staged by git itself (both the deletion of the
 ///   old path and the addition of the new path are written to the index). No call to
-///   `stage_file()` is needed — the TUI will show both sides as `staged: true`.
+///   `stage_file()` is needed: the TUI will show both sides as `staged: true`.
 ///
 /// - **Manual renames** (e.g. `mv old new` or `std::fs::rename`) are NOT detected as renames.
 ///   They appear in the TUI as two separate unstaged entries: the old path as `Deleted` and
-///   the new path as `Untracked`. This is correct behavior — the user must stage each side
+///   the new path as `Untracked`. This is correct behavior: the user must stage each side
 ///   independently (or use `stage_all`). Rename detection would require calling
 ///   `find_similar()` on the diff, which is intentionally not done to keep staging explicit.
 pub fn stage_file(repo_path: &Path, file_path: &str) -> Result<()> {
@@ -1287,7 +1287,7 @@ mod tests {
 
         git(&["commit", "--allow-empty", "-m", "init"], &local);
         git(&["push", "-u", "origin", "main"], &local);
-        // Local-only commit — main is 1 ahead, 0 behind
+        // Local-only commit: main is 1 ahead, 0 behind
         git(&["commit", "--allow-empty", "-m", "local-only"], &local);
 
         let behind = branches_behind_upstream(&local);
