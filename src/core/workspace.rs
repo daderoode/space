@@ -573,7 +573,8 @@ const _: () = assert!(
 /// since only origin is fetched here. A branch that tracks anything else on
 /// a remote other than origin is left alone. Branches with local commits
 /// ahead, diverged, or currently checked out are left untouched and the
-/// refusals are reported as skips.
+/// refusals are reported as skips. A forwarded branch keeps what it tracks,
+/// including nothing.
 ///
 /// The fetch runs under the unattended-run policy (see `fetch_origin_unattended`)
 /// with the fixed `UNATTENDED_FETCH_TIMEOUT`. When it does not succeed the outcome
@@ -626,12 +627,17 @@ pub fn sync_repo_cancellable(
         }
         // `target` is the ref the comparison read, fully qualified, so the
         // branch moves to exactly what it was found behind (ticket 42).
+        // `--no-track` keeps every `branch.<name>.*` key as it was (ticket
+        // 45): without it git re-applies `branch.autoSetupMerge` to the
+        // remote-tracking target, so a branch that tracks nothing would
+        // track it, one tracking origin's base would be re-pointed, and a
+        // second merge value would gain a third.
         // `LC_ALL=C` pins git's output language so `parse_skip_reason` sees
         // the English refusal; a localized git would turn every skip into
         // `Other`.
         let out = spawn::output(
             Command::new("git")
-                .args(["branch", "-f", &branch, &target])
+                .args(["branch", "-f", "--no-track", &branch, &target])
                 .env("LC_ALL", "C")
                 .current_dir(repo_path),
         );
@@ -1431,8 +1437,11 @@ pub struct PushResult {
 
 /// Push the current branch of `repo_path`.
 ///
-/// - `set_upstream == true`  → `git push -u origin <branch>` (first publish of a
-///   branch with no upstream; also records the tracking ref).
+/// - `set_upstream == true`  → `git push -u origin
+///   refs/heads/<branch>:refs/heads/<branch>` (first publish of a branch with
+///   no upstream, or of one tracking a branch of another name on origin;
+///   also records `origin/<branch>` as its upstream). The branch is named
+///   exactly, never `heads/<branch>`.
 /// - `set_upstream == false` → `git push` (branch already has an upstream),
 ///   which git routes to the branch's own push destination
 ///   (`git::push_target`): origin for a branch that tracks origin, another
@@ -1444,7 +1453,7 @@ pub struct PushResult {
 /// `success == false` with git's rejection text in `message`, so callers can
 /// surface why the push was refused (typically: pull first).
 pub fn push_repo(repo_path: &Path, set_upstream: bool) -> PushResult {
-    let branch = match current_branch_name(repo_path) {
+    let branch = match head_branch_name(repo_path) {
         Some(b) => b,
         None => {
             return PushResult {
@@ -1455,11 +1464,16 @@ pub fn push_repo(repo_path: &Path, set_upstream: bool) -> PushResult {
     };
 
     let args: Vec<String> = if set_upstream {
+        // Both sides named (ticket 45): a refspec with no destination is
+        // resolved through `push.default`, and under `upstream` a branch
+        // that tracks origin's `main` would go into `main` even though the
+        // command names the branch. The source is qualified so a tag of the
+        // branch's name cannot make it ambiguous.
         vec![
             "push".to_string(),
             "-u".to_string(),
             "origin".to_string(),
-            branch.clone(),
+            format!("refs/heads/{0}:refs/heads/{0}", branch),
         ]
     } else {
         vec!["push".to_string()]
@@ -2440,8 +2454,24 @@ fn add_worktree(
                 } else {
                     &local_base
                 };
+                // `--no-track` from either start point (ticket 45): the new
+                // branch tracks nothing until its first push sets its own
+                // name on origin. Under git's `branch.autoSetupMerge` it
+                // would track the base (`origin/<base>` by default; with
+                // `always` the local base, with `inherit` whatever the base
+                // tracks), and a bare `git push` of it is then refused, or
+                // under `push.default=upstream` goes into the base.
                 git_worktree_add(
-                    &["worktree", "add", "-b", branch_name, "--", &wt, start_point],
+                    &[
+                        "worktree",
+                        "add",
+                        "--no-track",
+                        "-b",
+                        branch_name,
+                        "--",
+                        &wt,
+                        start_point,
+                    ],
                     repo_path,
                 )?;
             }
@@ -5068,9 +5098,10 @@ mod tests {
     }
 
     /// T3: tags named like the base and like `origin/<base>` do not shadow
-    /// the start point; the branch starts at `origin/main` and tracks it,
-    /// as it does with no tags (git sets upstream from a remote-tracking
-    /// start point).
+    /// the start point; the branch starts at `origin/main` and tracks
+    /// nothing, as it does with no tags (the add passes `--no-track`, so
+    /// git's `branch.autoSetupMerge` does not make it track the base,
+    /// ticket 45).
     #[test]
     fn new_branch_starts_at_the_base_branch_not_a_tag_of_its_name() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5092,8 +5123,8 @@ mod tests {
         );
         assert_eq!(
             upstream_of(&wt, "fresh"),
-            "refs/remotes/origin/main",
-            "the local branch tracks origin/main"
+            "",
+            "the local branch tracks nothing"
         );
     }
 
@@ -7854,7 +7885,7 @@ mod tests {
             );
             // Which argv form ran is pinned by the upstream it left: the
             // `--track` forms set it to origin/feat, while the new-branch
-            // form off the base would set origin/main. Without this the
+            // form off the base sets none (ticket 45). Without this the
             // new-branch arm could silently drift to the base form and
             // still pass. The plain form is not distinguished: git's DWIM
             // treats a branch that exists only as one remote-tracking ref

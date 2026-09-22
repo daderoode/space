@@ -30,7 +30,11 @@ pub enum GitOpsStage {
     /// A network op (fetch / pull / push / rebase) is running, showing live
     /// output lines.
     Running,
-    /// Confirm publishing a branch that has no upstream yet (push -u origin).
+    /// Confirm publishing a branch under its own name on origin (push -u
+    /// origin): one that has no upstream yet, or one that tracks a branch
+    /// of another name on origin and pushes there (a new-branch space made
+    /// before ticket 45 tracks its base), whose bare push git refuses or
+    /// sends into that other branch.
     ConfirmPush,
     /// Confirm a push whose destination is a remote other than origin: the
     /// branch tracks another remote (a worktree made from `upstream/<x>`,
@@ -272,9 +276,10 @@ impl GitOpsState {
         }
     }
 
-    /// Handle keys in the ConfirmPush stage (branch has no upstream).
-    /// Only `y`/`Y` confirms, pushing with `-u origin <branch>`; Enter
-    /// declines, because the prompt is `[y/N]` (default No).
+    /// Handle keys in the ConfirmPush stage (branch has no upstream, or
+    /// tracks another branch of origin). Only `y`/`Y` confirms, pushing
+    /// with `-u origin <branch>`; Enter declines, because the prompt is
+    /// `[y/N]` (default No).
     fn handle_confirm_push_key(&mut self, key: KeyEvent) -> ScreenAction {
         // Only an explicit `y` confirms publishing the branch; Enter
         // declines, matching the [y/N] prompt (default No) so the remote
@@ -318,6 +323,19 @@ impl GitOpsState {
             .is_none_or(|t| t.remote != "origin")
     }
 
+    /// Whether the current branch has an upstream that is a branch of
+    /// another name on origin, and pushes to origin
+    /// (`PushTarget::tracks_another_origin_branch`, ticket 45). Push then
+    /// offers to publish it under its own name, as for a branch with no
+    /// upstream, rather than run a bare push.
+    pub fn tracks_another_origin_branch(&self) -> bool {
+        self.has_upstream
+            && self
+                .push_target
+                .as_ref()
+                .is_some_and(|t| t.tracks_another_origin_branch)
+    }
+
     fn handle_menu_key(&mut self, key: KeyEvent) -> ScreenAction {
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') => ScreenAction::Back,
@@ -347,20 +365,26 @@ impl GitOpsState {
     }
 
     /// Fire the menu item at `idx`, moving the highlight to it. Fetch/pull/push
-    /// run through the async Running stage (push confirms first when the branch
-    /// has no upstream); commit and log open their own stages synchronously;
-    /// rebase opens the guarded pre-flight/target/confirm sub-flow.
+    /// run through the async Running stage (push confirms first unless the
+    /// branch tracks its namesake on origin and pushes there); commit and log
+    /// open their own stages synchronously; rebase opens the guarded
+    /// pre-flight/target/confirm sub-flow.
     fn fire(&mut self, idx: usize) -> ScreenAction {
         self.selected = idx;
         match idx {
             0 => self.start_network_op(GitOp::Fetch),
             1 => self.start_network_op(GitOp::Pull),
             2 => {
-                // With an upstream that pushes to origin, push straight away;
-                // with one that pushes elsewhere, confirm the remote first;
-                // with none, confirm before publishing the branch (push -u
-                // origin <branch>).
-                if self.has_upstream && self.push_needs_confirmation() {
+                // With an upstream of another name on origin, or none,
+                // confirm before publishing the branch (push -u origin
+                // <branch>); with one that pushes elsewhere, confirm the
+                // remote first; with its namesake on origin, push straight
+                // away.
+                if self.tracks_another_origin_branch() {
+                    self.stage = GitOpsStage::ConfirmPush;
+                    self.status = None;
+                    ScreenAction::Continue
+                } else if self.has_upstream && self.push_needs_confirmation() {
                     self.stage = GitOpsStage::ConfirmPushRemote;
                     self.status = None;
                     ScreenAction::Continue

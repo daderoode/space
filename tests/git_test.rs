@@ -1784,11 +1784,12 @@ fn status_of_a_branch_whose_remote_key_cannot_be_read_is_zero() {
     assert_eq!((detail.repos[0].ahead, detail.repos[0].behind), (0, 0));
 }
 
-/// T23. A new-branch space started from `origin/main` tracks `origin/main`
-/// (git's `branch.autoSetupMerge`), and its status still counts against
-/// `origin/<branch>`, which is absent until the branch is published: 0 and
-/// 0, though origin's `main` has moved on and been fetched. Counting
-/// against git's own upstream would say 0 ahead, 1 behind the base.
+/// T23. A new-branch space that tracks `origin/main`, as every one made
+/// before ticket 45 does (git's `branch.autoSetupMerge` set it), and its
+/// status still counts against `origin/<branch>`, which is absent until the
+/// branch is published: 0 and 0, though origin's `main` has moved on and
+/// been fetched. Counting against git's own upstream would say 0 ahead, 1
+/// behind the base.
 #[test]
 fn status_of_a_new_branch_does_not_count_against_its_base() {
     let tmp = TempDir::new().unwrap();
@@ -1812,13 +1813,22 @@ fn status_of_a_new_branch_does_not_count_against_its_base() {
         &space::core::workspace::BranchStrategy::NewBranch("newb".to_string()),
     )
     .unwrap();
+    git_out(
+        &clone,
+        &[
+            "branch",
+            "-q",
+            "--set-upstream-to=refs/remotes/origin/main",
+            "newb",
+        ],
+    );
     assert_eq!(
         git_out(
             &clone,
             &["rev-parse", "--symbolic-full-name", "newb@{upstream}"]
         ),
         "refs/remotes/origin/main",
-        "fixture: git set the new branch to track its base"
+        "fixture: the new branch tracks its base, as before ticket 45"
     );
     let next = mint_commit(&seed, "main", "main-next");
     git_out(

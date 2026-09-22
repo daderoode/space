@@ -4390,10 +4390,11 @@ fn a_pull_refuses_an_upstream_of_another_name_on_another_remote() {
     );
 }
 
-/// T4. A new branch started from `origin/main` tracks `origin/main` (git's
-/// `branch.autoSetupMerge`), and a pull of it still reads `origin/<branch>`
-/// as before ticket 42: the base is neither fast-forwarded nor merged into
-/// the branch, which is what following git's upstream literally would do.
+/// T4. A new branch that tracks `origin/main`, as every new-branch space
+/// made before ticket 45 does (git's `branch.autoSetupMerge` set it), and a
+/// pull of it still reads `origin/<branch>` as before ticket 42: the base
+/// is neither fast-forwarded nor merged into the branch, which is what
+/// following git's upstream literally would do.
 #[test]
 fn a_pull_of_a_new_branch_still_reads_its_own_name_on_origin() {
     let env = TestEnv::new();
@@ -4405,10 +4406,19 @@ fn a_pull_of_a_new_branch_still_reads_its_own_name_on_origin() {
         &BranchStrategy::NewBranch("newb".to_string()),
     )
     .unwrap();
+    git_ok(
+        &f.repo,
+        &[
+            "branch",
+            "-q",
+            "--set-upstream-to=refs/remotes/origin/main",
+            "newb",
+        ],
+    );
     assert_eq!(
         upstream_of(&f.repo, "newb"),
         "refs/remotes/origin/main",
-        "fixture: git set the new branch to track its base"
+        "fixture: the new branch tracks its base, as before ticket 45"
     );
     let start = rev(&wt, "HEAD");
     let main_next = mint(&f.repo, &start, "main-next");
@@ -4870,4 +4880,286 @@ fn a_pull_reads_the_last_value_of_a_remote_key_set_twice() {
         result.message
     );
     assert_eq!(rev(&wt, "HEAD"), upstream_next, "at upstream's new tip");
+}
+
+// ---------------------------------------------------------------------------
+// Ticket 45: a new branch tracks nothing, and the sync moves a branch without
+// changing what it tracks.
+// ---------------------------------------------------------------------------
+
+/// Every `branch.<name>.*` key and its value, one per line, as git lists
+/// them; empty when the branch has none.
+fn branch_keys(repo: &Path, branch: &str) -> String {
+    let out = Command::new("git")
+        .args(["config", "--get-regexp", &format!(r"^branch\.{}\.", branch)])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    // Exit 1 is git's "no key matched"; anything else is a broken probe.
+    assert!(
+        out.status.success() || out.status.code() == Some(1),
+        "git config --get-regexp failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// N1. A new branch started from `refs/remotes/origin/<base>` tracks
+/// nothing. git's default `branch.autoSetupMerge` would make it track the
+/// base, so the git-ops Push would run a bare `git push`, which git refuses
+/// (the upstream's name is not the branch's) or, under
+/// `push.default=upstream`, sends into origin's base branch.
+#[test]
+fn a_new_branch_space_tracks_nothing() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let wt = create_worktree(
+        &f.repo,
+        &env.workspaces_dir,
+        "s",
+        &BranchStrategy::NewBranch("newb".to_string()),
+    )
+    .unwrap();
+    assert_eq!(
+        rev(&wt, "HEAD"),
+        rev(&f.repo, "refs/remotes/origin/main"),
+        "fixture: the branch started from origin's base"
+    );
+
+    assert_eq!(head_symref(&wt), "refs/heads/newb");
+    assert_eq!(upstream_of(&f.repo, "newb"), "", "no upstream");
+    assert_eq!(branch_keys(&f.repo, "newb"), "", "no branch.newb.* key");
+}
+
+/// N2. The new branch tracks nothing whatever `branch.autoSetupMerge`
+/// says, from either start point the arm uses. On the local fallback (no
+/// `refs/remotes/origin/<base>`), `always` makes git track the base branch
+/// in the repository itself (`remote = .`) and `inherit` copies what the
+/// base tracks; from origin's start point `always` tracks origin's base.
+#[test]
+fn a_new_branch_tracks_nothing_whatever_auto_setup_merge_says() {
+    for setting in ["always", "inherit"] {
+        let env = TestEnv::new();
+        let repo = env.create_repo("plain");
+        git_ok(&repo, &["config", "branch.autoSetupMerge", setting]);
+        // What `inherit` would copy: the base tracks origin's main, and
+        // there is no `refs/remotes/origin/main`, so the add falls back to
+        // `refs/heads/main`.
+        let nowhere = env.dir.path().join("nowhere.git");
+        git_ok(
+            &repo,
+            &["remote", "add", "origin", nowhere.to_str().unwrap()],
+        );
+        git_ok(&repo, &["config", "branch.main.remote", "origin"]);
+        git_ok(&repo, &["config", "branch.main.merge", "refs/heads/main"]);
+        assert!(
+            !ref_present(&repo, "refs/remotes/origin/main"),
+            "fixture: no origin/main, so the start point is the local base"
+        );
+        create_worktree(
+            &repo,
+            &env.workspaces_dir,
+            "local",
+            &BranchStrategy::NewBranch("local".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            branch_keys(&repo, "local"),
+            "",
+            "{}: from the local base the new branch tracks nothing",
+            setting
+        );
+
+        let f = two_remote_repo(&env);
+        git_ok(&f.repo, &["config", "branch.autoSetupMerge", setting]);
+        create_worktree(
+            &f.repo,
+            &env.workspaces_dir,
+            "remote",
+            &BranchStrategy::NewBranch("remote".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            branch_keys(&f.repo, "remote"),
+            "",
+            "{}: from origin's base the new branch tracks nothing",
+            setting
+        );
+    }
+}
+
+/// S1. The sync forwards a branch that tracks nothing and it still tracks
+/// nothing. A plain `git branch -f <b> refs/remotes/origin/<b>` re-applies
+/// `branch.autoSetupMerge` and makes it track origin's branch, so a later
+/// Push would run unasked where it should ask before `push -u origin`.
+#[test]
+fn a_sync_leaves_a_branch_that_tracks_nothing_tracking_nothing() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let main = rev(&f.repo, "refs/heads/main");
+    git_ok(&f.repo, &["branch", "-q", "--no-track", "loose", &main]);
+    let next = mint(&f.repo, &main, "loose-next");
+    publish(&f.repo, &f.origin, &next, "loose");
+    assert_eq!(branch_keys(&f.repo, "loose"), "", "fixture: tracks nothing");
+
+    let result = sync_repo(&f.repo);
+
+    assert_eq!(
+        result.forwarded,
+        vec!["loose".to_string()],
+        "skipped: {:?}",
+        result.skipped
+    );
+    assert_eq!(rev(&f.repo, "refs/heads/loose"), next, "at origin's tip");
+    assert_eq!(
+        branch_keys(&f.repo, "loose"),
+        "",
+        "and it still tracks nothing"
+    );
+}
+
+/// S2. The sync keeps exactly the keys of each branch it forwards: a branch
+/// tracking origin's `main` (a space made before ticket 45, published from
+/// the shell) keeps tracking `main`, and a branch with two merge values
+/// keeps both. A plain `git branch -f` re-points the first at origin's
+/// namesake and appends a third merge value to the second.
+#[test]
+fn a_sync_keeps_what_a_forwarded_branch_tracks() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let main = rev(&f.repo, "refs/heads/main");
+    git_ok(
+        &f.repo,
+        &[
+            "branch",
+            "-q",
+            "--track",
+            "based",
+            "refs/remotes/origin/main",
+        ],
+    );
+    git_ok(&f.repo, &["branch", "-q", "--no-track", "twice", &main]);
+    git_ok(&f.repo, &["config", "branch.twice.remote", "origin"]);
+    for merge in ["refs/heads/twice", "refs/heads/other"] {
+        git_ok(&f.repo, &["config", "--add", "branch.twice.merge", merge]);
+    }
+    let before: Vec<String> = ["based", "twice"]
+        .iter()
+        .map(|b| branch_keys(&f.repo, b))
+        .collect();
+    assert_eq!(
+        before[0], "branch.based.remote origin\nbranch.based.merge refs/heads/main\n",
+        "fixture: based tracks origin's main"
+    );
+    let mut tips = vec![];
+    for branch in ["based", "twice"] {
+        let next = mint(&f.repo, &main, &format!("{}-next", branch));
+        publish(&f.repo, &f.origin, &next, branch);
+        tips.push(next);
+    }
+
+    let mut result = sync_repo(&f.repo);
+    result.forwarded.sort();
+
+    assert_eq!(
+        result.forwarded,
+        vec!["based".to_string(), "twice".to_string()],
+        "skipped: {:?}",
+        result.skipped
+    );
+    for (i, branch) in ["based", "twice"].iter().enumerate() {
+        assert_eq!(
+            rev(&f.repo, &format!("refs/heads/{}", branch)),
+            tips[i],
+            "{} is at origin's tip",
+            branch
+        );
+        assert_eq!(
+            branch_keys(&f.repo, branch),
+            before[i],
+            "{} keeps exactly the keys it had",
+            branch
+        );
+    }
+}
+
+/// A repo `pub` whose `main` is published to a bare origin and fetched, and
+/// that origin.
+fn published_repo(env: &TestEnv) -> (PathBuf, PathBuf) {
+    let repo = env.create_repo("pub");
+    let origin = env.dir.path().join("pub-origin.git");
+    std::fs::create_dir_all(&origin).unwrap();
+    git_ok(&origin, &["init", "-q", "--bare", "-b", "main"]);
+    git_ok(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git_ok(&repo, &["push", "-q", "origin", "main"]);
+    git_ok(&repo, &["fetch", "-q", "origin"]);
+    (repo, origin)
+}
+
+/// P1. The set-upstream push names its source exactly, so a tag of the
+/// branch's name beside it does not make the push ambiguous: the branch
+/// lands on origin's `refs/heads/feat` and tracks `origin/feat`.
+#[test]
+fn a_set_upstream_push_publishes_a_branch_beside_a_tag_of_its_name() {
+    let env = TestEnv::new();
+    let (repo, origin) = published_repo(&env);
+    let main = rev(&repo, "refs/heads/main");
+    let decoy = mint(&repo, &main, "decoy");
+    git_ok(&repo, &["tag", "feat", &decoy]);
+    git_ok(&repo, &["checkout", "-q", "--no-track", "-b", "feat"]);
+    git_ok(&repo, &["commit", "-q", "--allow-empty", "-m", "work"]);
+    let work = rev(&repo, "refs/heads/feat");
+    assert_ne!(work, decoy, "fixture: the tag is elsewhere");
+
+    let result = space::core::workspace::push_repo(&repo, true);
+
+    assert!(result.success, "{}", result.message);
+    assert_eq!(
+        rev(&origin, "refs/heads/feat"),
+        work,
+        "the branch, not the tag"
+    );
+    assert_eq!(upstream_of(&repo, "feat"), "refs/remotes/origin/feat");
+}
+
+/// P2. A branch configured to track origin's `main` whose
+/// `refs/remotes/origin/main` is gone reads as having no upstream (libgit2
+/// cannot resolve it), so Push offers `push -u origin`. Under
+/// `push.default=upstream` a push that names the branch alone goes into
+/// origin's `main` all the same; this one names both sides, so `main`
+/// stays and the branch is published under its own name.
+#[test]
+fn a_set_upstream_push_never_goes_into_the_branch_git_says_it_tracks() {
+    let env = TestEnv::new();
+    let (repo, origin) = published_repo(&env);
+    let main_before = rev(&origin, "refs/heads/main");
+    git_ok(
+        &repo,
+        &[
+            "checkout",
+            "-q",
+            "-b",
+            "feat",
+            "--track",
+            "refs/remotes/origin/main",
+        ],
+    );
+    git_ok(&repo, &["commit", "-q", "--allow-empty", "-m", "work"]);
+    let work = rev(&repo, "refs/heads/feat");
+    git_ok(&repo, &["update-ref", "-d", "refs/remotes/origin/main"]);
+    git_ok(&repo, &["config", "push.default", "upstream"]);
+    assert!(
+        !space::core::git::has_upstream(&repo),
+        "fixture: the app reads no upstream, so Push offers push -u"
+    );
+
+    let result = space::core::workspace::push_repo(&repo, true);
+
+    assert!(result.success, "{}", result.message);
+    assert_eq!(rev(&origin, "refs/heads/main"), main_before, "main stays");
+    assert_eq!(rev(&origin, "refs/heads/feat"), work);
+    assert_eq!(upstream_of(&repo, "feat"), "refs/remotes/origin/feat");
 }

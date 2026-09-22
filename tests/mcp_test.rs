@@ -1829,3 +1829,97 @@ fn a_panic_under_the_env_lock_fails_only_its_own_test() {
     assert!(outcome.is_err(), "the body must have panicked");
     with_test_env(|env, _| assert!(env.config_dir.is_dir()));
 }
+
+/// Run git in `dir`, fail the test if git fails, and return its stdout.
+fn git_run(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A repo `name` whose `main` is published to a bare origin and fetched,
+/// so a new branch starts from `refs/remotes/origin/main`.
+fn repo_with_origin(env: &TestEnv, name: &str) -> PathBuf {
+    let repo = env.create_repo(name);
+    let bare = env.dir.path().join(format!("{}-origin.git", name));
+    std::fs::create_dir_all(&bare).unwrap();
+    git_run(&bare, &["init", "-q", "--bare", "-b", "main"]);
+    git_run(&repo, &["remote", "add", "origin", bare.to_str().unwrap()]);
+    git_run(&repo, &["push", "-q", "origin", "main"]);
+    git_run(&repo, &["fetch", "-q", "origin"]);
+    repo
+}
+
+/// Every `branch.<name>.*` key in `repo`; empty when there is none (git
+/// exits 1 for no match).
+fn branch_keys(repo: &std::path::Path, branch: &str) -> String {
+    let out = std::process::Command::new("git")
+        .args(["config", "--get-regexp", &format!(r"^branch\.{}\.", branch)])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success() || out.status.code() == Some(1),
+        "git config --get-regexp failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// N4 (ticket 45). Over MCP a new branch tracks nothing too, from
+/// `create_workspace` and from `add_repos`: both start it from
+/// `refs/remotes/origin/main`, where git's default `branch.autoSetupMerge`
+/// would make it track the base.
+#[test]
+fn mcp_new_branches_track_nothing() {
+    with_test_env(|env, server| {
+        let first = repo_with_origin(env, "first");
+        let second = repo_with_origin(env, "second");
+        env.write_cache(&[first.clone(), second.clone()]);
+
+        server
+            .create_workspace(Parameters(CreateWorkspaceParams {
+                name: "fresh".to_string(),
+                repos: vec!["first".to_string()],
+                strategy: "new".to_string(),
+                branch: None,
+            }))
+            .unwrap();
+        server
+            .add_repos(Parameters(AddReposParams {
+                workspace: "fresh".to_string(),
+                repos: vec!["second".to_string()],
+                strategy: "new".to_string(),
+                branch: None,
+            }))
+            .unwrap();
+
+        for repo in [&first, &second] {
+            let wt = env
+                .workspaces_dir
+                .join("fresh")
+                .join(repo.file_name().unwrap());
+            assert_eq!(
+                git_run(&wt, &["rev-parse", "HEAD"]),
+                git_run(repo, &["rev-parse", "refs/remotes/origin/main"]),
+                "fixture: {} started from origin's base",
+                repo.display()
+            );
+            assert_eq!(
+                branch_keys(repo, "fresh"),
+                "",
+                "{}: the new branch tracks nothing",
+                repo.display()
+            );
+        }
+    });
+}

@@ -400,9 +400,22 @@ pub fn has_upstream(repo_path: &Path) -> bool {
 /// so the destination is unknown rather than guessed. The git-ops overlay
 /// treats an unknown destination on a branch with an upstream as a reason
 /// to ask, never as origin.
+///
+/// `tracks_another_origin_branch` (ticket 45) is true when the branch
+/// tracks a branch of another name on origin (`branch.<name>.remote` is
+/// origin and `branch.<name>.merge` is not exactly one value,
+/// `refs/heads/<name>`) and its push goes to origin too. Every new-branch
+/// space made before ticket 45 is so (git set it to track its base). A bare
+/// push there is refused under `push.default=simple` and goes into that
+/// other branch under `upstream`, so the overlay offers `push -u origin
+/// <name>` instead. A branch whose push goes to another remote pushes under
+/// its own name (git's triangular push) and keeps the flag false, as does
+/// one tracking another remote that pushes to origin. A merge key that
+/// cannot be read makes the whole target unknown (`None`).
 pub struct PushTarget {
     pub remote: String,
     pub tracks: String,
+    pub tracks_another_origin_branch: bool,
 }
 
 pub fn push_target(repo_path: &Path) -> Option<PushTarget> {
@@ -421,19 +434,36 @@ pub fn push_target(repo_path: &Path) -> Option<PushTarget> {
         .ok()??
         .to_string();
     let config = repo.config().ok()?;
+    let tracked_remote_key = format!("branch.{}.remote", name);
     let keys = [
         format!("branch.{}.pushRemote", name),
         "remote.pushDefault".to_string(),
-        format!("branch.{}.remote", name),
+        tracked_remote_key.clone(),
     ];
+    let mut destination = None;
     for key in &keys {
         match config.get_string(key) {
-            Ok(remote) => return Some(PushTarget { remote, tracks }),
+            Ok(remote) => {
+                destination = Some(remote);
+                break;
+            }
             Err(e) if e.code() == git2::ErrorCode::NotFound => continue,
             Err(_) => return None,
         }
     }
-    None
+    let remote = destination?;
+    // The upstream resolved, so the branch has a remote; one that cannot be
+    // read now, or a merge value that cannot, is unknown, not a namesake.
+    let tracked_remote = config.get_string(&tracked_remote_key).ok()?;
+    let merges = config_values(&config, &format!("branch.{}.merge", name)).ok()?;
+    let tracks_another_origin_branch = remote == "origin"
+        && tracked_remote == "origin"
+        && merges != [format!("refs/heads/{}", name)];
+    Some(PushTarget {
+        remote,
+        tracks,
+        tracks_another_origin_branch,
+    })
 }
 
 /// What pull, sync and status compare a local branch with (ticket 42).
@@ -457,8 +487,8 @@ pub enum Upstream {
 /// the two keys git's own fetch and pull read, `branch.<name>.remote` and
 /// `branch.<name>.merge`:
 /// - no remote, or `origin` whatever the merge: `refs/remotes/origin/<name>`,
-///   the rule from before ticket 42. That includes a new branch started
-///   from `origin/<base>`, which git sets to track the base.
+///   the rule from before ticket 42. That includes a new-branch space made
+///   before ticket 45, whose branch git set to track its base.
 /// - the namesake (`merge` is `refs/heads/<name>`) on another remote the
 ///   repo has: `refs/remotes/<remote>/<name>`, the ref ticket 25's
 ///   `--track` add reads, so every branch made from `<remote>/<name>` is

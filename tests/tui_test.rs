@@ -11359,6 +11359,7 @@ mod push_remote_confirmation_tests {
         st.push_target = Some(PushTarget {
             remote: remote.to_string(),
             tracks: format!("{}/feat", remote),
+            tracks_another_origin_branch: false,
         });
         app.screen = Screen::GitOps(st);
         app
@@ -11516,6 +11517,7 @@ mod push_remote_confirmation_tests {
             st.push_target = Some(PushTarget {
                 remote: ".".to_string(),
                 tracks: "main".to_string(),
+                tracks_another_origin_branch: false,
             });
         }
         app.handle_key(key(KeyCode::Char('P')));
@@ -11535,11 +11537,20 @@ mod push_remote_confirmation_tests {
     }
 
     /// The whole path on a real repository, not three stubs: a repo with
-    /// two remotes whose checked-out branch tracks `upstream/feat`, the
-    /// overlay opened with `G` (so `GitOpsState::new` resolves the
-    /// destination itself), then `P`. Its mirror on a branch tracking
-    /// `origin/main` takes the no-prompt path.
+    /// two remotes whose checked-out branch tracks `track`, the overlay
+    /// opened with `G` (so `GitOpsState::new` resolves the destination
+    /// itself), then `P`. Its mirror on a branch tracking `origin/feat`
+    /// takes the no-prompt path.
     fn real_two_remote_app(track: &str) -> (TestEnv, App) {
+        let (env, repo) = real_two_remote_repo(track);
+        let app = git_ops_over(&env, &repo, "two");
+        (env, app)
+    }
+
+    /// The repo behind `real_two_remote_app`, for a test that changes it
+    /// before opening the overlay: both remotes have `main` and `feat`,
+    /// every ref is fetched, and `feat` is checked out tracking `track`.
+    fn real_two_remote_repo(track: &str) -> (TestEnv, std::path::PathBuf) {
         let env = TestEnv::new();
         let repo = env.create_repo("two");
         for remote in ["origin", "upstream"] {
@@ -11547,13 +11558,45 @@ mod push_remote_confirmation_tests {
             std::fs::create_dir_all(&bare).unwrap();
             git(&["init", "-q", "--bare", "-b", "main"], &bare);
             git(&["remote", "add", remote, bare.to_str().unwrap()], &repo);
+            git(&["push", "-q", remote, "main", "main:feat"], &repo);
         }
-        git(&["push", "-q", "origin", "main"], &repo);
-        git(&["push", "-q", "upstream", "main:feat"], &repo);
         git(&["fetch", "-q", "--all"], &repo);
         git(&["checkout", "-q", "-b", "feat", "--track", track], &repo);
-        let app = git_ops_over(&env, &repo, "two");
-        (env, app)
+        (env, repo)
+    }
+
+    /// The bare repo `real_two_remote_repo` made for `remote`.
+    fn bare_of(env: &TestEnv, remote: &str) -> std::path::PathBuf {
+        env.workspaces_dir.join(format!("{}.git", remote))
+    }
+
+    /// Drive the git-ops worker until it reports, then return whether the
+    /// op worked, with its output for the failure message.
+    fn finish_gitop(app: &mut App) -> (bool, String) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            app.poll_gitop_result();
+            if let Screen::GitOps(st) = &app.screen {
+                if let Some(ok) = st.finished {
+                    return (ok, st.output.join("\n"));
+                }
+            } else {
+                panic!("the overlay must stay open until the op reports");
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the git-ops worker did not finish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// The op the overlay dispatched to its worker.
+    fn running_op(app: &App) -> Option<space::tui::actions::GitOp> {
+        match &app.screen {
+            Screen::GitOps(st) => st.running_op.clone(),
+            _ => None,
+        }
     }
 
     /// Runs git in `dir`, fails the test if git fails, and returns its
@@ -11613,9 +11656,11 @@ mod push_remote_confirmation_tests {
         assert!(app.gitop_rx.is_none(), "no worker before the answer");
     }
 
+    /// D3 (ticket 45). A branch tracking its namesake on origin keeps the
+    /// no-prompt path: a bare push goes to `origin/feat`, where it belongs.
     #[test]
-    fn a_real_worktree_tracking_origin_pushes_without_asking() {
-        let (_env, mut app) = real_two_remote_app("origin/main");
+    fn a_real_worktree_tracking_its_namesake_on_origin_pushes_without_asking() {
+        let (_env, mut app) = real_two_remote_app("origin/feat");
         app.handle_key(key(KeyCode::Char('P')));
         assert_eq!(
             stage(&app),
@@ -11623,6 +11668,182 @@ mod push_remote_confirmation_tests {
             "the destination read from the real repo is origin, so Push runs"
         );
         assert!(app.gitop_rx.is_some(), "the worker starts at once");
+    }
+
+    /// D1 (ticket 45). A branch tracking a branch of another name on
+    /// origin, as every new-branch space made before ticket 45 tracks its
+    /// base, asks before publishing under its own name. A bare push there
+    /// is refused by git under `push.default=simple` and, under
+    /// `push.default=upstream`, moves origin's `main` to the branch.
+    #[test]
+    fn a_real_worktree_tracking_origin_main_asks_to_publish_under_its_own_name() {
+        let (_env, mut app) = real_two_remote_app("origin/main");
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::ConfirmPush,
+            "Push asks to set the upstream, and does not run a bare push"
+        );
+        assert!(app.gitop_rx.is_none(), "no worker before the answer");
+        let flat = flatten(&render_text(&app, 80, 24));
+        assert!(
+            flat.contains(
+                "Branch feat tracks origin/main. Push to origin/feat and track it instead? [y/N]"
+            ),
+            "the prompt names what it tracks and where it would publish, got:\n{}",
+            flat
+        );
+    }
+
+    /// D2 (ticket 45). `y` on that prompt publishes the branch under its
+    /// own name and makes it track that, even with `push.default=upstream`,
+    /// where the bare push would have moved origin's `main`; `n`, `q`, Esc
+    /// and Enter push nothing.
+    #[test]
+    fn y_publishes_a_branch_tracking_origin_main_under_its_own_name() {
+        for code in [
+            KeyCode::Char('n'),
+            KeyCode::Char('q'),
+            KeyCode::Esc,
+            KeyCode::Enter,
+        ] {
+            let (_env, mut app) = real_two_remote_app("origin/main");
+            app.handle_key(key(KeyCode::Char('P')));
+            app.handle_key(key(code));
+            assert_eq!(stage(&app), GitOpsStage::Menu, "{:?} declines", code);
+            assert!(app.gitop_rx.is_none(), "{:?} starts no worker", code);
+        }
+
+        let (env, repo) = real_two_remote_repo("origin/main");
+        git(&["config", "push.default", "upstream"], &repo);
+        git(&["commit", "-q", "--allow-empty", "-m", "work"], &repo);
+        let work = git(&["rev-parse", "HEAD"], &repo);
+        let origin = bare_of(&env, "origin");
+        let main_before = git(&["rev-parse", "refs/heads/main"], &origin);
+        let mut app = git_ops_over(&env, &repo, "two");
+        app.handle_key(key(KeyCode::Char('P')));
+        app.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(
+            running_op(&app),
+            Some(space::tui::actions::GitOp::Push { set_upstream: true }),
+            "y sets the upstream, it does not run a bare push"
+        );
+
+        let (ok, output) = finish_gitop(&mut app);
+
+        assert!(ok, "the push worked: {}", output);
+        assert_eq!(git(&["rev-parse", "refs/heads/feat"], &origin), work);
+        assert_eq!(
+            git(&["rev-parse", "refs/heads/main"], &origin),
+            main_before,
+            "origin's main did not move"
+        );
+        assert_eq!(
+            git(
+                &["rev-parse", "--symbolic-full-name", "feat@{upstream}"],
+                &repo
+            ),
+            "refs/remotes/origin/feat",
+            "feat now tracks its own name on origin"
+        );
+    }
+
+    /// D4a (ticket 45). A branch tracking origin's `main` that pushes to
+    /// another remote (`branch.feat.pushRemote`) pushes under its own name
+    /// there, so it keeps PR #59's confirmation of the other remote.
+    #[test]
+    fn a_branch_tracking_origin_main_that_pushes_elsewhere_asks_about_that_remote() {
+        let (env, repo) = real_two_remote_repo("origin/main");
+        git(&["config", "branch.feat.pushRemote", "upstream"], &repo);
+        let mut app = git_ops_over(&env, &repo, "two");
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(stage(&app), GitOpsStage::ConfirmPushRemote);
+        let flat = flatten(&render_text(&app, 80, 24));
+        assert!(
+            flat.contains("Branch feat tracks origin/main. Push to upstream? [y/N]"),
+            "got:\n{}",
+            flat
+        );
+    }
+
+    /// D4b (ticket 45). A branch tracking `upstream/main` that pushes to
+    /// origin pushes under its own name there (git's triangular push), so
+    /// it keeps the no-prompt path; asking to set the upstream would
+    /// rewrite what it pulls from.
+    #[test]
+    fn a_branch_tracking_upstream_main_that_pushes_to_origin_pushes_without_asking() {
+        let (env, repo) = real_two_remote_repo("upstream/main");
+        git(&["config", "branch.feat.pushRemote", "origin"], &repo);
+        let mut app = git_ops_over(&env, &repo, "two");
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(
+            stage(&app),
+            GitOpsStage::Running,
+            "the push goes to origin under its own name, so Push runs"
+        );
+        assert!(app.gitop_rx.is_some(), "the worker starts at once");
+    }
+
+    /// N3 (ticket 45). A real new-branch space: its branch tracks nothing,
+    /// so `P` asks before publishing it, and `y` publishes it under its own
+    /// name, leaves origin's `main` alone and makes it track what it
+    /// published. A second, bare push then goes to the same place.
+    #[test]
+    fn a_new_branch_space_publishes_from_the_push_confirmation() {
+        let env = TestEnv::new();
+        let clone = env.create_repo("clone");
+        let origin = env.dir.path().join("origin.git");
+        std::fs::create_dir_all(&origin).unwrap();
+        git(&["init", "-q", "--bare", "-b", "main"], &origin);
+        git(
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+            &clone,
+        );
+        git(&["push", "-q", "origin", "main"], &clone);
+        git(&["fetch", "-q", "origin"], &clone);
+        let main_before = git(&["rev-parse", "refs/heads/main"], &origin);
+        let wt = space::core::workspace::create_worktree(
+            &clone,
+            &env.workspaces_dir,
+            "feat",
+            &space::core::workspace::BranchStrategy::NewBranch("feat".to_string()),
+        )
+        .unwrap();
+        git(&["commit", "-q", "--allow-empty", "-m", "work"], &wt);
+        let work = git(&["rev-parse", "HEAD"], &wt);
+
+        let mut app = git_ops_over(&env, &wt, "clone");
+        app.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(stage(&app), GitOpsStage::ConfirmPush);
+        assert!(app.gitop_rx.is_none(), "no worker before the answer");
+        let flat = flatten(&render_text(&app, 80, 24));
+        assert!(
+            flat.contains("Branch feat has no upstream. Push and set upstream to origin/feat?"),
+            "got:\n{}",
+            flat
+        );
+        app.handle_key(key(KeyCode::Char('y')));
+        let (ok, output) = finish_gitop(&mut app);
+
+        assert!(ok, "the push worked: {}", output);
+        assert_eq!(git(&["rev-parse", "refs/heads/feat"], &origin), work);
+        assert_eq!(
+            git(&["rev-parse", "refs/heads/main"], &origin),
+            main_before,
+            "origin's main did not move"
+        );
+        assert_eq!(
+            git(
+                &["rev-parse", "--symbolic-full-name", "feat@{upstream}"],
+                &wt
+            ),
+            "refs/remotes/origin/feat"
+        );
+        git(&["commit", "-q", "--allow-empty", "-m", "more"], &wt);
+        let more = git(&["rev-parse", "HEAD"], &wt);
+        let again = space::core::workspace::push_repo(&wt, false);
+        assert!(again.success, "the bare push worked: {}", again.message);
+        assert_eq!(git(&["rev-parse", "refs/heads/feat"], &origin), more);
     }
 
     #[test]
