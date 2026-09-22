@@ -1783,3 +1783,61 @@ fn status_of_a_branch_whose_remote_key_cannot_be_read_is_zero() {
     let detail = space::core::workspace::workspace_detail(&ws_dir, "s").unwrap();
     assert_eq!((detail.repos[0].ahead, detail.repos[0].behind), (0, 0));
 }
+
+/// T23. A new-branch space started from `origin/main` tracks `origin/main`
+/// (git's `branch.autoSetupMerge`), and its status still counts against
+/// `origin/<branch>`, which is absent until the branch is published: 0 and
+/// 0, though origin's `main` has moved on and been fetched. Counting
+/// against git's own upstream would say 0 ahead, 1 behind the base.
+#[test]
+fn status_of_a_new_branch_does_not_count_against_its_base() {
+    let tmp = TempDir::new().unwrap();
+    let seed = tmp.path().join("seed");
+    std::fs::create_dir(&seed).unwrap();
+    common::init_repo(&seed);
+    let origin = tmp.path().join("origin.git");
+    std::fs::create_dir(&origin).unwrap();
+    git_out(&origin, &["init", "-q", "--bare", "-b", "main"]);
+    git_out(&seed, &["push", "-q", origin.to_str().unwrap(), "main"]);
+    git_out(
+        tmp.path(),
+        &["clone", "-q", origin.to_str().unwrap(), "clone"],
+    );
+    let clone = tmp.path().join("clone");
+    let ws_dir = tmp.path().join("ws");
+    let wt = space::core::workspace::create_worktree(
+        &clone,
+        &ws_dir,
+        "newb",
+        &space::core::workspace::BranchStrategy::NewBranch("newb".to_string()),
+    )
+    .unwrap();
+    assert_eq!(
+        git_out(
+            &clone,
+            &["rev-parse", "--symbolic-full-name", "newb@{upstream}"]
+        ),
+        "refs/remotes/origin/main",
+        "fixture: git set the new branch to track its base"
+    );
+    let next = mint_commit(&seed, "main", "main-next");
+    git_out(
+        &seed,
+        &[
+            "push",
+            "-q",
+            origin.to_str().unwrap(),
+            &format!("{}:refs/heads/main", next),
+        ],
+    );
+    git_out(&clone, &["fetch", "-q", "origin"]);
+    assert_eq!(
+        git_out(&clone, &["rev-parse", "refs/remotes/origin/main"]),
+        next,
+        "fixture: origin's main moved on and was fetched"
+    );
+
+    assert_eq!(space::core::git::ahead_behind(&wt).unwrap(), (0, 0));
+    let detail = space::core::workspace::workspace_detail(&ws_dir, "newb").unwrap();
+    assert_eq!((detail.repos[0].ahead, detail.repos[0].behind), (0, 0));
+}
