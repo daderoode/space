@@ -6446,8 +6446,9 @@ fn real(path: &Path) -> String {
 /// repo was there (master `9e1e1e9`). The live repo has no worktrees at all,
 /// so neither its admin directory nor its `worktrees` directory exists: the
 /// reading counts a worktree path of a repository that is there, as the
-/// blank-separated words do. A `/` inside the note (a date) and the live path
-/// in the middle of the line are read too.
+/// blank-separated words do. A `/` inside the note (a date), the live path in
+/// the middle of the line, and the live path pasted over the dead id are read
+/// too.
 #[test]
 fn a_dead_admin_path_with_a_live_one_glued_on_is_kept() {
     let env = TestEnv::new();
@@ -6470,6 +6471,19 @@ fn a_dead_admin_path_with_a_live_one_glued_on_is_kept() {
             format!("{}#moved 2026/09/21{}", dead, live),
         ),
         ("glued-middle", format!("{}#now{}#was{}", dead, live, dead)),
+        // The live path pasted over the dead id: `worktrees//<live>`. Its
+        // first name sits where the id was, so readings start there. The
+        // path is the one given, not the real one, so that dropping its first
+        // name finds nothing (on macOS `/private` dropped leaves `/var`, a
+        // link to the same place; code review of PR #66).
+        (
+            "glued-over-the-id",
+            format!(
+                "{}/worktrees/{}/.git/worktrees/alpha",
+                dead.trim_end_matches("/worktrees/alpha"),
+                repo.display()
+            ),
+        ),
     ];
     for (name, gitdir) in &shapes {
         let dir = copy_alone(&env, name, gitdir);
@@ -6508,12 +6522,7 @@ fn a_live_admin_path_with_a_dead_one_glued_on_by_a_slash_is_kept() {
     ];
     for (name, gitdir) in &shapes {
         let dir = copy_alone(&env, name, gitdir);
-        assert_kept_alone(
-            &env,
-            name,
-            &dir,
-            "under another repository's worktrees directory",
-        );
+        assert_kept_alone(&env, name, &dir, "inside a live worktree's admin directory");
     }
     assert!(original.exists(), "and the original is left alone");
 }
@@ -6640,8 +6649,8 @@ fn a_genuine_orphan_whose_glued_reading_is_no_repository_is_removed() {
 /// U7. The readings after an orphan's admin path are bounded: past 256 of
 /// them the directory is kept with a reason that says so, rather than read,
 /// so a crafted line costs a bounded number of checks and never a deletion.
-/// A real line needs a few dozen: the U1 shapes need 10 to 32 (measured),
-/// and this one needs 301.
+/// A real line needs a few dozen: the U1 shapes need 9 to 34 (measured),
+/// and this one needs 302.
 #[test]
 fn a_gitdir_with_too_many_parts_to_read_is_kept() {
     let env = TestEnv::new();
@@ -6660,20 +6669,30 @@ fn a_gitdir_with_too_many_parts_to_read_is_kept() {
 
 /// U8. The cap's edge: 256 readings are still made, 257 are not. The live
 /// repo's worktree path is glued on after an orphan's admin path and `k`
-/// one-letter names, so the readings number `k` plus the names of the live
-/// repo's git directory; at 256 the live path is found (the glued reason),
-/// at 257 the line is kept unread (the cap's reason). Both keep; only the
-/// reason tells the edge (independent review of PR #66).
+/// one-letter names. Readings start at the dead id, so they number `k`, plus
+/// the names of the live repo's git directory, plus one; at 256 the live
+/// path is found (the glued reason), at 257 the line is kept unread (the
+/// cap's reason). Both keep; only the reason tells the edge (independent
+/// review of PR #66). Built under `/tmp`, since a folder named `worktrees` in
+/// the temporary directory's path would add readings (code review of PR #66).
 #[test]
 fn the_cap_reads_256_readings_and_no_more() {
     let env = TestEnv::new();
-    let repo = absolute_repo(&env, "alpha");
+    let tmp = TempDir::new_in("/tmp").unwrap();
+    let repo = absolute_repo_at(&tmp.path().join("alpha"));
     let live_git = repo.canonicalize().unwrap().join(".git");
-    let names = live_git.components().count() - 1;
-    let dead = format!(
-        "{}/old-home/alpha/.git/worktrees/alpha",
-        real(env.dir.path())
+    let dead = format!("{}/old-home/alpha/.git/worktrees/alpha", real(tmp.path()));
+    assert!(
+        !Path::new(&dead)
+            .components()
+            .rev()
+            .skip(2)
+            .any(|c| c.as_os_str() == "worktrees")
+            && !live_git.components().any(|c| c.as_os_str() == "worktrees"),
+        "fixture: no other folder named worktrees on either path, got {:?}",
+        dead
     );
+    let names = live_git.components().count() - 1;
     for (readings, phrase) in [
         (256, "of a repository that is there joined on after it"),
         (257, "too many parts to check"),
@@ -6681,7 +6700,7 @@ fn the_cap_reads_256_readings_and_no_more() {
         let gitdir = format!(
             "{}{}{}/worktrees/alpha",
             dead,
-            "/a".repeat(readings - names),
+            "/a".repeat(readings - names - 1),
             live_git.display()
         );
         assert!(
@@ -6692,4 +6711,53 @@ fn the_cap_reads_256_readings_and_no_more() {
         let dir = copy_alone(&env, &name, &gitdir);
         assert_kept_alone(&env, &name, &dir, phrase);
     }
+}
+
+/// U9. Keep when unsure: a reading that cannot be read counts as neither a
+/// repository nor its absence. The live repo sits in a directory with mode
+/// 000, so every reading that reaches it answers a permission error, which
+/// `is_repository_dir` alone reads as "not a repository", and a network
+/// mount that answers an I/O error would read the same (code review of PR
+/// #66). The directory is kept, and the reason says the reading could not
+/// be checked.
+#[test]
+fn a_glued_reading_that_cannot_be_read_is_kept() {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Gives the locked directory its mode back however the test ends, so
+    /// the temporary directory can be removed.
+    struct Restore(PathBuf, std::fs::Permissions);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, self.1.clone());
+        }
+    }
+
+    let env = TestEnv::new();
+    let locked = env.dir.path().join("locked");
+    let repo = absolute_repo_at(&locked.join("alpha"));
+    let live = format!("{}/.git/worktrees/alpha", real(&repo));
+    let dead = format!(
+        "{}/old-home/alpha/.git/worktrees/alpha",
+        real(env.dir.path())
+    );
+    let dir = copy_alone(&env, "locked-out", &format!("{}#now{}", dead, live));
+    let _restore = Restore(
+        locked.clone(),
+        std::fs::metadata(&locked).unwrap().permissions(),
+    );
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::symlink_metadata(locked.join("alpha")).is_ok() {
+        // Running as a user the mode does not apply to (root), so there is
+        // nothing to test here. Say so rather than passing quietly.
+        eprintln!("skipped: this user can read a directory with mode 000");
+        return;
+    }
+
+    assert_kept_alone(
+        &env,
+        "locked-out",
+        &dir,
+        "cannot be checked for a repository",
+    );
 }
