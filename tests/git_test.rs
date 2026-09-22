@@ -1692,3 +1692,94 @@ fn status_of_an_origin_branch_does_not_depend_on_its_merge_key() {
 
     assert_eq!(space::core::git::ahead_behind(&clone).unwrap(), (0, 1));
 }
+
+/// A worktree on `fix`, a local branch that tracks `upstream/main` (a
+/// branch of another name on a remote that is not origin), while origin has
+/// a `fix` one commit ahead of it, fetched. Returns the tempdir, the source
+/// repo, the workspaces dir and the worktree.
+fn fix_tracking_upstream_main() -> (
+    TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    common::init_repo(&repo);
+    for name in ["origin", "upstream"] {
+        let bare = tmp.path().join(format!("{}.git", name));
+        std::fs::create_dir(&bare).unwrap();
+        git_out(&bare, &["init", "-q", "--bare", "-b", "main"]);
+        git_out(&repo, &["remote", "add", name, bare.to_str().unwrap()]);
+        git_out(&repo, &["push", "-q", name, "main"]);
+    }
+    git_out(&repo, &["fetch", "-q", "--all"]);
+    git_out(
+        &repo,
+        &[
+            "branch",
+            "-q",
+            "--track",
+            "fix",
+            "refs/remotes/upstream/main",
+        ],
+    );
+    let origin_fix = mint_commit(&repo, "main", "origin-fix");
+    git_out(
+        &repo,
+        &[
+            "push",
+            "-q",
+            "origin",
+            &format!("{}:refs/heads/fix", origin_fix),
+        ],
+    );
+    let ws_dir = tmp.path().join("ws");
+    let wt = space::core::workspace::create_worktree(
+        &repo,
+        &ws_dir,
+        "s",
+        &space::core::workspace::BranchStrategy::ExistingBranch("fix".to_string()),
+    )
+    .unwrap();
+    assert_eq!(
+        git_out(&repo, &["rev-parse", "refs/remotes/origin/fix"]),
+        origin_fix,
+        "fixture: origin's fix is fetched, one commit ahead"
+    );
+    (tmp, repo, ws_dir, wt)
+}
+
+/// T21. A branch that tracks a branch of another name on a remote that is
+/// not origin shows 0 and 0: its status is not counted against
+/// `origin/<branch>`, though origin has a `fix` one commit ahead (master
+/// said 0 ahead, 1 behind).
+#[test]
+fn status_of_a_branch_tracking_another_name_on_another_remote_is_zero() {
+    let (_tmp, _repo, ws_dir, wt) = fix_tracking_upstream_main();
+
+    assert_eq!(space::core::git::ahead_behind(&wt).unwrap(), (0, 0));
+    let detail = space::core::workspace::workspace_detail(&ws_dir, "s").unwrap();
+    assert_eq!((detail.repos[0].ahead, detail.repos[0].behind), (0, 0));
+}
+
+/// T22. A branch whose `branch.<name>.remote` cannot be read (not UTF-8)
+/// shows 0 and 0 too, rather than being counted against `origin/<branch>`.
+#[test]
+fn status_of_a_branch_whose_remote_key_cannot_be_read_is_zero() {
+    use std::os::unix::ffi::OsStrExt;
+    let (_tmp, repo, ws_dir, wt) = fix_tracking_upstream_main();
+    let out = Command::new("git")
+        .arg("config")
+        .arg("branch.fix.remote")
+        .arg(std::ffi::OsStr::from_bytes(b"up\xffstream"))
+        .current_dir(&repo)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "fixture: git stores the bytes");
+
+    assert_eq!(space::core::git::ahead_behind(&wt).unwrap(), (0, 0));
+    let detail = space::core::workspace::workspace_detail(&ws_dir, "s").unwrap();
+    assert_eq!((detail.repos[0].ahead, detail.repos[0].behind), (0, 0));
+}
