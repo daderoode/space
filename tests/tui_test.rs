@@ -11725,7 +11725,7 @@ fn switch_refusals_read_in_full_at_eighty_columns() {
     for (shape, reason) in [
         (
             "local",
-            format!("{} exists and does not track {}", NAME, REMOTE),
+            format!("{} exists and does not track the picked branch", NAME),
         ),
         (
             "unfetched",

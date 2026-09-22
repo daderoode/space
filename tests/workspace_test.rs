@@ -5112,8 +5112,8 @@ fn switch_to_a_remote_branch_that_is_gone_guesses_no_other_remote() {
 
 /// T7. For a remote other than origin, an existing local `feat` that tracks
 /// another line (here origin's) is not switched to in place of the picked
-/// `upstream/feat`: the switch is refused with a sentence naming both, and
-/// nothing moves. Head `1edf10d` switched to it silently, so the dashboard
+/// `upstream/feat`: the switch is refused with a sentence naming the local
+/// branch (short enough for the status line), and nothing moves. Head `1edf10d` switched to it silently, so the dashboard
 /// showed origin's code under a pick of upstream's.
 #[test]
 fn switch_to_another_remotes_branch_refuses_a_local_branch_on_another_line() {
@@ -5136,8 +5136,8 @@ fn switch_to_another_remotes_branch_refuses_a_local_branch_on_another_line() {
         .to_string();
 
     assert!(
-        err.contains("feat exists and does not track upstream"),
-        "the refusal names the pick, got {:?}",
+        err.contains("feat exists and does not track the picked branch"),
+        "the refusal says why, got {:?}",
         err
     );
     assert!(is_detached(&wt), "the worktree has not moved");
@@ -5478,6 +5478,12 @@ fn switch_refused_by_the_worktree_leaves_no_new_branch_behind() {
         !remote_key.success(),
         "and no tracking config is left for a branch that is gone"
     );
+    let merge_key = Command::new("git")
+        .args(["config", "--get", "branch.feat.merge"])
+        .current_dir(&f.repo)
+        .status()
+        .unwrap();
+    assert!(!merge_key.success(), "neither half of it");
 }
 
 /// T17. A remote carrying a negative fetch refspec (`^refs/heads/<x>`, read

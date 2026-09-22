@@ -423,7 +423,7 @@ pub fn switch_worktree_branch(wt_path: &Path, branch: &str, new_branch: bool) ->
         // at the 80-column minimum after "Switch failed: ": a remote of about
         // ten characters and a branch of about twenty fit.
         if remote != DEFAULT_REMOTE && !tracks_the_pick() {
-            anyhow::bail!("{} exists and does not track {}", local_name, remote);
+            anyhow::bail!("{} exists and does not track the picked branch", local_name);
         }
         // The bare name in the switch slot, deliberately: `git switch --
         // refs/heads/<x>` refuses (`a branch is expected`), while the bare
