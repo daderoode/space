@@ -6864,3 +6864,78 @@ fn a_dangling_link_where_a_rule_does_not_follow_it_keeps() {
         assert_kept_alone(&env, name, &dir, phrase);
     }
 }
+
+/// Ticket 52. The sync leaves a diverged branch where it is: one commit of
+/// its own and one new commit on origin, so it is neither forwarded nor
+/// tried, and its own commit stays the branch tip rather than surviving in
+/// the reflog alone. A strictly behind branch in the same run is forwarded,
+/// so the fetch and the forward demonstrably ran.
+///
+/// Why this fixture and not a simpler one (do not simplify it back):
+/// - The branch must be ahead AND behind. The guard is `ahead == 0 &&
+///   behind > 0` in `branches_behind_upstream`; an ahead-only branch has
+///   `behind == 0`, so it is excluded with or without the `ahead == 0` half,
+///   and the unit test on such a fixture stayed green when the ticket 51
+///   audit dropped that half (G1), while `branch -f` rewound a diverged
+///   branch and left its commit reachable from no ref.
+/// - The branch must not be checked out in any worktree. git itself refuses
+///   to force-move a checked-out branch, so under G1 such a branch keeps its
+///   commit anyway and only shows up as a skip.
+#[test]
+fn a_sync_leaves_a_diverged_branch_and_its_commit_where_they_are() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let main = rev(&f.repo, "refs/heads/main");
+    let local = mint(&f.repo, &main, "local-only");
+    git_ok(&f.repo, &["branch", "-q", "--no-track", "wip", &local]);
+    let theirs = mint(&f.repo, &main, "origin-only");
+    publish(&f.repo, &f.origin, &theirs, "wip");
+    git_ok(&f.repo, &["branch", "-q", "--no-track", "ff", &main]);
+    let next = mint(&f.repo, &main, "ff-next");
+    publish(&f.repo, &f.origin, &next, "ff");
+    assert!(
+        !git_ok(&f.repo, &["worktree", "list", "--porcelain"])
+            .lines()
+            .any(|l| l == "branch refs/heads/wip"),
+        "fixture: wip is checked out nowhere"
+    );
+
+    let result = sync_repo(&f.repo);
+
+    assert!(result.fetch_ok(), "fetch: {:?}", result.fetch);
+    assert_eq!(
+        rev(&f.repo, "refs/heads/wip"),
+        local,
+        "wip still ends at its own commit"
+    );
+    assert_eq!(
+        rev(&f.repo, "refs/remotes/origin/wip"),
+        theirs,
+        "fixture: the fetch brought origin's commit"
+    );
+    assert_eq!(
+        git_ok(
+            &f.repo,
+            &[
+                "rev-list",
+                "--left-right",
+                "--count",
+                "refs/heads/wip...refs/remotes/origin/wip",
+            ],
+        )
+        .trim(),
+        "1\t1",
+        "fixture: wip is one ahead and one behind what the sync read"
+    );
+    assert_eq!(
+        result.forwarded,
+        vec!["ff".to_string()],
+        "only the strictly behind branch is forwarded"
+    );
+    assert_eq!(rev(&f.repo, "refs/heads/ff"), next, "ff is at origin's tip");
+    assert!(
+        result.skipped.is_empty(),
+        "wip is not tried either: {:?}",
+        result.skipped
+    );
+}
