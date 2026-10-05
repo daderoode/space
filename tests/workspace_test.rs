@@ -6865,6 +6865,21 @@ fn a_dangling_link_where_a_rule_does_not_follow_it_keeps() {
     }
 }
 
+/// `a` against `b` as git counts it: commits only on `a`, a tab, commits
+/// only on `b`.
+fn left_right(repo: &Path, a: &str, b: &str) -> String {
+    let range = format!("{}...{}", a, b);
+    git_ok(repo, &["rev-list", "--left-right", "--count", &range])
+        .trim()
+        .to_string()
+}
+
+/// Whether some worktree of `repo` has `branch` checked out.
+fn checked_out(repo: &Path, branch: &str) -> bool {
+    let line = format!("branch refs/heads/{}", branch);
+    registered_worktrees(repo).lines().any(|l| l == line)
+}
+
 /// Ticket 52. The sync leaves a diverged branch where it is: one commit of
 /// its own and one new commit on origin, so it is neither forwarded nor
 /// tried, and its own commit stays the branch tip rather than surviving in
@@ -6894,9 +6909,7 @@ fn a_sync_leaves_a_diverged_branch_and_its_commit_where_they_are() {
     let next = mint(&f.repo, &main, "ff-next");
     publish(&f.repo, &f.origin, &next, "ff");
     assert!(
-        !git_ok(&f.repo, &["worktree", "list", "--porcelain"])
-            .lines()
-            .any(|l| l == "branch refs/heads/wip"),
+        !checked_out(&f.repo, "wip"),
         "fixture: wip is checked out nowhere"
     );
 
@@ -6914,16 +6927,7 @@ fn a_sync_leaves_a_diverged_branch_and_its_commit_where_they_are() {
         "fixture: the fetch brought origin's commit"
     );
     assert_eq!(
-        git_ok(
-            &f.repo,
-            &[
-                "rev-list",
-                "--left-right",
-                "--count",
-                "refs/heads/wip...refs/remotes/origin/wip",
-            ],
-        )
-        .trim(),
+        left_right(&f.repo, "refs/heads/wip", "refs/remotes/origin/wip"),
         "1\t1",
         "fixture: wip is one ahead and one behind what the sync read"
     );
@@ -6944,9 +6948,9 @@ fn a_sync_leaves_a_diverged_branch_and_its_commit_where_they_are() {
 /// its namesake on upstream and has a commit of its own; upstream's `feat`
 /// has moved on beside it, so the two have diverged, while origin's `feat`
 /// holds that local commit plus one more, so against origin `feat` is
-/// strictly behind. Read against origin, the sync would move `feat` to
-/// upstream's tip and take the local commit off the branch. It is left
-/// where it is, still tracking upstream.
+/// strictly behind. Deciding against origin while moving to the ref `feat`
+/// tracks, the sync would move `feat` to upstream's tip and take the local
+/// commit off the branch. It is left where it is, still tracking upstream.
 #[test]
 fn a_sync_leaves_a_branch_diverged_from_its_upstream_though_behind_origin() {
     let env = TestEnv::new();
@@ -6979,16 +6983,11 @@ fn a_sync_leaves_a_branch_diverged_from_its_upstream_though_behind_origin() {
     );
     for (theirs, counts) in [("upstream", "1\t1"), ("origin", "0\t1")] {
         assert_eq!(
-            git_ok(
+            left_right(
                 &f.repo,
-                &[
-                    "rev-list",
-                    "--left-right",
-                    "--count",
-                    &format!("refs/heads/feat...refs/remotes/{}/feat", theirs),
-                ],
-            )
-            .trim(),
+                "refs/heads/feat",
+                &format!("refs/remotes/{}/feat", theirs)
+            ),
             counts,
             "fixture: feat against {}'s feat",
             theirs
@@ -7010,8 +7009,10 @@ fn a_sync_leaves_a_branch_diverged_from_its_upstream_though_behind_origin() {
 /// Ticket 52. A branch typed as new whose name is already taken is refused,
 /// and the existing branch keeps its own commit. `git switch -c` refuses an
 /// existing name; `-C` would reset that branch to HEAD and take its commit
-/// off it. The existing branch is checked out nowhere, since git refuses to
-/// reset a checked-out branch even under `-C`.
+/// off it. The existing branch must be checked out nowhere, since git
+/// refuses to reset a checked-out branch even under `-C`. The error is read
+/// only for the branch's name, as the other switch tests do, because this
+/// path does not pin git's language.
 #[test]
 fn switch_to_a_new_branch_whose_name_is_taken_keeps_that_branch() {
     let env = TestEnv::new();
@@ -7019,16 +7020,16 @@ fn switch_to_a_new_branch_whose_name_is_taken_keeps_that_branch() {
     let main = rev(&f.repo, "refs/heads/main");
     let own = mint(&f.repo, &main, "topic-only");
     git_ok(&f.repo, &["branch", "-q", "--no-track", "topic", &own]);
+    assert!(
+        !checked_out(&f.repo, "topic"),
+        "fixture: topic is checked out nowhere"
+    );
 
     let err = space::core::workspace::switch_worktree_branch(&f.repo, "topic", true)
         .expect_err("a branch named topic already exists")
         .to_string();
 
-    assert!(
-        err.contains("a branch named 'topic' already exists"),
-        "git's own refusal, got {:?}",
-        err
-    );
+    assert!(err.contains("topic"), "git names the branch, got {:?}", err);
     assert_eq!(
         rev(&f.repo, "refs/heads/topic"),
         own,
