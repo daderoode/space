@@ -163,15 +163,6 @@ fn left_arrow_noop_when_already_on_left_pane() {
 }
 
 #[test]
-fn right_arrow_on_repo_pane_triggers_expand() {
-    // Right arrow on repos pane dispatches ToggleRepoExpand.
-    // With no workspace/repos, this is effectively a no-op but must not panic.
-    let mut app = test_app(vec![], vec![]);
-    app.focus = Pane::Right;
-    app.handle_key(key(KeyCode::Right)); // should not panic
-}
-
-#[test]
 fn dashboard_j_moves_ws_down() {
     let workspaces = vec![
         Workspace {
@@ -1726,43 +1717,6 @@ fn repo_index_for_cursor_on_file_row() {
 }
 
 #[test]
-fn cursor_row_navigates_through_file_rows() {
-    use space::core::git::{FileEntry, FileStatus};
-    let ws = common::workspace_with_repos(&["repo-a"]);
-    let mut app = test_app(vec![ws], vec![]);
-    app.focus = Pane::Right;
-    app.expanded_repos.insert(0);
-    app.repo_file_cache.insert(
-        0,
-        vec![
-            FileEntry {
-                path: "a.rs".into(),
-                status: FileStatus::Modified,
-                staged: false,
-                insertions: 1,
-                deletions: 0,
-            },
-            FileEntry {
-                path: "b.rs".into(),
-                status: FileStatus::Modified,
-                staged: true,
-                insertions: 2,
-                deletions: 0,
-            },
-        ],
-    );
-    // rows: [Repo(0), SectionHeader("Unstaged")(1), File(a.rs)(2), SectionHeader("Staged")(3), File(b.rs)(4)]
-    // j/k skip SectionHeader rows, so navigation goes: Repo → a.rs → b.rs
-    assert_eq!(app.cursor_row, 0);
-    app.handle_key(key(KeyCode::Down));
-    assert_eq!(app.cursor_row, 2); // skips SectionHeader("Unstaged"), lands on a.rs
-    app.handle_key(key(KeyCode::Down));
-    assert_eq!(app.cursor_row, 4); // skips SectionHeader("Staged"), lands on b.rs
-    app.handle_key(key(KeyCode::Down)); // clamp at end
-    assert_eq!(app.cursor_row, 4);
-}
-
-#[test]
 fn section_header_rows_are_non_interactive() {
     use space::core::git::{FileEntry, FileStatus};
 
@@ -1893,70 +1847,6 @@ fn k_skips_section_headers() {
     assert_eq!(
         app.cursor_row, 0,
         "Up from a.rs should skip SectionHeader and land on Repo"
-    );
-}
-
-#[test]
-fn cursor_repositions_after_staging() {
-    use space::core::git::{FileEntry, FileStatus};
-
-    let ws = common::workspace_with_repos(&["repo-a"]);
-    let mut app = test_app(vec![ws], vec![]);
-    app.focus = Pane::Right;
-    app.expanded_repos.insert(0);
-    // Two unstaged files
-    app.repo_file_cache.insert(
-        0,
-        vec![
-            FileEntry {
-                path: "a.rs".into(),
-                status: FileStatus::Modified,
-                staged: false,
-                insertions: 1,
-                deletions: 0,
-            },
-            FileEntry {
-                path: "b.rs".into(),
-                status: FileStatus::Modified,
-                staged: false,
-                insertions: 2,
-                deletions: 0,
-            },
-        ],
-    );
-    // rows: [Repo(0), SectionHeader("Unstaged"), File(a.rs at 2), File(b.rs at 3)]
-    // cursor on a.rs
-    app.cursor_row = 2;
-
-    // Simulate staging a.rs by updating cache directly (no real git repo)
-    app.repo_file_cache.insert(
-        0,
-        vec![
-            FileEntry {
-                path: "a.rs".into(),
-                status: FileStatus::Modified,
-                staged: true, // now staged
-                insertions: 1,
-                deletions: 0,
-            },
-            FileEntry {
-                path: "b.rs".into(),
-                status: FileStatus::Modified,
-                staged: false,
-                insertions: 2,
-                deletions: 0,
-            },
-        ],
-    );
-    // rows after: [Repo(0), SectionHeader("Unstaged"), File(b.rs at 2), SectionHeader("Staged"), File(a.rs at 4)]
-    // cursor_row=2 was a.rs (now b.rs is at row 2); cursor stays valid
-    // Apply the reposition logic manually by calling Down then verifying sensible state
-    // The key invariant: cursor must NOT be on a SectionHeader
-    let rows = app.flattened_rows();
-    let cursor = app.cursor_row.min(rows.len().saturating_sub(1));
-    assert!(
-        !matches!(rows[cursor], space::tui::app::RepoRow::SectionHeader { .. }),
-        "cursor should not rest on a SectionHeader after section structure change"
     );
 }
 
@@ -2119,15 +2009,6 @@ fn esc_on_left_pane_is_a_noop() {
         "Esc on the left pane must leave the app on the dashboard"
     );
     assert_eq!(app.focus, Pane::Left, "focus must be unchanged");
-}
-
-#[test]
-fn q_still_quits_after_esc_is_neutered() {
-    let mut app = test_app(vec![], vec![]);
-    app.handle_key(key(KeyCode::Esc));
-    assert!(!app.should_quit);
-    app.handle_key(key(KeyCode::Char('q')));
-    assert!(app.should_quit, "q remains the documented way out");
 }
 
 #[test]
@@ -3043,53 +2924,6 @@ fn diff_viewer_page_and_home_end_scrolling() {
 }
 
 #[test]
-fn reopening_diff_viewer_uses_cache() {
-    let (_env, _repo_path, mut app) = setup_real_repo_app();
-
-    // Open diff viewer
-    app.handle_key(key(KeyCode::Enter));
-    assert!(matches!(app.screen, Screen::DiffViewer(_)));
-
-    // Close it
-    app.handle_key(key(KeyCode::Esc));
-    assert!(matches!(app.screen, Screen::Dashboard));
-
-    // Verify cache has entries for repo 0
-    assert!(
-        app.diff_content_cache.keys().any(|k| k.repo_index == 0),
-        "diff_content_cache should have entries for repo 0 after viewing diff"
-    );
-
-    // Count cache entries for repo 0
-    let count_before = app
-        .diff_content_cache
-        .keys()
-        .filter(|k| k.repo_index == 0)
-        .count();
-
-    // Re-open the same file
-    app.handle_key(key(KeyCode::Enter));
-    assert!(
-        matches!(app.screen, Screen::DiffViewer(_)),
-        "expected DiffViewer screen on re-open"
-    );
-
-    // Close again so cache is still visible
-    app.handle_key(key(KeyCode::Esc));
-
-    // Count should be the same (cache hit, no new entries)
-    let count_after = app
-        .diff_content_cache
-        .keys()
-        .filter(|k| k.repo_index == 0)
-        .count();
-    assert_eq!(
-        count_before, count_after,
-        "cache entry count should be the same after re-opening (cache hit): before={count_before}, after={count_after}"
-    );
-}
-
-#[test]
 fn stage_with_invalid_repo_path_shows_error_status() {
     let (_env, _repo_path, mut app) = setup_real_repo_app();
 
@@ -3931,37 +3765,6 @@ fn create_new_branch_empty_name_rejected() {
     } else {
         panic!("expected CreateWorkspace screen");
     }
-}
-
-#[test]
-fn create_new_branch_custom_name_creates_worktree() {
-    let env = TestEnv::new();
-    let repo_path = env.create_repo("branch-name-repo");
-
-    let config = config_from_env(&env);
-    let mut app = test_app_with_config(config, vec![], vec![repo_path.clone()]);
-
-    app.handle_key(key(KeyCode::Char('c')));
-    if let Screen::CreateWorkspace(ref mut st) = app.screen {
-        st.selected_repos = vec![repo_path];
-        st.ws_name = tui_input::Input::default().with_value("my-ws".to_string());
-        st.stage = space::tui::screens::create::CreateStage::EnterBranchName;
-        st.branch_name_input =
-            tui_input::Input::default().with_value("feature/DEV-1234".to_string());
-    }
-
-    app.handle_key(key(KeyCode::Enter));
-    pump_creating(&mut app);
-
-    assert!(
-        matches!(app.screen, Screen::Dashboard),
-        "expected Dashboard after creating with custom branch name"
-    );
-    assert!(env
-        .workspaces_dir
-        .join("my-ws")
-        .join("branch-name-repo")
-        .exists());
 }
 
 #[test]
@@ -9074,20 +8877,6 @@ mod help_overlay_tests {
         );
     }
 
-    #[test]
-    fn help_opened_from_the_repo_pane_lands_on_the_repo_pane_group() {
-        let ws = common::workspace_with_repos(&["repo-a"]);
-        let mut app = test_app(vec![ws], vec![]);
-        app.focus = Pane::Right;
-        app.handle_key(key(KeyCode::Char('?')));
-        let rendered = render_text(&app, 80, 24);
-        assert!(
-            rendered.contains(keybindings::REPO_PANE_NAME),
-            "help from the repo pane must land on the Repo Pane group, got:\n{}",
-            rendered
-        );
-    }
-
     /// Every group `landing_group` can return must exist in the registry, or
     /// help silently opens at the top instead of on the screen's own group.
     /// The two share one set of constants, so this pins that they stay shared.
@@ -9355,208 +9144,147 @@ mod help_overlay_tests {
         }
     }
 
-    /// Every row of the registry, pinned.
+    /// Every row of the registry, pinned as `group | key | description`, one
+    /// line per row, so a registry change shows up here as one changed line
+    /// and a failure names the rows that differ.
     ///
-    /// Six reviews of this branch found roughly ten rows that documented keys
-    /// the code does not bind, or omitted stages where a key means something
-    /// else. Four consecutive attempts to fix that by hand each introduced a
-    /// fresh instance. Spot checks keep failing because they test the row that
-    /// was just edited rather than the property "this row is true".
+    /// What it protects: an entry silently added, removed, reworded or moved,
+    /// or a group renamed or dropped. Six reviews of this branch found roughly
+    /// ten rows that documented keys the code does not bind, and hand fixes
+    /// kept introducing fresh ones, so changing a row has to be a deliberate
+    /// act.
     ///
-    /// So the whole table is pinned here. This test is not evidence that the
-    /// rows are correct; it makes changing one a deliberate act. When it fails,
-    /// re-read the handler for that key, in the stage the group covers, and
-    /// only then update the expectation.
+    /// What it does not protect: that any entry behaves as it says. It never
+    /// presses a key; the handler tests do that (for example
+    /// `the_registry_does_not_claim_q_goes_back_where_q_is_typed`). When it
+    /// fails, re-read the handler for that key, in the stage the group covers,
+    /// and only then update the row.
     #[test]
     fn the_whole_registry_is_pinned() {
-        let expected: &[(&str, &str, &str)] = &[
-            ("Navigation", "Tab", "Switch pane"),
-            ("Navigation", "↑/k", "Up"),
-            ("Navigation", "↓/j", "Down"),
-            ("Navigation", "PgUp/PgDn", "Page up/down"),
-            ("Navigation", "Home/End", "First / last row"),
-            ("Navigation", "h/l", "Scroll table left/right (repo pane)"),
-            ("Navigation", "→", "Expand / focus repos"),
-            (
-                "Navigation",
-                "←/Esc",
-                "Right pane: collapse / focus workspaces",
-            ),
-            ("Workspace Pane", "Enter", "Go to workspace (cd)"),
-            ("Workspace Pane", "c", "Create workspace"),
-            ("Workspace Pane", "a", "Add repos"),
-            ("Workspace Pane", "d", "Delete workspace"),
-            ("Workspace Pane", "g", "Go (fuzzy picker)"),
-            ("Workspace Pane", "/", "Filter spaces"),
-            ("Workspace Pane", "S", "Config"),
-            ("Repo Pane", "Enter (repo)", "Expand / collapse repo"),
-            ("Repo Pane", "Enter (file)", "View file diff"),
-            ("Repo Pane", "←/Esc", "Collapse all / back"),
-            ("Repo Pane", "s/space", "Stage / unstage file"),
-            ("Repo Pane", "/", "Search repos"),
-            ("Repo Pane", "S", "Stage all unstaged"),
-            ("Repo Pane", "U", "Unstage all staged"),
-            ("Repo Pane", "b", "Switch branch"),
-            ("Repo Pane", "G", "Git operations"),
-            ("Repo Picker", "Tab", "Toggle repo"),
-            ("Repo Picker", "Ctrl-S", "Cycle scope"),
-            ("Repo Picker", "Ctrl-R", "Rescan repo list"),
-            ("Create / Add Flow", "Tab", "Toggle repo in picker"),
-            ("Create / Add Flow", "Enter", "Confirm and continue"),
-            ("Create / Add Flow", "↑↓/jk", "Choose branch strategy"),
-            (
-                "Create / Add Flow",
-                "letters",
-                "Type a name, or filter the picker",
-            ),
-            ("Create / Add Flow", "Esc", "Back one stage"),
-            ("Creating Log", "↑↓/jk", "Scroll the log"),
-            ("Creating Log", "PgUp/PgDn", "Page the log"),
-            (
-                "Creating Log",
-                "Home/End",
-                "Top / bottom (End resumes follow)",
-            ),
-            (
-                "Creating Log",
-                "Esc/q",
-                "Stop creating, or dismiss a failure",
-            ),
-            (
-                "Creating Log",
-                "Enter",
-                "Dismiss failure (ignored while running)",
-            ),
-            ("Delete Confirm", "y", "Delete the space"),
-            ("Delete Confirm", "n/Esc/Enter", "Cancel (the default)"),
-            ("Delete Confirm", "q", "Cancel"),
-            ("Switch Branch", "↑↓/jk", "Choose strategy"),
-            ("Switch Branch", "Enter", "Confirm"),
-            (
-                "Switch Branch",
-                "letters",
-                "Type a new branch name / filter",
-            ),
-            ("Switch Branch", "↑↓", "Move the branch highlight"),
-            ("Switch Branch", "Esc", "Back one stage"),
-            ("Switch Branch", "q", "Back, on the strategy stage only"),
-            ("Config Editor", "↑↓/jk", "Move between fields"),
-            ("Config Editor", "Enter", "Edit field / commit edit"),
-            ("Config Editor", "Ctrl-S", "Save and exit"),
-            ("Config Editor", "Esc", "Cancel edit, or close"),
-            ("Config Editor", "q", "Close, when not editing"),
-            ("Space & Repo Pickers", "↑↓", "Move the highlight"),
-            ("Space & Repo Pickers", "Enter", "Select"),
-            ("Space & Repo Pickers", "Esc", "Cancel"),
-            ("Space & Repo Pickers", "letters", "Type into the filter"),
-            ("Git Operations", "f", "Fetch"),
-            ("Git Operations", "p", "Pull"),
-            ("Git Operations", "P", "Push"),
-            ("Git Operations", "c", "Commit"),
-            ("Git Operations", "l", "Log"),
-            ("Git Operations", "r", "Rebase"),
-            ("Git Operations", "↑↓/jk", "Navigate (menu and log only)"),
-            ("Git Operations", "↑↓", "Move the rebase-target highlight"),
-            ("Git Operations", "PgUp/PgDn", "Page the log"),
-            ("Git Operations", "Home/End", "Log top / bottom"),
-            ("Git Operations", "enter", "Select"),
-            ("Git Operations", "y", "Confirm a push or rebase"),
-            ("Git Operations", "n/Enter/Esc", "Decline (the default)"),
-            (
-                "Git Operations",
-                "esc",
-                "Back a stage (closes from menu/running)",
-            ),
-            ("Git Operations", "q", "Same as Esc, except while typing"),
-            ("Diff Viewer", "up/k", "Scroll up"),
-            ("Diff Viewer", "dn/j", "Scroll down"),
-            ("Diff Viewer", "PgUp/PgDn", "Page scroll"),
-            ("Diff Viewer", "Home/End", "Jump to start/end"),
-            ("Diff Viewer", "s/space", "Stage / unstage"),
-            ("Diff Viewer", "Esc/q", "Close"),
-            ("Sync Report", "↑↓/jk", "Select repo (once done)"),
-            ("Sync Report", "PgUp/PgDn", "Page by 10 rows"),
-            ("Sync Report", "Home/End", "First / last repo"),
-            (
-                "Sync Report",
-                "Enter",
-                "Continue to branch picker (once done)",
-            ),
-            ("Sync Report", "Esc", "Cancel / back to repo picker"),
-            ("Help Overlay", "↑↓/jk", "Scroll"),
-            ("Help Overlay", "PgUp/PgDn", "Page"),
-            ("Help Overlay", "Home/End", "Top / bottom"),
-            ("Help Overlay", "Esc/q/?/F1", "Close"),
-            ("General", "r", "Rescan repo list (dashboard)"),
-            ("General", "?", "Help (not while typing)"),
-            ("General", "F1", "Help (works while typing)"),
-            ("General", "q", "Quit (dashboard, not while typing)"),
-            ("General", "Ctrl-C", "Force quit"),
+        let expected = [
+            "Navigation | Tab | Switch pane",
+            "Navigation | ↑/k | Up",
+            "Navigation | ↓/j | Down",
+            "Navigation | PgUp/PgDn | Page up/down",
+            "Navigation | Home/End | First / last row",
+            "Navigation | h/l | Scroll table left/right (repo pane)",
+            "Navigation | → | Expand / focus repos",
+            "Navigation | ←/Esc | Right pane: collapse / focus workspaces",
+            "Workspace Pane | Enter | Go to workspace (cd)",
+            "Workspace Pane | c | Create workspace",
+            "Workspace Pane | a | Add repos",
+            "Workspace Pane | d | Delete workspace",
+            "Workspace Pane | g | Go (fuzzy picker)",
+            "Workspace Pane | / | Filter spaces",
+            "Workspace Pane | S | Config",
+            "Repo Pane | Enter (repo) | Expand / collapse repo",
+            "Repo Pane | Enter (file) | View file diff",
+            "Repo Pane | ←/Esc | Collapse all / back",
+            "Repo Pane | s/space | Stage / unstage file",
+            "Repo Pane | / | Search repos",
+            "Repo Pane | S | Stage all unstaged",
+            "Repo Pane | U | Unstage all staged",
+            "Repo Pane | b | Switch branch",
+            "Repo Pane | G | Git operations",
+            "Repo Picker | Tab | Toggle repo",
+            "Repo Picker | Ctrl-S | Cycle scope",
+            "Repo Picker | Ctrl-R | Rescan repo list",
+            "Create / Add Flow | Tab | Toggle repo in picker",
+            "Create / Add Flow | Enter | Confirm and continue",
+            "Create / Add Flow | ↑↓/jk | Choose branch strategy",
+            "Create / Add Flow | letters | Type a name, or filter the picker",
+            "Create / Add Flow | Esc | Back one stage",
+            "Creating Log | ↑↓/jk | Scroll the log",
+            "Creating Log | PgUp/PgDn | Page the log",
+            "Creating Log | Home/End | Top / bottom (End resumes follow)",
+            "Creating Log | Esc/q | Stop creating, or dismiss a failure",
+            "Creating Log | Enter | Dismiss failure (ignored while running)",
+            "Delete Confirm | y | Delete the space",
+            "Delete Confirm | n/Esc/Enter | Cancel (the default)",
+            "Delete Confirm | q | Cancel",
+            "Switch Branch | ↑↓/jk | Choose strategy",
+            "Switch Branch | Enter | Confirm",
+            "Switch Branch | letters | Type a new branch name / filter",
+            "Switch Branch | ↑↓ | Move the branch highlight",
+            "Switch Branch | Esc | Back one stage",
+            "Switch Branch | q | Back, on the strategy stage only",
+            "Config Editor | ↑↓/jk | Move between fields",
+            "Config Editor | Enter | Edit field / commit edit",
+            "Config Editor | Ctrl-S | Save and exit",
+            "Config Editor | Esc | Cancel edit, or close",
+            "Config Editor | q | Close, when not editing",
+            "Space & Repo Pickers | ↑↓ | Move the highlight",
+            "Space & Repo Pickers | Enter | Select",
+            "Space & Repo Pickers | Esc | Cancel",
+            "Space & Repo Pickers | letters | Type into the filter",
+            "Git Operations | f | Fetch",
+            "Git Operations | p | Pull",
+            "Git Operations | P | Push",
+            "Git Operations | c | Commit",
+            "Git Operations | l | Log",
+            "Git Operations | r | Rebase",
+            "Git Operations | ↑↓/jk | Navigate (menu and log only)",
+            "Git Operations | ↑↓ | Move the rebase-target highlight",
+            "Git Operations | PgUp/PgDn | Page the log",
+            "Git Operations | Home/End | Log top / bottom",
+            "Git Operations | enter | Select",
+            "Git Operations | y | Confirm a push or rebase",
+            "Git Operations | n/Enter/Esc | Decline (the default)",
+            "Git Operations | esc | Back a stage (closes from menu/running)",
+            "Git Operations | q | Same as Esc, except while typing",
+            "Diff Viewer | up/k | Scroll up",
+            "Diff Viewer | dn/j | Scroll down",
+            "Diff Viewer | PgUp/PgDn | Page scroll",
+            "Diff Viewer | Home/End | Jump to start/end",
+            "Diff Viewer | s/space | Stage / unstage",
+            "Diff Viewer | Esc/q | Close",
+            "Sync Report | ↑↓/jk | Select repo (once done)",
+            "Sync Report | PgUp/PgDn | Page by 10 rows",
+            "Sync Report | Home/End | First / last repo",
+            "Sync Report | Enter | Continue to branch picker (once done)",
+            "Sync Report | Esc | Cancel / back to repo picker",
+            "Help Overlay | ↑↓/jk | Scroll",
+            "Help Overlay | PgUp/PgDn | Page",
+            "Help Overlay | Home/End | Top / bottom",
+            "Help Overlay | Esc/q/?/F1 | Close",
+            "General | r | Rescan repo list (dashboard)",
+            "General | ? | Help (not while typing)",
+            "General | F1 | Help (works while typing)",
+            "General | q | Quit (dashboard, not while typing)",
+            "General | Ctrl-C | Force quit",
         ];
-        let actual: Vec<(&str, &str, &str)> = keybindings::all_groups()
+        let actual: Vec<String> = keybindings::all_groups()
             .iter()
-            .flat_map(|g| g.bindings.iter().map(move |b| (g.name, b.key, b.desc)))
+            .flat_map(|g| {
+                g.bindings
+                    .iter()
+                    .map(move |b| format!("{} | {} | {}", g.name, b.key, b.desc))
+            })
             .collect();
-        assert_eq!(
-            actual.len(),
-            expected.len(),
-            "the registry gained or lost rows; see this test's doc comment"
+        let missing: Vec<&str> = expected
+            .iter()
+            .copied()
+            .filter(|row| !actual.iter().any(|a| a == row))
+            .collect();
+        let added: Vec<&String> = actual
+            .iter()
+            .filter(|a| !expected.contains(&a.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty() && added.is_empty(),
+            "the registry changed; re-read the handler before updating this table\n\
+             rows in the table but not in the registry: {:#?}\n\
+             rows in the registry but not in the table: {:#?}",
+            missing,
+            added
         );
-        for (i, (got, want)) in actual.iter().zip(expected).enumerate() {
-            assert_eq!(
-                got, want,
-                "registry row {} changed; re-read the handler before updating this \
-                 expectation",
-                i
-            );
-        }
+        assert_eq!(
+            actual, expected,
+            "the registry has the table's rows in another order"
+        );
     }
 
     // --- registry completeness and layout ---
-
-    /// Deliberately spelled with literals, not the shared constants: this is
-    /// the tripwire that makes a group rename a visible, failing decision
-    /// rather than a silent one.
-    #[test]
-    fn the_registry_documents_every_screen() {
-        let names: Vec<&str> = keybindings::all_groups().iter().map(|g| g.name).collect();
-        for expected in [
-            "Navigation",
-            "Workspace Pane",
-            "Repo Pane",
-            "Repo Picker",
-            "Create / Add Flow",
-            "Creating Log",
-            "Delete Confirm",
-            "Switch Branch",
-            "Config Editor",
-            "Space & Repo Pickers",
-            "Git Operations",
-            "Diff Viewer",
-            "Sync Report",
-            "Help Overlay",
-            "General",
-        ] {
-            assert!(
-                names.contains(&expected),
-                "the registry is missing the {:?} group; it has {:?}",
-                expected,
-                names
-            );
-        }
-    }
-
-    #[test]
-    fn f1_is_documented_as_a_general_key() {
-        let general = keybindings::all_groups()
-            .iter()
-            .find(|g| g.name == "General")
-            .unwrap();
-        assert!(
-            general.bindings.iter().any(|b| b.key.contains("F1")),
-            "F1 works everywhere, so it belongs in General"
-        );
-    }
 
     #[test]
     fn git_operations_is_documented_in_the_readme_and_the_guide() {

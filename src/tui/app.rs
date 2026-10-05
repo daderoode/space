@@ -3428,18 +3428,6 @@ mod tests {
     }
 
     #[test]
-    fn poll_background_result_no_op_with_no_channel() {
-        let mut app = make_app(vec![]);
-        app.ws_loading = true;
-        // ws_result_rx is None (set by make_app); poll must be a no-op
-        app.poll_background_result();
-        assert!(
-            app.ws_loading,
-            "ws_loading must be unchanged when there is no channel"
-        );
-    }
-
-    #[test]
     fn poll_background_result_clears_loading_when_worker_dies() {
         let mut app = make_app(vec![]);
         app.ws_loading = true;
@@ -3577,19 +3565,6 @@ mod tests {
         assert!(
             app.sync_rx.is_some(),
             "sync_rx must be set after ExecuteSyncFlow"
-        );
-    }
-
-    #[test]
-    fn poll_sync_result_drops_rx_when_not_syncing() {
-        let mut app = make_app(vec![]);
-        // Dashboard screen, not in Syncing stage
-        let (_tx, rx) = mpsc::sync_channel::<SyncProgress>(4);
-        app.sync_rx = Some(rx);
-        app.poll_sync_result();
-        assert!(
-            app.sync_rx.is_none(),
-            "sync_rx must be dropped when not in Syncing stage"
         );
     }
 

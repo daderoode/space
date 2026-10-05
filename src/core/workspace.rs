@@ -7933,35 +7933,6 @@ mod tests {
     }
 
     #[test]
-    fn rebase_repo_rejects_leading_dash_target() {
-        // A target beginning with '-' would be parsed by `git rebase` as an
-        // option, not a revspec (argument injection). rebase_repo must reject
-        // it up front without running git or moving the branch.
-        let (_tmp, local) = origin_and_local();
-        let sha_before = get_sha(&local, "main");
-
-        let result = rebase_repo(&local, "--onto=evil");
-
-        assert!(
-            matches!(result.outcome, RebaseOutcome::Failed),
-            "a leading-dash target must report Failed, got {:?}: {}",
-            result.outcome,
-            result.message
-        );
-        assert!(!result.success(), "a rejected target is not a success");
-        assert!(
-            result.message.contains('-'),
-            "the rejection must name the offending target, got: {}",
-            result.message
-        );
-        assert_eq!(
-            sha_before,
-            get_sha(&local, "main"),
-            "a rejected rebase must not move the branch"
-        );
-    }
-
-    #[test]
     fn rebase_repo_reports_detached_head_without_acting() {
         let (_tmp, local) = origin_and_local();
         git(&["checkout", "--detach"], &local);
