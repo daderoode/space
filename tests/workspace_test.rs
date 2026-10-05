@@ -6939,3 +6939,104 @@ fn a_sync_leaves_a_diverged_branch_and_its_commit_where_they_are() {
         result.skipped
     );
 }
+
+/// Ticket 52. The sync decides with the same ref it moves to. `feat` tracks
+/// its namesake on upstream and has a commit of its own; upstream's `feat`
+/// has moved on beside it, so the two have diverged, while origin's `feat`
+/// holds that local commit plus one more, so against origin `feat` is
+/// strictly behind. Read against origin, the sync would move `feat` to
+/// upstream's tip and take the local commit off the branch. It is left
+/// where it is, still tracking upstream.
+#[test]
+fn a_sync_leaves_a_branch_diverged_from_its_upstream_though_behind_origin() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    git_ok(
+        &f.repo,
+        &[
+            "branch",
+            "-q",
+            "--track",
+            "feat",
+            "refs/remotes/upstream/feat",
+        ],
+    );
+    let local = mint(&f.repo, &f.upstream_feat, "local-only");
+    git_ok(&f.repo, &["update-ref", "refs/heads/feat", &local]);
+    let upstream_next = mint(&f.repo, &f.upstream_feat, "upstream-next");
+    publish(&f.repo, &upstream_bare(&f), &upstream_next, "feat");
+    git_ok(&f.repo, &["fetch", "-q", "upstream"]);
+    let origin_next = mint(&f.repo, &local, "origin-on-top");
+    publish(&f.repo, &f.origin, &origin_next, "feat");
+
+    let result = sync_repo(&f.repo);
+
+    assert!(result.fetch_ok(), "fetch: {:?}", result.fetch);
+    assert_eq!(
+        rev(&f.repo, "refs/heads/feat"),
+        local,
+        "feat still ends at its own commit"
+    );
+    for (theirs, counts) in [("upstream", "1\t1"), ("origin", "0\t1")] {
+        assert_eq!(
+            git_ok(
+                &f.repo,
+                &[
+                    "rev-list",
+                    "--left-right",
+                    "--count",
+                    &format!("refs/heads/feat...refs/remotes/{}/feat", theirs),
+                ],
+            )
+            .trim(),
+            counts,
+            "fixture: feat against {}'s feat",
+            theirs
+        );
+    }
+    assert!(
+        result.forwarded.is_empty() && result.skipped.is_empty(),
+        "nothing is forwarded or tried: {:?} {:?}",
+        result.forwarded,
+        result.skipped
+    );
+    assert_eq!(
+        upstream_of(&f.repo, "feat"),
+        "refs/remotes/upstream/feat",
+        "and it still tracks upstream"
+    );
+}
+
+/// Ticket 52. A branch typed as new whose name is already taken is refused,
+/// and the existing branch keeps its own commit. `git switch -c` refuses an
+/// existing name; `-C` would reset that branch to HEAD and take its commit
+/// off it. The existing branch is checked out nowhere, since git refuses to
+/// reset a checked-out branch even under `-C`.
+#[test]
+fn switch_to_a_new_branch_whose_name_is_taken_keeps_that_branch() {
+    let env = TestEnv::new();
+    let f = two_remote_repo(&env);
+    let main = rev(&f.repo, "refs/heads/main");
+    let own = mint(&f.repo, &main, "topic-only");
+    git_ok(&f.repo, &["branch", "-q", "--no-track", "topic", &own]);
+
+    let err = space::core::workspace::switch_worktree_branch(&f.repo, "topic", true)
+        .expect_err("a branch named topic already exists")
+        .to_string();
+
+    assert!(
+        err.contains("a branch named 'topic' already exists"),
+        "git's own refusal, got {:?}",
+        err
+    );
+    assert_eq!(
+        rev(&f.repo, "refs/heads/topic"),
+        own,
+        "topic still ends at its own commit"
+    );
+    assert_eq!(
+        head_symref(&f.repo),
+        "refs/heads/main",
+        "and the checkout stays on main"
+    );
+}
