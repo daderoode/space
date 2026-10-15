@@ -4206,14 +4206,16 @@ fn mint(repo: &Path, parent: &str, msg: &str) -> String {
         .to_string()
 }
 
-/// Point `branch` on the bare repo at `sha`. Pushed by path, not by remote
-/// name, so the clone's remote-tracking refs do not move: the clone sees the
-/// commit only once something fetches that remote.
+/// Point `branch` on the bare repo at `sha`. The bare fetches it from the
+/// clone, so the clone's remote-tracking refs do not move: the clone sees
+/// the commit only once something fetches that remote. A push by path would
+/// not do: since git 2.56 a push to a URL that matches one configured remote
+/// updates that remote's tracking refs.
 fn publish(repo: &Path, bare: &Path, sha: &str, branch: &str) {
     let refspec = format!("{}:refs/heads/{}", sha, branch);
     git_ok(
-        repo,
-        &["push", "-q", "-f", bare.to_str().unwrap(), &refspec],
+        bare,
+        &["fetch", "-q", "-f", repo.to_str().unwrap(), &refspec],
     );
 }
 
