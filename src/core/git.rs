@@ -109,38 +109,7 @@ pub fn detect_base_branch(repo_path: &Path) -> String {
 pub fn repo_status(repo_path: &Path) -> Result<RepoStatus> {
     let repo = Repository::open(repo_path)
         .with_context(|| format!("opening repo at {}", repo_path.display()))?;
-
-    let mut opts = StatusOptions::new();
-    opts.include_untracked(true)
-        .recurse_untracked_dirs(true)
-        .include_ignored(false);
-
-    let statuses = repo.statuses(Some(&mut opts))?;
-    let mut result = RepoStatus::default();
-
-    for entry in statuses.iter() {
-        let s = entry.status();
-        if s.intersects(
-            git2::Status::INDEX_NEW
-                | git2::Status::INDEX_MODIFIED
-                | git2::Status::INDEX_DELETED
-                | git2::Status::INDEX_RENAMED,
-        ) {
-            result.staged += 1;
-        }
-        if s.intersects(
-            git2::Status::WT_MODIFIED | git2::Status::WT_DELETED | git2::Status::WT_RENAMED,
-        ) {
-            result.modified += 1;
-        }
-        if s.contains(git2::Status::WT_NEW) {
-            result.untracked += 1;
-        }
-        if s.contains(git2::Status::CONFLICTED) {
-            result.conflicted += 1;
-        }
-    }
-    Ok(result)
+    repo_status_from_repo(&repo)
 }
 
 /// List local + remote branches. Remote HEAD refs (`origin/HEAD`) are excluded.
@@ -260,16 +229,22 @@ pub fn repo_status_from_repo(repo: &Repository) -> Result<RepoStatus> {
 
     for entry in statuses.iter() {
         let s = entry.status();
+        // A type change (regular file <-> symlink) is a change too: missed,
+        // a swapped file read as clean and `space rm` destroyed it (ticket 47).
         if s.intersects(
             git2::Status::INDEX_NEW
                 | git2::Status::INDEX_MODIFIED
                 | git2::Status::INDEX_DELETED
-                | git2::Status::INDEX_RENAMED,
+                | git2::Status::INDEX_RENAMED
+                | git2::Status::INDEX_TYPECHANGE,
         ) {
             result.staged += 1;
         }
         if s.intersects(
-            git2::Status::WT_MODIFIED | git2::Status::WT_DELETED | git2::Status::WT_RENAMED,
+            git2::Status::WT_MODIFIED
+                | git2::Status::WT_DELETED
+                | git2::Status::WT_RENAMED
+                | git2::Status::WT_TYPECHANGE,
         ) {
             result.modified += 1;
         }
@@ -829,13 +804,19 @@ fn file_diff_vs_head(repo: &Repository) -> Result<Vec<FileEntry>> {
 
     let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
 
+    // Both sides report a type change (file <-> symlink) as one Typechange
+    // delta, not a Deleted + Added pair under the same path.
     // 1. Staged: tree -> index
-    let staged_diff = repo.diff_tree_to_index(head_tree.as_ref(), None, None)?;
+    let mut opts = git2::DiffOptions::new();
+    opts.include_typechange(true);
+    let staged_diff = repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut opts))?;
     entries.extend(collect_entries(&staged_diff, true)?);
 
     // 2. Unstaged: index -> workdir (include untracked)
     let mut opts = git2::DiffOptions::new();
-    opts.include_untracked(true).recurse_untracked_dirs(true);
+    opts.include_typechange(true)
+        .include_untracked(true)
+        .recurse_untracked_dirs(true);
     let unstaged_diff = repo.diff_index_to_workdir(None, Some(&mut opts))?;
     entries.extend(collect_entries(&unstaged_diff, false)?);
 
@@ -904,7 +885,7 @@ fn collect_entries(diff: &git2::Diff, staged: bool) -> Result<Vec<FileEntry>> {
 
 fn delta_to_file_status(delta: git2::Delta) -> Option<FileStatus> {
     match delta {
-        git2::Delta::Modified => Some(FileStatus::Modified),
+        git2::Delta::Modified | git2::Delta::Typechange => Some(FileStatus::Modified),
         git2::Delta::Added => Some(FileStatus::Added),
         git2::Delta::Deleted => Some(FileStatus::Deleted),
         git2::Delta::Renamed => Some(FileStatus::Renamed),
