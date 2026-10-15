@@ -229,8 +229,8 @@ pub fn repo_status_from_repo(repo: &Repository) -> Result<RepoStatus> {
 
     for entry in statuses.iter() {
         let s = entry.status();
-        // A type change (regular file <-> symlink) is a change too: missed,
-        // a swapped file read as clean and `space rm` destroyed it (ticket 47).
+        // Count a type change (file <-> symlink) as a change; without it a
+        // swapped file read as clean (ticket 47).
         if s.intersects(
             git2::Status::INDEX_NEW
                 | git2::Status::INDEX_MODIFIED
@@ -905,12 +905,16 @@ pub fn file_content_diff(repo_path: &Path, file_path: &str, staged: bool) -> Res
     let repo = Repository::open(repo_path)
         .with_context(|| format!("opening repo at {}", repo_path.display()))?;
 
+    // A type change is one Typechange delta here, as in `file_diff`.
     let diff = if staged {
         let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-        repo.diff_tree_to_index(head_tree.as_ref(), None, None)?
+        let mut opts = git2::DiffOptions::new();
+        opts.include_typechange(true);
+        repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut opts))?
     } else {
         let mut opts = git2::DiffOptions::new();
-        opts.include_untracked(true)
+        opts.include_typechange(true)
+            .include_untracked(true)
             .recurse_untracked_dirs(true)
             .show_untracked_content(true);
         repo.diff_index_to_workdir(None, Some(&mut opts))?
@@ -977,6 +981,23 @@ pub fn file_content_diff(repo_path: &Path, file_path: &str, staged: bool) -> Res
                 }
             } else {
                 let mut lines = Vec::new();
+                // libgit2 gives a type change no hunks; say what changed
+                // rather than show an empty pane.
+                if delta.status() == git2::Delta::Typechange {
+                    let kind = |m: git2::FileMode| match m {
+                        git2::FileMode::Link => "symlink",
+                        git2::FileMode::Commit => "submodule",
+                        _ => "regular file",
+                    };
+                    lines.push(DiffLine {
+                        kind: DiffLineKind::FileHeader,
+                        content: format!(
+                            "type changed: {} -> {}",
+                            kind(delta.old_file().mode()),
+                            kind(delta.new_file().mode())
+                        ),
+                    });
+                }
                 for hunk_idx in 0..patch.num_hunks() {
                     let (hunk, _) = patch.hunk(hunk_idx)?;
                     let header = std::str::from_utf8(hunk.header()).unwrap_or("<binary hunk>");

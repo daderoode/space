@@ -1913,6 +1913,18 @@ fn file_diff_lists_typechange_as_modified() {
             assert_eq!(hits.len(), 1, "{path} staged={staged}: {entries:?}");
             assert_eq!(hits[0].status, FileStatus::Modified, "{path}");
             assert_eq!(hits[0].staged, staged, "{path}");
+            // The detail view finds the same single delta and renders it.
+            let detail = file_content_diff(tmp.path(), path, staged).unwrap();
+            assert_eq!(detail.path, path);
+            assert_eq!(detail.old_path, None, "{path}");
+            let swap = if path == "f" {
+                "regular file -> symlink"
+            } else {
+                "symlink -> regular file"
+            };
+            assert_eq!(detail.lines.len(), 1, "{path}: {:?}", detail.lines);
+            assert_eq!(detail.lines[0].kind, DiffLineKind::FileHeader);
+            assert_eq!(detail.lines[0].content, format!("type changed: {swap}"));
         }
     }
 }
