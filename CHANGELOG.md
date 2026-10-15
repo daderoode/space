@@ -36,14 +36,12 @@
 - Very wide terminals no longer crash the TUI or squash dialogs. (#46, #47)
 - Fixed occasional hangs when several git processes started at once. (#41)
 - Git output can no longer corrupt the MCP JSON-RPC stream. (#44)
+- A file whose type changed (a regular file replaced by a symlink, or the reverse) no longer reads as clean, so `space rm` and the rebase check no longer treat that work as safe to discard. (ticket 47)
 
 ### Other behaviour changes
 - Esc on the workspaces pane no longer quits; `j`/`k` type in pickers; delete confirmation defaults to No. (#27)
 - Create pauses on a sync report; press Enter to continue. (#26)
 - Git errors are always shown in English. (#52)
-
-### Known limitations
-- A file replaced by a symlink may read as clean in status and the rebase check (ticket 47, under investigation).
 
 ### Internal
 - Faster builds (binary reuses the library's modules) (#68)
