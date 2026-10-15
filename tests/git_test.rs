@@ -1851,3 +1851,80 @@ fn status_of_a_new_branch_does_not_count_against_its_base() {
     let detail = space::core::workspace::workspace_detail(&ws_dir, "newb").unwrap();
     assert_eq!((detail.repos[0].ahead, detail.repos[0].behind), (0, 0));
 }
+
+// ---------------------------------------------------------------------------
+// Ticket 47: a type change (regular file <-> symlink) is a change. Read as
+// clean, `space rm` (which forces `git worktree remove`) destroyed the work.
+// ---------------------------------------------------------------------------
+
+/// Commit a regular file `f` and a symlink `link -> other`, then swap both
+/// types: `f` becomes a symlink, `link` a regular file holding new content.
+fn repo_with_typechanges(dir: &std::path::Path) {
+    common::init_repo(dir);
+    std::fs::write(dir.join("f"), "content\n").unwrap();
+    std::fs::write(dir.join("other"), "other\n").unwrap();
+    std::os::unix::fs::symlink("other", dir.join("link")).unwrap();
+    git_in(dir, &["add", "."]);
+    git_in(dir, &["commit", "-m", "files"]);
+    std::fs::remove_file(dir.join("f")).unwrap();
+    std::os::unix::fs::symlink("other", dir.join("f")).unwrap();
+    std::fs::remove_file(dir.join("link")).unwrap();
+    std::fs::write(dir.join("link"), "precious uncommitted work\n").unwrap();
+}
+
+/// (modified, staged) via both the path and the open-repo entry points.
+fn typechange_counts(dir: &std::path::Path) -> [(usize, usize); 2] {
+    let via_path = repo_status(dir).unwrap();
+    let repo = git2::Repository::open(dir).unwrap();
+    let via_repo = space::core::git::repo_status_from_repo(&repo).unwrap();
+    [
+        (via_path.modified, via_path.staged),
+        (via_repo.modified, via_repo.staged),
+    ]
+}
+
+#[test]
+fn repo_status_counts_typechange_as_modified() {
+    let tmp = TempDir::new().unwrap();
+    repo_with_typechanges(tmp.path());
+    assert_eq!(typechange_counts(tmp.path()), [(2, 0); 2]);
+}
+
+#[test]
+fn repo_status_counts_staged_typechange_as_staged() {
+    let tmp = TempDir::new().unwrap();
+    repo_with_typechanges(tmp.path());
+    git_in(tmp.path(), &["add", "-A"]);
+    assert_eq!(typechange_counts(tmp.path()), [(0, 2); 2]);
+}
+
+#[test]
+fn file_diff_lists_typechange_as_modified() {
+    let tmp = TempDir::new().unwrap();
+    repo_with_typechanges(tmp.path());
+
+    for staged in [false, true] {
+        if staged {
+            git_in(tmp.path(), &["add", "-A"]);
+        }
+        let entries = file_diff(tmp.path()).unwrap();
+        for path in ["f", "link"] {
+            let hits: Vec<_> = entries.iter().filter(|e| e.path == path).collect();
+            assert_eq!(hits.len(), 1, "{path} staged={staged}: {entries:?}");
+            assert_eq!(hits[0].status, FileStatus::Modified, "{path}");
+            assert_eq!(hits[0].staged, staged, "{path}");
+            // The detail view finds the same single delta and renders it.
+            let detail = file_content_diff(tmp.path(), path, staged).unwrap();
+            assert_eq!(detail.path, path);
+            assert_eq!(detail.old_path, None, "{path}");
+            let swap = if path == "f" {
+                "regular file -> symlink"
+            } else {
+                "symlink -> regular file"
+            };
+            assert_eq!(detail.lines.len(), 1, "{path}: {:?}", detail.lines);
+            assert_eq!(detail.lines[0].kind, DiffLineKind::FileHeader);
+            assert_eq!(detail.lines[0].content, format!("type changed: {swap}"));
+        }
+    }
+}
