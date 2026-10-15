@@ -3,10 +3,10 @@
 A CLI workspace manager for multi-repo git worktrees.
 
 **Repository:** [github.com/daderoode/space](https://github.com/daderoode/space)
-**Version:** 0.6.1
+**Version:** 0.14.0
 **Install:** `brew install daderoode/tap/space`
 
-Last updated: 2026-04-07
+Last updated: 2026-10-15
 
 ## Contents
 
@@ -155,7 +155,7 @@ Running `space` with no arguments opens an interactive terminal dashboard:
 - **Left pane (25%):** Workspace list. Empty state shows "No workspaces yet".
 - **Right pane (75%):** Repo table with columns: REPO, BRANCH, STATUS, +/-.
   - STATUS shows `clean` (green) or plain-language summaries like `3 modified, 1 new`.
-  - +/- shows total file insertions/deletions vs the base branch in green/red.
+  - +/- shows total line insertions/deletions of the uncommitted changes (staged, unstaged and untracked) against HEAD, in green/red.
   - Repos can be expanded (`→` or `Enter`) to show per-file diffs. Expanded repos group files into **Conflicts**, **Unstaged**, and **Staged** sections. File rows show a status letter (M/A/D/R/?/!), the file path, and per-file +/- counts. Files with only some hunks staged show a `[partial]` badge; conflicts show `[conflict]`.
 - **Status bar:** Context-sensitive key hints. Shows timed status messages (5-second TTL) when actions complete or fail.
 
@@ -536,7 +536,7 @@ The agent skill at `~/.config/opencode/skills/superpowers/using-space/` teaches 
 space ls -v
 ```
 
-Shows each workspace with per-repo branch, modified/staged counts, and ahead/behind. Or open the TUI dashboard (`space`) for an interactive overview -- select a workspace on the left, see repo details on the right with green/red `+/-` line counts vs the base branch. Press `→` or `Enter` on any repo to expand it and see exactly which files changed.
+Shows each workspace with per-repo branch, modified/staged counts, and ahead/behind. Or open the TUI dashboard (`space`) for an interactive overview -- select a workspace on the left, see repo details on the right with green/red `+/-` line counts of the uncommitted changes against HEAD. Press `→` or `Enter` on any repo to expand it and see exactly which files changed.
 
 Via MCP: `list_workspaces` returns the same information as JSON.
 
@@ -902,7 +902,7 @@ The server runs on stdio (stdin/stdout). Logs go to stderr at INFO level. No add
 | macOS | `~/Library/Application Support/space/space.log.YYYY-MM-DD` |
 | Linux | `~/.local/share/space/space.log.YYYY-MM-DD` |
 
-The last 3 days of logs are kept. Logs include workspace load timings, navigation events, and errors: no workspace names, file paths, or file content.
+The last 3 days of logs are kept. Logs include workspace load timings, navigation events, and errors. They hold no file content, and routine events carry no workspace names or file paths, but a refused workspace delete logs its whole removal report, repo by repo, which names the workspace, its repo directories and their paths (see [Delete Workspace](#delete-workspace)).
 
 **Environment variables:**
 
