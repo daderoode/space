@@ -9,8 +9,8 @@ Ordered so each tier builds on the previous one.
 
 ### 1. Test coverage (golden sample) ✓
 
-126 tests across 9 test files (cli, config, git, mcp, repo, tui, workspace),
-all green. Covers CLI commands, TUI create/add flows, MCP tools, cache TTL
+949 tests: unit tests in `src/` plus 7 integration test files (cli, config,
+git, mcp, repo, tui, workspace), all green. Covers CLI commands, TUI create/add flows, MCP tools, cache TTL
 enforcement, branch strategy navigation, and recent branches. No gaps.
 
 ---
@@ -29,9 +29,9 @@ Standalone UX feature, not gated on any git manager work, low effort.
 
 ### 3. Help overlay ✓
 
-Users can now press `?` from the dashboard to open a full-screen help overlay
-listing keybindings grouped by context. The overlay closes with `Esc`, `q`, or
-`?`, and the status bar consumes the same shared keybinding registry so hints
+Users can now press `?` to open the help overlay, a layer drawn over the
+current screen (ADR 0001), listing keybindings grouped by context. The overlay
+closes with `Esc`, `q`, or `?`, and the key bar consumes the same shared keybinding registry so hints
 stay aligned.
 
 **Files:** `src/tui/keybindings.rs`, `src/tui/screens/help.rs`,
@@ -118,7 +118,7 @@ is a bonus.
 
 ---
 
-## Tier 2 -- Git Visibility
+## Tier 2 -- Git Visibility ✓ Complete
 
 Turn `space` from a workspace navigator into a workspace-aware git viewer.
 Users can see exactly what changed, at every level of detail, without leaving
@@ -134,18 +134,20 @@ file-level detail. Users must leave `space` to see what actually changed.
 - `Enter` or `→` on a repo row expands it to show changed files as child rows.
 - Each file row shows: status letter (M/A/D/R/?), file path, `+N -M` line
   counts, and a `[staged]`/`[unstaged]` indicator.
-- `T` (Shift+T) toggles diff target between HEAD (uncommitted changes) and
-  base branch (total divergence from main/master).
 - Navigation: `←`/`Esc` collapses expanded repos or refocuses the workspaces
   pane. `↑`/`↓` moves through the flattened repo+file row list.
 - File diffs computed via `git2` crate: `diff_tree_to_index()` for staged,
-  `diff_index_to_workdir()` for unstaged, `diff_tree_to_tree()` for base mode.
+  `diff_index_to_workdir()` for unstaged.
 - Diffs fetched lazily on expand, cached per-repo, invalidated on workspace
   switch or refresh.
 
 **Files:** `src/core/git.rs`, `src/tui/app.rs`, `src/tui/ui.rs`
-**Done when:** Repos expand/collapse with file-level diffs, toggle between HEAD
-and base mode works, navigation through flattened rows is smooth.
+**Done when:** Repos expand/collapse with file-level diffs and navigation
+through flattened rows is smooth.
+
+**Not done:** the planned `T` (Shift+T) toggle between HEAD (uncommitted
+changes) and the base branch (total divergence from main/master) was never
+built. Diffs are always the uncommitted changes against HEAD.
 
 ---
 
@@ -154,7 +156,7 @@ and base mode works, navigation through flattened rows is smooth.
 Scrollable diff viewer opens on `Enter` from a file row, with syntax-colored
 unified diff (green additions, red deletions, dimmed context). `j`/`k` scroll,
 `PgUp`/`PgDn` page, `Home`/`End` jump. `s` stages/unstages the viewed file
-(HEAD mode only). From the dashboard, `s` stages a single file, `S` bulk-stages
+From the dashboard, `s` stages a single file, `S` bulk-stages
 all unstaged files in a repo, and `U` unstages all staged files. Diff content
 cache is invalidated on staging operations. 9 integration tests cover the full
 flow.
@@ -204,7 +206,7 @@ individual repos within a workspace.
 
 **Approach:**
 
-- `b` on a repo (folded or unfolded) opens a git operations overlay.
+- `G` on a repo (folded or unfolded) opens a git operations overlay.
 - Available actions: `f` fetch, `p` pull, `P` push, `c` commit, `r` rebase,
   `l` log (recent commits).
 - **Commit flow:** Opens a text input for the commit message. Shows a summary

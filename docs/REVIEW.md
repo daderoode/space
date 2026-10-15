@@ -2,6 +2,10 @@
 
 Reviewed at v0.4.0, 2026-03-23.
 
+> This is a historical snapshot taken at v0.4.0. Many of the items below have
+> since been resolved; see [ROADMAP.md](ROADMAP.md) and
+> [CHANGELOG.md](../CHANGELOG.md) for the current state.
+
 ---
 
 ## What It Is

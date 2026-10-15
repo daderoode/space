@@ -319,7 +319,7 @@ fn complete_repos_lists_cached() {
     let env = TestEnv::new();
     let repo_path = env.repos_dir.join("my-service");
     std::fs::create_dir_all(&repo_path).unwrap();
-    env.write_cache(&[repo_path.clone()]);
+    env.write_cache(std::slice::from_ref(&repo_path));
 
     space(&env)
         .args(["__complete", "repos"])
