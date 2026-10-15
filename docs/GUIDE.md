@@ -157,7 +157,7 @@ Running `space` with no arguments opens an interactive terminal dashboard:
   - STATUS shows `clean` (green) or plain-language summaries like `3 modified, 1 new`.
   - +/- shows total line insertions/deletions of the uncommitted changes (staged, unstaged and untracked) against HEAD, in green/red.
   - Repos can be expanded (`→` or `Enter`) to show per-file diffs. Expanded repos group files into **Conflicts**, **Unstaged**, and **Staged** sections. File rows show a status letter (M/A/D/R/?/!), the file path, and per-file +/- counts. Files with only some hunks staged show a `[partial]` badge; conflicts show `[conflict]`.
-- **Status bar:** Context-sensitive key hints. Shows timed status messages (5-second TTL) when actions complete or fail.
+- **Key bar:** Context-sensitive key hints for the focused pane. Timed status messages (5-second TTL) show above it when actions complete or fail.
 
 ### Diff Viewer
 
@@ -205,8 +205,8 @@ under the general bindings below.
 | `s` or `space` | Stage / unstage file |
 | `S` | Stage all unstaged files in repo |
 | `U` | Unstage all staged files in repo |
-| `b` | Switch branch for selected repo |
-| `G` | Git operations for selected repo (fetch, pull, push, commit, log, rebase). Pull fetches origin and merges `origin/<name>`, or, for a branch that tracks its namesake on another remote (one made from `upstream/<name>`), fetches that remote and merges `upstream/<name>`; a branch that tracks anything else on a remote other than origin (a branch of another name, two branches, a remote the repo does not have), or whose tracking cannot be read (its remote, or on a remote other than origin its merge), is refused with a sentence saying so, and nothing runs. Push runs `git push` at once for a branch whose push destination is origin, except one that tracks a branch of another name there (below); a branch that pushes elsewhere (one made from `upstream/<name>` tracks `upstream`, and a bare push goes there) asks `Branch <name> tracks upstream/<name>. Push to upstream?` first, as does a branch whose push destination cannot be read (`where a push goes could not be read. Push anyway?`) or is the repository itself (`branch.<name>.remote` is `.`); a branch with no upstream asks before `push -u origin`, and so does a branch that tracks one branch of another name on origin and pushes there (`Branch <name> tracks origin/main. Push to origin/<name> and track it instead?`; a new-branch space made by an earlier version tracks its base, and a bare push of it is refused by git, or under `push.default=upstream` goes into origin's `main`), unless `push.default` is `current` or `remote.origin.push` is set, where the bare push already goes where they say; that push is `git -c push.default=current push -u origin refs/heads/<name>`, so it lands on origin's `<name>`, or where `remote.origin.push` maps it, whatever `push.default` says, and the branch then tracks what it landed on; all default to No |
+| `b` | Switch branch for selected repo. Picking an existing local branch checks it out. Picking `<remote>/<x>` with no local `<x>` creates a local `<x>` tracking `<remote>/<x>` (on origin, when no fetch refspec maps the ref, the branch tracks nothing); an existing local `<x>` is checked out for an `origin/<x>` pick, and for another remote's pick only when it already tracks that branch. A branch typed as new starts at HEAD and tracks nothing. Refusals show as `Switch failed: ` followed by `<x> exists and does not track the picked branch`, `<pick> is fetched by several remotes`, or `<pick> is not fetched by <remote>`; nothing is changed. If the switch itself is refused after the new branch was made, the branch is deleted again, or kept and named (`<x> kept, it is checked out: ...`, `<x> kept, it moved meanwhile: ...`) |
+| `G` | Git operations for selected repo (fetch, pull, push, commit, log, rebase). Pull fetches origin and merges `origin/<name>`, or, for a branch that tracks its namesake on another remote (one made from `upstream/<name>`), fetches that remote and merges `upstream/<name>`; a branch that tracks anything else on a remote other than origin (a branch of another name, two branches, a remote the repo does not have), or whose tracking cannot be read (its remote, or on a remote other than origin its merge), is refused with a sentence saying so, and nothing runs. Pull also refuses, before fetching, a branch with a merge already in progress (`<name> is mid-merge (MERGE_HEAD present); run 'git merge --continue' or 'git merge --abort' in that repo before pulling.`). A pull whose merge conflicts runs `git merge --abort` and says the worktree was restored; if the abort itself fails, it says so with git's reason and that the branch is still mid-merge. Push runs `git push` at once for a branch whose push destination is origin, except one that tracks a branch of another name there (below); a branch that pushes elsewhere (one made from `upstream/<name>` tracks `upstream`, and a bare push goes there) asks `Branch <name> tracks upstream/<name>. Push to upstream?` first, as does a branch whose push destination cannot be read (`where a push goes could not be read. Push anyway?`) or is the repository itself (`branch.<name>.remote` is `.`); a branch with no upstream asks before `push -u origin`, and so does a branch that tracks one branch of another name on origin and pushes there (`Branch <name> tracks origin/main. Push to origin/<name> and track it instead?`; a new-branch space made by an earlier version tracks its base, and a bare push of it is refused by git, or under `push.default=upstream` goes into origin's `main`), unless `push.default` is `current` or `remote.origin.push` is set, where the bare push already goes where they say; that push is `git -c push.default=current push -u origin refs/heads/<name>`, so it lands on origin's `<name>`, or where `remote.origin.push` maps it, whatever `push.default` says, and the branch then tracks what it landed on; all default to No |
 | `PgUp` / `PgDn` | Page up / down |
 | `Home` / `End` | First / last row |
 | `/` | Search all repos |
@@ -303,7 +303,7 @@ Progress log showing each repo with a checkmark or error. A repo whose place in 
 
 ## Add Repos Flow
 
-5-stage wizard (same as Create minus the naming step). Launched by pressing `a` or running `space add <workspace> <repos>`; the repo names follow the same exact-name rule as `space create` and open the picker with those repos toggled on; a name the workspace already holds stops the command before the TUI opens. The fuzzy picker automatically excludes repos already in the workspace.
+5-stage wizard (same as Create minus the naming step). Launched by pressing `a` or running `space add <workspace> [repos...]`; the repo names follow the same exact-name rule as `space create` and open the picker with those repos toggled on; a name the workspace already holds stops the command before the TUI opens. The fuzzy picker automatically excludes repos already in the workspace.
 
 ---
 
@@ -354,7 +354,7 @@ Navigation: `j`/`k` between fields, `Enter` to edit, `Esc` to cancel edit, `Ctrl
 | `space go` | -- | `[name]` | cd into workspace. No name opens fuzzy picker |
 | `space status` | `st` | `<name>` | Detailed per-repo status (branch, dirty state, ahead/behind) |
 | `space create` | -- | `[repos...]` | Create workspace. Optional exact repo names (as `space repos` lists them) open the picker with those repos selected |
-| `space add` | -- | `<workspace> <repos...>` | Add repos to existing workspace. Same exact-name rule as `space create` |
+| `space add` | -- | `<workspace> [repos...]` | Add repos to existing workspace. Same exact-name rule as `space create` |
 | `space rm` | `remove` | `<name>` `-f`/`--force` | Remove workspace. Force skips confirmation |
 | `space repos` | -- | `-r`/`--refresh` | List discovered repos. Refresh rescans filesystem |
 | `space config` | -- | -- | Open TUI config editor |
@@ -524,7 +524,7 @@ The agent connects to `space mcp` (MCP server on stdio) and uses the tools progr
 4. **Add more repos later:** `add_repos(workspace: "feature-add-metrics", repos: ["shared-lib"])`
 5. **Clean up:** `remove_workspace(name: "feature-add-metrics")`
 
-The agent skill at `~/.config/opencode/skills/superpowers/using-space/` teaches AI agents when and how to use these tools. See [MCP Tools](#tools-reference) for the full tool reference.
+An agent skill or system prompt can teach AI agents when and how to use these tools. See [MCP Tools](#tools-reference) for the full tool reference.
 
 ---
 

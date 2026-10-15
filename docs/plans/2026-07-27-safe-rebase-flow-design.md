@@ -1,7 +1,7 @@
 # Design: Safe Rebase Flow (Tier 3, Item 7)
 
 **Date:** 2026-07-27
-**Status:** Approved
+**Status:** Implemented (v0.13.0)
 
 ## Problem
 

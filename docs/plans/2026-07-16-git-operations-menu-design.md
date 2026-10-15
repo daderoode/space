@@ -1,7 +1,7 @@
 # Design: Git Operations Menu (Tier 3, Item 6)
 
 **Date:** 2026-07-16
-**Status:** Approved
+**Status:** Implemented (v0.12.0)
 
 ## Problem
 
