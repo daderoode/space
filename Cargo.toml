@@ -20,9 +20,11 @@ path = "src/lib.rs"
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
 colored = "3"
-crossterm = "0.28"
 git2 = { version = "0.19", default-features = false }
 nucleo = "0.5"
+# crossterm comes only through ratatui: use ratatui::crossterm (0.29). Do not add
+# a direct crossterm dependency. tui-input 0.11 still sits on ratatui 0.29 and
+# crossterm 0.28; key_to_input_request in src/tui/app.rs bridges the two.
 ratatui = "0.30.0"
 tui-input = "0.11"
 unicode-segmentation = "1"
