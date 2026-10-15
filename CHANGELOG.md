@@ -36,7 +36,7 @@
 - Very wide terminals no longer crash the TUI or squash dialogs. (#46, #47)
 - Fixed occasional hangs when several git processes started at once. (#41)
 - Git output can no longer corrupt the MCP JSON-RPC stream. (#44)
-- A file whose type changed (a regular file replaced by a symlink, or the reverse) no longer reads as clean, so `space rm` and the rebase check no longer treat that work as safe to discard. (ticket 47)
+- A file whose type changed (a regular file replaced by a symlink, or the reverse) no longer reads as clean in `space status`, `space list`, the dashboard and the rebase check, so you can see that work before removing a space. (#74)
 
 ### Other behaviour changes
 - Esc on the workspaces pane no longer quits; `j`/`k` type in pickers; delete confirmation defaults to No. (#27)
