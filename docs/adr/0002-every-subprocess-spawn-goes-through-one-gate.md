@@ -122,7 +122,9 @@ site that skips the gate shows up as one more clippy warning.
       then waits for that child to exit. That needs the rare fallback and a
       worker's spawn to coincide.
   - **crossterm 0.28.1** has the same fallback (`src/terminal/sys/unix.rs:263`).
-    It is a direct dependency, and `tui-input`'s ratatui 0.29 also pulls it in.
+    `tui-input`'s ratatui 0.29 pulls it in (tui-input's default crossterm
+    feature); in a release build no object of it reaches the binary (ld link
+    map, PR #70).
     Nothing in space calls it, because the TUI's terminal is ratatui 0.30 over
     crossterm 0.29.0.
   - **git2 0.19.0's `CredentialHelper`** runs `sh -c "<helper> get"`
