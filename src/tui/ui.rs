@@ -1386,112 +1386,6 @@ fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn truncate_for_width_uses_display_width() {
-        assert_eq!(line_width("界界"), 4);
-        assert_eq!(truncate_for_width("界界abc", 5), "界...");
-    }
-
-    #[test]
-    fn delete_footer_wraps_when_it_cannot_fit_on_one_line() {
-        let lines = render_delete_footer(18, "y delete", "   ", "Esc/n/Enter cancel");
-
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].width(), 8);
-        assert_eq!(lines[1].width(), 18);
-    }
-
-    #[test]
-    fn skip_zero_returns_full_string() {
-        assert_eq!(skip_display_width("abcde", 0), "abcde");
-    }
-
-    #[test]
-    fn skip_ascii_offset() {
-        assert_eq!(skip_display_width("abcdefg", 3), "defg");
-    }
-
-    #[test]
-    fn skip_exact_length_returns_empty() {
-        assert_eq!(skip_display_width("abc", 3), "");
-    }
-
-    #[test]
-    fn skip_exceeds_length_returns_empty() {
-        assert_eq!(skip_display_width("abc", 10), "");
-    }
-
-    #[test]
-    fn skip_unicode_multibyte() {
-        // "café" = c(1) a(1) f(1) é(1 display width, 2 UTF-8 bytes)
-        // skip 3 display chars -> should return "é"
-        assert_eq!(skip_display_width("café", 3), "é");
-    }
-
-    #[test]
-    fn skip_wide_char_full_column() {
-        // '日' width=2; skip 2 columns → return "語"
-        assert_eq!(skip_display_width("日語", 2), "語");
-    }
-
-    #[test]
-    fn skip_bisects_wide_char_snaps_forward() {
-        // '日' width=2; skip=1 bisects the wide char.
-        // Policy: snap forward (skip the entire wide char, return "bc").
-        assert_eq!(skip_display_width("日bc", 1), "bc");
-    }
-
-    /// The cut matches ratatui's own `trim_offset`: whole clusters go while
-    /// they fit, a straddled one stays whole, and a multi-char cluster (a
-    /// flag is two regional indicators) is never split.
-    #[test]
-    fn after_scroll_cuts_on_grapheme_clusters_and_keeps_a_straddled_one() {
-        assert_eq!(after_scroll("abcdef", 0, 52), "abcdef");
-        assert_eq!(after_scroll("abcdef", 3, 52), "def");
-        assert_eq!(after_scroll("abcdef", 6, 52), "");
-        assert_eq!(after_scroll("abcdef", 40, 52), "");
-        // A wide character the scroll lands inside is kept whole, where
-        // `skip_display_width` would snap past it.
-        assert_eq!(after_scroll("\u{65e5}bc", 1, 52), "\u{65e5}bc");
-        assert_eq!(after_scroll("\u{65e5}bc", 2, 52), "bc");
-        // Two flags: four regional indicators, two clusters of width 2.
-        let flags = "\u{1f1fa}\u{1f1f8}\u{1f1ec}\u{1f1e7}y";
-        assert_eq!(after_scroll(flags, 1, 52), flags);
-        assert_eq!(after_scroll(flags, 2, 52), "\u{1f1ec}\u{1f1e7}y");
-        assert_eq!(after_scroll(flags, 3, 52), "\u{1f1ec}\u{1f1e7}y");
-        assert_eq!(after_scroll(flags, 4, 52), "y");
-        // A combining mark goes with its base character.
-        assert_eq!(after_scroll("e\u{301}x", 1, 52), "x");
-    }
-
-    /// The truncator skips a cluster wider than the area before it counts
-    /// the scroll, so such a cluster is dropped and the scroll still applies
-    /// in full to what follows. A one-column area makes every wide
-    /// character over-wide; a zero-column area makes everything over-wide.
-    #[test]
-    fn after_scroll_drops_an_over_wide_cluster_without_spending_the_scroll() {
-        assert_eq!(after_scroll("\u{65e5}abc", 2, 1), "c");
-        assert_eq!(after_scroll("\u{65e5}abc", 0, 1), "abc");
-        assert_eq!(after_scroll("ab\u{65e5}cd", 3, 1), "d");
-        assert_eq!(after_scroll("\u{65e5}abc", 1, 0), "");
-        // At the ordinary width a wide character is not over-wide.
-        assert_eq!(after_scroll("\u{65e5}abc", 2, 52), "abc");
-    }
-
-    /// Past `u16::MAX` a count saturates; below it, it is the count.
-    #[test]
-    fn fit_u16_saturates_at_the_maximum() {
-        assert_eq!(fit_u16(0), 0);
-        assert_eq!(fit_u16(65_535), u16::MAX);
-        assert_eq!(fit_u16(65_536), u16::MAX);
-        assert_eq!(fit_u16(70_000), u16::MAX);
-    }
-}
-
 fn render_config_editor(
     state: &crate::tui::screens::config::ConfigState,
     show_cursor: bool,
@@ -2272,5 +2166,111 @@ fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
         y,
         width: width.min(area.width),
         height: height.min(area.height),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_for_width_uses_display_width() {
+        assert_eq!(line_width("界界"), 4);
+        assert_eq!(truncate_for_width("界界abc", 5), "界...");
+    }
+
+    #[test]
+    fn delete_footer_wraps_when_it_cannot_fit_on_one_line() {
+        let lines = render_delete_footer(18, "y delete", "   ", "Esc/n/Enter cancel");
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].width(), 8);
+        assert_eq!(lines[1].width(), 18);
+    }
+
+    #[test]
+    fn skip_zero_returns_full_string() {
+        assert_eq!(skip_display_width("abcde", 0), "abcde");
+    }
+
+    #[test]
+    fn skip_ascii_offset() {
+        assert_eq!(skip_display_width("abcdefg", 3), "defg");
+    }
+
+    #[test]
+    fn skip_exact_length_returns_empty() {
+        assert_eq!(skip_display_width("abc", 3), "");
+    }
+
+    #[test]
+    fn skip_exceeds_length_returns_empty() {
+        assert_eq!(skip_display_width("abc", 10), "");
+    }
+
+    #[test]
+    fn skip_unicode_multibyte() {
+        // "café" = c(1) a(1) f(1) é(1 display width, 2 UTF-8 bytes)
+        // skip 3 display chars -> should return "é"
+        assert_eq!(skip_display_width("café", 3), "é");
+    }
+
+    #[test]
+    fn skip_wide_char_full_column() {
+        // '日' width=2; skip 2 columns → return "語"
+        assert_eq!(skip_display_width("日語", 2), "語");
+    }
+
+    #[test]
+    fn skip_bisects_wide_char_snaps_forward() {
+        // '日' width=2; skip=1 bisects the wide char.
+        // Policy: snap forward (skip the entire wide char, return "bc").
+        assert_eq!(skip_display_width("日bc", 1), "bc");
+    }
+
+    /// The cut matches ratatui's own `trim_offset`: whole clusters go while
+    /// they fit, a straddled one stays whole, and a multi-char cluster (a
+    /// flag is two regional indicators) is never split.
+    #[test]
+    fn after_scroll_cuts_on_grapheme_clusters_and_keeps_a_straddled_one() {
+        assert_eq!(after_scroll("abcdef", 0, 52), "abcdef");
+        assert_eq!(after_scroll("abcdef", 3, 52), "def");
+        assert_eq!(after_scroll("abcdef", 6, 52), "");
+        assert_eq!(after_scroll("abcdef", 40, 52), "");
+        // A wide character the scroll lands inside is kept whole, where
+        // `skip_display_width` would snap past it.
+        assert_eq!(after_scroll("\u{65e5}bc", 1, 52), "\u{65e5}bc");
+        assert_eq!(after_scroll("\u{65e5}bc", 2, 52), "bc");
+        // Two flags: four regional indicators, two clusters of width 2.
+        let flags = "\u{1f1fa}\u{1f1f8}\u{1f1ec}\u{1f1e7}y";
+        assert_eq!(after_scroll(flags, 1, 52), flags);
+        assert_eq!(after_scroll(flags, 2, 52), "\u{1f1ec}\u{1f1e7}y");
+        assert_eq!(after_scroll(flags, 3, 52), "\u{1f1ec}\u{1f1e7}y");
+        assert_eq!(after_scroll(flags, 4, 52), "y");
+        // A combining mark goes with its base character.
+        assert_eq!(after_scroll("e\u{301}x", 1, 52), "x");
+    }
+
+    /// The truncator skips a cluster wider than the area before it counts
+    /// the scroll, so such a cluster is dropped and the scroll still applies
+    /// in full to what follows. A one-column area makes every wide
+    /// character over-wide; a zero-column area makes everything over-wide.
+    #[test]
+    fn after_scroll_drops_an_over_wide_cluster_without_spending_the_scroll() {
+        assert_eq!(after_scroll("\u{65e5}abc", 2, 1), "c");
+        assert_eq!(after_scroll("\u{65e5}abc", 0, 1), "abc");
+        assert_eq!(after_scroll("ab\u{65e5}cd", 3, 1), "d");
+        assert_eq!(after_scroll("\u{65e5}abc", 1, 0), "");
+        // At the ordinary width a wide character is not over-wide.
+        assert_eq!(after_scroll("\u{65e5}abc", 2, 52), "abc");
+    }
+
+    /// Past `u16::MAX` a count saturates; below it, it is the count.
+    #[test]
+    fn fit_u16_saturates_at_the_maximum() {
+        assert_eq!(fit_u16(0), 0);
+        assert_eq!(fit_u16(65_535), u16::MAX);
+        assert_eq!(fit_u16(65_536), u16::MAX);
+        assert_eq!(fit_u16(70_000), u16::MAX);
     }
 }

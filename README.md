@@ -8,7 +8,8 @@ work across many repos in a single `space go` command.
 
 Running `space` with no arguments opens the TUI dashboard.
 
-For the full guide, see [docs/GUIDE.md](docs/GUIDE.md).
+For the full guide, see [docs/GUIDE.md](docs/GUIDE.md). For what changed in
+each release, see [CHANGELOG.md](CHANGELOG.md).
 
 ## Install
 
@@ -119,7 +120,7 @@ space ls [--verbose]           # list workspaces
 space go [name]                # cd into a workspace (fuzzy picker if no name)
 space status <name>            # show repo status for a workspace
 space create [repos...]        # create a new workspace with worktrees
-space add <workspace> <repos>  # add repos to an existing workspace
+space add <workspace> [repos...]  # add repos to an existing workspace
 space rm <name> [--force]      # remove a workspace
 space repos [--refresh]        # list / refresh the repo cache
 space config                   # edit configuration interactively
@@ -199,6 +200,9 @@ runs `git worktree add` for each selected repo, placing the worktrees at
 nothing has been kept. A worktree git refuses to remove, such as one locked
 with `git worktree lock`, keeps the workspace and is reported instead, as does
 a directory holding a repository of its own.
+Removal also keeps a worktree copy git has no record of and a directory whose
+`.git` file cannot be read; see
+[Removing a Workspace](docs/GUIDE.md#removing-a-workspace).
 
 A workspace name is one plain path component: not empty, no `/` or `\`, no
 leading `-` or `.`, no surrounding whitespace, no control or invisible

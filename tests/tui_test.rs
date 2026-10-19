@@ -12,9 +12,6 @@ use space::core::workspace::{Workspace, WorkspaceRepo};
 use space::tui::app::{App, Pane, Screen};
 use std::path::PathBuf;
 use unicode_width::UnicodeWidthStr;
-// git::remote_url tests use these directly
-use git2;
-use tempfile;
 
 /// Build a SpaceConfig pointing at a TestEnv's directories.
 fn config_from_env(env: &TestEnv) -> SpaceConfig {
