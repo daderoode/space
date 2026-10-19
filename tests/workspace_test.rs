@@ -7052,7 +7052,8 @@ fn switch_to_a_new_branch_whose_name_is_taken_keeps_that_branch() {
 // ---------------------------------------------------------------------------
 
 use space::core::workspace::{
-    pending_work, remove_space, PendingWork, UncommittedWork, UncommittedWorkError,
+    pending_work, remove_space, OtherWork, PendingWork, UncommittedWork, UncommittedWorkError,
+    WorkStatus,
 };
 
 /// A space `ws_name` holding one worktree of a fresh repo `repo_name`, with a
@@ -7081,10 +7082,9 @@ fn refused(env: &TestEnv, ws_name: &str) -> UncommittedWorkError {
 }
 
 fn counts(pending: &PendingWork) -> RepoStatusCounts {
-    let status = pending
-        .status
-        .as_ref()
-        .unwrap_or_else(|why| panic!("status should have been read, got {:?}", why));
+    let WorkStatus::Read(status) = &pending.status else {
+        panic!("status should have been read, got {:?}", pending.status);
+    };
     (
         status.modified,
         status.staged,
@@ -7179,10 +7179,12 @@ fn remove_space_refuses_a_worktree_whose_status_cannot_be_read() {
 
     let err = refused(&env, "unreadable-ws");
     assert_eq!(err.repos.len(), 1);
-    let why = err.repos[0]
-        .status
-        .as_ref()
-        .expect_err("the status could not be read");
+    let WorkStatus::Unreadable(why) = &err.repos[0].status else {
+        panic!(
+            "the status could not be read, got {:?}",
+            err.repos[0].status
+        );
+    };
     assert!(!why.is_empty(), "git's reason is carried");
     assert!(
         err.to_string().contains("status could not be read"),
@@ -7360,11 +7362,22 @@ fn remove_space_refuses_an_orphan_unless_discarding() {
 
     let err = refused(&env, "orphan-ws");
     assert_eq!(err.repos.len(), 1);
-    let why = err.repos[0].status.as_ref().expect_err("cannot be read");
+    assert_eq!(err.repos[0].status, WorkStatus::SourceGone);
+    let text = err.to_string();
     assert!(
-        why.contains("source repository is gone"),
-        "the reason says why, got {:?}",
-        why
+        text.contains("alpha: its source repository is gone, so what it holds cannot be read\n"),
+        "the reason is said once, got {:?}",
+        text
+    );
+    assert!(
+        !text.contains("status could not be read (its source"),
+        "not wrapped in a second explanation, got {:?}",
+        text
+    );
+    assert!(
+        text.contains("copy out what you need from it"),
+        "the remedy fits an orphan, got {:?}",
+        text
     );
     assert!(wt.join("wip.txt").exists(), "the orphan is kept");
 
@@ -7417,11 +7430,14 @@ fn remove_space_refuses_commits_only_a_detached_head_holds() {
     git_ok(&wt, &["commit", "--quiet", "--allow-empty", "-m", "loose"]);
 
     let err = refused(&env, "detached-ws");
-    assert_eq!(err.repos[0].status, Ok(Default::default()));
-    assert_eq!(
-        err.repos[0].also,
-        vec!["commits on a detached HEAD that no branch holds".to_string()]
+    assert_eq!(err.repos[0].status, WorkStatus::Read(Default::default()));
+    assert_eq!(err.repos[0].also, vec![OtherWork::DetachedCommits]);
+    assert!(
+        err.to_string().contains("git branch <name>"),
+        "the remedy is a branch, not a commit, got {:?}",
+        err.to_string()
     );
+    assert!(!err.to_string().contains("commit or stash"));
     assert!(
         err.to_string()
             .contains("alpha: commits on a detached HEAD that no branch holds"),
@@ -7457,7 +7473,13 @@ fn remove_space_refuses_an_operation_in_progress() {
     git_ok(&wt, &["bisect", "start"]);
 
     let err = refused(&env, "bisect-ws");
-    assert_eq!(err.repos[0].also, vec!["a bisect in progress".to_string()]);
+    assert_eq!(err.repos[0].also, vec![OtherWork::InProgress("bisect")]);
+    assert!(
+        err.to_string()
+            .contains("alpha: a bisect in progress\n    finish or abort the bisect"),
+        "the remedy is to finish or abort it, got {:?}",
+        err.to_string()
+    );
 }
 
 /// A conflicted merge reads as both a conflict and a merge in progress.
@@ -7511,4 +7533,88 @@ fn remove_space_removes_a_clean_worktree_with_a_submodule() {
     remove_space(&env.workspaces_dir, "sub-ws", true, UncommittedWork::Refuse).unwrap();
     assert!(!env.workspaces_dir.join("sub-ws").exists());
     assert!(!registered_worktrees(&repo).contains("sub-ws"));
+}
+
+/// Detachment is asked of git, and a commit counts as held by any ref or by
+/// another worktree's HEAD. Here the source repo itself is detached at a
+/// commit no branch holds, and the space's worktree is added at that same
+/// HEAD: the main worktree's HEAD still holds it, so nothing is lost and the
+/// removal goes ahead.
+#[test]
+fn remove_space_counts_a_commit_the_main_worktree_holds_as_held() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    git_ok(&repo, &["switch", "--quiet", "--detach"]);
+    git_ok(
+        &repo,
+        &["commit", "--quiet", "--allow-empty", "-m", "loose in main"],
+    );
+    let wt = env.workspaces_dir.join("main-held-ws").join("alpha");
+    std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+    git_ok(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            wt.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+
+    assert_eq!(
+        pending_work(&env.workspaces_dir, "main-held-ws").unwrap(),
+        vec![]
+    );
+    remove_space(
+        &env.workspaces_dir,
+        "main-held-ws",
+        true,
+        UncommittedWork::Refuse,
+    )
+    .unwrap();
+    assert!(!env.workspaces_dir.join("main-held-ws").exists());
+}
+
+/// A commit only the stash, or another ref outside branches and tags, holds
+/// is held: `--glob=refs/*` reads every ref.
+#[test]
+fn remove_space_counts_any_ref_as_holding_a_detached_commit() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "ref-held-ws");
+    git_ok(&wt, &["switch", "--quiet", "--detach"]);
+    git_ok(
+        &wt,
+        &["commit", "--quiet", "--allow-empty", "-m", "kept by a ref"],
+    );
+    git_ok(&wt, &["update-ref", "refs/keep/this", "HEAD"]);
+
+    remove_space(
+        &env.workspaces_dir,
+        "ref-held-ws",
+        true,
+        UncommittedWork::Refuse,
+    )
+    .unwrap();
+}
+
+/// Each kind of work gets its own remedy: changed files are committed or
+/// stashed, a rebase is finished or aborted.
+#[test]
+fn the_refusal_names_a_remedy_per_kind_of_work() {
+    let env = TestEnv::new();
+    let (_repo, wt) = space_with_tracked_file(&env, "alpha", "remedy-ws");
+    std::fs::write(wt.join("tracked.txt"), "changed\n").unwrap();
+    let err = refused(&env, "remedy-ws");
+    let text = err.to_string();
+    assert!(
+        text.contains("alpha: 1 modified\n    commit or stash the changes"),
+        "got {:?}",
+        text
+    );
+    assert!(
+        text.ends_with("nothing was removed; do that for each repo, then remove the space again")
+    );
 }

@@ -202,7 +202,9 @@ read: if any repo holds modified, staged, untracked or conflicted files (files
 git ignores do not count), commits on a detached HEAD that no branch holds, or
 a rebase, merge, cherry-pick, revert or bisect in progress, or its status
 cannot be read, nothing is removed and the error names each repo and what it
-holds. Commit or stash the work, or throw it away on purpose with
+holds, with what to do about it (commit or stash, put a branch on a detached
+HEAD, finish or abort the operation). Do that, or throw the work away on
+purpose with
 `space rm <name> --force --discard-changes`; the TUI's delete dialog shows
 the work and asks a second time instead. Branches are kept either way, so
 commits on a branch, pushed or not, survive the removal. A worktree git refuses to remove, such as one locked

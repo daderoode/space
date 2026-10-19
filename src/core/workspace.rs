@@ -2794,16 +2794,56 @@ pub enum UncommittedWork {
 pub struct PendingWork {
     /// The repo's directory name inside the space.
     pub repo: String,
-    /// The counts `git status` gave, never all zero here, or the reason they
-    /// could not be read. An unreadable status counts as work: what cannot be
-    /// read cannot be shown to be safe to delete.
-    pub status: std::result::Result<RepoStatus, String>,
-    /// Work that is not a file: commits on a detached HEAD that no branch,
-    /// tag or remote-tracking ref holds, which go with the worktree's HEAD,
-    /// and an operation in progress (a rebase, merge, cherry-pick, revert or
-    /// bisect), whose state lives in the worktree's admin directory. Each is a
-    /// label ready for the report.
-    pub also: Vec<String>,
+    /// What reading its files gave: counts that are never all zero here
+    /// unless `also` holds something, or why they could not be read. What
+    /// cannot be read counts as work: it cannot be shown to be safe to
+    /// delete.
+    pub status: WorkStatus,
+    /// Work that is not a file: commits on a detached HEAD that nothing else
+    /// holds, which go with the worktree's HEAD, and an operation in progress,
+    /// whose state lives in the worktree's admin directory.
+    pub also: Vec<OtherWork>,
+}
+
+/// What reading a repo's files gave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkStatus {
+    /// `git status` read it: the counts.
+    Read(RepoStatus),
+    /// `git status` failed, with git's reason.
+    Unreadable(String),
+    /// An orphan: its source repository is gone, so there is no git left to
+    /// read it with.
+    SourceGone,
+}
+
+/// Work in a repo that is not a changed file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OtherWork {
+    /// HEAD is detached at commits no ref and no other worktree's HEAD holds.
+    DetachedCommits,
+    /// HEAD is detached and whether its commits are held could not be told,
+    /// with the reason.
+    DetachedUnchecked(String),
+    /// An operation in progress, by git's name for it (`rebase`, `merge`,
+    /// `cherry-pick`, `revert`, `bisect`).
+    InProgress(&'static str),
+}
+
+impl std::fmt::Display for OtherWork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OtherWork::DetachedCommits => {
+                write!(f, "commits on a detached HEAD that no branch holds")
+            }
+            OtherWork::DetachedUnchecked(why) => write!(
+                f,
+                "a detached HEAD whose commits could not be checked ({})",
+                why
+            ),
+            OtherWork::InProgress(op) => write!(f, "a {} in progress", op),
+        }
+    }
 }
 
 impl PendingWork {
@@ -2812,7 +2852,7 @@ impl PendingWork {
     pub fn summary(&self) -> String {
         let mut parts = Vec::new();
         match &self.status {
-            Ok(status) => {
+            WorkStatus::Read(status) => {
                 for (count, what) in [
                     (status.modified, "modified"),
                     (status.staged, "staged"),
@@ -2824,10 +2864,48 @@ impl PendingWork {
                     }
                 }
             }
-            Err(why) => parts.push(format!("status could not be read ({})", why)),
+            WorkStatus::Unreadable(why) => {
+                parts.push(format!("status could not be read ({})", why))
+            }
+            WorkStatus::SourceGone => parts
+                .push("its source repository is gone, so what it holds cannot be read".to_string()),
         }
-        parts.extend(self.also.iter().cloned());
+        parts.extend(self.also.iter().map(ToString::to_string));
         parts.join(", ")
+    }
+
+    /// What to do about it before removing the space again, one clause per
+    /// kind of work, in the order `summary` names them. Discarding is not
+    /// among them: each caller names its own way to discard.
+    pub fn remedy(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        match &self.status {
+            WorkStatus::Read(status) if !status.is_clean() => {
+                parts.push("commit or stash the changes".to_string())
+            }
+            WorkStatus::Read(_) => {}
+            WorkStatus::Unreadable(_) => {
+                parts.push("run `git status` in it to see what stops git reading it".to_string())
+            }
+            WorkStatus::SourceGone => parts.push(
+                "copy out what you need from it, since without its source repository it \
+                 can only be discarded"
+                    .to_string(),
+            ),
+        }
+        for other in &self.also {
+            let part = match other {
+                OtherWork::DetachedCommits | OtherWork::DetachedUnchecked(_) => {
+                    "create a branch on its detached HEAD (`git branch <name>` in that repo)"
+                        .to_string()
+                }
+                OtherWork::InProgress(op) => format!("finish or abort the {}", op),
+            };
+            if !parts.contains(&part) {
+                parts.push(part);
+            }
+        }
+        parts.join("; ")
     }
 }
 
@@ -2862,12 +2940,21 @@ impl std::fmt::Display for UncommittedWorkError {
                 "repos"
             }
         )?;
+        // Each repo with what it holds, and under it what to do about that:
+        // committing does nothing for a rebase in progress, and a branch is
+        // what keeps commits on a detached HEAD.
         for pending in &self.repos {
-            write!(f, "\n  {}: {}", pending.repo, pending.summary())?;
+            write!(
+                f,
+                "\n  {}: {}\n    {}",
+                pending.repo,
+                pending.summary(),
+                pending.remedy()
+            )?;
         }
         write!(
             f,
-            "\nnothing was removed; commit or stash the work, then remove the space again"
+            "\nnothing was removed; do that for each repo, then remove the space again"
         )
     }
 }
@@ -3165,9 +3252,7 @@ fn pending_in(classified: &[(PathBuf, SpaceEntry)]) -> Vec<PendingWork> {
             // deleted under `Refuse`: discarding is the only way past it.
             SpaceEntry::Orphan => Some(PendingWork {
                 repo: name_of(dir),
-                status: Err(
-                    "its source repository is gone, so what it holds cannot be read".to_string(),
-                ),
+                status: WorkStatus::SourceGone,
                 also: Vec::new(),
             }),
             // Everything else is kept by the removal whatever it holds, or is
@@ -3181,12 +3266,12 @@ fn pending_in(classified: &[(PathBuf, SpaceEntry)]) -> Vec<PendingWork> {
 /// directory, with the words the report uses for each. `rebase-apply` is
 /// also what `git am` leaves; either way the half-applied series is in it.
 const OPERATIONS_IN_PROGRESS: [(&str, &str); 6] = [
-    ("rebase-merge", "a rebase in progress"),
-    ("rebase-apply", "a rebase in progress"),
-    ("MERGE_HEAD", "a merge in progress"),
-    ("CHERRY_PICK_HEAD", "a cherry-pick in progress"),
-    ("REVERT_HEAD", "a revert in progress"),
-    ("BISECT_LOG", "a bisect in progress"),
+    ("rebase-merge", "rebase"),
+    ("rebase-apply", "rebase"),
+    ("MERGE_HEAD", "merge"),
+    ("CHERRY_PICK_HEAD", "cherry-pick"),
+    ("REVERT_HEAD", "revert"),
+    ("BISECT_LOG", "bisect"),
 ];
 
 /// What removing worktree `dir` (admin directory `admin`) would lose, or
@@ -3202,22 +3287,23 @@ fn work_in(dir: &Path, admin: &Path) -> Option<PendingWork> {
     if half_built(admin) {
         return None;
     }
-    let status = worktree_work(dir);
-    let mut also: Vec<String> = Vec::new();
-    for (file, label) in OPERATIONS_IN_PROGRESS {
-        if admin.join(file).exists() && !also.iter().any(|l| l == label) {
-            also.push(label.to_string());
+    let status = match worktree_work(dir) {
+        Ok(counts) => WorkStatus::Read(counts),
+        Err(why) => WorkStatus::Unreadable(why),
+    };
+    let mut also: Vec<OtherWork> = Vec::new();
+    for (file, op) in OPERATIONS_IN_PROGRESS {
+        let work = OtherWork::InProgress(op);
+        if admin.join(file).exists() && !also.contains(&work) {
+            also.push(work);
         }
     }
-    match unheld_detached_commits(dir, admin) {
+    match unheld_detached_commits(dir) {
         Ok(false) => {}
-        Ok(true) => also.push("commits on a detached HEAD that no branch holds".to_string()),
-        Err(why) => also.push(format!(
-            "a detached HEAD whose commits could not be checked ({})",
-            why
-        )),
+        Ok(true) => also.push(OtherWork::DetachedCommits),
+        Err(why) => also.push(OtherWork::DetachedUnchecked(why)),
     }
-    if also.is_empty() && matches!(&status, Ok(s) if s.is_clean()) {
+    if also.is_empty() && matches!(&status, WorkStatus::Read(s) if s.is_clean()) {
         return None;
     }
     Some(PendingWork {
@@ -3228,29 +3314,71 @@ fn work_in(dir: &Path, admin: &Path) -> Option<PendingWork> {
 }
 
 /// Whether the worktree's HEAD is detached at commits that nothing else
-/// holds: no local branch, tag or remote-tracking ref reaches them. Removing
-/// the worktree removes its HEAD, and with it the only name those commits
-/// have; a branch's commits survive, because removal keeps every branch.
-fn unheld_detached_commits(dir: &Path, admin: &Path) -> std::result::Result<bool, String> {
-    let head = std::fs::read_to_string(admin.join("HEAD"))
-        .map_err(|e| format!("its HEAD cannot be read: {}", e))?;
-    if head.trim_start().starts_with("ref:") {
-        return Ok(false);
+/// holds: no ref of any kind (`--glob=refs/*`: branches, tags, remote-tracking
+/// branches, the stash, notes) and no other worktree's HEAD, the main
+/// worktree's included, reaches them. Removing the worktree removes its
+/// HEAD, and with it the only name those commits have; a branch's commits
+/// survive, because removal keeps every branch.
+///
+/// Detachment is asked of git (`git symbolic-ref -q HEAD`) rather than read
+/// from the admin directory's `HEAD` file: with the reftable format that
+/// file is a stub that always reads `ref: refs/heads/.invalid`, whatever
+/// HEAD really is.
+fn unheld_detached_commits(dir: &Path) -> std::result::Result<bool, String> {
+    let symref = spawn::output(git_in(dir).args(["symbolic-ref", "-q", "HEAD"]))
+        .map_err(|e| format!("could not run git: {}", e))?;
+    match symref.status.code() {
+        Some(0) => return Ok(false),
+        // `-q`: exit 1, silently, is "HEAD is not a symbolic ref", detached.
+        Some(1) => {}
+        _ => return Err(first_stderr_line(&symref, "git symbolic-ref")),
     }
-    let out = spawn::output(git_in(dir).args([
-        "rev-list",
-        "-1",
-        "HEAD",
-        "--not",
-        "--branches",
-        "--tags",
-        "--remotes",
-    ]))
-    .map_err(|e| format!("could not run git: {}", e))?;
+
+    let list = spawn::output(git_in(dir).args(["worktree", "list", "--porcelain"]))
+        .map_err(|e| format!("could not run git: {}", e))?;
+    if !list.status.success() {
+        return Err(first_stderr_line(&list, "git worktree list"));
+    }
+    let here = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let other_heads = other_worktree_heads(&String::from_utf8_lossy(&list.stdout), &here);
+
+    let mut args: Vec<String> = ["rev-list", "-1", "HEAD", "--not", "--glob=refs/*"]
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+    args.extend(other_heads);
+    let out =
+        spawn::output(git_in(dir).args(&args)).map_err(|e| format!("could not run git: {}", e))?;
     if !out.status.success() {
         return Err(first_stderr_line(&out, "git rev-list"));
     }
     Ok(!out.stdout.iter().all(u8::is_ascii_whitespace))
+}
+
+/// The HEAD commits of every worktree in `git worktree list --porcelain`
+/// output except the one at `here` (canonical), the main worktree included.
+/// A bare main repository has no HEAD line and gives nothing.
+fn other_worktree_heads(porcelain: &str, here: &Path) -> Vec<String> {
+    let mut heads = Vec::new();
+    for record in porcelain.split("\n\n") {
+        let mut path = None;
+        let mut head = None;
+        for line in record.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                path = Some(PathBuf::from(p));
+            } else if let Some(h) = line.strip_prefix("HEAD ") {
+                head = Some(h.trim().to_string());
+            }
+        }
+        let (Some(path), Some(head)) = (path, head) else {
+            continue;
+        };
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        if path != here && head.chars().all(|c| c.is_ascii_hexdigit()) && !head.is_empty() {
+            heads.push(head);
+        }
+    }
+    heads
 }
 
 /// The variables that point git at a repository, index, object store or
@@ -4036,8 +4164,9 @@ fn unregister_worktree(
         if let Some(work) = work_in(dir, admin) {
             return Err(format!(
                 "uncommitted work appeared in it while the space was being removed, so it \
-                 is kept: {}\ncommit or stash it, then remove the space again",
-                work.summary()
+                 is kept: {}\n{}, then remove the space again",
+                work.summary(),
+                work.remedy()
             ));
         }
     }
@@ -8878,7 +9007,20 @@ mod tests {
 
 #[cfg(test)]
 mod porcelain_tests {
-    use super::parse_porcelain_status;
+    use super::{other_worktree_heads, parse_porcelain_status};
+
+    /// Every other worktree's HEAD, the main one included; not this one's,
+    /// and nothing from a bare main repository, which has no HEAD line.
+    #[test]
+    fn other_worktree_heads_skips_this_one_and_a_bare_main() {
+        let porcelain = "worktree /nowhere/bare\nbare\n\n\
+                         worktree /nowhere/main\nHEAD 1111111111111111111111111111111111111111\ndetached\n\n\
+                         worktree /nowhere/here\nHEAD 2222222222222222222222222222222222222222\ndetached\n";
+        assert_eq!(
+            other_worktree_heads(porcelain, std::path::Path::new("/nowhere/here")),
+            vec!["1111111111111111111111111111111111111111".to_string()]
+        );
+    }
     use crate::core::git::RepoStatus;
 
     /// A rename's second entry is its source path, not a change of its own;
