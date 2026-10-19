@@ -8874,6 +8874,20 @@ mod help_overlay_tests {
         );
     }
 
+    #[test]
+    fn help_opened_from_the_repo_pane_lands_on_the_repo_pane_group() {
+        let ws = common::workspace_with_repos(&["repo-a"]);
+        let mut app = test_app(vec![ws], vec![]);
+        app.focus = Pane::Right;
+        app.handle_key(key(KeyCode::Char('?')));
+        let rendered = render_text(&app, 80, 24);
+        assert!(
+            rendered.contains(keybindings::REPO_PANE_NAME),
+            "help from the repo pane must land on the Repo Pane group, got:\n{}",
+            rendered
+        );
+    }
+
     /// Every group `landing_group` can return must exist in the registry, or
     /// help silently opens at the top instead of on the screen's own group.
     /// The two share one set of constants, so this pins that they stay shared.
