@@ -1257,6 +1257,7 @@ fn delete_confirm_handles_long_workspace_name() {
         ],
         pending: vec![],
         stage: space::tui::screens::delete::DeleteStage::Confirm,
+        changed: false,
     });
 
     let rendered = render_text(&app, 68, 12);
@@ -1281,6 +1282,7 @@ fn delete_confirm_keeps_footer_visible_for_long_repo_lists() {
         repo_names: (1..=12).map(|idx| format!("repo-{}", idx)).collect(),
         pending: vec![],
         stage: space::tui::screens::delete::DeleteStage::Confirm,
+        changed: false,
     });
 
     let rendered = render_text(&app, 70, 10);
@@ -1315,6 +1317,7 @@ fn delete_confirm_wraps_footer_on_narrow_terminals() {
         repo_names: vec!["repo-with-a-very-long-name".to_string()],
         pending: vec![],
         stage: space::tui::screens::delete::DeleteStage::Confirm,
+        changed: false,
     });
 
     let rendered = render_text(&app, 24, 10);
@@ -12580,10 +12583,91 @@ fn work_that_appears_after_the_dialog_opened_is_still_refused() {
     assert_eq!(app.status_kind, StatusKind::Error);
     let status = app.status_message.clone().unwrap_or_default();
     assert!(
-        status.starts_with("Delete failed: space 'racy-ws' was not removed")
-            && status.contains("alpha"),
-        "the status names the space and the repo, got {:?}",
+        status == "Delete failed: uncommitted work in alpha; press d to see it and discard it",
+        "the status names the repo and the way on, got {:?}",
         status
     );
     assert!(wt.join("wip.txt").exists(), "the work is kept");
+}
+
+/// Review of e07b3ae: the second `y` discards whatever the repos hold when
+/// it runs, so it reads them again first. Work that appeared in another repo
+/// after the dialog opened is shown, and the question asked again, instead
+/// of being discarded unseen.
+#[test]
+fn the_second_y_asks_again_when_the_work_changed() {
+    use space::core::workspace::{create_worktree, list_workspaces, BranchStrategy};
+    use space::tui::actions::StatusKind;
+    use space::tui::screens::delete::DeleteStage;
+    let env = TestEnv::new();
+    let mut worktrees = Vec::new();
+    for name in ["alpha", "beta"] {
+        let repo = env.create_repo(name);
+        worktrees.push(
+            create_worktree(
+                &repo,
+                &env.workspaces_dir,
+                "two-ws",
+                &BranchStrategy::NewBranch("two-ws".to_string()),
+            )
+            .unwrap(),
+        );
+    }
+    std::fs::write(worktrees[0].join("wip.txt"), "seen").unwrap();
+    let workspaces = list_workspaces(&env.workspaces_dir).unwrap();
+    let mut app = test_app_with_config(config_from_env(&env), workspaces, vec![]);
+
+    app.handle_key(key(KeyCode::Char('d')));
+    app.handle_key(key(KeyCode::Char('y')));
+    // Work appears in the other repo while the second question is up.
+    std::fs::write(worktrees[1].join("unseen.txt"), "new").unwrap();
+    app.handle_key(key(KeyCode::Char('y')));
+
+    let Screen::ConfirmDelete(state) = &app.screen else {
+        panic!("a changed space must not be deleted on the second y");
+    };
+    assert_eq!(state.stage, DeleteStage::ConfirmDiscard);
+    assert!(state.changed);
+    let names: Vec<&str> = state.pending.iter().map(|p| p.repo.as_str()).collect();
+    assert_eq!(names, vec!["alpha", "beta"], "the new reading is shown");
+    assert!(worktrees[1].join("unseen.txt").exists());
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("beta  (1 untracked)")
+            && rendered.contains("2 repos have uncommitted work that will be lost.")
+            && rendered.contains("What the repos hold changed"),
+        "the dialog shows what changed, got:\n{}",
+        rendered
+    );
+
+    // Asked again, with nothing changed since: now it deletes.
+    app.handle_key(key(KeyCode::Char('y')));
+    assert!(matches!(app.screen, Screen::Dashboard));
+    assert_eq!(app.status_kind, StatusKind::Success);
+    assert!(!env.workspaces_dir.join("two-ws").exists());
+}
+
+/// If the work went (committed or stashed meanwhile), the dialog goes back to
+/// the first question, whose `y` deletes under Refuse.
+#[test]
+fn the_second_y_returns_to_the_first_question_when_the_work_went() {
+    use space::tui::screens::delete::DeleteStage;
+    let env = TestEnv::new();
+    let (mut app, wt) = app_on_real_space(&env, "gone-work-ws");
+    std::fs::write(wt.join("wip.txt"), "unsaved").unwrap();
+
+    app.handle_key(key(KeyCode::Char('d')));
+    app.handle_key(key(KeyCode::Char('y')));
+    std::fs::remove_file(wt.join("wip.txt")).unwrap();
+    app.handle_key(key(KeyCode::Char('y')));
+
+    let Screen::ConfirmDelete(state) = &app.screen else {
+        panic!("a changed space must not be deleted on the second y");
+    };
+    assert_eq!(state.stage, DeleteStage::Confirm);
+    assert!(state.pending.is_empty());
+    assert!(env.workspaces_dir.join("gone-work-ws").exists());
+
+    app.handle_key(key(KeyCode::Char('y')));
+    assert!(!env.workspaces_dir.join("gone-work-ws").exists());
 }

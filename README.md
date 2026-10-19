@@ -199,11 +199,13 @@ runs `git worktree add` for each selected repo, placing the worktrees at
 `git worktree remove` for each worktree in it and deletes the directory once
 nothing has been kept. Before anything is removed, every repo's status is
 read: if any repo holds modified, staged, untracked or conflicted files (files
-git ignores do not count), or its status cannot be read, nothing is removed
-and the error names each repo and what it holds. Commit or stash the work, or
-throw it away on purpose with `space rm <name> --force --discard-changes`;
-the TUI's delete dialog shows the work and asks a second time instead.
-Branches are kept either way, so committed work, pushed or not, survives. A worktree git refuses to remove, such as one locked
+git ignores do not count), commits on a detached HEAD that no branch holds, or
+a rebase, merge, cherry-pick, revert or bisect in progress, or its status
+cannot be read, nothing is removed and the error names each repo and what it
+holds. Commit or stash the work, or throw it away on purpose with
+`space rm <name> --force --discard-changes`; the TUI's delete dialog shows
+the work and asks a second time instead. Branches are kept either way, so
+commits on a branch, pushed or not, survive the removal. A worktree git refuses to remove, such as one locked
 with `git worktree lock`, keeps the workspace and is reported instead, as does
 a directory holding a repository of its own.
 Removal also keeps a worktree copy git has no record of and a directory whose

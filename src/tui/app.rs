@@ -1739,10 +1739,31 @@ impl App {
                         tracing::warn!("{}", e);
                         let report = e.to_string();
                         let summary = report.lines().next().unwrap_or_default();
-                        // The prefix stays: the other failures here ("workspace
-                        // 'x' not found") do not say what was being attempted,
-                        // and this is the only line the user sees.
-                        self.set_status(format!("Delete failed: {}", summary), StatusKind::Error);
+                        // A space refused for uncommitted work (it read clean
+                        // when the dialog opened and did not by the `y`) says
+                        // how to get past it: `d` again opens the dialog on a
+                        // fresh reading, which shows the work and offers to
+                        // discard it. The repo names lead, so they survive a
+                        // status row clipped at 80 columns.
+                        let message = match e
+                            .downcast_ref::<crate::core::workspace::UncommittedWorkError>()
+                        {
+                            Some(refused) => {
+                                let names: Vec<&str> =
+                                    refused.repos.iter().map(|p| p.repo.as_str()).collect();
+                                format!(
+                                    "Delete failed: uncommitted work in {}; press d to see it \
+                                     and discard it",
+                                    names.join(", ")
+                                )
+                            }
+                            // The prefix stays: the other failures here
+                            // ("workspace 'x' not found") do not say what was
+                            // being attempted, and this is the only line the
+                            // user sees.
+                            None => format!("Delete failed: {}", summary),
+                        };
+                        self.set_status(message, StatusKind::Error);
                     }
                 }
             }

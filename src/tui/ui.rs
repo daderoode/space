@@ -1326,6 +1326,11 @@ fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame
         line_width(repo_heading),
         line_width(&footer_text),
         warning.as_deref().map(line_width).unwrap_or(0),
+        if state.changed {
+            line_width("What the repos hold changed. Check, then answer again.")
+        } else {
+            0
+        },
         state
             .repo_names
             .iter()
@@ -1345,7 +1350,9 @@ fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame
 
     let max_outer_height = frame.area().height.saturating_sub(2).max(8);
     let max_inner_height = max_outer_height.saturating_sub(2) as usize;
-    let static_line_count = 5usize + usize::from(warning.is_some()) + footer_line_count;
+    let changed = "What the repos hold changed. Check, then answer again.";
+    let static_line_count =
+        5usize + usize::from(warning.is_some()) + usize::from(state.changed) + footer_line_count;
     let available_repo_lines = max_inner_height.saturating_sub(static_line_count);
 
     // Repos with pending work are listed first, so a list cut short by a
@@ -1431,6 +1438,12 @@ fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame
     if let Some(warning) = &warning {
         lines.push(Line::from(Span::styled(
             truncate_for_width(warning, inner.width as usize),
+            theme::warn().add_modifier(Modifier::BOLD),
+        )));
+    }
+    if state.changed {
+        lines.push(Line::from(Span::styled(
+            truncate_for_width(changed, inner.width as usize),
             theme::warn().add_modifier(Modifier::BOLD),
         )));
     }

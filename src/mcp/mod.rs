@@ -495,7 +495,7 @@ impl SpaceServer {
 
     /// Remove a workspace and all its worktrees.
     #[tool(
-        description = "Remove a workspace and all its git worktrees. If any repo in it holds uncommitted work (modified, staged, untracked or conflicted files; files git ignores do not count), the call fails before anything is removed, with an error naming each such repo and what it holds; commit or stash the work, or pass discard_changes: true to remove the workspace anyway and lose it. Branches are kept either way, so committed work survives. A worktree git refuses to remove, for example one locked with 'git worktree lock', keeps the whole workspace: the call fails with an error naming each repo it kept and git's own reason, the repos it did remove stay removed, and retrying once the cause is fixed removes the rest."
+        description = "Remove a workspace and all its git worktrees. If any repo in it holds uncommitted work (modified, staged, untracked or conflicted files; files git ignores do not count), or commits on a detached HEAD that no branch holds, or a rebase, merge, cherry-pick, revert or bisect in progress, or a worktree whose source repository is gone, the call fails before anything is removed, with an error naming each such repo and what it holds; commit or stash the work, or pass discard_changes: true to remove the workspace anyway and lose it. Branches are kept either way, so commits on a branch survive. A worktree git refuses to remove, for example one locked with 'git worktree lock', keeps the whole workspace: the call fails with an error naming each repo it kept and git's own reason, the repos it did remove stay removed, and retrying once the cause is fixed removes the rest."
     )]
     pub fn remove_workspace(
         &self,

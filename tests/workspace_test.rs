@@ -7329,3 +7329,186 @@ fn pending_work_of_a_missing_space_is_not_found() {
     let err = pending_work(&env.workspaces_dir, "ghost").unwrap_err();
     assert!(err.to_string().contains("not found"));
 }
+
+// Review of e07b3ae (issue #75): what the first guard missed.
+
+/// A file added with `git add -N` is in the index with no content (` A` in
+/// porcelain); its content is only in the tree, and read as clean it was
+/// destroyed.
+#[test]
+fn remove_space_refuses_an_intent_to_add_file() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "ita-ws");
+    std::fs::write(wt.join("planned.txt"), "only here").unwrap();
+    git_ok(&wt, &["add", "-N", "planned.txt"]);
+
+    let err = refused(&env, "ita-ws");
+    assert_eq!(counts(&err.repos[0]), (1, 0, 0, 0));
+    assert!(wt.join("planned.txt").exists());
+}
+
+/// An orphan's source repo is gone, so what it holds cannot be read: under
+/// Refuse it is pending work, and only discarding removes it.
+#[test]
+fn remove_space_refuses_an_orphan_unless_discarding() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "orphan-ws");
+    std::fs::write(wt.join("wip.txt"), "unreadable now").unwrap();
+    std::fs::remove_dir_all(&repo).unwrap();
+
+    let err = refused(&env, "orphan-ws");
+    assert_eq!(err.repos.len(), 1);
+    let why = err.repos[0].status.as_ref().expect_err("cannot be read");
+    assert!(
+        why.contains("source repository is gone"),
+        "the reason says why, got {:?}",
+        why
+    );
+    assert!(wt.join("wip.txt").exists(), "the orphan is kept");
+
+    remove_space(
+        &env.workspaces_dir,
+        "orphan-ws",
+        true,
+        UncommittedWork::Discard,
+    )
+    .unwrap();
+    assert!(!env.workspaces_dir.join("orphan-ws").exists());
+}
+
+/// A worktree whose add was killed mid-checkout holds nothing of the user's.
+/// `git status` reads it as every file deleted and untracked, which must not
+/// turn into "commit or stash": it is removed under Refuse, as the way out
+/// `placement_of` names for it says.
+#[test]
+fn remove_space_removes_a_half_built_worktree_under_refuse() {
+    let env = TestEnv::new();
+    let (repo, wt) = space_with_tracked_file(&env, "alpha", "half-built-ws");
+    let admin = admin_dir_of(&wt);
+    std::fs::write(admin.join("locked"), "initializing\n").unwrap();
+    std::fs::remove_file(admin.join("index")).unwrap();
+    std::fs::write(admin.join("index.lock"), "").unwrap();
+
+    assert_eq!(
+        pending_work(&env.workspaces_dir, "half-built-ws").unwrap(),
+        vec![]
+    );
+    remove_space(
+        &env.workspaces_dir,
+        "half-built-ws",
+        true,
+        UncommittedWork::Refuse,
+    )
+    .unwrap();
+    assert!(!env.workspaces_dir.join("half-built-ws").exists());
+    assert!(!registered_worktrees(&repo).contains("half-built-ws"));
+}
+
+/// Commits made on a detached HEAD that no branch, tag or remote ref holds
+/// go with the worktree's HEAD.
+#[test]
+fn remove_space_refuses_commits_only_a_detached_head_holds() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "detached-ws");
+    git_ok(&wt, &["switch", "--quiet", "--detach"]);
+    git_ok(&wt, &["commit", "--quiet", "--allow-empty", "-m", "loose"]);
+
+    let err = refused(&env, "detached-ws");
+    assert_eq!(err.repos[0].status, Ok(Default::default()));
+    assert_eq!(
+        err.repos[0].also,
+        vec!["commits on a detached HEAD that no branch holds".to_string()]
+    );
+    assert!(
+        err.to_string()
+            .contains("alpha: commits on a detached HEAD that no branch holds"),
+        "the report says it, got {:?}",
+        err.to_string()
+    );
+}
+
+/// A detached HEAD at a commit a branch holds loses nothing.
+#[test]
+fn remove_space_removes_a_detached_head_a_branch_holds() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "held-ws");
+    git_ok(&wt, &["switch", "--quiet", "--detach"]);
+    remove_space(
+        &env.workspaces_dir,
+        "held-ws",
+        true,
+        UncommittedWork::Refuse,
+    )
+    .unwrap();
+    assert!(!env.workspaces_dir.join("held-ws").exists());
+}
+
+/// An operation in progress lives in the worktree's admin directory and goes
+/// with it, even with a clean tree: a bisect here.
+#[test]
+fn remove_space_refuses_an_operation_in_progress() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "bisect-ws");
+    git_ok(&wt, &["bisect", "start"]);
+
+    let err = refused(&env, "bisect-ws");
+    assert_eq!(err.repos[0].also, vec!["a bisect in progress".to_string()]);
+}
+
+/// A conflicted merge reads as both a conflict and a merge in progress.
+#[test]
+fn a_conflicted_merge_is_also_a_merge_in_progress() {
+    let env = TestEnv::new();
+    let (_repo, wt) = space_with_tracked_file(&env, "alpha", "merge-ws");
+    git_ok(&wt, &["switch", "--quiet", "-c", "side"]);
+    std::fs::write(wt.join("tracked.txt"), "side\n").unwrap();
+    git_ok(&wt, &["commit", "--quiet", "-am", "side"]);
+    git_ok(&wt, &["switch", "--quiet", "merge-ws"]);
+    std::fs::write(wt.join("tracked.txt"), "main\n").unwrap();
+    git_ok(&wt, &["commit", "--quiet", "-am", "main"]);
+    let _ = Command::new("git")
+        .args(["merge", "--quiet", "side"])
+        .current_dir(&wt)
+        .output()
+        .unwrap();
+
+    let err = refused(&env, "merge-ws");
+    assert_eq!(err.repos[0].summary(), "1 conflicted, a merge in progress");
+}
+
+/// A clean worktree holding a submodule: git will not remove it unforced
+/// however clean it is, so the guarded removal reads it again, finds it
+/// clean, and forces it.
+#[test]
+fn remove_space_removes_a_clean_worktree_with_a_submodule() {
+    let env = TestEnv::new();
+    let sub = env.create_repo("sub");
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "sub-ws");
+    git_ok(
+        &wt,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+            sub.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    git_ok(&wt, &["commit", "--quiet", "-m", "submodule"]);
+    assert!(
+        wt.join("sub/.git").exists(),
+        "fixture: the worktree holds a checked-out submodule"
+    );
+
+    remove_space(&env.workspaces_dir, "sub-ws", true, UncommittedWork::Refuse).unwrap();
+    assert!(!env.workspaces_dir.join("sub-ws").exists());
+    assert!(!registered_worktrees(&repo).contains("sub-ws"));
+}

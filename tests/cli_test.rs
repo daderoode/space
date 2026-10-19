@@ -448,11 +448,14 @@ fn rm_force_prints_only_its_own_line() {
     let bin = env.dir.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let marker = env.dir.path().join("shim-ran.txt");
+    // The shim prints only for `worktree remove`, the git run whose output
+    // this is about. The status reads before it parse git's stdout, so a
+    // shim printing into them reads, safely, as uncommitted work (issue #75).
     let real_path = std::env::var("PATH").unwrap();
     std::fs::write(
         bin.join("git"),
         format!(
-            "#!/bin/sh\necho \"shim: git $*\"\necho \"$*\" >> '{}'\nPATH='{real_path}'\nexec git \"$@\"\n",
+            "#!/bin/sh\ncase \"$*\" in *\"worktree remove\"*) echo \"shim: git $*\" ;; esac\necho \"$*\" >> '{}'\nPATH='{real_path}'\nexec git \"$@\"\n",
             marker.display()
         ),
     )
@@ -792,5 +795,80 @@ fn rm_discard_changes_requires_force() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("--force"));
+    assert!(wt.join("wip.txt").exists());
+}
+
+/// The check at the start of a removal can be seconds old by the time a
+/// later repo is reached. Work that appears in one meanwhile (here: written
+/// by a git shim while the first repo is being removed) keeps that repo:
+/// git is asked without `--force` first, and the refusal is read again.
+#[test]
+fn rm_force_keeps_a_repo_that_became_dirty_mid_run() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = TestEnv::new();
+    let first = env.create_repo("a-first");
+    let second = env.create_repo("b-second");
+    for repo in [&first, &second] {
+        create_worktree(
+            repo,
+            &env.workspaces_dir,
+            "race-ws",
+            &BranchStrategy::NewBranch("race-ws".to_string()),
+        )
+        .unwrap();
+    }
+    let second_wt = env.workspaces_dir.join("race-ws").join("b-second");
+
+    let bin = env.dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let real_path = std::env::var("PATH").unwrap();
+    std::fs::write(
+        bin.join("git"),
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *\"worktree remove\"*a-first*) echo wip > '{}/appeared.txt' ;; esac\nPATH='{real_path}'\nexec git \"$@\"\n",
+            second_wt.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    space(&env)
+        .env("PATH", format!("{}:{}", bin.display(), real_path))
+        .args(["rm", "--force", "race-ws"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "uncommitted work appeared in it while the space was being removed",
+        ));
+
+    assert!(
+        !env.workspaces_dir.join("race-ws").join("a-first").exists(),
+        "the repo that was clean when reached is removed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(second_wt.join("appeared.txt")).unwrap(),
+        "wip\n",
+        "the work that appeared is kept"
+    );
+}
+
+/// A `space` started from a git hook inherits `GIT_DIR` and `GIT_INDEX_FILE`.
+/// The status read must still look at the space's worktree, not at the
+/// (clean) repository those name, or a dirty worktree would read as clean.
+#[test]
+fn rm_force_reads_the_worktree_whatever_git_dir_says() {
+    let env = TestEnv::new();
+    let wt = dirty_space(&env, "hooked-ws");
+    let elsewhere = env.create_repo("elsewhere");
+
+    space(&env)
+        .env("GIT_DIR", elsewhere.join(".git"))
+        .env("GIT_WORK_TREE", &elsewhere)
+        .env("GIT_INDEX_FILE", elsewhere.join(".git/index"))
+        .args(["rm", "--force", "hooked-ws"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("alpha: 1 untracked"));
     assert!(wt.join("wip.txt").exists());
 }

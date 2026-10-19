@@ -1342,7 +1342,9 @@ fn a_repo_named_twice_is_placed_once() {
 // ---------------------------------------------------------------------------
 
 /// A `git` that prints one line to stdout and records that it ran, then hands
-/// over to the real git. Returns the directory to put on PATH and the file the
+/// over to the real git. It prints only for `worktree remove`: the status
+/// reads made before it (issue #75) parse git's stdout, so a line printed into
+/// them reads, safely, as uncommitted work and refuses the removal. Returns the directory to put on PATH and the file the
 /// shim appends its arguments to.
 fn git_that_prints_to_stdout(dir: &std::path::Path) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
@@ -1355,7 +1357,7 @@ fn git_that_prints_to_stdout(dir: &std::path::Path) -> (PathBuf, PathBuf) {
         bin.join("git"),
         format!(
             "#!/bin/sh\n\
-             echo \"shim: git $*\"\n\
+             case \"$*\" in *\"worktree remove\"*) echo \"shim: git $*\" ;; esac\n\
              echo \"$*\" >> '{}'\n\
              PATH='{}'\n\
              exec git \"$@\"\n",

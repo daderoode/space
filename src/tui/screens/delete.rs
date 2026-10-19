@@ -25,6 +25,10 @@ pub struct DeleteState {
     /// dialog behaves as it always has: one `y` deletes.
     pub pending: Vec<PendingWork>,
     pub stage: DeleteStage,
+    /// The second `y` found the repos holding something other than what the
+    /// dialog showed, so the dialog was refreshed instead of deleting, and
+    /// says so.
+    pub changed: bool,
 }
 
 impl DeleteState {
@@ -40,16 +44,13 @@ impl DeleteState {
     /// list is added to the list, so every warning has a row.
     pub fn new(ws_dir: &Path, name: &str, mut repo_names: Vec<String>) -> Self {
         let pending = workspace::pending_work(ws_dir, name).unwrap_or_default();
-        for p in &pending {
-            if !repo_names.contains(&p.repo) {
-                repo_names.push(p.repo.clone());
-            }
-        }
+        add_missing_rows(&mut repo_names, &pending);
         DeleteState {
             workspace_name: name.to_string(),
             repo_names,
             pending,
             stage: DeleteStage::Confirm,
+            changed: false,
         }
     }
 
@@ -68,7 +69,15 @@ impl DeleteState {
     /// pending work asks a second, default-No question first, and only a `y`
     /// to that deletes with `UncommittedWork::Discard`. Every decline, at
     /// either question, leaves the dialog with nothing deleted.
-    pub fn handle_key(&mut self, key: KeyEvent, _ctx: &ScreenContext) -> ScreenAction {
+    ///
+    /// `Discard` throws away whatever the repos hold when it runs, not what
+    /// the dialog showed. So the second `y` reads the space again first, and
+    /// if that differs from what was shown (work appeared in another repo, or
+    /// went), the dialog shows the new reading and asks again rather than
+    /// discarding something the user never saw. A space that reads clean by
+    /// then goes back to the first question, whose `y` deletes it under
+    /// `Refuse`.
+    pub fn handle_key(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
         // Nothing is typed here, so `?` always opens help.
         if super::opens_help(key.code, true) {
             return ScreenAction::OpenHelp;
@@ -83,13 +92,36 @@ impl DeleteState {
                 force: true,
                 uncommitted: UncommittedWork::Refuse,
             },
-            (Some(true), DeleteStage::ConfirmDiscard) => ScreenAction::DeleteWorkspace {
-                name: self.workspace_name.clone(),
-                force: true,
-                uncommitted: UncommittedWork::Discard,
-            },
+            (Some(true), DeleteStage::ConfirmDiscard) => {
+                let now = workspace::pending_work(&ctx.config.workspaces.dir, &self.workspace_name)
+                    .unwrap_or_default();
+                if now != self.pending {
+                    add_missing_rows(&mut self.repo_names, &now);
+                    if now.is_empty() {
+                        self.stage = DeleteStage::Confirm;
+                    }
+                    self.pending = now;
+                    self.changed = true;
+                    return ScreenAction::Continue;
+                }
+                ScreenAction::DeleteWorkspace {
+                    name: self.workspace_name.clone(),
+                    force: true,
+                    uncommitted: UncommittedWork::Discard,
+                }
+            }
             (Some(false), _) => ScreenAction::Back,
             (None, _) => ScreenAction::Continue,
+        }
+    }
+}
+
+/// Give every repo with pending work a row, for a repo the dashboard did not
+/// list (its detail was read before the repo appeared, say).
+fn add_missing_rows(repo_names: &mut Vec<String>, pending: &[PendingWork]) {
+    for p in pending {
+        if !repo_names.contains(&p.repo) {
+            repo_names.push(p.repo.clone());
         }
     }
 }
