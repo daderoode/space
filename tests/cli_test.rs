@@ -721,3 +721,76 @@ fn no_tracked_file_holds_an_em_dash() {
         hits.join("\n")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #75: `rm --force` refuses uncommitted work; `--discard-changes`
+// throws it away.
+// ---------------------------------------------------------------------------
+
+/// A space `ws_name` with one worktree of a new repo `alpha` holding an
+/// untracked file. Returns the worktree.
+fn dirty_space(env: &TestEnv, ws_name: &str) -> std::path::PathBuf {
+    let repo = env.create_repo("alpha");
+    let wt = create_worktree(
+        &repo,
+        &env.workspaces_dir,
+        ws_name,
+        &BranchStrategy::NewBranch(ws_name.to_string()),
+    )
+    .unwrap();
+    std::fs::write(wt.join("wip.txt"), "unsaved").unwrap();
+    wt
+}
+
+#[test]
+fn rm_force_refuses_uncommitted_work() {
+    let env = TestEnv::new();
+    let wt = dirty_space(&env, "dirty-ws");
+
+    space(&env)
+        .args(["rm", "--force", "dirty-ws"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("dirty-ws"))
+        .stderr(predicate::str::contains("alpha: 1 untracked"))
+        .stderr(predicate::str::contains("nothing was removed"))
+        .stderr(predicate::str::contains(
+            "space rm dirty-ws --force --discard-changes",
+        ))
+        .stdout(predicate::str::contains("Removed workspace").not());
+
+    assert_eq!(
+        std::fs::read_to_string(wt.join("wip.txt")).unwrap(),
+        "unsaved",
+        "the uncommitted work is still on disk"
+    );
+}
+
+#[test]
+fn rm_force_discard_changes_removes_a_dirty_space() {
+    let env = TestEnv::new();
+    dirty_space(&env, "dirty-ws");
+
+    space(&env)
+        .args(["rm", "--force", "--discard-changes", "dirty-ws"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("Removed workspace 'dirty-ws'\n"));
+    assert!(!env.workspaces_dir.join("dirty-ws").exists());
+}
+
+/// Without `--force` the TUI dialog opens, and it asks about uncommitted work
+/// itself, so `--discard-changes` alone is refused by the argument parser
+/// before anything is read or removed.
+#[test]
+fn rm_discard_changes_requires_force() {
+    let env = TestEnv::new();
+    let wt = dirty_space(&env, "dirty-ws");
+
+    space(&env)
+        .args(["rm", "--discard-changes", "dirty-ws"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--force"));
+    assert!(wt.join("wip.txt").exists());
+}

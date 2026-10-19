@@ -1275,14 +1275,48 @@ fn render_add_overlay(
 }
 
 fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame: &mut Frame) {
+    use crate::tui::screens::delete::DeleteStage;
     use ratatui::widgets::Clear;
     let title = " Delete Workspace ";
-    let heading = "Delete workspace?";
+    let discarding = state.stage == DeleteStage::ConfirmDiscard;
+    // The second question (issue #75) keeps the same layout and changes its
+    // words: the heading asks about the work, the warning line says what is
+    // lost, and `y` says it discards.
+    let heading = if discarding {
+        "Discard uncommitted work?"
+    } else {
+        "Delete workspace?"
+    };
     let repo_heading = "This removes these worktrees:";
-    let footer_delete = "y delete";
+    let pending = state.pending.len();
+    let repos = if pending == 1 {
+        "repo has"
+    } else {
+        "repos have"
+    };
+    let warning = if pending == 0 {
+        None
+    } else if discarding {
+        Some(format!(
+            "{} {} uncommitted work that will be lost.",
+            pending, repos
+        ))
+    } else {
+        Some(format!("{} {} uncommitted work.", pending, repos))
+    };
+    let footer_delete = if discarding {
+        "y discard and delete"
+    } else {
+        "y delete"
+    };
     let footer_cancel = "Esc/n/Enter cancel";
     let footer_spacing = "   ";
     let footer_text = format!("{}{}{}", footer_delete, footer_spacing, footer_cancel);
+    // A repo with pending work carries what it holds beside its name.
+    let repo_line = |name: &str| match state.pending_for(name) {
+        Some(p) => format!("  {}  ({})", name, p.summary()),
+        None => format!("  {}", name),
+    };
 
     let max_outer_width = frame.area().width.saturating_sub(4).max(20);
     let max_inner_width = max_outer_width.saturating_sub(2) as usize;
@@ -1291,10 +1325,11 @@ fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame
         line_width(&state.workspace_name),
         line_width(repo_heading),
         line_width(&footer_text),
+        warning.as_deref().map(line_width).unwrap_or(0),
         state
             .repo_names
             .iter()
-            .map(|name| line_width(name) + 2)
+            .map(|name| line_width(&repo_line(name)))
             .max()
             .unwrap_or(0),
     ]
@@ -1310,19 +1345,32 @@ fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame
 
     let max_outer_height = frame.area().height.saturating_sub(2).max(8);
     let max_inner_height = max_outer_height.saturating_sub(2) as usize;
-    let static_line_count = 5usize + footer_line_count;
+    let static_line_count = 5usize + usize::from(warning.is_some()) + footer_line_count;
     let available_repo_lines = max_inner_height.saturating_sub(static_line_count);
 
-    let mut visible_repo_names = Vec::new();
+    // Repos with pending work are listed first, so a list cut short by a
+    // small terminal still shows what would be lost.
+    let mut ordered: Vec<&String> = state
+        .repo_names
+        .iter()
+        .filter(|n| state.pending_for(n).is_some())
+        .collect();
+    ordered.extend(
+        state
+            .repo_names
+            .iter()
+            .filter(|n| state.pending_for(n).is_none()),
+    );
+    let mut visible_repo_names: Vec<&String> = Vec::new();
     let mut overflow_count = 0usize;
-    if state.repo_names.len() <= available_repo_lines {
-        visible_repo_names.extend(state.repo_names.iter().cloned());
+    if ordered.len() <= available_repo_lines {
+        visible_repo_names.extend(ordered.iter().copied());
     } else if available_repo_lines > 0 {
         let visible_count = available_repo_lines.saturating_sub(1);
-        visible_repo_names.extend(state.repo_names.iter().take(visible_count).cloned());
-        overflow_count = state.repo_names.len().saturating_sub(visible_count);
+        visible_repo_names.extend(ordered.iter().take(visible_count).copied());
+        overflow_count = ordered.len().saturating_sub(visible_count);
     } else {
-        overflow_count = state.repo_names.len();
+        overflow_count = ordered.len();
     }
 
     let content_line_count =
@@ -1359,9 +1407,14 @@ fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame
     ];
 
     for name in &visible_repo_names {
+        let style = if state.pending_for(name).is_some() {
+            theme::warn()
+        } else {
+            theme::dim_text()
+        };
         lines.push(Line::from(Span::styled(
-            truncate_for_width(&format!("  {}", name), inner.width as usize),
-            theme::dim_text(),
+            truncate_for_width(&repo_line(name), inner.width as usize),
+            style,
         )));
     }
 
@@ -1372,6 +1425,13 @@ fn render_delete_confirm(state: &crate::tui::screens::delete::DeleteState, frame
                 inner.width as usize,
             ),
             theme::muted(),
+        )));
+    }
+
+    if let Some(warning) = &warning {
+        lines.push(Line::from(Span::styled(
+            truncate_for_width(warning, inner.width as usize),
+            theme::warn().add_modifier(Modifier::BOLD),
         )));
     }
 

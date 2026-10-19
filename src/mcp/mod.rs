@@ -1,5 +1,5 @@
 use crate::core::config::SpaceConfig;
-use crate::core::workspace::BranchStrategy;
+use crate::core::workspace::{BranchStrategy, UncommittedWork, UncommittedWorkError};
 use crate::core::{repo, workspace};
 use anyhow::Result;
 use rmcp::{
@@ -62,6 +62,12 @@ pub struct AddReposParams {
 pub struct RemoveWorkspaceParams {
     /// Workspace to remove.
     pub name: String,
+    /// Remove the workspace even if repos in it hold uncommitted work
+    /// (modified, staged, untracked or conflicted files), which is lost.
+    /// Defaults to false: such a workspace is refused, nothing is removed,
+    /// and the error names each repo and what it holds.
+    #[serde(default)]
+    pub discard_changes: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -489,7 +495,7 @@ impl SpaceServer {
 
     /// Remove a workspace and all its worktrees.
     #[tool(
-        description = "Remove a workspace and all its git worktrees. A worktree git refuses to remove, for example one locked with 'git worktree lock', keeps the whole workspace: the call fails with an error naming each repo it kept and git's own reason, the repos it did remove stay removed, and retrying once the cause is fixed removes the rest."
+        description = "Remove a workspace and all its git worktrees. If any repo in it holds uncommitted work (modified, staged, untracked or conflicted files; files git ignores do not count), the call fails before anything is removed, with an error naming each such repo and what it holds; commit or stash the work, or pass discard_changes: true to remove the workspace anyway and lose it. Branches are kept either way, so committed work survives. A worktree git refuses to remove, for example one locked with 'git worktree lock', keeps the whole workspace: the call fails with an error naming each repo it kept and git's own reason, the repos it did remove stay removed, and retrying once the cause is fixed removes the rest."
     )]
     pub fn remove_workspace(
         &self,
@@ -498,8 +504,28 @@ impl SpaceServer {
         let cfg = SpaceConfig::load().map_err(|e| McpError::internal_error(e.to_string(), None))?;
         workspace::require_plain_component(&params.name)
             .map_err(|e| bad_space_name(&params.name, e))?;
-        workspace::remove_workspace(&cfg.workspaces.dir, &params.name, true)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let uncommitted = if params.discard_changes {
+            UncommittedWork::Discard
+        } else {
+            UncommittedWork::Refuse
+        };
+        workspace::remove_space(&cfg.workspaces.dir, &params.name, true, uncommitted).map_err(
+            |e| {
+                // The core names no parameter; this tool's way out is added
+                // as the last line. Still `internal_error`, as every other
+                // refused removal is: the request was well formed.
+                let message = if e.downcast_ref::<UncommittedWorkError>().is_some() {
+                    format!(
+                        "{}\nto remove it anyway and lose that work, call remove_workspace again \
+                         with discard_changes: true",
+                        e
+                    )
+                } else {
+                    e.to_string()
+                };
+                McpError::internal_error(message, None)
+            },
+        )?;
         let result = RemoveResult {
             removed: params.name,
         };

@@ -56,7 +56,8 @@ _space() {
     rm|remove)
       _arguments \
         '1:workspace:_space_workspace_names' \
-        '(-f --force)'{-f,--force}'[Skip confirmation]'
+        '(-f --force)'{-f,--force}'[Skip confirmation]' \
+        '--discard-changes[With --force, remove even if repos hold uncommitted work]'
       ;;
     add)
       if (( CURRENT == 3 )); then

@@ -7043,3 +7043,289 @@ fn switch_to_a_new_branch_whose_name_is_taken_keeps_that_branch() {
         "and the checkout stays on main"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #75: removal refuses uncommitted work unless told to discard it.
+// `remove_space` with `UncommittedWork::Refuse` is what the CLI, the MCP tool
+// and the TUI call; every check reads what is still on disk afterwards, not
+// only the error.
+// ---------------------------------------------------------------------------
+
+use space::core::workspace::{
+    pending_work, remove_space, PendingWork, UncommittedWork, UncommittedWorkError,
+};
+
+/// A space `ws_name` holding one worktree of a fresh repo `repo_name`, with a
+/// committed `tracked.txt`, so a test can modify or stage it.
+fn space_with_tracked_file(env: &TestEnv, repo_name: &str, ws_name: &str) -> (PathBuf, PathBuf) {
+    let repo = env.create_repo(repo_name);
+    let wt = worktree_in_space(env, &repo, ws_name);
+    std::fs::write(wt.join("tracked.txt"), "committed\n").unwrap();
+    git_ok(&wt, &["add", "tracked.txt"]);
+    git_ok(&wt, &["commit", "--quiet", "-m", "tracked"]);
+    (repo, wt)
+}
+
+/// The refusal, as the type callers recognise it.
+fn refused(env: &TestEnv, ws_name: &str) -> UncommittedWorkError {
+    let err = remove_space(&env.workspaces_dir, ws_name, true, UncommittedWork::Refuse)
+        .expect_err("uncommitted work refuses the removal");
+    err.downcast_ref::<UncommittedWorkError>()
+        .unwrap_or_else(|| {
+            panic!(
+                "expected an UncommittedWorkError, got {:?}",
+                err.to_string()
+            )
+        })
+        .clone()
+}
+
+fn counts(pending: &PendingWork) -> RepoStatusCounts {
+    let status = pending
+        .status
+        .as_ref()
+        .unwrap_or_else(|why| panic!("status should have been read, got {:?}", why));
+    (
+        status.modified,
+        status.staged,
+        status.untracked,
+        status.conflicted,
+    )
+}
+type RepoStatusCounts = (usize, usize, usize, usize);
+
+#[test]
+fn remove_space_refuses_a_modified_file_and_keeps_it() {
+    let env = TestEnv::new();
+    let (repo, wt) = space_with_tracked_file(&env, "alpha", "dirty-ws");
+    std::fs::write(wt.join("tracked.txt"), "changed\n").unwrap();
+
+    let err = refused(&env, "dirty-ws");
+    assert_eq!(err.space, "dirty-ws");
+    assert_eq!(err.repos.len(), 1);
+    assert_eq!(err.repos[0].repo, "alpha");
+    assert_eq!(counts(&err.repos[0]), (1, 0, 0, 0));
+
+    assert_eq!(
+        std::fs::read_to_string(wt.join("tracked.txt")).unwrap(),
+        "changed\n",
+        "the modified file is still there"
+    );
+    assert!(
+        registered_worktrees(&repo).contains("dirty-ws"),
+        "and the worktree is still registered"
+    );
+}
+
+#[test]
+fn remove_space_refuses_a_staged_file() {
+    let env = TestEnv::new();
+    let (_repo, wt) = space_with_tracked_file(&env, "alpha", "staged-ws");
+    std::fs::write(wt.join("new.txt"), "staged\n").unwrap();
+    git_ok(&wt, &["add", "new.txt"]);
+
+    let err = refused(&env, "staged-ws");
+    assert_eq!(counts(&err.repos[0]), (0, 1, 0, 0));
+    assert!(wt.join("new.txt").exists());
+}
+
+/// Untracked files are counted one by one, including those inside an
+/// untracked directory, which `git status` would otherwise show as one line.
+#[test]
+fn remove_space_refuses_untracked_files_inside_an_untracked_directory() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "untracked-ws");
+    std::fs::create_dir_all(wt.join("notes/deeper")).unwrap();
+    std::fs::write(wt.join("notes/a.txt"), "a").unwrap();
+    std::fs::write(wt.join("notes/deeper/b.txt"), "b").unwrap();
+
+    let err = refused(&env, "untracked-ws");
+    assert_eq!(counts(&err.repos[0]), (0, 0, 2, 0));
+    assert!(wt.join("notes/deeper/b.txt").exists());
+}
+
+#[test]
+fn remove_space_refuses_a_conflicted_merge() {
+    let env = TestEnv::new();
+    let (_repo, wt) = space_with_tracked_file(&env, "alpha", "conflict-ws");
+    git_ok(&wt, &["switch", "--quiet", "-c", "side"]);
+    std::fs::write(wt.join("tracked.txt"), "side\n").unwrap();
+    git_ok(&wt, &["commit", "--quiet", "-am", "side"]);
+    git_ok(&wt, &["switch", "--quiet", "conflict-ws"]);
+    std::fs::write(wt.join("tracked.txt"), "main\n").unwrap();
+    git_ok(&wt, &["commit", "--quiet", "-am", "main"]);
+    let merge = Command::new("git")
+        .args(["merge", "--quiet", "side"])
+        .current_dir(&wt)
+        .output()
+        .unwrap();
+    assert!(!merge.status.success(), "fixture: the merge conflicts");
+
+    let err = refused(&env, "conflict-ws");
+    assert_eq!(counts(&err.repos[0]), (0, 0, 0, 1));
+    assert!(wt.join("tracked.txt").exists());
+}
+
+/// What cannot be read is not deleted: a worktree whose index is garbage
+/// makes `git status` fail, and the removal is refused with git's reason.
+#[test]
+fn remove_space_refuses_a_worktree_whose_status_cannot_be_read() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "unreadable-ws");
+    let admin = admin_dir_of(&wt);
+    std::fs::write(admin.join("index"), "not an index").unwrap();
+
+    let err = refused(&env, "unreadable-ws");
+    assert_eq!(err.repos.len(), 1);
+    let why = err.repos[0]
+        .status
+        .as_ref()
+        .expect_err("the status could not be read");
+    assert!(!why.is_empty(), "git's reason is carried");
+    assert!(
+        err.to_string().contains("status could not be read"),
+        "the report says so, got {:?}",
+        err.to_string()
+    );
+    assert!(wt.join(".git").exists(), "the worktree is kept");
+}
+
+/// The guard runs before anything is acted on: with one clean and one dirty
+/// repo, the clean one (visited first) is not removed either.
+#[test]
+fn remove_space_removes_nothing_when_one_of_two_repos_is_dirty() {
+    let env = TestEnv::new();
+    let clean_repo = env.create_repo("a-clean");
+    let clean_wt = worktree_in_space(&env, &clean_repo, "half-ws");
+    let (dirty_repo, dirty_wt) = space_with_tracked_file(&env, "b-dirty", "half-ws");
+    std::fs::write(dirty_wt.join("tracked.txt"), "changed\n").unwrap();
+    std::fs::write(env.workspaces_dir.join("half-ws/README"), "plain").unwrap();
+
+    let err = refused(&env, "half-ws");
+    let names: Vec<&str> = err.repos.iter().map(|p| p.repo.as_str()).collect();
+    assert_eq!(names, vec!["b-dirty"], "only the dirty repo is named");
+
+    assert!(clean_wt.join(".git").exists(), "the clean worktree is kept");
+    assert!(
+        registered_worktrees(&clean_repo).contains("half-ws"),
+        "and still registered"
+    );
+    assert!(registered_worktrees(&dirty_repo).contains("half-ws"));
+    assert!(
+        env.workspaces_dir.join("half-ws/README").exists(),
+        "plain content is kept too"
+    );
+
+    let text = err.to_string();
+    let first = text.lines().next().unwrap();
+    assert!(
+        first.contains("half-ws") && first.contains("b-dirty"),
+        "the first line names the space and the repo, got {:?}",
+        first
+    );
+    assert!(
+        text.contains("b-dirty: 1 modified"),
+        "counts, got {:?}",
+        text
+    );
+    assert!(
+        text.contains("nothing was removed"),
+        "and says nothing was removed, got {:?}",
+        text
+    );
+}
+
+/// Several dirty repos are reported in name order, whatever order they were
+/// made in.
+#[test]
+fn remove_space_reports_every_dirty_repo_in_name_order() {
+    let env = TestEnv::new();
+    for name in ["z-last", "a-first"] {
+        let repo = env.create_repo(name);
+        let wt = worktree_in_space(&env, &repo, "many-ws");
+        std::fs::write(wt.join("wip.txt"), "wip").unwrap();
+    }
+    let err = refused(&env, "many-ws");
+    let names: Vec<&str> = err.repos.iter().map(|p| p.repo.as_str()).collect();
+    assert_eq!(names, vec!["a-first", "z-last"]);
+    assert_eq!(
+        pending_work(&env.workspaces_dir, "many-ws").unwrap(),
+        err.repos,
+        "the dialog's read agrees with the removal's"
+    );
+}
+
+#[test]
+fn remove_space_discards_uncommitted_work_when_told_to() {
+    let env = TestEnv::new();
+    let (repo, wt) = space_with_tracked_file(&env, "alpha", "discard-ws");
+    std::fs::write(wt.join("tracked.txt"), "changed\n").unwrap();
+    std::fs::write(wt.join("untracked.txt"), "new").unwrap();
+
+    remove_space(
+        &env.workspaces_dir,
+        "discard-ws",
+        true,
+        UncommittedWork::Discard,
+    )
+    .unwrap();
+    assert!(!env.workspaces_dir.join("discard-ws").exists());
+    assert!(!registered_worktrees(&repo).contains("discard-ws"));
+}
+
+#[test]
+fn remove_space_removes_a_clean_space_under_refuse() {
+    let env = TestEnv::new();
+    let (repo, _wt) = space_with_tracked_file(&env, "alpha", "clean-ws");
+    assert_eq!(
+        pending_work(&env.workspaces_dir, "clean-ws").unwrap(),
+        vec![],
+        "a clean space has nothing pending"
+    );
+    remove_space(
+        &env.workspaces_dir,
+        "clean-ws",
+        true,
+        UncommittedWork::Refuse,
+    )
+    .unwrap();
+    assert!(!env.workspaces_dir.join("clean-ws").exists());
+    assert!(!registered_worktrees(&repo).contains("clean-ws"));
+}
+
+/// Ignored files are not work, as they are not for `git worktree remove`.
+#[test]
+fn remove_space_does_not_count_an_ignored_file() {
+    let env = TestEnv::new();
+    let repo = env.create_repo("alpha");
+    let wt = worktree_in_space(&env, &repo, "ignored-ws");
+    // The source repo's exclude file applies to its worktrees too, and is not
+    // itself a file in the worktree that would count as untracked.
+    std::fs::write(repo.join(".git/info/exclude"), "*.log\nbuild/\n").unwrap();
+    std::fs::write(wt.join("debug.log"), "noise").unwrap();
+    std::fs::create_dir_all(wt.join("build")).unwrap();
+    std::fs::write(wt.join("build/out.o"), "obj").unwrap();
+
+    assert_eq!(
+        pending_work(&env.workspaces_dir, "ignored-ws").unwrap(),
+        vec![]
+    );
+    remove_space(
+        &env.workspaces_dir,
+        "ignored-ws",
+        true,
+        UncommittedWork::Refuse,
+    )
+    .unwrap();
+    assert!(!env.workspaces_dir.join("ignored-ws").exists());
+}
+
+/// The guard only reads; a refused space is still found by name.
+#[test]
+fn pending_work_of_a_missing_space_is_not_found() {
+    let env = TestEnv::new();
+    let err = pending_work(&env.workspaces_dir, "ghost").unwrap_err();
+    assert!(err.to_string().contains("not found"));
+}

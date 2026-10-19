@@ -1703,9 +1703,14 @@ impl App {
                 self.space_cd_target = Some(path);
                 self.should_quit = true;
             }
-            ScreenAction::DeleteWorkspace { name, force } => {
+            ScreenAction::DeleteWorkspace {
+                name,
+                force,
+                uncommitted,
+            } => {
                 let ws_dir = self.config.workspaces.dir.clone();
-                let outcome = crate::core::workspace::remove_workspace(&ws_dir, &name, force);
+                let outcome =
+                    crate::core::workspace::remove_space(&ws_dir, &name, force, uncommitted);
                 // The worktrees are unregistered one at a time, so a delete
                 // that failed part-way still changed the disk. Both paths
                 // refresh, or the dashboard keeps listing repos that are gone.
@@ -2611,10 +2616,11 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
         }
         Message::StartDelete => {
             if let Some(ws) = app.selected_workspace() {
-                let state = crate::tui::screens::delete::DeleteState {
-                    workspace_name: ws.name.clone(),
-                    repo_names: ws.repos.iter().map(|r| r.name.clone()).collect(),
-                };
+                let state = crate::tui::screens::delete::DeleteState::new(
+                    &app.config.workspaces.dir,
+                    &ws.name,
+                    ws.repos.iter().map(|r| r.name.clone()).collect(),
+                );
                 app.screen = Screen::ConfirmDelete(state);
             }
             None
@@ -6295,6 +6301,7 @@ mod tests {
         app.process_action(crate::tui::actions::ScreenAction::DeleteWorkspace {
             name: "ws".to_string(),
             force: true,
+            uncommitted: crate::core::workspace::UncommittedWork::Refuse,
         });
 
         assert_eq!(app.status_kind, StatusKind::Error);
@@ -6366,6 +6373,7 @@ mod tests {
         app.process_action(crate::tui::actions::ScreenAction::DeleteWorkspace {
             name: "gone".to_string(),
             force: true,
+            uncommitted: crate::core::workspace::UncommittedWork::Refuse,
         });
 
         assert_eq!(app.status_kind, StatusKind::Error);
@@ -6408,6 +6416,7 @@ mod tests {
         app.process_action(crate::tui::actions::ScreenAction::DeleteWorkspace {
             name: "ws".to_string(),
             force: true,
+            uncommitted: crate::core::workspace::UncommittedWork::Refuse,
         });
         assert_eq!(
             app.status_kind,

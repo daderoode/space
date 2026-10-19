@@ -145,8 +145,14 @@ pub enum ScreenAction {
     ExecuteGitOp { repo_path: PathBuf, op: GitOp },
     /// Commit the staged changes of a single repo (synchronous local op).
     CommitRepo { repo_path: PathBuf, message: String },
-    /// Delete a workspace.
-    DeleteWorkspace { name: String, force: bool },
+    /// Delete a workspace. `force` is git's mechanics (`remove_space`);
+    /// `uncommitted` is whether work in its repos stops the delete, which
+    /// only the dialog's second confirmation sets to `Discard`.
+    DeleteWorkspace {
+        name: String,
+        force: bool,
+        uncommitted: crate::core::workspace::UncommittedWork,
+    },
     /// Save config and reload.
     SaveConfig(SpaceConfig),
     /// Navigate to the workspace containing a repo with the given name
