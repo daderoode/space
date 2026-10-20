@@ -17,6 +17,7 @@
 
 ### Fixes
 - Rebase passes `--` before its target, so a target starting with `-` (for example `--exec=...`) is read as a branch name and can never run as a git option. Such targets were already refused; this is a second defence. (#79)
+- Sync passes `--` before the branch it fast-forwards, so a local branch named like an option (for example `-M`) can no longer make git rename the checked-out branch. (#82, #83)
 
 ### Internal
 - ADR 0002 corrected on how crossterm 0.28 reaches the build (#77)
