@@ -4643,8 +4643,8 @@ mod tests {
     /// A local branch named `-M` (git branch refuses the name, but update-ref
     /// and fetch refspecs can write it) that is behind its origin namesake.
     /// Without the `--` in sync's `branch -f`, git reads `-M` as force-rename
-    /// and renames the checked-out main to `refs/remotes/origin/-M`, and sync
-    /// reports `-M` as forwarded (issue #82).
+    /// and renames the checked-out main to a local branch named
+    /// `refs/remotes/origin/-M`, and sync reports `-M` as forwarded (issue #82).
     #[test]
     fn sync_repo_does_not_read_a_dash_branch_as_an_option() {
         let (tmp, local) = origin_and_local();
