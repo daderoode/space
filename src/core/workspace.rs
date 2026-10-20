@@ -1749,6 +1749,13 @@ pub fn rebase_repo(repo_path: &Path, onto: &str) -> RebaseResult {
         };
     }
 
+    fetch_and_rebase(repo_path, &branch, onto)
+}
+
+/// The part of `rebase_repo` after its guards: fetch, rebase, classify. Kept
+/// apart so a test can show the `--` before the target holds on its own, with
+/// the dash guard out of the way.
+fn fetch_and_rebase(repo_path: &Path, branch: &str, onto: &str) -> RebaseResult {
     // Best-effort refresh so a rebase onto `origin/<x>` replays onto the latest
     // remote state. A fetch failure (offline / no remote) is non-fatal: the
     // rebase can still proceed onto a local target. `GIT_TERMINAL_PROMPT=0`
@@ -1764,10 +1771,12 @@ pub fn rebase_repo(repo_path: &Path, onto: &str) -> RebaseResult {
     // `LC_ALL=C` pins git's output language so the up-to-date classification
     // below (`stdout.contains("is up to date")`) is stable: git localizes that
     // message via gettext, and a non-English LANG would misclassify UpToDate
-    // as Rebased.
+    // as Rebased. The `--` makes git read `onto` as the upstream even if the
+    // guard above it ever lets a dash through: `git rebase --exec=<cmd>`
+    // would run the command after each replayed commit.
     let out = spawn::output(
         Command::new("git")
-            .args(["rebase", onto])
+            .args(["rebase", "--", onto])
             .env("LC_ALL", "C")
             .current_dir(repo_path),
     );
@@ -7954,21 +7963,25 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rebase_repo_refuses_a_dash_target_git_would_run_as_an_option() {
-        // `--onto=main~1` is a working `git rebase` option: with no upstream
-        // argument git replays main's commits past origin/main onto main~1.
-        // After the push origin/main is main, so git would move main back a
-        // commit and report success. Only the guard stands between that
-        // target and the branch.
-        let (_tmp, local) = origin_and_local();
-        std::fs::write(local.join("second.txt"), "second\n").unwrap();
+    /// `local` one commit ahead of origin/main, so `git rebase --exec=<cmd>`
+    /// replays a commit and runs `<cmd>` after it, plus a target that would
+    /// create `marker` if git ran it as that option.
+    fn ahead_with_exec_target() -> (tempfile::TempDir, PathBuf, PathBuf, String) {
+        let (tmp, local) = origin_and_local();
+        std::fs::write(local.join("ahead.txt"), "ahead\n").unwrap();
         git(&["add", "."], &local);
-        git(&["commit", "-m", "second"], &local);
-        git(&["push", "origin", "main"], &local);
+        git(&["commit", "-m", "ahead"], &local);
+        let marker = tmp.path().join("marker");
+        let target = format!("--exec=touch {}", marker.display());
+        (tmp, local, marker, target)
+    }
+
+    #[test]
+    fn rebase_repo_refuses_a_dash_target_and_runs_nothing() {
+        let (_tmp, local, marker, target) = ahead_with_exec_target();
         let sha_before = get_sha(&local, "main");
 
-        let result = rebase_repo(&local, "--onto=main~1");
+        let result = rebase_repo(&local, &target);
 
         assert!(
             matches!(result.outcome, RebaseOutcome::Failed),
@@ -7978,8 +7991,12 @@ mod tests {
         );
         assert_eq!(
             result.message,
-            "Refusing to rebase onto '--onto=main~1': a target may not begin with '-'."
+            format!(
+                "Refusing to rebase onto '{}': a target may not begin with '-'.",
+                target
+            )
         );
+        assert!(!marker.exists(), "the target's command must not run");
         assert_eq!(
             sha_before,
             get_sha(&local, "main"),
@@ -7991,6 +8008,29 @@ mod tests {
         assert_eq!(
             result.message,
             "Refusing to rebase onto '-q': a target may not begin with '-'."
+        );
+    }
+
+    #[test]
+    fn rebase_reads_a_dash_target_as_the_upstream_past_the_guard() {
+        // Straight past the dash guard: only the `--` before the target keeps
+        // git from running it as `--exec`.
+        let (_tmp, local, marker, target) = ahead_with_exec_target();
+        let sha_before = get_sha(&local, "main");
+
+        let result = fetch_and_rebase(&local, "main", &target);
+
+        assert!(
+            matches!(result.outcome, RebaseOutcome::Failed),
+            "git must refuse the target as an unknown upstream, got {:?}: {}",
+            result.outcome,
+            result.message
+        );
+        assert!(!marker.exists(), "the target's command must not run");
+        assert_eq!(
+            sha_before,
+            get_sha(&local, "main"),
+            "a refused rebase must not move the branch"
         );
     }
 
