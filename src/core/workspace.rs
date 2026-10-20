@@ -1715,7 +1715,7 @@ impl RebaseResult {
 /// on top of the target.
 ///
 /// Fetches `origin` best-effort first (non-fatal) so `origin/*` targets are
-/// current, then runs `git rebase <onto>`. On conflict the rebase is aborted
+/// current, then runs `git rebase -- <onto>`. On conflict the rebase is aborted
 /// (`git rebase --abort`) and the branch restored, so `space` never leaves a
 /// worktree mid-rebase.
 ///
@@ -1738,7 +1738,8 @@ pub fn rebase_repo(repo_path: &Path, onto: &str) -> RebaseResult {
     // Reject a target that starts with '-': `git rebase -foo` would parse the
     // target as an option, not a revspec (argument injection). The TUI picker
     // only yields real branch names, but a plumbing-created ref could begin
-    // with a dash, so guard the boundary rather than trust the caller.
+    // with a dash, so guard the boundary rather than trust the caller. The
+    // `--` in `fetch_and_rebase` is the second defence.
     if onto.starts_with('-') {
         return RebaseResult {
             outcome: RebaseOutcome::Failed,
@@ -7965,14 +7966,17 @@ mod tests {
 
     /// `local` one commit ahead of origin/main, so `git rebase --exec=<cmd>`
     /// replays a commit and runs `<cmd>` after it, plus a target that would
-    /// create `marker` if git ran it as that option.
+    /// create `marker` and add a commit to main if git ran it as that option.
     fn ahead_with_exec_target() -> (tempfile::TempDir, PathBuf, PathBuf, String) {
         let (tmp, local) = origin_and_local();
         std::fs::write(local.join("ahead.txt"), "ahead\n").unwrap();
         git(&["add", "."], &local);
         git(&["commit", "-m", "ahead"], &local);
         let marker = tmp.path().join("marker");
-        let target = format!("--exec=touch {}", marker.display());
+        let target = format!(
+            "--exec=touch '{}' && git commit --allow-empty -qm exec",
+            marker.display()
+        );
         (tmp, local, marker, target)
     }
 
