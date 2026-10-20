@@ -372,7 +372,7 @@ const DELETE_CONFIRM: BindingGroup = BindingGroup {
     bindings: &[
         Binding {
             key: "y",
-            desc: "Delete the space",
+            desc: "Delete (a dirty space asks twice)",
         },
         Binding {
             key: "n/Esc/Enter",

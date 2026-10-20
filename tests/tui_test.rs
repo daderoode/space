@@ -1255,6 +1255,9 @@ fn delete_confirm_handles_long_workspace_name() {
             "omari-zw-vsuite-env".to_string(),
             "vgateway-discovery".to_string(),
         ],
+        pending: vec![],
+        stage: space::tui::screens::delete::DeleteStage::Confirm,
+        changed: false,
     });
 
     let rendered = render_text(&app, 68, 12);
@@ -1277,6 +1280,9 @@ fn delete_confirm_keeps_footer_visible_for_long_repo_lists() {
     app.screen = Screen::ConfirmDelete(space::tui::screens::delete::DeleteState {
         workspace_name: "too-many-repos".to_string(),
         repo_names: (1..=12).map(|idx| format!("repo-{}", idx)).collect(),
+        pending: vec![],
+        stage: space::tui::screens::delete::DeleteStage::Confirm,
+        changed: false,
     });
 
     let rendered = render_text(&app, 70, 10);
@@ -1309,6 +1315,9 @@ fn delete_confirm_wraps_footer_on_narrow_terminals() {
     app.screen = Screen::ConfirmDelete(space::tui::screens::delete::DeleteState {
         workspace_name: "tight-layout".to_string(),
         repo_names: vec!["repo-with-a-very-long-name".to_string()],
+        pending: vec![],
+        stage: space::tui::screens::delete::DeleteStage::Confirm,
+        changed: false,
     });
 
     let rendered = render_text(&app, 24, 10);
@@ -9424,7 +9433,7 @@ mod help_overlay_tests {
                 "Enter",
                 "Dismiss failure (ignored while running)",
             ),
-            ("Delete Confirm", "y", "Delete the space"),
+            ("Delete Confirm", "y", "Delete (a dirty space asks twice)"),
             ("Delete Confirm", "n/Esc/Enter", "Cancel (the default)"),
             ("Delete Confirm", "q", "Cancel"),
             ("Switch Branch", "↑↓/jk", "Choose strategy"),
@@ -12441,4 +12450,224 @@ mod branch_picker_slash_tests {
             rendered
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #75: the delete dialog shows uncommitted work and asks twice before
+// discarding it. A clean space still deletes on one `y`.
+// ---------------------------------------------------------------------------
+
+/// An app on a real space `ws_name` in `env`, holding one worktree of a new
+/// repo `alpha`, selected on the dashboard. Returns the app and the worktree.
+fn app_on_real_space(env: &TestEnv, ws_name: &str) -> (App, PathBuf) {
+    use space::core::workspace::{create_worktree, list_workspaces, BranchStrategy};
+    let repo = env.create_repo("alpha");
+    let wt = create_worktree(
+        &repo,
+        &env.workspaces_dir,
+        ws_name,
+        &BranchStrategy::NewBranch(ws_name.to_string()),
+    )
+    .unwrap();
+    let workspaces = list_workspaces(&env.workspaces_dir).unwrap();
+    let app = test_app_with_config(config_from_env(env), workspaces, vec![]);
+    (app, wt)
+}
+
+#[test]
+fn delete_of_a_clean_space_takes_one_y() {
+    use space::tui::actions::StatusKind;
+    let env = TestEnv::new();
+    let (mut app, _wt) = app_on_real_space(&env, "clean-ws");
+
+    app.handle_key(key(KeyCode::Char('d')));
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        !rendered.contains("uncommitted"),
+        "a clean space shows no warning, got:\n{}",
+        rendered
+    );
+    app.handle_key(key(KeyCode::Char('y')));
+
+    assert!(matches!(app.screen, Screen::Dashboard));
+    assert_eq!(app.status_kind, StatusKind::Success);
+    assert!(!env.workspaces_dir.join("clean-ws").exists());
+}
+
+#[test]
+fn delete_of_a_dirty_space_shows_the_work_and_asks_again() {
+    use space::tui::actions::StatusKind;
+    use space::tui::screens::delete::DeleteStage;
+    let env = TestEnv::new();
+    let (mut app, wt) = app_on_real_space(&env, "dirty-ws");
+    std::fs::write(wt.join("wip.txt"), "unsaved").unwrap();
+
+    app.handle_key(key(KeyCode::Char('d')));
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("alpha  (1 untracked)"),
+        "the dialog shows what the repo holds, got:\n{}",
+        rendered
+    );
+    assert!(
+        rendered.contains("1 repo has uncommitted work."),
+        "and warns, got:\n{}",
+        rendered
+    );
+
+    app.handle_key(key(KeyCode::Char('y')));
+    let Screen::ConfirmDelete(state) = &app.screen else {
+        panic!("the first y on a dirty space must not delete");
+    };
+    assert_eq!(state.stage, DeleteStage::ConfirmDiscard);
+    assert!(wt.join("wip.txt").exists(), "nothing is deleted yet");
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("Discard uncommitted work?")
+            && rendered.contains("1 repo has uncommitted work that will be lost.")
+            && rendered.contains("y discard and delete"),
+        "the second question says what is lost, got:\n{}",
+        rendered
+    );
+
+    app.handle_key(key(KeyCode::Char('y')));
+    assert!(matches!(app.screen, Screen::Dashboard));
+    assert_eq!(app.status_kind, StatusKind::Success);
+    assert!(!env.workspaces_dir.join("dirty-ws").exists());
+}
+
+/// The second question defaults to No: every decline key leaves the dialog
+/// with the space and its work untouched.
+#[test]
+fn the_discard_question_defaults_to_no() {
+    for (name, code) in [
+        ("Enter", KeyCode::Enter),
+        ("Esc", KeyCode::Esc),
+        ("n", KeyCode::Char('n')),
+        ("q", KeyCode::Char('q')),
+    ] {
+        let env = TestEnv::new();
+        let (mut app, wt) = app_on_real_space(&env, "dirty-ws");
+        std::fs::write(wt.join("wip.txt"), "unsaved").unwrap();
+
+        app.handle_key(key(KeyCode::Char('d')));
+        app.handle_key(key(KeyCode::Char('y')));
+        app.handle_key(key(code));
+
+        assert!(
+            matches!(app.screen, Screen::Dashboard),
+            "{name} leaves the dialog"
+        );
+        assert_eq!(
+            app.status_message, None,
+            "{name}: declining attempts no delete"
+        );
+        assert!(wt.join("wip.txt").exists(), "{name}: the work is kept");
+    }
+}
+
+/// Work that appears after the dialog opened on a clean space is still
+/// caught: the one `y` deletes under Refuse, which reads every repo again,
+/// and the refusal shows as the error status.
+#[test]
+fn work_that_appears_after_the_dialog_opened_is_still_refused() {
+    use space::tui::actions::StatusKind;
+    let env = TestEnv::new();
+    let (mut app, wt) = app_on_real_space(&env, "racy-ws");
+
+    app.handle_key(key(KeyCode::Char('d')));
+    std::fs::write(wt.join("wip.txt"), "unsaved").unwrap();
+    app.handle_key(key(KeyCode::Char('y')));
+
+    assert!(matches!(app.screen, Screen::Dashboard));
+    assert_eq!(app.status_kind, StatusKind::Error);
+    let status = app.status_message.clone().unwrap_or_default();
+    assert!(
+        status == "Delete failed: uncommitted work in alpha; press d to see it and discard it",
+        "the status names the repo and the way on, got {:?}",
+        status
+    );
+    assert!(wt.join("wip.txt").exists(), "the work is kept");
+}
+
+/// Review of e07b3ae: the second `y` discards whatever the repos hold when
+/// it runs, so it reads them again first. Work that appeared in another repo
+/// after the dialog opened is shown, and the question asked again, instead
+/// of being discarded unseen.
+#[test]
+fn the_second_y_asks_again_when_the_work_changed() {
+    use space::core::workspace::{create_worktree, list_workspaces, BranchStrategy};
+    use space::tui::actions::StatusKind;
+    use space::tui::screens::delete::DeleteStage;
+    let env = TestEnv::new();
+    let mut worktrees = Vec::new();
+    for name in ["alpha", "beta"] {
+        let repo = env.create_repo(name);
+        worktrees.push(
+            create_worktree(
+                &repo,
+                &env.workspaces_dir,
+                "two-ws",
+                &BranchStrategy::NewBranch("two-ws".to_string()),
+            )
+            .unwrap(),
+        );
+    }
+    std::fs::write(worktrees[0].join("wip.txt"), "seen").unwrap();
+    let workspaces = list_workspaces(&env.workspaces_dir).unwrap();
+    let mut app = test_app_with_config(config_from_env(&env), workspaces, vec![]);
+
+    app.handle_key(key(KeyCode::Char('d')));
+    app.handle_key(key(KeyCode::Char('y')));
+    // Work appears in the other repo while the second question is up.
+    std::fs::write(worktrees[1].join("unseen.txt"), "new").unwrap();
+    app.handle_key(key(KeyCode::Char('y')));
+
+    let Screen::ConfirmDelete(state) = &app.screen else {
+        panic!("a changed space must not be deleted on the second y");
+    };
+    assert_eq!(state.stage, DeleteStage::ConfirmDiscard);
+    assert!(state.changed);
+    let names: Vec<&str> = state.pending.iter().map(|p| p.repo.as_str()).collect();
+    assert_eq!(names, vec!["alpha", "beta"], "the new reading is shown");
+    assert!(worktrees[1].join("unseen.txt").exists());
+    let rendered = render_text(&app, 80, 24);
+    assert!(
+        rendered.contains("beta  (1 untracked)")
+            && rendered.contains("2 repos have uncommitted work that will be lost.")
+            && rendered.contains("What the repos hold changed"),
+        "the dialog shows what changed, got:\n{}",
+        rendered
+    );
+
+    // Asked again, with nothing changed since: now it deletes.
+    app.handle_key(key(KeyCode::Char('y')));
+    assert!(matches!(app.screen, Screen::Dashboard));
+    assert_eq!(app.status_kind, StatusKind::Success);
+    assert!(!env.workspaces_dir.join("two-ws").exists());
+}
+
+/// If the work went (committed or stashed meanwhile), the dialog goes back to
+/// the first question, whose `y` deletes under Refuse.
+#[test]
+fn the_second_y_returns_to_the_first_question_when_the_work_went() {
+    use space::tui::screens::delete::DeleteStage;
+    let env = TestEnv::new();
+    let (mut app, wt) = app_on_real_space(&env, "gone-work-ws");
+    std::fs::write(wt.join("wip.txt"), "unsaved").unwrap();
+
+    app.handle_key(key(KeyCode::Char('d')));
+    app.handle_key(key(KeyCode::Char('y')));
+    std::fs::remove_file(wt.join("wip.txt")).unwrap();
+    app.handle_key(key(KeyCode::Char('y')));
+
+    let Screen::ConfirmDelete(state) = &app.screen else {
+        panic!("a changed space must not be deleted on the second y");
+    };
+    assert_eq!(state.stage, DeleteStage::Confirm);
+    assert!(state.pending.is_empty());
+    assert!(env.workspaces_dir.join("gone-work-ws").exists());
+
+    app.handle_key(key(KeyCode::Char('y')));
+    assert!(!env.workspaces_dir.join("gone-work-ws").exists());
 }

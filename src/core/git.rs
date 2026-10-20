@@ -5,12 +5,21 @@ use std::path::Path;
 
 pub const MAX_DIFF_LINES: usize = 10_000;
 
-#[derive(Debug, Default, serde::Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RepoStatus {
     pub modified: usize,
     pub staged: usize,
     pub untracked: usize,
     pub conflicted: usize,
+}
+
+impl RepoStatus {
+    /// No file of any kind is waiting: nothing modified, staged, untracked
+    /// or in conflict. Ignored files are never counted, so they never make a
+    /// repo read as dirty.
+    pub fn is_clean(&self) -> bool {
+        self.modified == 0 && self.staged == 0 && self.untracked == 0 && self.conflicted == 0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

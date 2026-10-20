@@ -2766,7 +2766,210 @@ fn base_ref(base_branch: &str) -> String {
     }
 }
 
-/// Remove a workspace: hand every repo worktree back to its source repo with
+/// What a removal does about work a worktree holds that git has not
+/// committed: modified, staged, untracked or conflicted files (issue #75).
+///
+/// This is a separate question from `force`, which is about git's own
+/// mechanics: whether `git worktree remove` gets `--force`, whether an orphan
+/// whose source repo is gone goes with the space, and whether a half-built
+/// worktree is overridden. Before issue #75 every caller in the app passed
+/// `force`, and `--force` is also what makes git throw away a dirty
+/// worktree, so a `space rm --force` destroyed uncommitted work in every repo
+/// of the space without a word and exited 0. The two are now asked for apart:
+/// a caller can keep git's mechanics forced and still refuse to lose work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UncommittedWork {
+    /// Read every worktree's status before anything is removed, and remove
+    /// nothing at all if any repo has work in it or cannot be read.
+    Refuse,
+    /// Remove the space whatever its worktrees hold. With `force` that work is
+    /// gone; without it git still refuses a dirty worktree on its own.
+    Discard,
+}
+
+/// A repo in a space whose removal would lose work: what it holds, or why
+/// that could not be read. Unpushed commits are not counted, because removing
+/// a space keeps every branch, so commits survive it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingWork {
+    /// The repo's directory name inside the space.
+    pub repo: String,
+    /// What reading its files gave: counts that are never all zero here
+    /// unless `also` holds something, or why they could not be read. What
+    /// cannot be read counts as work: it cannot be shown to be safe to
+    /// delete.
+    pub status: WorkStatus,
+    /// Work that is not a file: commits on a detached HEAD that nothing else
+    /// holds, which go with the worktree's HEAD, and an operation in progress,
+    /// whose state lives in the worktree's admin directory.
+    pub also: Vec<OtherWork>,
+}
+
+/// What reading a repo's files gave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkStatus {
+    /// `git status` read it: the counts.
+    Read(RepoStatus),
+    /// `git status` failed, with git's reason.
+    Unreadable(String),
+    /// An orphan: its source repository is gone, so there is no git left to
+    /// read it with.
+    SourceGone,
+}
+
+/// Work in a repo that is not a changed file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OtherWork {
+    /// HEAD is detached at commits no ref and no other worktree's HEAD holds.
+    DetachedCommits,
+    /// HEAD is detached and whether its commits are held could not be told,
+    /// with the reason.
+    DetachedUnchecked(String),
+    /// An operation in progress, by git's name for it (`rebase`, `merge`,
+    /// `cherry-pick`, `revert`, `bisect`).
+    InProgress(&'static str),
+}
+
+impl std::fmt::Display for OtherWork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OtherWork::DetachedCommits => {
+                write!(f, "commits on a detached HEAD that no branch holds")
+            }
+            OtherWork::DetachedUnchecked(why) => write!(
+                f,
+                "a detached HEAD whose commits could not be checked ({})",
+                why
+            ),
+            OtherWork::InProgress(op) => write!(f, "a {} in progress", op),
+        }
+    }
+}
+
+impl PendingWork {
+    /// What the repo holds, in words: `2 modified, 1 untracked, a rebase in
+    /// progress`, or `status could not be read (<git's reason>)`.
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        match &self.status {
+            WorkStatus::Read(status) => {
+                for (count, what) in [
+                    (status.modified, "modified"),
+                    (status.staged, "staged"),
+                    (status.untracked, "untracked"),
+                    (status.conflicted, "conflicted"),
+                ] {
+                    if count > 0 {
+                        parts.push(format!("{} {}", count, what));
+                    }
+                }
+            }
+            WorkStatus::Unreadable(why) => {
+                parts.push(format!("status could not be read ({})", why))
+            }
+            WorkStatus::SourceGone => parts
+                .push("its source repository is gone, so what it holds cannot be read".to_string()),
+        }
+        parts.extend(self.also.iter().map(ToString::to_string));
+        parts.join(", ")
+    }
+
+    /// What to do about it before removing the space again, one clause per
+    /// kind of work, in the order `summary` names them. Discarding is not
+    /// among them: each caller names its own way to discard.
+    pub fn remedy(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        match &self.status {
+            WorkStatus::Read(status) if !status.is_clean() => {
+                parts.push("commit or stash the changes".to_string())
+            }
+            WorkStatus::Read(_) => {}
+            WorkStatus::Unreadable(_) => {
+                parts.push("run `git status` in it to see what stops git reading it".to_string())
+            }
+            WorkStatus::SourceGone => parts.push(
+                "copy out what you need from it, since without its source repository it \
+                 can only be discarded"
+                    .to_string(),
+            ),
+        }
+        for other in &self.also {
+            let part = match other {
+                OtherWork::DetachedCommits | OtherWork::DetachedUnchecked(_) => {
+                    "create a branch on its detached HEAD (`git branch <name>` in that repo)"
+                        .to_string()
+                }
+                OtherWork::InProgress(op) => format!("finish or abort the {}", op),
+            };
+            if !parts.contains(&part) {
+                parts.push(part);
+            }
+        }
+        parts.join("; ")
+    }
+}
+
+/// A removal refused under `UncommittedWork::Refuse`: nothing was removed.
+///
+/// A type of its own rather than a string, so a caller can recognise it with
+/// `anyhow::Error::downcast_ref` and add the way out in its own terms (the
+/// CLI's `--discard-changes`, the MCP tool's `discard_changes`, the TUI's
+/// second confirmation). The message here names no flag for that reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UncommittedWorkError {
+    pub space: String,
+    /// In the order the space's directories sort in, which is the order the
+    /// report lists them.
+    pub repos: Vec<PendingWork>,
+}
+
+impl std::fmt::Display for UncommittedWorkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<String> = self.repos.iter().map(|p| p.repo.clone()).collect();
+        // The first line stands alone, as every removal report's does: it is
+        // all the TUI's one-line status shows.
+        write!(
+            f,
+            "space '{}' was not removed: uncommitted work in {} ({} {})",
+            self.space,
+            quoted(&names),
+            self.repos.len(),
+            if self.repos.len() == 1 {
+                "repo"
+            } else {
+                "repos"
+            }
+        )?;
+        // Each repo with what it holds, and under it what to do about that:
+        // committing does nothing for a rebase in progress, and a branch is
+        // what keeps commits on a detached HEAD.
+        for pending in &self.repos {
+            write!(
+                f,
+                "\n  {}: {}\n    {}",
+                pending.repo,
+                pending.summary(),
+                pending.remedy()
+            )?;
+        }
+        write!(
+            f,
+            "\nnothing was removed; do that for each repo, then remove the space again"
+        )
+    }
+}
+
+impl std::error::Error for UncommittedWorkError {}
+
+/// `remove_space` with `UncommittedWork::Discard`: what removal was before
+/// issue #75, kept for the library surface and the tests built on it. Nothing
+/// in the app calls it; the CLI, the MCP tool and the TUI call `remove_space`
+/// and say which they want.
+pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
+    remove_space(ws_dir, name, force, UncommittedWork::Discard)
+}
+
+/// Remove a space: hand every repo worktree back to its source repo with
 /// `git worktree remove`, then delete the directory.
 ///
 /// A worktree git refuses to give up (a locked one, or one whose directory
@@ -2783,19 +2986,166 @@ fn base_ref(base_branch: &str) -> String {
 /// git runs with its output captured (`spawn::output`), never inherited: the
 /// parent's stdout is the JSON-RPC stream under MCP and the terminal under
 /// the TUI, and git's stderr is the reason in the report.
-pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
+///
+/// With `UncommittedWork::Refuse`, every worktree's status is read once the
+/// space has been classified and before anything is acted on. A repo with
+/// modified, staged, untracked or conflicted files, or one whose status
+/// cannot be read, stops the whole removal with nothing removed, and the
+/// error is an `UncommittedWorkError` naming each such repo. So do commits
+/// on a detached HEAD that nothing else holds and an operation in progress
+/// (`work_in`), and an orphan, which has no git left to read it with. Files
+/// git ignores do not count, as they do not for `git worktree remove`; nor
+/// do a half-built worktree's files, which are not the user's. Every other
+/// kind of directory is kept anyway, or is plain content.
+///
+/// Not checked, and documented as such: changes to files marked
+/// `assume-unchanged` or `skip-worktree` (git status is told not to look),
+/// and a repository nested inside a plain directory of the space, which is
+/// not looked for (`classify_space` sorts only the top level).
+pub fn remove_space(
+    ws_dir: &Path,
+    name: &str,
+    force: bool,
+    uncommitted: UncommittedWork,
+) -> Result<()> {
     checked_space_name(name)?;
     let ws_path = ws_dir.join(name);
     if !ws_path.exists() {
         anyhow::bail!("workspace '{}' not found", name);
     }
 
+    let ClassifiedSpace {
+        entries: classified,
+        shared,
+    } = classify_space(&ws_path)?;
+
+    // Read before acting, and refuse before acting: a refusal half-way
+    // through would leave the repos visited first already removed, which is
+    // the loss this guard is for.
+    if uncommitted == UncommittedWork::Refuse {
+        let repos = pending_in(&classified);
+        if !repos.is_empty() {
+            return Err(UncommittedWorkError {
+                space: name.to_string(),
+                repos,
+            }
+            .into());
+        }
+    }
+
+    let mut removed: Vec<String> = Vec::new();
+    let mut orphaned: Vec<String> = Vec::new();
+    let mut kept: Vec<(String, String)> = Vec::new();
+    for (dir, kind) in classified {
+        let repo = name_of(&dir);
+        match kind {
+            SpaceEntry::Shared { reason } => kept.push((repo, reason)),
+            // Not a repository of any kind: ordinary content of the space,
+            // which goes when the space does, as it always has.
+            SpaceEntry::Plain => {}
+            // Nothing registered points at this directory any more, and its
+            // source repo is gone from where the `.git` file says it is:
+            // deleted or moved (`absent_admin`; a record that is gone while
+            // the repo is there is `Unregistered`, kept). Git has nothing to
+            // unregister, so with `force` the directory goes with the space
+            // rather than making the space unremovable.
+            //
+            // Every caller in the app passes `force` (`cli/remove.rs`, which
+            // refuses the command without `--force`, `mcp/mod.rs` and the TUI
+            // delete dialog), so the unforced arm is the library surface
+            // only. It is here because there is no git left in this case to
+            // say whether the directory holds uncommitted work, and silently
+            // destroying it is the one thing `force` is supposed to gate.
+            //
+            // `UncommittedWork::Refuse` never reaches this arm: with no git
+            // left to read the directory with, what it holds cannot be told,
+            // so `pending_in` reports it as pending work and the removal is
+            // refused before anything is acted on. Only `Discard` gets here.
+            SpaceEntry::Orphan => {
+                if force {
+                    orphaned.push(repo);
+                } else {
+                    kept.push((
+                        repo,
+                        "its source repository is gone, so git cannot say whether the \
+                         worktree holds uncommitted work; remove the space with force, \
+                         or delete the directory by hand"
+                            .to_string(),
+                    ));
+                }
+            }
+            SpaceEntry::Repository => kept.push((
+                repo,
+                "holds a git repository of its own, which space did not create; \
+                 move it aside or delete it by hand, then remove the space again"
+                    .to_string(),
+            )),
+            SpaceEntry::Unresolved(reason) => kept.push((repo, reason)),
+            // No repair hint: for a copy it would hand the original's name to
+            // the copy, and there is no record left to repair anyway. The
+            // path stays off the first line, which may become the summary.
+            SpaceEntry::Unregistered { admin } => kept.push((
+                repo,
+                format!(
+                    "git has no record of it any more, though its source repo is still \
+                     there, so what it holds cannot be told\nits .git file names {:?}, \
+                     which does not exist; a copy of a worktree looks like this once the \
+                     original is removed (a space duplicated with `cp -R`, for instance), \
+                     and so does a worktree whose record was pruned or whose source repo \
+                     was cloned again; keep what you need from it, delete it by hand, then \
+                     remove the space again",
+                    admin
+                ),
+            )),
+            SpaceEntry::Unreadable(why) => kept.push((
+                repo,
+                format!(
+                    "{}, so what this directory is cannot be told; look at it, \
+                     then move it aside or delete it by hand, and remove the \
+                     space again",
+                    why
+                ),
+            )),
+            SpaceEntry::Worktree { admin } => {
+                match unregister_worktree(&dir, force, &admin, uncommitted) {
+                    Ok(()) => removed.push(repo),
+                    Err(reason) => kept.push((repo, reason)),
+                }
+            }
+        }
+    }
+
+    if !kept.is_empty() {
+        anyhow::bail!(removal_report(name, &removed, &orphaned, &kept, shared,));
+    }
+
+    std::fs::remove_dir_all(&ws_path)
+        .with_context(|| format!("removing workspace directory {}", ws_path.display()))?;
+    Ok(())
+}
+
+/// A space as `classify_space` found it.
+struct ClassifiedSpace {
+    /// Every directory directly inside the space, in name order, with what
+    /// it is.
+    entries: Vec<(PathBuf, SpaceEntry)>,
+    /// How many entries are in worktree-and-copy pairs, and how many pairs,
+    /// for the removal report.
+    shared: (usize, usize),
+}
+
+/// Every directory directly inside a space, sorted by name and classified
+/// as it was found, with the worktree-and-copy pairs already marked
+/// `Shared`. Both `remove_space` and `pending_work` read the space this way,
+/// so the repos the dialog warns about are the repos the removal would hand
+/// to git.
+fn classify_space(ws_path: &Path) -> Result<ClassifiedSpace> {
     // Symlinks are not followed: `file_type` reports the link itself, so a
     // symlinked entry is left where master left it, neither classified nor
     // handed to git. Following one would let a link inside the space aim
     // `git worktree remove` at a worktree outside it.
     let mut dirs: Vec<PathBuf> = Vec::new();
-    for entry in std::fs::read_dir(&ws_path)? {
+    for entry in std::fs::read_dir(ws_path)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             dirs.push(entry.path());
@@ -2872,94 +3222,289 @@ pub fn remove_workspace(ws_dir: &Path, name: &str, force: bool) -> Result<()> {
         }
     }
 
-    let mut removed: Vec<String> = Vec::new();
-    let mut orphaned: Vec<String> = Vec::new();
-    let mut kept: Vec<(String, String)> = Vec::new();
-    for (dir, kind) in classified {
-        let repo = name_of(&dir);
-        match kind {
-            SpaceEntry::Shared { reason } => kept.push((repo, reason)),
-            // Not a repository of any kind: ordinary content of the space,
-            // which goes when the space does, as it always has.
-            SpaceEntry::Plain => {}
-            // Nothing registered points at this directory any more, and its
-            // source repo is gone from where the `.git` file says it is:
-            // deleted or moved (`absent_admin`; a record that is gone while
-            // the repo is there is `Unregistered`, kept). Git has nothing to
-            // unregister, so with `force` the directory goes with the space
-            // rather than making the space unremovable.
-            //
-            // Every caller in the app passes `force` (`cli/remove.rs`, which
-            // refuses the command without `--force`, `mcp/mod.rs` and the TUI
-            // delete dialog), so the unforced arm is the library surface
-            // only. It is here because there is no git left in this case to
-            // say whether the directory holds uncommitted work, and silently
-            // destroying it is the one thing `force` is supposed to gate.
-            SpaceEntry::Orphan => {
-                if force {
-                    orphaned.push(repo);
-                } else {
-                    kept.push((
-                        repo,
-                        "its source repository is gone, so git cannot say whether the \
-                         worktree holds uncommitted work; remove the space with force, \
-                         or delete the directory by hand"
-                            .to_string(),
-                    ));
-                }
-            }
-            SpaceEntry::Repository => kept.push((
-                repo,
-                "holds a git repository of its own, which space did not create; \
-                 move it aside or delete it by hand, then remove the space again"
-                    .to_string(),
-            )),
-            SpaceEntry::Unresolved(reason) => kept.push((repo, reason)),
-            // No repair hint: for a copy it would hand the original's name to
-            // the copy, and there is no record left to repair anyway. The
-            // path stays off the first line, which may become the summary.
-            SpaceEntry::Unregistered { admin } => kept.push((
-                repo,
-                format!(
-                    "git has no record of it any more, though its source repo is still \
-                     there, so what it holds cannot be told\nits .git file names {:?}, \
-                     which does not exist; a copy of a worktree looks like this once the \
-                     original is removed (a space duplicated with `cp -R`, for instance), \
-                     and so does a worktree whose record was pruned or whose source repo \
-                     was cloned again; keep what you need from it, delete it by hand, then \
-                     remove the space again",
-                    admin
-                ),
-            )),
-            SpaceEntry::Unreadable(why) => kept.push((
-                repo,
-                format!(
-                    "{}, so what this directory is cannot be told; look at it, \
-                     then move it aside or delete it by hand, and remove the \
-                     space again",
-                    why
-                ),
-            )),
-            SpaceEntry::Worktree { admin } => match unregister_worktree(&dir, force, &admin) {
-                Ok(()) => removed.push(repo),
-                Err(reason) => kept.push((repo, reason)),
-            },
+    Ok(ClassifiedSpace {
+        entries: classified,
+        shared: (shared_count, shared_groups),
+    })
+}
+
+/// The repos in space `name` whose removal would lose work, read the way
+/// `remove_space` reads them under `UncommittedWork::Refuse`. Empty when
+/// every worktree is clean. The TUI's delete dialog reads this when it opens,
+/// so it can show what would be lost and ask twice; the removal reads the
+/// space again itself, so a change in between is still caught.
+pub fn pending_work(ws_dir: &Path, name: &str) -> Result<Vec<PendingWork>> {
+    checked_space_name(name)?;
+    let ws_path = ws_dir.join(name);
+    if !ws_path.exists() {
+        anyhow::bail!("workspace '{}' not found", name);
+    }
+    Ok(pending_in(&classify_space(&ws_path)?.entries))
+}
+
+fn pending_in(classified: &[(PathBuf, SpaceEntry)]) -> Vec<PendingWork> {
+    classified
+        .iter()
+        .filter_map(|(dir, kind)| match kind {
+            SpaceEntry::Worktree { admin } => work_in(dir, admin),
+            // A forced removal deletes an orphan with the space, and there is
+            // no git left to say what it holds. What cannot be read is not
+            // deleted under `Refuse`: discarding is the only way past it.
+            SpaceEntry::Orphan => Some(PendingWork {
+                repo: name_of(dir),
+                status: WorkStatus::SourceGone,
+                also: Vec::new(),
+            }),
+            // Everything else is kept by the removal whatever it holds, or is
+            // plain content, which holds no repository to ask.
+            _ => None,
+        })
+        .collect()
+}
+
+/// The state files of an operation in progress, in a worktree's admin
+/// directory, with the words the report uses for each. `rebase-apply` is
+/// also what `git am` leaves; either way the half-applied series is in it.
+const OPERATIONS_IN_PROGRESS: [(&str, &str); 6] = [
+    ("rebase-merge", "rebase"),
+    ("rebase-apply", "rebase"),
+    ("MERGE_HEAD", "merge"),
+    ("CHERRY_PICK_HEAD", "cherry-pick"),
+    ("REVERT_HEAD", "revert"),
+    ("BISECT_LOG", "bisect"),
+];
+
+/// What removing worktree `dir` (admin directory `admin`) would lose, or
+/// `None` when it would lose nothing.
+///
+/// A half-built worktree (`half_built`: an add killed mid-checkout) is clean
+/// by definition here. Its tree holds only what the interrupted checkout
+/// wrote, nothing of the user's, and `git status` reads it as every file
+/// deleted plus every file untracked; refusing it with "commit or stash"
+/// would contradict the way out `placement_of` names for it, which is to
+/// remove the space and create it again.
+fn work_in(dir: &Path, admin: &Path) -> Option<PendingWork> {
+    if half_built(admin) {
+        return None;
+    }
+    let status = match worktree_work(dir) {
+        Ok(counts) => WorkStatus::Read(counts),
+        Err(why) => WorkStatus::Unreadable(why),
+    };
+    let mut also: Vec<OtherWork> = Vec::new();
+    for (file, op) in OPERATIONS_IN_PROGRESS {
+        let work = OtherWork::InProgress(op);
+        if admin.join(file).exists() && !also.contains(&work) {
+            also.push(work);
         }
     }
+    match unheld_detached_commits(dir) {
+        Ok(false) => {}
+        Ok(true) => also.push(OtherWork::DetachedCommits),
+        Err(why) => also.push(OtherWork::DetachedUnchecked(why)),
+    }
+    if also.is_empty() && matches!(&status, WorkStatus::Read(s) if s.is_clean()) {
+        return None;
+    }
+    Some(PendingWork {
+        repo: name_of(dir),
+        status,
+        also,
+    })
+}
 
-    if !kept.is_empty() {
-        anyhow::bail!(removal_report(
-            name,
-            &removed,
-            &orphaned,
-            &kept,
-            (shared_count, shared_groups),
-        ));
+/// Whether the worktree's HEAD is detached at commits that nothing else
+/// holds: no ref of any kind (`--glob=refs/*`: branches, tags, remote-tracking
+/// branches, the stash, notes) and no other worktree's HEAD, the main
+/// worktree's included, reaches them. Removing the worktree removes its
+/// HEAD, and with it the only name those commits have; a branch's commits
+/// survive, because removal keeps every branch.
+///
+/// Detachment is asked of git (`git symbolic-ref -q HEAD`) rather than read
+/// from the admin directory's `HEAD` file: with the reftable format that
+/// file is a stub that always reads `ref: refs/heads/.invalid`, whatever
+/// HEAD really is.
+fn unheld_detached_commits(dir: &Path) -> std::result::Result<bool, String> {
+    let symref = spawn::output(git_in(dir).args(["symbolic-ref", "-q", "HEAD"]))
+        .map_err(|e| format!("could not run git: {}", e))?;
+    match symref.status.code() {
+        Some(0) => return Ok(false),
+        // `-q`: exit 1, silently, is "HEAD is not a symbolic ref", detached.
+        Some(1) => {}
+        _ => return Err(first_stderr_line(&symref, "git symbolic-ref")),
     }
 
-    std::fs::remove_dir_all(&ws_path)
-        .with_context(|| format!("removing workspace directory {}", ws_path.display()))?;
-    Ok(())
+    let list = spawn::output(git_in(dir).args(["worktree", "list", "--porcelain"]))
+        .map_err(|e| format!("could not run git: {}", e))?;
+    if !list.status.success() {
+        return Err(first_stderr_line(&list, "git worktree list"));
+    }
+    let here = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let other_heads = other_worktree_heads(&String::from_utf8_lossy(&list.stdout), &here);
+
+    let mut args: Vec<String> = ["rev-list", "-1", "HEAD", "--not", "--glob=refs/*"]
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+    args.extend(other_heads);
+    let out =
+        spawn::output(git_in(dir).args(&args)).map_err(|e| format!("could not run git: {}", e))?;
+    if !out.status.success() {
+        return Err(first_stderr_line(&out, "git rev-list"));
+    }
+    Ok(!out.stdout.iter().all(u8::is_ascii_whitespace))
+}
+
+/// The HEAD commits of every worktree in `git worktree list --porcelain`
+/// output except the one at `here` (canonical), the main worktree included.
+/// A bare main repository has no HEAD line and gives nothing.
+fn other_worktree_heads(porcelain: &str, here: &Path) -> Vec<String> {
+    let mut heads = Vec::new();
+    for record in porcelain.split("\n\n") {
+        let mut path = None;
+        let mut head = None;
+        for line in record.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                path = Some(PathBuf::from(p));
+            } else if let Some(h) = line.strip_prefix("HEAD ") {
+                head = Some(h.trim().to_string());
+            }
+        }
+        let (Some(path), Some(head)) = (path, head) else {
+            continue;
+        };
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        if path != here && head.chars().all(|c| c.is_ascii_hexdigit()) && !head.is_empty() {
+            heads.push(head);
+        }
+    }
+    heads
+}
+
+/// The variables that point git at a repository, index, object store or
+/// config other than the one in its working directory: the list `git
+/// rev-parse --local-env-vars` prints, which git itself clears when it moves
+/// to another repository. A git hook exports `GIT_DIR` and `GIT_INDEX_FILE`,
+/// so `space` started from one (or from a shell that set them) would
+/// otherwise read the status of the wrong repository, or remove a worktree
+/// of it, while believing it was looking at the space.
+const REPO_LOCATING_VARS: [&str; 15] = [
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
+
+/// A `git` command that runs in `dir` and finds its repository from there
+/// alone (`REPO_LOCATING_VARS`). Used by everything removal runs.
+fn git_in(dir: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    for var in REPO_LOCATING_VARS {
+        cmd.env_remove(var);
+    }
+    cmd.current_dir(dir);
+    cmd
+}
+
+/// git's first line of complaint, or a stand-in naming `what` and its exit
+/// status when it printed nothing.
+fn first_stderr_line(out: &std::process::Output, what: &str) -> String {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let first = stderr.trim().lines().next().unwrap_or("").to_string();
+    if first.is_empty() {
+        format!("{} exited with {}", what, out.status)
+    } else {
+        first
+    }
+}
+
+/// What a worktree holds that git has not committed, read with `git status`
+/// itself rather than with libgit2 (`git::repo_status`).
+///
+/// libgit2 refuses a repository format extension its version does not know,
+/// and `extensions.refstorage` (reftable) and `extensions.relativeWorktrees`
+/// are both ones git writes today (see `classify_space_entry`). Read through
+/// libgit2, every worktree of such a repo would be "unreadable", refused,
+/// and the user taught to reach for `--discard-changes` every time, which
+/// would be the guard turned off. git reads whatever git wrote.
+///
+/// The options match the check `git worktree remove` makes before it
+/// refuses a dirty worktree (`--ignore-submodules=none`, ignored files not
+/// listed), with untracked files listed one by one rather than one line per
+/// directory, so the counts are files, as `git::repo_status`'s are.
+/// `--no-optional-locks` keeps `git status` from writing a refreshed index,
+/// which a read-only check has no business doing.
+///
+/// Not seen, and documented as such: a file marked `assume-unchanged` or
+/// `skip-worktree`, whose changes `git status` is told not to look at.
+fn worktree_work(dir: &Path) -> std::result::Result<RepoStatus, String> {
+    let out = spawn::output(git_in(dir).args([
+        "--no-optional-locks",
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    ]))
+    .map_err(|e| format!("could not run git: {}", e))?;
+    if !out.status.success() {
+        return Err(first_stderr_line(&out, "git status"));
+    }
+    Ok(parse_porcelain_status(&out.stdout))
+}
+
+/// Count `git status --porcelain=v1 -z` entries the way `git::repo_status`
+/// counts libgit2's: a file staged and then modified again counts once in
+/// each, an unmerged path only as a conflict.
+fn parse_porcelain_status(stdout: &[u8]) -> RepoStatus {
+    let mut status = RepoStatus::default();
+    let mut entries = stdout.split(|&b| b == 0).filter(|e| !e.is_empty());
+    while let Some(entry) = entries.next() {
+        // Fail safe: an entry this does not recognise, a short one included,
+        // counts as modified rather than as nothing. A status code git adds
+        // later, or output this misreads, must never let a dirty worktree
+        // read as clean, since clean is what lets the removal go ahead.
+        if entry.len() < 3 {
+            status.modified += 1;
+            continue;
+        }
+        let (x, y) = (entry[0], entry[1]);
+        // A rename or copy is followed by a second entry, its source path,
+        // which is not a change of its own.
+        if matches!(x, b'R' | b'C') || matches!(y, b'R' | b'C') {
+            entries.next();
+        }
+        match (x, y) {
+            (b'?', b'?') => status.untracked += 1,
+            (b'!', b'!') => {}
+            (b'U', _) | (_, b'U') | (b'A', b'A') | (b'D', b'D') => status.conflicted += 1,
+            _ => {
+                let staged = matches!(x, b'M' | b'A' | b'D' | b'R' | b'C' | b'T');
+                // ` A` is a file added with `git add -N` (intent to add): in
+                // the index with no content yet, so its content is only in
+                // the tree, and is lost with it.
+                let modified = matches!(y, b'M' | b'A' | b'D' | b'R' | b'C' | b'T');
+                if staged {
+                    status.staged += 1;
+                }
+                if modified || !staged {
+                    status.modified += 1;
+                }
+            }
+        }
+    }
+    status
 }
 
 /// What a directory inside a space is, as far as removing it goes.
@@ -3592,25 +4137,42 @@ fn recorded_at(admin: &Path, dir: &Path) -> RecordedAt {
 /// lost power mid-create remove the space and create it again with no git
 /// command; the create side refuses to adopt such a worktree
 /// (`placement_of`) and names this as the way out.
-fn unregister_worktree(dir: &Path, force: bool, admin: &Path) -> std::result::Result<(), String> {
-    let target = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    let target = target.to_string_lossy().into_owned();
-    let mut args = vec!["worktree", "remove"];
+///
+/// Under `UncommittedWork::Refuse` a forced removal first asks git without
+/// `--force`, so git checks the tree for changes itself, immediately before
+/// it deletes anything; the check `remove_space` made at the start can be
+/// seconds old by the time a later repo is reached, and an editor or a build
+/// may have written to it since. If git refuses, the worktree is read again
+/// (`work_in`) right then: work found keeps the worktree with that reason,
+/// and only a tree that still reads clean gets the forced run, for the
+/// refusals `--force` exists for (a worktree holding submodules, which git
+/// will not remove unforced however clean). A lock or a moved worktree is
+/// refused by the forced run too and reported with its own way out, as
+/// before. The repos already removed stay removed, as on any kept worktree;
+/// their branches, and everything committed on them, are still there.
+fn unregister_worktree(
+    dir: &Path,
+    force: bool,
+    admin: &Path,
+    uncommitted: UncommittedWork,
+) -> std::result::Result<(), String> {
     let overriding = force && half_built(admin);
-    if force {
-        args.push("--force");
+    if force && !overriding && uncommitted == UncommittedWork::Refuse {
+        if run_worktree_remove(dir, 0).is_ok_and(|out| out.status.success()) {
+            return Ok(());
+        }
+        if let Some(work) = work_in(dir, admin) {
+            return Err(format!(
+                "uncommitted work appeared in it while the space was being removed, so it \
+                 is kept: {}\n{}, then remove the space again",
+                work.summary(),
+                work.remedy()
+            ));
+        }
     }
-    if overriding {
-        args.push("--force");
-    }
-    // Belt and braces: what git gets is the canonicalised path, so a repo
-    // directory named `-x` is already inside an absolute path. The separator
-    // is what still holds if the canonicalisation above ever falls back to
-    // the path as given. `git worktree add` in this module passes it too.
-    args.push("--");
-    args.push(&target);
+    let forces = usize::from(force) + usize::from(overriding);
 
-    match spawn::output(Command::new("git").args(&args).current_dir(dir)) {
+    match run_worktree_remove(dir, forces) {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
@@ -3665,6 +4227,22 @@ fn unregister_worktree(dir: &Path, force: bool, admin: &Path) -> std::result::Re
         }
         Err(e) => Err(format!("could not run git: {}", e)),
     }
+}
+
+/// `git worktree remove` of `dir`, with `--force` given `forces` times, run
+/// inside the worktree with its output captured.
+fn run_worktree_remove(dir: &Path, forces: usize) -> std::io::Result<std::process::Output> {
+    let target = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let target = target.to_string_lossy().into_owned();
+    let mut args = vec!["worktree", "remove"];
+    args.extend(std::iter::repeat_n("--force", forces));
+    // Belt and braces: what git gets is the canonicalised path, so a repo
+    // directory named `-x` is already inside an absolute path. The separator
+    // is what still holds if the canonicalisation above ever falls back to
+    // the path as given. `git worktree add` in this module passes it too.
+    args.push("--");
+    args.push(&target);
+    spawn::output(git_in(dir).args(&args))
 }
 
 /// The error a kept space reports. The first line stands alone as a summary,
@@ -8424,5 +9002,59 @@ mod tests {
                 text
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod porcelain_tests {
+    use super::{other_worktree_heads, parse_porcelain_status};
+
+    /// Every other worktree's HEAD, the main one included; not this one's,
+    /// and nothing from a bare main repository, which has no HEAD line.
+    #[test]
+    fn other_worktree_heads_skips_this_one_and_a_bare_main() {
+        let porcelain = "worktree /nowhere/bare\nbare\n\n\
+                         worktree /nowhere/main\nHEAD 1111111111111111111111111111111111111111\ndetached\n\n\
+                         worktree /nowhere/here\nHEAD 2222222222222222222222222222222222222222\ndetached\n";
+        assert_eq!(
+            other_worktree_heads(porcelain, std::path::Path::new("/nowhere/here")),
+            vec!["1111111111111111111111111111111111111111".to_string()]
+        );
+    }
+    use crate::core::git::RepoStatus;
+
+    /// A rename's second entry is its source path, not a change of its own;
+    /// a path staged and modified again counts in both; ignored entries and
+    /// the empty tail after the last NUL count as nothing.
+    #[test]
+    fn counts_follow_repo_status() {
+        let out =
+            b"R  new.txt\0old.txt\0MM both.txt\0?? a b.txt\0UU c.txt\0AA d.txt\0!! e.log\0 T f\0";
+        assert_eq!(
+            parse_porcelain_status(out),
+            RepoStatus {
+                modified: 2,
+                staged: 2,
+                untracked: 1,
+                conflicted: 2,
+            }
+        );
+        assert!(parse_porcelain_status(b"").is_clean());
+    }
+
+    /// ` A` is `git add -N`: its content is only in the tree. And anything
+    /// this does not recognise, a short entry included, counts as modified,
+    /// never as nothing, so a misread can only refuse, never delete.
+    #[test]
+    fn intent_to_add_and_unknown_entries_count_as_modified() {
+        assert_eq!(parse_porcelain_status(b" A planned.txt\0").modified, 1);
+        assert_eq!(parse_porcelain_status(b"XY odd.txt\0").modified, 1);
+        assert_eq!(parse_porcelain_status(b"x\0").modified, 1);
+        assert_eq!(
+            parse_porcelain_status(b"shim: git status\n").modified,
+            1,
+            "stray output is not clean"
+        );
+        assert!(parse_porcelain_status(b"!! ignored.log\0").is_clean());
     }
 }

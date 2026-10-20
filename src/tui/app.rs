@@ -1703,9 +1703,14 @@ impl App {
                 self.space_cd_target = Some(path);
                 self.should_quit = true;
             }
-            ScreenAction::DeleteWorkspace { name, force } => {
+            ScreenAction::DeleteWorkspace {
+                name,
+                force,
+                uncommitted,
+            } => {
                 let ws_dir = self.config.workspaces.dir.clone();
-                let outcome = crate::core::workspace::remove_workspace(&ws_dir, &name, force);
+                let outcome =
+                    crate::core::workspace::remove_space(&ws_dir, &name, force, uncommitted);
                 // The worktrees are unregistered one at a time, so a delete
                 // that failed part-way still changed the disk. Both paths
                 // refresh, or the dashboard keeps listing repos that are gone.
@@ -1734,10 +1739,31 @@ impl App {
                         tracing::warn!("{}", e);
                         let report = e.to_string();
                         let summary = report.lines().next().unwrap_or_default();
-                        // The prefix stays: the other failures here ("workspace
-                        // 'x' not found") do not say what was being attempted,
-                        // and this is the only line the user sees.
-                        self.set_status(format!("Delete failed: {}", summary), StatusKind::Error);
+                        // A space refused for uncommitted work (it read clean
+                        // when the dialog opened and did not by the `y`) says
+                        // how to get past it: `d` again opens the dialog on a
+                        // fresh reading, which shows the work and offers to
+                        // discard it. The repo names lead, so they survive a
+                        // status row clipped at 80 columns.
+                        let message = match e
+                            .downcast_ref::<crate::core::workspace::UncommittedWorkError>()
+                        {
+                            Some(refused) => {
+                                let names: Vec<&str> =
+                                    refused.repos.iter().map(|p| p.repo.as_str()).collect();
+                                format!(
+                                    "Delete failed: uncommitted work in {}; press d to see it \
+                                     and discard it",
+                                    names.join(", ")
+                                )
+                            }
+                            // The prefix stays: the other failures here
+                            // ("workspace 'x' not found") do not say what was
+                            // being attempted, and this is the only line the
+                            // user sees.
+                            None => format!("Delete failed: {}", summary),
+                        };
+                        self.set_status(message, StatusKind::Error);
                     }
                 }
             }
@@ -2611,10 +2637,11 @@ pub fn update(app: &mut App, msg: Message) -> Option<Message> {
         }
         Message::StartDelete => {
             if let Some(ws) = app.selected_workspace() {
-                let state = crate::tui::screens::delete::DeleteState {
-                    workspace_name: ws.name.clone(),
-                    repo_names: ws.repos.iter().map(|r| r.name.clone()).collect(),
-                };
+                let state = crate::tui::screens::delete::DeleteState::new(
+                    &app.config.workspaces.dir,
+                    &ws.name,
+                    ws.repos.iter().map(|r| r.name.clone()).collect(),
+                );
                 app.screen = Screen::ConfirmDelete(state);
             }
             None
@@ -6295,6 +6322,7 @@ mod tests {
         app.process_action(crate::tui::actions::ScreenAction::DeleteWorkspace {
             name: "ws".to_string(),
             force: true,
+            uncommitted: crate::core::workspace::UncommittedWork::Refuse,
         });
 
         assert_eq!(app.status_kind, StatusKind::Error);
@@ -6366,6 +6394,7 @@ mod tests {
         app.process_action(crate::tui::actions::ScreenAction::DeleteWorkspace {
             name: "gone".to_string(),
             force: true,
+            uncommitted: crate::core::workspace::UncommittedWork::Refuse,
         });
 
         assert_eq!(app.status_kind, StatusKind::Error);
@@ -6408,6 +6437,7 @@ mod tests {
         app.process_action(crate::tui::actions::ScreenAction::DeleteWorkspace {
             name: "ws".to_string(),
             force: true,
+            uncommitted: crate::core::workspace::UncommittedWork::Refuse,
         });
         assert_eq!(
             app.status_kind,
