@@ -419,6 +419,7 @@ fn remove_workspace_success() {
         let result = server
             .remove_workspace(Parameters(RemoveWorkspaceParams {
                 name: "doomed".to_string(),
+                discard_changes: false,
             }))
             .unwrap();
         let text = result_text(&result);
@@ -619,6 +620,7 @@ fn remove_workspace_refuses_dot_dot_and_dot() {
             let err = server
                 .remove_workspace(Parameters(RemoveWorkspaceParams {
                     name: name.to_string(),
+                    discard_changes: false,
                 }))
                 .expect_err("a name that is not one plain component must be refused");
             let msg = invalid_params(&err);
@@ -1340,7 +1342,9 @@ fn a_repo_named_twice_is_placed_once() {
 // ---------------------------------------------------------------------------
 
 /// A `git` that prints one line to stdout and records that it ran, then hands
-/// over to the real git. Returns the directory to put on PATH and the file the
+/// over to the real git. It prints only for `worktree remove`: the status
+/// reads made before it (issue #75) parse git's stdout, so a line printed into
+/// them reads, safely, as uncommitted work and refuses the removal. Returns the directory to put on PATH and the file the
 /// shim appends its arguments to.
 fn git_that_prints_to_stdout(dir: &std::path::Path) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
@@ -1353,7 +1357,7 @@ fn git_that_prints_to_stdout(dir: &std::path::Path) -> (PathBuf, PathBuf) {
         bin.join("git"),
         format!(
             "#!/bin/sh\n\
-             echo \"shim: git $*\"\n\
+             case \"$*\" in *\"worktree remove\"*) echo \"shim: git $*\" ;; esac\n\
              echo \"$*\" >> '{}'\n\
              PATH='{}'\n\
              exec git \"$@\"\n",
@@ -1506,6 +1510,7 @@ fn remove_workspace_reports_a_locked_worktree() {
         let err = server
             .remove_workspace(Parameters(RemoveWorkspaceParams {
                 name: "locked-ws".to_string(),
+                discard_changes: false,
             }))
             .expect_err("a refused worktree removal must be reported");
         let msg = err.to_string();
@@ -1893,4 +1898,72 @@ fn mcp_new_branches_track_nothing() {
             );
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Issue #75: `remove_workspace` refuses uncommitted work unless
+// `discard_changes` is set.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn remove_workspace_refuses_uncommitted_work_by_default() {
+    with_test_env(|env, server| {
+        let repo = env.create_repo("alpha");
+        let wt = create_worktree(
+            &repo,
+            &env.workspaces_dir,
+            "dirty-ws",
+            &BranchStrategy::NewBranch("dirty-ws".to_string()),
+        )
+        .unwrap();
+        std::fs::write(wt.join("wip.txt"), "unsaved").unwrap();
+
+        let err = server
+            .remove_workspace(Parameters(RemoveWorkspaceParams {
+                name: "dirty-ws".to_string(),
+                discard_changes: false,
+            }))
+            .expect_err("uncommitted work refuses the removal");
+        let msg = err.message.to_string();
+        assert!(
+            msg.contains("alpha: 1 untracked") && msg.contains("nothing was removed"),
+            "the error names the repo and what it holds, got {msg:?}"
+        );
+        assert!(
+            msg.contains("discard_changes: true"),
+            "and the parameter that overrides it, got {msg:?}"
+        );
+        assert!(wt.join("wip.txt").exists(), "the work is still on disk");
+    });
+}
+
+#[test]
+fn remove_workspace_discards_uncommitted_work_when_asked() {
+    with_test_env(|env, server| {
+        let repo = env.create_repo("alpha");
+        let wt = create_worktree(
+            &repo,
+            &env.workspaces_dir,
+            "dirty-ws",
+            &BranchStrategy::NewBranch("dirty-ws".to_string()),
+        )
+        .unwrap();
+        std::fs::write(wt.join("wip.txt"), "unsaved").unwrap();
+
+        server
+            .remove_workspace(Parameters(RemoveWorkspaceParams {
+                name: "dirty-ws".to_string(),
+                discard_changes: true,
+            }))
+            .expect("discard_changes removes it");
+        assert!(!env.workspaces_dir.join("dirty-ws").exists());
+    });
+}
+
+/// A client that sends only `name`, as every client written before issue #75
+/// does, gets the refusing default rather than a deserialisation error.
+#[test]
+fn remove_workspace_discard_changes_defaults_to_false() {
+    let params: RemoveWorkspaceParams = serde_json::from_str(r#"{"name":"x"}"#).unwrap();
+    assert!(!params.discard_changes);
 }

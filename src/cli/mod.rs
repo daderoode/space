@@ -193,7 +193,9 @@ pub fn dispatch(cmd: Commands) -> Result<()> {
             run_tui_and_emit_cd(&mut app)
         }
 
-        Commands::Rm { name, force: false } => {
+        Commands::Rm {
+            name, force: false, ..
+        } => {
             let mut app = App::new()?;
             // Build DeleteState: find workspace to get repo names for display
             let ws_detail = app.workspaces.iter().find(|w| w.name == name);
@@ -202,14 +204,19 @@ pub fn dispatch(cmd: Commands) -> Result<()> {
             } else {
                 vec![]
             };
-            app.screen = Screen::ConfirmDelete(screens::delete::DeleteState {
-                workspace_name: name.clone(),
+            app.screen = Screen::ConfirmDelete(screens::delete::DeleteState::new(
+                &app.config.workspaces.dir,
+                &name,
                 repo_names,
-            });
+            ));
             run_tui_and_emit_cd(&mut app)
         }
 
-        Commands::Rm { name, force: true } => remove::run(&name, true),
+        Commands::Rm {
+            name,
+            force: true,
+            discard_changes,
+        } => remove::run(&name, true, discard_changes),
 
         Commands::Completions { shell } => crate::shell::print_completions(&shell),
 

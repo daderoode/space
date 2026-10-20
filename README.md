@@ -121,7 +121,7 @@ space go [name]                # cd into a workspace (fuzzy picker if no name)
 space status <name>            # show repo status for a workspace
 space create [repos...]        # create a new workspace with worktrees
 space add <workspace> [repos...]  # add repos to an existing workspace
-space rm <name> [--force]      # remove a workspace
+space rm <name> [--force [--discard-changes]]  # remove a space
 space repos [--refresh]        # list / refresh the repo cache
 space config                   # edit configuration interactively
 space init zsh                 # output shell init script (wrapper + completions)
@@ -143,7 +143,7 @@ server on stdio, exposing workspace management to AI coding agents.
 | `workspace_status` | Detailed status for a specific workspace |
 | `create_workspace` | Create a workspace with git worktrees for selected repos |
 | `add_repos` | Add repos to an existing workspace |
-| `remove_workspace` | Remove a workspace and all its worktrees |
+| `remove_workspace` | Remove a workspace and all its worktrees; refuses uncommitted work unless `discard_changes` is set |
 
 Add to your agent's MCP config:
 
@@ -197,7 +197,17 @@ Each workspace is a directory under `workspaces.dir`. Creating a workspace
 runs `git worktree add` for each selected repo, placing the worktrees at
 `<workspaces_dir>/<workspace>/<repo>`. Removing a workspace runs
 `git worktree remove` for each worktree in it and deletes the directory once
-nothing has been kept. A worktree git refuses to remove, such as one locked
+nothing has been kept. Before anything is removed, every repo's status is
+read: if any repo holds modified, staged, untracked or conflicted files (files
+git ignores do not count), commits on a detached HEAD that no branch holds, or
+a rebase, merge, cherry-pick, revert or bisect in progress, or its status
+cannot be read, nothing is removed and the error names each repo and what it
+holds, with what to do about it (commit or stash, put a branch on a detached
+HEAD, finish or abort the operation). Do that, or throw the work away on
+purpose with
+`space rm <name> --force --discard-changes`; the TUI's delete dialog shows
+the work and asks a second time instead. Branches are kept either way, so
+commits on a branch, pushed or not, survive the removal. A worktree git refuses to remove, such as one locked
 with `git worktree lock`, keeps the workspace and is reported instead, as does
 a directory holding a repository of its own.
 Removal also keeps a worktree copy git has no record of and a directory whose

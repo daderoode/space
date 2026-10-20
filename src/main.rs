@@ -65,8 +65,12 @@ pub enum Commands {
     #[command(alias = "remove")]
     Rm {
         name: String,
+        /// Skip the confirmation dialog. Uncommitted work still stops the removal
         #[arg(short, long)]
         force: bool,
+        /// With --force: remove the space even if repos in it hold uncommitted work, which is lost
+        #[arg(long, requires = "force")]
+        discard_changes: bool,
     },
     /// cd into a workspace (prints __SPACE_CD__ marker for shell wrapper)
     Go { name: Option<String> },
