@@ -15,8 +15,12 @@
 ### New / improved
 - The TUI delete dialog shows what each repo would lose (`alpha  (2 modified, 1 untracked)`) and, when any repo has uncommitted work, asks a second, default-No question before discarding it; if the repos changed in between, it shows the new state and asks again. A clean space still deletes on one `y`. (#75, #80)
 
+### Fixes
+- Rebase passes `--` before its target, so a target starting with `-` (for example `--exec=...`) is read as a branch name and can never run as a git option. Such targets were already refused; this is a second defence. (#79)
+
 ### Internal
 - ADR 0002 corrected on how crossterm 0.28 reaches the build (#77)
+- Removed 18 tests that pinned nothing another test does not (#78)
 
 **Full Changelog**: https://github.com/daderoode/space/compare/v0.14.0...v0.15.0
 
