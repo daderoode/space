@@ -751,12 +751,16 @@ pub fn sync_repo_cancellable(
         // remote-tracking target, so a branch that tracks nothing would
         // track it, one tracking origin's base would be re-pointed, and a
         // second merge value would gain a third.
+        // `--` makes git read a dash-leading branch name (update-ref and
+        // fetch refspecs can create `refs/heads/-M`) as a name, which it then
+        // refuses, rather than as `-M`, which would rename the checked-out
+        // branch (issue #82).
         // `LC_ALL=C` pins git's output language so `parse_skip_reason` sees
         // the English refusal; a localized git would turn every skip into
         // `Other`.
         let out = spawn::output(
             Command::new("git")
-                .args(["branch", "-f", "--no-track", &branch, &target])
+                .args(["branch", "-f", "--no-track", "--", &branch, &target])
                 .env("LC_ALL", "C")
                 .current_dir(repo_path),
         );
@@ -4634,6 +4638,64 @@ mod tests {
             ),
             other => panic!("expected CheckedOutAt, got {:?}", other),
         }
+    }
+
+    /// A local branch named `-M` (git branch refuses the name, but update-ref
+    /// and fetch refspecs can write it) that is behind its origin namesake.
+    /// Without the `--` in sync's `branch -f`, git reads `-M` as force-rename
+    /// and renames the checked-out main to a local branch named
+    /// `refs/remotes/origin/-M`, and sync reports `-M` as forwarded (issue #82).
+    #[test]
+    fn sync_repo_does_not_read_a_dash_branch_as_an_option() {
+        let (tmp, local) = origin_and_local();
+        git(&["update-ref", "refs/heads/-M", "HEAD"], &local);
+        let dash_before = get_sha(&local, "refs/heads/-M");
+        git(&["commit", "--allow-empty", "-m", "b"], &local);
+        git(&["push", "origin", "main"], &local);
+        git(
+            &["update-ref", "refs/heads/-M", "refs/heads/main"],
+            &tmp.path().join("origin.git"),
+        );
+        let main_before = get_sha(&local, "refs/heads/main");
+
+        let result = sync_repo(&local);
+
+        assert!(result.fetch_ok(), "fetch must succeed: {:?}", result.fetch);
+        assert_ne!(
+            get_sha(&local, "refs/remotes/origin/-M"),
+            dash_before,
+            "the fixture must leave -M behind origin/-M"
+        );
+        let head = Cmd::new("git")
+            .args(["symbolic-ref", "HEAD"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "refs/heads/main",
+            "the checked-out branch must not be renamed"
+        );
+        assert_eq!(get_sha(&local, "refs/heads/main"), main_before);
+        assert_eq!(
+            get_sha(&local, "refs/heads/-M"),
+            dash_before,
+            "-M must not move"
+        );
+        assert!(
+            result.forwarded.is_empty(),
+            "nothing is forwarded: {:?}",
+            result.forwarded
+        );
+        let skip = result
+            .skipped
+            .iter()
+            .find(|s| s.name == "-M")
+            .unwrap_or_else(|| panic!("-M must be reported as skipped: {:?}", result.skipped));
+        assert_eq!(
+            skip.reason,
+            SkipReason::Other("fatal: '-M' is not a valid branch name".to_string())
+        );
     }
 
     #[test]
