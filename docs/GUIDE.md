@@ -6,7 +6,7 @@ A CLI workspace manager for multi-repo git worktrees.
 **Version:** 0.15.0
 **Install:** `brew install daderoode/tap/space`
 
-Last updated: 2026-10-15
+Last updated: 2026-10-20
 
 ## Contents
 

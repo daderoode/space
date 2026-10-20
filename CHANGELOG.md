@@ -5,15 +5,15 @@
 ## [0.15.0] - 2026-10-20
 
 ### Highlights
-- `space rm` no longer deletes uncommitted work. If any repo in the space has changes, removal stops and tells you what is there; pass `--discard-changes` (or `discard_changes: true` over MCP, or answer a second `y` in the TUI) to remove it anyway. (#75)
+- `space rm` no longer deletes uncommitted work. If any repo in the space has changes, removal stops and tells you what is there; pass `--force --discard-changes` (or `discard_changes: true` over MCP, or answer a second `y` in the TUI) to remove it anyway. (#75, #80)
 
 ### Breaking changes
-- Removing a space refuses uncommitted work instead of destroying it. `space rm <name> --force`, MCP `remove_workspace` and the TUI delete read every repo's status first; if any repo has modified, staged, untracked or conflicted files (ignored files do not count), commits on a detached HEAD that no branch holds, or a rebase, merge, cherry-pick, revert or bisect in progress, or its status cannot be read (including a worktree whose source repository is gone), nothing is removed and the error names each repo with its counts. `space rm --force` exits 1; `remove_workspace` fails with `internal_error`. Before this, every removal passed `git worktree remove --force` and that work was lost without a word. (#75)
+- Removing a space refuses uncommitted work instead of destroying it. `space rm <name> --force`, MCP `remove_workspace` and the TUI delete read every repo's status first; if any repo has modified, staged, untracked or conflicted files (ignored files do not count), commits on a detached HEAD that no branch holds, or a rebase, merge, cherry-pick, revert or bisect in progress, or its status cannot be read (including a worktree whose source repository is gone), nothing is removed and the error names each repo with its counts. `space rm --force` exits 1; `remove_workspace` fails with `internal_error`. Before this, every removal passed `git worktree remove --force` and that work was lost without a word. (#75, #80)
   - CLI: add `--discard-changes` (with `--force`) to remove the space anyway. `--force` alone still only skips the confirmation.
   - MCP: `remove_workspace` takes an optional `discard_changes` (default `false`). Clients that relied on it removing a dirty workspace must now pass `discard_changes: true`.
 
 ### New / improved
-- The TUI delete dialog shows what each repo would lose (`alpha  (2 modified, 1 untracked)`) and, when any repo has uncommitted work, asks a second, default-No question before discarding it; if the repos changed in between, it shows the new state and asks again. A clean space still deletes on one `y`. (#75)
+- The TUI delete dialog shows what each repo would lose (`alpha  (2 modified, 1 untracked)`) and, when any repo has uncommitted work, asks a second, default-No question before discarding it; if the repos changed in between, it shows the new state and asks again. A clean space still deletes on one `y`. (#75, #80)
 
 ### Internal
 - ADR 0002 corrected on how crossterm 0.28 reaches the build (#77)
