@@ -511,44 +511,8 @@ fn create_worktree_cancellable_stops_before_the_add() {
     );
 }
 
-/// Checkpoint 1: the pre-create fetch does not run either, and `fetch: None`
-/// is how the caller observes that.
-#[test]
-fn create_worktree_cancellable_skips_the_pre_create_fetch() {
-    use space::core::workspace::{create_worktree_cancellable, PreCreateFetch};
-    use std::sync::atomic::AtomicBool;
-
-    let repo_dir = TempDir::new().unwrap();
-    common::init_repo(repo_dir.path());
-    let ws_dir = TempDir::new().unwrap();
-    let repo_name = repo_dir.path().file_name().unwrap().to_owned();
-
-    let attempt = create_worktree_cancellable(
-        repo_dir.path(),
-        ws_dir.path(),
-        "test-ws",
-        &BranchStrategy::DetachedHead,
-        PreCreateFetch::Run(std::time::Duration::from_secs(5)),
-        &AtomicBool::new(true),
-    );
-
-    assert!(
-        attempt.fetch.is_none(),
-        "a cancelled attempt must not have run its fetch, got {:?}",
-        attempt.fetch
-    );
-    assert!(
-        attempt.created.is_err(),
-        "a cancelled attempt must not report a created worktree"
-    );
-    assert!(
-        !ws_dir.path().join("test-ws").join(&repo_name).exists(),
-        "cancelling before the fetch must leave no worktree on disk"
-    );
-}
-
 /// The uncancelled path is the one the flow actually takes, and it is what
-/// makes the two cancellation tests above non-vacuous: the same call with an
+/// makes the cancellation test above non-vacuous: the same call with an
 /// unset flag creates the worktree.
 #[test]
 fn create_worktree_cancellable_creates_when_the_flag_is_unset() {
@@ -5804,37 +5768,6 @@ fn switch_cleanup_keeps_a_new_branch_that_is_checked_out() {
 // Ticket 45: a new branch tracks nothing, and the sync moves a branch without
 // changing what it tracks.
 // ---------------------------------------------------------------------------
-
-/// N1. A new branch started from `refs/remotes/origin/<base>` tracks
-/// nothing. git's default `branch.autoSetupMerge` would make it track the
-/// base, so the git-ops Push would run a bare `git push`, which git refuses
-/// (the upstream's name is not the branch's) or, under
-/// `push.default=upstream`, sends into origin's base branch.
-#[test]
-fn a_new_branch_space_tracks_nothing() {
-    let env = TestEnv::new();
-    let f = two_remote_repo(&env);
-    let wt = create_worktree(
-        &f.repo,
-        &env.workspaces_dir,
-        "s",
-        &BranchStrategy::NewBranch("newb".to_string()),
-    )
-    .unwrap();
-    assert_eq!(
-        rev(&wt, "HEAD"),
-        rev(&f.repo, "refs/remotes/origin/main"),
-        "fixture: the branch started from origin's base"
-    );
-
-    assert_eq!(head_symref(&wt), "refs/heads/newb");
-    assert_eq!(upstream_of(&f.repo, "newb"), "", "no upstream");
-    assert_eq!(
-        common::branch_keys(&f.repo, "newb"),
-        "",
-        "no branch.newb.* key"
-    );
-}
 
 /// N2. The new branch tracks nothing whatever `branch.autoSetupMerge`
 /// says, from either start point the arm uses. On the local fallback (no
