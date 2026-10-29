@@ -658,8 +658,14 @@ fn render_create_overlay(
         CreateStage::PickRepos => {
             crate::tui::widgets::fuzzy_picker::render(&state.picker, show_cursor, frame);
         }
+        CreateStage::PickPlanMode => {
+            render_plan_fork(frame, state.plan.fork_idx, state.selected_repos.len())
+        }
         CreateStage::PickBranchStrategy => render_branch_strategy_picker(
             frame,
+            &state
+                .plan
+                .picker_title(&state.selected_repos, PICKER_TITLE_NAME_COLS),
             state.ws_name.value(),
             state.new_branch_name(),
             state.branch_strategy_idx,
@@ -875,7 +881,46 @@ fn render_name_input(
     );
 }
 
-/// The branch strategy picker (Stage 4 of create, Stage 3 of add).
+/// Display columns the strategy picker's title gives the repo it is choosing
+/// for. The dialog is 62 wide at the documented 80-column minimum, 60 inside
+/// its corners, and the rest of the title (` Branch Strategy: ` and
+/// ` (99 of 99) `) is 30, so 28 keeps the count on the border.
+const PICKER_TITLE_NAME_COLS: usize = 28;
+
+/// The fork shown after the sync report when several repos are selected: one
+/// strategy for every repo, or one chosen per repo.
+fn render_plan_fork(frame: &mut Frame, fork_idx: usize, repos: usize) {
+    use ratatui::widgets::Clear;
+    let dialog_w = percent_of(frame.area().width, 70, 62);
+    let area = centered_rect_fixed(dialog_w, 4, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border_focused())
+        .title(" Branch Strategy ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let options = [
+        format!("Same strategy for all {} repos", repos),
+        "Choose a strategy per repo".to_string(),
+    ];
+    let items: Vec<ListItem> = options
+        .iter()
+        .enumerate()
+        .map(|(i, opt)| {
+            if i == fork_idx {
+                ListItem::new(format!("> {}", opt)).style(theme::selected())
+            } else {
+                ListItem::new(format!("  {}", opt))
+            }
+        })
+        .collect();
+    frame.render_widget(List::new(items), inner);
+}
+
+/// The branch strategy picker (Stage 4 of create, Stage 3 of add). `title`
+/// names the repo it is choosing for, or all of them.
 /// `workspace_name` is the live space name, which the Existing-branch row
 /// sends to git unchanged; `new_branch_name` is the branch the New-branch row
 /// creates, which is the space name until the user types one of their own in
@@ -884,6 +929,7 @@ fn render_name_input(
 /// because its space name is fixed for the whole flow (ticket 32).
 fn render_branch_strategy_picker(
     frame: &mut Frame,
+    title: &str,
     workspace_name: &str,
     new_branch_name: &str,
     strategy_idx: usize,
@@ -918,7 +964,7 @@ fn render_branch_strategy_picker(
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
-        .title(" Branch Strategy ");
+        .title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1241,8 +1287,14 @@ fn render_add_overlay(
         AddStage::PickRepos => {
             crate::tui::widgets::fuzzy_picker::render(&state.picker, show_cursor, frame);
         }
+        AddStage::PickPlanMode => {
+            render_plan_fork(frame, state.plan.fork_idx, state.selected_repos.len())
+        }
         AddStage::PickBranchStrategy => render_branch_strategy_picker(
             frame,
+            &state
+                .plan
+                .picker_title(&state.selected_repos, PICKER_TITLE_NAME_COLS),
             &state.workspace_name,
             state.new_branch_name(),
             state.branch_strategy_idx,

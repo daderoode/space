@@ -1,5 +1,5 @@
 use crate::core::workspace::BranchStrategy;
-use crate::tui::screens::branch_plan::{BranchPlan, Next, RowChoice};
+use crate::tui::screens::branch_plan::{Back, BranchPlan, ForkStep, Next, RowChoice};
 use crate::tui::screens::sync_report::{LogView, SyncReport};
 use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
 use std::path::PathBuf;
@@ -9,7 +9,8 @@ use tui_input::Input;
 pub enum CreateStage {
     EnterName,
     PickRepos,
-    Syncing, // running git fetch + fast-forward before showing the branch picker
+    Syncing,      // running git fetch + fast-forward before showing the branch picker
+    PickPlanMode, // one strategy for every repo, or one per repo (several repos only)
     PickBranchStrategy,
     EnterBranchName, // edit the new-branch name
     PickBranch,
@@ -99,7 +100,10 @@ impl CreateState {
             key.code,
             matches!(
                 self.stage,
-                CreateStage::Syncing | CreateStage::PickBranchStrategy | CreateStage::Creating
+                CreateStage::Syncing
+                    | CreateStage::PickPlanMode
+                    | CreateStage::PickBranchStrategy
+                    | CreateStage::Creating
             ),
         ) {
             return crate::tui::actions::ScreenAction::OpenHelp;
@@ -108,6 +112,7 @@ impl CreateState {
             CreateStage::EnterName => self.handle_enter_name(key),
             CreateStage::PickRepos => self.handle_pick_repos(key),
             CreateStage::Syncing => self.handle_syncing(key),
+            CreateStage::PickPlanMode => self.handle_plan_mode(key),
             CreateStage::PickBranchStrategy => self.handle_branch_strategy(key, ctx),
             CreateStage::EnterBranchName => self.handle_enter_branch_name(key, ctx),
             CreateStage::PickBranch => self.handle_pick_branch(key, ctx),
@@ -139,6 +144,9 @@ impl CreateState {
                     return ScreenAction::Continue;
                 }
                 self.selected_repos = confirmed;
+                // A new selection starts a new plan: choices made for the old
+                // one are dropped, whatever repos the two have in common.
+                self.plan = BranchPlan::default();
                 self.error = None;
                 self.progress.clear();
                 self.report = SyncReport::new(&self.selected_repos);
@@ -247,7 +255,11 @@ impl CreateState {
         match key.code {
             KeyCode::Esc => {
                 self.error = None;
-                self.stage = CreateStage::PickRepos;
+                match self.plan.back(&self.selected_repos) {
+                    Back::PreviousRepo => self.open_picker(),
+                    Back::Fork => self.stage = CreateStage::PickPlanMode,
+                    Back::Repos => self.stage = CreateStage::PickRepos,
+                }
                 ScreenAction::Continue
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -267,7 +279,7 @@ impl CreateState {
             KeyCode::Enter => {
                 if self.branch_strategy_idx == max_idx {
                     // "Show more..." / "Pick a branch...": open fuzzy picker
-                    let repo_path = self.selected_repos.first().cloned();
+                    let repo_path = self.plan.picker_repo(&self.selected_repos).cloned();
                     if let Some(repo_path) = repo_path {
                         let repo_name = repo_path
                             .file_name()
@@ -463,6 +475,44 @@ impl CreateState {
         }
     }
 
+    /// Enter on a finished sync report: the fork when several repos are
+    /// selected, otherwise the strategy picker.
+    pub fn continue_from_sync_report(&mut self) {
+        self.progress.clear();
+        if self.selected_repos.len() > 1 {
+            self.stage = CreateStage::PickPlanMode;
+        } else {
+            self.plan.per_repo = false;
+            self.open_picker();
+        }
+    }
+
+    /// The fork: one strategy for every repo, or one per repo. Esc returns
+    /// to the repo picker, as Esc on the strategy picker used to.
+    fn handle_plan_mode(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> crate::tui::actions::ScreenAction {
+        match self.plan.fork_key(key.code) {
+            ForkStep::Stay => {}
+            ForkStep::Chosen => self.open_picker(),
+            ForkStep::Back => self.stage = CreateStage::PickRepos,
+        }
+        crate::tui::actions::ScreenAction::Continue
+    }
+
+    /// Open the strategy picker on the repo the plan is choosing for.
+    fn open_picker(&mut self) {
+        self.plan.open_picker(
+            &self.selected_repos,
+            &mut self.branch_strategy_idx,
+            &mut self.branch_name_input,
+            &mut self.picked_branch,
+            &mut self.recent_branches,
+        );
+        self.stage = CreateStage::PickBranchStrategy;
+    }
+
     /// Record `strategy` with the picker state that chose it, and move on.
     /// Every key that chooses a strategy leaves through here.
     fn record(
@@ -478,6 +528,11 @@ impl CreateState {
             picked_branch: self.picked_branch.clone(),
         };
         match self.plan.record(&self.selected_repos, choice) {
+            Next::Configure => {
+                self.error = None;
+                self.open_picker();
+                ScreenAction::Continue
+            }
             Next::Run => {
                 self.stage = CreateStage::Creating;
                 ScreenAction::ExecuteWorktreeFlow(WorktreeParams {

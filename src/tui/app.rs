@@ -1310,10 +1310,26 @@ impl App {
                             } else {
                                 "Adding"
                             };
+                            // A run whose repos do not share one strategy
+                            // says which each repo gets, so the log can be
+                            // checked against what was chosen.
+                            let mixed = job
+                                .params
+                                .plans
+                                .windows(2)
+                                .any(|w| w[0].strategy != w[1].strategy);
+                            let strategy = match job.params.plans.get(index) {
+                                Some(plan) if mixed => format!(
+                                    " ({})",
+                                    crate::tui::screens::branch_plan::describe(&plan.strategy)
+                                ),
+                                _ => String::new(),
+                            };
                             format!(
-                                "{} worktree for {}...",
+                                "{} worktree for {}{}...",
                                 verb,
-                                repo_label(&job.params, index)
+                                repo_label(&job.params, index),
+                                strategy
                             )
                         }
                         None => return,
@@ -1482,31 +1498,13 @@ impl App {
         }
     }
 
-    /// Load recent branches for the first selected repo and advance the active
-    /// screen from Syncing to PickBranchStrategy.
+    /// Move the active screen past its finished sync report: to the fork
+    /// between one strategy for all and one per repo, or with a single repo,
+    /// to the strategy picker.
     fn advance_to_branch_strategy(&mut self) {
-        let repo_path = match &self.screen {
-            Screen::CreateWorkspace(st) => st.selected_repos.first().cloned(),
-            Screen::AddRepos(st) => st.selected_repos.first().cloned(),
-            _ => return,
-        };
-        let recent = repo_path
-            .as_ref()
-            .map(|p| crate::core::git::recent_branches(p, 5))
-            .unwrap_or_default();
         match &mut self.screen {
-            Screen::CreateWorkspace(st) => {
-                st.recent_branches = recent;
-                st.branch_strategy_idx = 0;
-                st.progress.clear();
-                st.stage = crate::tui::screens::create::CreateStage::PickBranchStrategy;
-            }
-            Screen::AddRepos(st) => {
-                st.recent_branches = recent;
-                st.branch_strategy_idx = 0;
-                st.progress.clear();
-                st.stage = crate::tui::screens::add::AddStage::PickBranchStrategy;
-            }
+            Screen::CreateWorkspace(st) => st.continue_from_sync_report(),
+            Screen::AddRepos(st) => st.continue_from_sync_report(),
             _ => {}
         }
     }
@@ -5747,6 +5745,38 @@ mod tests {
     /// poll, so it reads `Creating 0 of 2` and never sees N non-zero. Mutating
     /// `job.started = index + 1` to `index` therefore left the whole suite
     /// green while the footer counted one repo behind for the entire run.
+    /// A run whose repos do not share a strategy names each repo's in its
+    /// start line; a run that shares one keeps the plain line, which
+    /// `a_detached_head_create_is_silent_in_the_log` pins.
+    #[test]
+    fn a_mixed_run_says_which_strategy_each_repo_gets() {
+        let mut app = make_app(vec![]);
+        app.screen = creating_screen();
+        let mut params = create_params(
+            std::path::Path::new("/ws"),
+            "ws-a",
+            vec![PathBuf::from("/r/repo-a"), PathBuf::from("/r/repo-b")],
+        );
+        params.plans[0].strategy =
+            crate::core::workspace::BranchStrategy::NewBranch("feat".to_string());
+        let (tx, _cancel, job) = make_job(params);
+        app.create_job = Some(job);
+        tx.send(CreateProgress::Started { index: 0 }).unwrap();
+        tx.send(CreateProgress::Started { index: 1 }).unwrap();
+        app.poll_create_result();
+
+        match &app.screen {
+            Screen::CreateWorkspace(st) => assert_eq!(
+                st.progress,
+                vec![
+                    "Creating worktree for repo-a (new branch 'feat')...".to_string(),
+                    "Creating worktree for repo-b (detached HEAD)...".to_string(),
+                ]
+            ),
+            _ => panic!("expected the create screen"),
+        }
+    }
+
     #[test]
     fn started_counts_the_repo_being_worked_on_not_the_one_before_it() {
         let tmp = tempfile::tempdir().unwrap();

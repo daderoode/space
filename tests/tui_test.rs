@@ -6499,8 +6499,8 @@ mod sync_report_tests {
         match &app.screen {
             Screen::CreateWorkspace(st) => assert_eq!(
                 st.stage,
-                CreateStage::PickBranchStrategy,
-                "Enter continues to the branch picker"
+                CreateStage::PickPlanMode,
+                "Enter continues to the fork, which two repos are asked first"
             ),
             _ => panic!("expected CreateWorkspace screen"),
         }
@@ -9213,7 +9213,7 @@ mod help_overlay_tests {
             "Create / Add Flow | Enter | Confirm and continue",
             "Create / Add Flow | ↑↓/jk | Choose branch strategy",
             "Create / Add Flow | letters | Type a name, or filter the picker",
-            "Create / Add Flow | Esc | Back one stage",
+            "Create / Add Flow | Esc | Back a stage, or to the previous repo",
             "Creating Log | ↑↓/jk | Scroll the log",
             "Creating Log | PgUp/PgDn | Page the log",
             "Creating Log | Home/End | Top / bottom (End resumes follow)",
@@ -9261,7 +9261,7 @@ mod help_overlay_tests {
             "Sync Report | ↑↓/jk | Select repo (once done)",
             "Sync Report | PgUp/PgDn | Page by 10 rows",
             "Sync Report | Home/End | First / last repo",
-            "Sync Report | Enter | Continue to branch picker (once done)",
+            "Sync Report | Enter | Continue to branch strategy (once done)",
             "Sync Report | Esc | Cancel / back to repo picker",
             "Help Overlay | ↑↓/jk | Scroll",
             "Help Overlay | PgUp/PgDn | Page",

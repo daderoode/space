@@ -275,7 +275,7 @@ const SYNC_REPORT: BindingGroup = BindingGroup {
         },
         Binding {
             key: "Enter",
-            desc: "Continue to branch picker (once done)",
+            desc: "Continue to branch strategy (once done)",
         },
         Binding {
             key: "Esc",
@@ -331,7 +331,7 @@ const CREATE_ADD_FLOW: BindingGroup = BindingGroup {
         },
         Binding {
             key: "Esc",
-            desc: "Back one stage",
+            desc: "Back a stage, or to the previous repo",
         },
     ],
 };
