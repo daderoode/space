@@ -33,7 +33,7 @@ Git worktrees help by letting you have multiple branches checked out simultaneou
 
 ## What space Does
 
-`space` introduces the concept of a **workspace** -- a named group of repositories, all checked out on the same branch, living under a single directory. One command to set up, one to tear down.
+`space` introduces the concept of a **workspace**: a named directory of git worktrees for several repositories worked on together, each on whatever branch or detached commit was chosen for it, by default the same branch in all of them. One command to set up, one to tear down.
 
 ```
 ~/workspaces/
@@ -264,7 +264,7 @@ Custom color palette:
 
 ## Create Workspace Flow
 
-A 6-stage wizard launched by pressing `c` or running `space create`. Stage 5 appears only for `New branch` and the branch picker:
+A 6-stage wizard launched by pressing `c` or running `space create`. Stage 5 appears only for `New branch` and the branch picker. With more than one repo, Stage 4 opens on a choice between one strategy for all repos and one per repo, and per repo a review table follows the last repo's choice:
 
 ### Stage 1: Name the Space
 
@@ -286,30 +286,40 @@ If `space create repo-a repo-b` was used, the picker opens with `repo-a` and `re
 
 ### Stage 4: Pick Branch Strategy
 
+With more than one repo selected, `Enter` on the sync report first asks how to choose. `Same strategy for all N repos`, the highlighted default, runs the picker below once and uses its choice for every repo, titled `Branch Strategy: all N repos`. `Choose a strategy per repo` runs it once for each repo, in the order the sync report lists them, titled with the repo and its place (`Branch Strategy: api (2 of 3)`), and ends on the [review table](#review-per-repo-choices). `Esc` on this choice returns to Pick Repos. A single repo skips the choice and goes straight to the picker.
+
+The options apply to the repo being chosen for, or with one strategy for all, to every repo:
+
 | Option | Behaviour |
 |--------|-----------|
-| `New branch '<name>'` | Asks for the branch name (Stage 5), then puts each repo on that branch, creating it where it does not exist yet; a tag or other ref of that name is not a branch and does not count: the branch is created beside it |
-| `Existing branch '<name>' (if present)` | Uses the space name as the branch in each repo, resolved by git as described in [Creating a Workspace](#creating-a-workspace): a local branch of that name is checked out, and a tag of that name, when there is no local branch, gives a detached worktree. The space name must pass `git check-ref-format --branch`, checked when you choose this option |
-| `Detached HEAD` | No branch created: each worktree is detached at its source repo's current commit (see [Creating a Workspace](#creating-a-workspace)). For read-only exploration |
-| `Pick a branch...` | A heading over up to five local branches, the most recently committed ones: `Enter` on one uses it in every repo, and `Show more...` below them opens the branch picker (Stage 5). When there are no local branches to list, `Pick a branch...` opens the picker itself |
+| `New branch '<name>'` | Asks for the branch name (Stage 5), then puts the repo on that branch, creating it where it does not exist yet; a tag or other ref of that name is not a branch and does not count: the branch is created beside it |
+| `Existing branch '<name>' (if present)` | Uses the space name as the branch, resolved by git in each repo as described in [Creating a Workspace](#creating-a-workspace): a local branch of that name is checked out, and a tag of that name, when there is no local branch, gives a detached worktree. The space name must pass `git check-ref-format --branch`, checked when you choose this option |
+| `Detached HEAD` | No branch created: the worktree is detached at its source repo's current commit (see [Creating a Workspace](#creating-a-workspace)). For read-only exploration |
+| `Pick a branch...` | A heading over up to five local branches, the most recently committed ones: `Enter` on one uses it, and `Show more...` below them opens the branch picker (Stage 5). When there are no local branches to list, `Pick a branch...` opens the picker itself |
 
-The branches listed here and in the picker come from one repo: the selected repo whose name sorts first.
+Per repo, the branches listed here and in the picker are that repo's own. With one strategy for all they come from one repo, the selected repo whose name sorts first, and the branch chosen is used in every repo.
+
+Per repo, each repo keeps its own choice. `Esc` returns to the previous repo's picker on the row it was left on, with its own branch name, and from the first repo to the choice between one strategy and one per repo. A repo not chosen yet opens on the first row, and its `New branch` name is the space name: a name typed for one repo is never carried to the next. Picking repos again in Stage 2 starts every choice afresh.
 
 ### Stage 5: Branch Name or Pick Branch (conditional)
 
-`New branch` opens a text input (`New branch name:`), filled in with the space name. While the field reads the space name, or nothing, it follows the space name: going back to Stage 1 and renaming the space renames the branch too, and a field you emptied is filled in again. A branch name you typed that differs from the space name is kept. `Show more...` (or `Pick a branch...` with no local branches) opens a fuzzy picker of all local and remote branches of that one repo; a `/` in its filter is part of the branch name, so a remote-tracking branch is found as `upstream/feat` (no `remotes/` in front) and a local one as `fix/login`. The branch picked is used in every repo. A branch picked as `<remote>/<name>`, from `origin` or any other remote the repo has configured (`upstream/<name>`), is checked out as a new local `<name>` tracking it, which git refuses in a repo that already has a local `<name>`, whichever remote that one tracks; pick `<name>` itself when the picker lists it. When the picker lists a local branch of that whole name too (`alice/fix` beside a remote `alice`), the local branch wins for any remote but origin: both rows check out the local branch, and the tracking form is not reachable from the picker in that repo (`git checkout -b fix --track refs/remotes/alice/fix` is the route; the bare `alice/fix` is ambiguous there and git refuses it).
+`New branch` opens a text input (`New branch name:`), filled in with the space name. While the field reads the space name, or nothing, it follows the space name: going back to Stage 1 and renaming the space renames the branch too, and a field you emptied is filled in again. A branch name you typed that differs from the space name is kept. `Show more...` (or `Pick a branch...` with no local branches) opens a fuzzy picker of all local and remote branches of that one repo; a `/` in its filter is part of the branch name, so a remote-tracking branch is found as `upstream/feat` (no `remotes/` in front) and a local one as `fix/login`. The branch picked is used for that repo, or with one strategy for all, in every repo. A branch picked as `<remote>/<name>`, from `origin` or any other remote the repo has configured (`upstream/<name>`), is checked out as a new local `<name>` tracking it, which git refuses in a repo that already has a local `<name>`, whichever remote that one tracks; pick `<name>` itself when the picker lists it. When the picker lists a local branch of that whole name too (`alice/fix` beside a remote `alice`), the local branch wins for any remote but origin: both rows check out the local branch, and the tracking form is not reachable from the picker in that repo (`git checkout -b fix --track refs/remotes/alice/fix` is the route; the bare `alice/fix` is ambiguous there and git refuses it).
+
+### Review: per-repo choices
+
+Per repo, once the last repo is chosen, a table lists every repo with its strategy (`new branch 'feat'`, `branch 'main'`, `detached HEAD`), then the row `Create N repos` (`Add N repos` in the add flow), which the table opens on. `Enter` on that row starts Stage 6. `Enter` on a repo reopens its picker where it was left and returns to the table once a strategy is chosen; `Esc` on that picker returns to the table with the repo unchanged. `Esc` on the table returns to the last repo's picker. At the 80-column minimum a long repo name is cut so the strategy beside it stays on the row.
 
 ### Stage 6: Creating
 
-Progress log showing each repo with a checkmark or error. A repo whose place in the space already holds a worktree of that repo is left as it is, with no fetch and no `git worktree add`, and its row reads `✓ <repo> (already created)`; it counts as created. A worktree of that repo whose `git worktree add` never finished (its admin directory still locked from the add, with the checkout's `index.lock` and no index) is neither adopted nor attempted: its row fails with the reason and says to remove the space and create it again, or to run `git worktree remove -f -f <path>` in the repo; nothing on disk is touched. When no repo failed, the flow returns to the dashboard with the space selected, and the status message reads `Created workspace '<name>'`, `Created space; N of M repos were already in place` when some repos were already there, or `Nothing created: all M repos were already in this space` when all were. When a repo failed, the log stays up so it can be read, except for a "branch already checked out" error, which stops the run at that repo and routes back to the strategy picker with an explanation rather than failing cryptically.
+Progress log showing each repo with a checkmark or error. When the repos do not all share one strategy, each repo's line names it (`Creating worktree for api (new branch 'feat')...`). A repo whose place in the space already holds a worktree of that repo is left as it is, with no fetch and no `git worktree add`, and its row reads `✓ <repo> (already created)`; it counts as created. A worktree of that repo whose `git worktree add` never finished (its admin directory still locked from the add, with the checkout's `index.lock` and no index) is neither adopted nor attempted: its row fails with the reason and says to remove the space and create it again, or to run `git worktree remove -f -f <path>` in the repo; nothing on disk is touched. When no repo failed, the flow returns to the dashboard with the space selected, and the status message reads `Created workspace '<name>'`, `Created space; N of M repos were already in place` when some repos were already there, or `Nothing created: all M repos were already in this space` when all were. Every repo is attempted. A repo git refuses because its branch is checked out elsewhere (in the source repo or another worktree) does not stop the others: when the run ends, the flow returns to the review table with that repo marked `refused`, the repos in place marked `in place`, and the first refused repo highlighted. This happens with one strategy for all too. A repo in place is closed to change, since a run leaves a repo already in the space as it is; `Enter` on one says so. Choose again for the refused repos, then `Enter` on `Retry N repos` attempts only the repos not in place. `Esc` on the table after a run leaves for the dashboard and says how many repos are in place. With a single repo there is no table: the refusal returns to its strategy picker with the reason. When a repo failed for any other reason and none was refused, the log stays up so it can be read.
 
-`Esc` goes back one stage, except at three points: at Stage 1 it returns to the dashboard; at Stage 4 it returns to Pick Repos, past the sync report; and at Stage 6 it leaves for the dashboard, stopping the run first if it is still going (the worktrees already made stay, and the status message says how many).
+`Esc` goes back one stage, except at these points: at Stage 1 it returns to the dashboard; at Stage 4 it returns to the previous repo when choosing per repo, from the first repo (or with one strategy for all) to the choice between the two, and from that choice, or with a single repo from the picker, to Pick Repos, past the sync report; on the review table it returns to the last repo, or after a run leaves for the dashboard; and at Stage 6 it leaves for the dashboard, stopping the run first if it is still going (the worktrees already made stay, and the status message says how many).
 
 ---
 
 ## Add Repos Flow
 
-5-stage wizard (same as Create minus the naming step). Launched by pressing `a` or running `space add <workspace> [repos...]`; the repo names follow the same exact-name rule as `space create` and open the picker with those repos toggled on; a name the workspace already holds stops the command before the TUI opens. The fuzzy picker automatically excludes repos already in the workspace.
+5-stage wizard (same as Create minus the naming step). The choice between one strategy for all and one per repo appears when more than one repo is being added; the repos already in the space do not count. Launched by pressing `a` or running `space add <workspace> [repos...]`; the repo names follow the same exact-name rule as `space create` and open the picker with those repos toggled on; a name the workspace already holds stops the command before the TUI opens. The fuzzy picker automatically excludes repos already in the workspace.
 
 ---
 
@@ -440,7 +450,7 @@ All worktrees removed, workspace directory cleaned up.
 1. Open the TUI with `space`, press `c` to create
 2. Name the workspace `refactor-rename-user-to-account`
 3. Use the fuzzy picker to select all 5 repos (type to filter, `Tab` to toggle)
-4. Press `Enter` on the sync report, choose "new branch" strategy and keep the branch name it fills in
+4. Press `Enter` on the sync report and again on `Same strategy for all 5 repos`, choose "new branch" strategy and keep the branch name it fills in
 
 All 5 repos are now on the same branch in one directory. Make the rename, test each repo, commit, push, and open PRs -- all from one workspace.
 
@@ -456,10 +466,10 @@ space create
 
 1. Name the workspace `review-payment-v2`
 2. Select the 3 repos
-3. Press `Enter` on the sync report, then choose **"Show more..."** under **"Pick a branch..."**
+3. Press `Enter` on the sync report and again on `Same strategy for all 3 repos`, then choose **"Show more..."** under **"Pick a branch..."**
 4. Pick `feature/payment-v2` if the picker lists it (a local branch from an earlier review), otherwise `origin/feature/payment-v2`; type `payment-v2` to filter
 
-space checks out the branch in each repo; where the repo has no local `feature/payment-v2` yet, git creates one tracking `origin/feature/payment-v2`. You can now build, run tests, and inspect the code. When you're done reviewing:
+space checks out the branch in each repo; where the repo has no local `feature/payment-v2` yet, git creates one tracking `origin/feature/payment-v2`. If the branch was pushed to only some of the repos, choose `Choose a strategy per repo` in step 3 instead and give the others `Detached HEAD` or the branch they should be on. You can now build, run tests, and inspect the code. When you're done reviewing:
 
 ```
 space rm review-payment-v2

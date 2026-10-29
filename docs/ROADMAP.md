@@ -292,14 +292,15 @@ are reported without aborting the workspace creation.
 
 ### 10. space sync
 
-**Problem:** After working in a multi-repo workspace, repos can drift -- different
-branches, unpushed commits, unfetched changes.
+**Problem:** After working in a multi-repo workspace, repos can drift: unpushed
+commits, unfetched changes.
 
 **Approach:**
 
 - New CLI command: `space sync [name]`
   - Fetch all repos in the workspace.
-  - Report branch consistency (all on same branch? any diverged?).
+  - Report each repo's branch and whether any diverged. Repos on different
+    branches are not drift: a space can be created that way on purpose.
   - Report ahead/behind for each repo vs upstream.
   - Optional `--pull` flag to pull all repos (abort on conflicts, report which).
 - TUI: Keybind on dashboard (e.g., `s`) to run sync for selected workspace.
