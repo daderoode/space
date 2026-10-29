@@ -26,7 +26,7 @@ pub struct WorkspaceRepo {
     pub behind: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BranchStrategy {
     /// Create a new branch with this name off the repo's default branch.
     NewBranch(String),

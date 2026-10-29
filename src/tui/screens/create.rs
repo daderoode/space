@@ -1,4 +1,5 @@
 use crate::core::workspace::BranchStrategy;
+use crate::tui::screens::branch_plan::{BranchPlan, Next, RowChoice};
 use crate::tui::screens::sync_report::{LogView, SyncReport};
 use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
 use std::path::PathBuf;
@@ -29,6 +30,7 @@ pub struct CreateState {
     pub branch_picker: Option<FuzzyPicker>, // populated when entering PickBranch stage
     pub picked_branch: Option<String>, // branch name chosen via branch_picker
     pub recent_branches: Vec<crate::core::git::BranchInfo>,
+    pub plan: BranchPlan,      // the strategy chosen for each selected repo
     pub progress: Vec<String>, // log lines shown during Creating stage
     pub report: SyncReport,    // per-repo sync outcomes shown during Syncing stage
     pub log_view: LogView,     // scroll state of the Creating log
@@ -73,6 +75,7 @@ impl CreateState {
             branch_picker: None,
             picked_branch: None,
             recent_branches: vec![],
+            plan: BranchPlan::default(),
             progress: vec![],
             report: SyncReport::empty(),
             log_view: LogView::new(),
@@ -235,7 +238,7 @@ impl CreateState {
         key: ratatui::crossterm::event::KeyEvent,
         ctx: &crate::tui::actions::ScreenContext,
     ) -> crate::tui::actions::ScreenAction {
-        use crate::tui::actions::{ScreenAction, WorktreeParams};
+        use crate::tui::actions::ScreenAction;
         use ratatui::crossterm::event::KeyCode;
 
         let n = self.recent_branches.len();
@@ -290,16 +293,7 @@ impl CreateState {
                     let branch_name = self.recent_branches[self.branch_strategy_idx - 3]
                         .name
                         .clone();
-                    self.stage = CreateStage::Creating;
-                    ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
-                        workspace_name: self.ws_name.value().to_string(),
-                        workspace_dir: ctx.config.workspaces.dir.clone(),
-                        repos: self.selected_repos.clone(),
-                        branch_strategy: BranchStrategy::ExistingBranch(branch_name),
-                        is_new: true,
-                        fresh_repos: self.report.fetched_ok_paths(),
-                        slow_fetch_repos: self.report.slow_fetch_paths(),
-                    })
+                    self.record(BranchStrategy::ExistingBranch(branch_name), ctx)
                 } else if self.branch_strategy_idx == 0 {
                     // New branch: open the branch name stage on
                     // `new_branch_name`, the name the picker's row shows. A
@@ -336,16 +330,7 @@ impl CreateState {
                     }
                     // The bounce reason (ticket 12) stays on the picker here;
                     // the dispatch clears it, as it did before this check.
-                    self.stage = CreateStage::Creating;
-                    ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
-                        workspace_name: self.ws_name.value().to_string(),
-                        workspace_dir: ctx.config.workspaces.dir.clone(),
-                        repos: self.selected_repos.clone(),
-                        branch_strategy: strategy,
-                        is_new: true,
-                        fresh_repos: self.report.fetched_ok_paths(),
-                        slow_fetch_repos: self.report.slow_fetch_paths(),
-                    })
+                    self.record(strategy, ctx)
                 }
             }
             _ => ScreenAction::Continue,
@@ -357,7 +342,7 @@ impl CreateState {
         key: ratatui::crossterm::event::KeyEvent,
         ctx: &crate::tui::actions::ScreenContext,
     ) -> crate::tui::actions::ScreenAction {
-        use crate::tui::actions::{ScreenAction, WorktreeParams};
+        use crate::tui::actions::ScreenAction;
         use ratatui::crossterm::event::KeyCode;
 
         match key.code {
@@ -381,16 +366,7 @@ impl CreateState {
                     return ScreenAction::Continue;
                 }
                 self.error = None;
-                self.stage = CreateStage::Creating;
-                ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
-                    workspace_name: self.ws_name.value().to_string(),
-                    workspace_dir: ctx.config.workspaces.dir.clone(),
-                    repos: self.selected_repos.clone(),
-                    branch_strategy: BranchStrategy::NewBranch(name),
-                    is_new: true,
-                    fresh_repos: self.report.fetched_ok_paths(),
-                    slow_fetch_repos: self.report.slow_fetch_paths(),
-                })
+                self.record(BranchStrategy::NewBranch(name), ctx)
             }
             _ => {
                 if let Some(req) = crate::tui::app::key_to_input_request(&key) {
@@ -407,7 +383,7 @@ impl CreateState {
         key: ratatui::crossterm::event::KeyEvent,
         ctx: &crate::tui::actions::ScreenContext,
     ) -> crate::tui::actions::ScreenAction {
-        use crate::tui::actions::{ScreenAction, WorktreeParams};
+        use crate::tui::actions::ScreenAction;
         use ratatui::crossterm::event::KeyCode;
 
         match key.code {
@@ -439,16 +415,7 @@ impl CreateState {
                 };
                 self.error = None;
                 self.picked_branch = Some(branch.clone());
-                self.stage = CreateStage::Creating;
-                ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
-                    workspace_name: self.ws_name.value().to_string(),
-                    workspace_dir: ctx.config.workspaces.dir.clone(),
-                    repos: self.selected_repos.clone(),
-                    branch_strategy: BranchStrategy::ExistingBranch(branch),
-                    is_new: true,
-                    fresh_repos: self.report.fetched_ok_paths(),
-                    slow_fetch_repos: self.report.slow_fetch_paths(),
-                })
+                self.record(BranchStrategy::ExistingBranch(branch), ctx)
             }
             _ => {
                 if let Some(ref mut bp) = self.branch_picker {
@@ -492,6 +459,35 @@ impl CreateState {
             _ => {
                 self.log_view.handle_key(key, self.progress.len());
                 ScreenAction::Continue
+            }
+        }
+    }
+
+    /// Record `strategy` with the picker state that chose it, and move on.
+    /// Every key that chooses a strategy leaves through here.
+    fn record(
+        &mut self,
+        strategy: BranchStrategy,
+        ctx: &crate::tui::actions::ScreenContext,
+    ) -> crate::tui::actions::ScreenAction {
+        use crate::tui::actions::{ScreenAction, WorktreeParams};
+        let choice = RowChoice {
+            strategy,
+            strategy_idx: self.branch_strategy_idx,
+            name_input: self.branch_name_input.clone(),
+            picked_branch: self.picked_branch.clone(),
+        };
+        match self.plan.record(&self.selected_repos, choice) {
+            Next::Run => {
+                self.stage = CreateStage::Creating;
+                ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
+                    workspace_name: self.ws_name.value().to_string(),
+                    workspace_dir: ctx.config.workspaces.dir.clone(),
+                    plans: self.plan.plans(&self.selected_repos),
+                    is_new: true,
+                    fresh_repos: self.report.fetched_ok_paths(),
+                    slow_fetch_repos: self.report.slow_fetch_paths(),
+                })
             }
         }
     }
@@ -712,7 +708,7 @@ mod tests {
     /// the space it creates it in.
     fn confirm_branch_name(st: &mut CreateState) -> (String, String) {
         match press(st, KeyCode::Enter) {
-            ScreenAction::ExecuteWorktreeFlow(p) => match p.branch_strategy {
+            ScreenAction::ExecuteWorktreeFlow(p) => match p.plans[0].strategy.clone() {
                 BranchStrategy::NewBranch(name) => (name, p.workspace_name),
                 other => panic!("expected a new branch, got {:?}", other),
             },

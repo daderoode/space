@@ -64,7 +64,7 @@ pub enum CreateOutcome {
 }
 
 /// Sent from the Creating worker thread back to the App during the Creating
-/// stage. `index` addresses the repo's position in `WorktreeParams::repos`.
+/// stage. `index` addresses the repo's position in `WorktreeParams::plans`.
 pub enum CreateProgress {
     Started {
         index: usize,
@@ -989,7 +989,7 @@ impl App {
     /// All zero with no run, which is what the footer renders as done.
     pub fn creating_progress(&self) -> (bool, usize, usize) {
         match &self.create_job {
-            Some(job) => (true, job.started, job.params.repos.len()),
+            Some(job) => (true, job.started, job.params.plans.len()),
             None => (false, 0, 0),
         }
     }
@@ -1023,7 +1023,7 @@ impl App {
     /// The Creating stage's success path: refresh the space list, select the
     /// space this run built BY NAME, and return to the dashboard.
     ///
-    /// `skipped` is how many of `params.repos` were already in the space
+    /// `skipped` is how many of `params.plans` were already in the space
     /// (`CreateJob::skipped`), and it decides what the run is reported as. A
     /// run where every repo was already there created nothing, so it is a
     /// warning rather than the success the plain "Created" line claims, and a
@@ -1054,7 +1054,7 @@ impl App {
             self.load_selected_workspace_detail();
         }
         self.screen = Screen::Dashboard;
-        let total = params.repos.len();
+        let total = params.plans.len();
         // `skipped == 0` first, so a run of no repos at all (an Esc-cancelled
         // list, or an add of nothing) keeps the plain wording instead of
         // reporting that all zero of them were already here.
@@ -1168,7 +1168,7 @@ impl App {
             // and it does not replay a key into a screen the user has not
             // seen. Pinned by
             // `esc_between_the_last_finished_and_the_stop_is_swallowed_and_the_bounce_arrives`.
-            if job.finished >= job.params.repos.len() {
+            if job.finished >= job.params.plans.len() {
                 // Left for the next drain, which finishes the run through the
                 // one completion path. Esc costs a frame nobody perceives.
                 // Synthesising the completion here instead would duplicate what
@@ -1225,7 +1225,7 @@ impl App {
                 "{} after {} of {} repos. Press a to add the rest.",
                 verb,
                 job.created,
-                job.params.repos.len()
+                job.params.plans.len()
             ),
             StatusKind::Warning,
         );
@@ -1354,9 +1354,9 @@ impl App {
                             if !already_created
                                 && job
                                     .params
-                                    .repos
+                                    .plans
                                     .get(index)
-                                    .is_some_and(|p| job.params.skipped_as_slow(p))
+                                    .is_some_and(|p| job.params.skipped_as_slow(&p.path))
                             {
                                 lines.push(format!(
                                     "  {}",
@@ -1448,7 +1448,7 @@ impl App {
                         Some(job) => job,
                         None => return,
                     };
-                    if job.finished < job.params.repos.len() {
+                    if job.finished < job.params.plans.len() {
                         // The worker died without saying so: a cancelled one
                         // stops after a `Stopped` or without a job at all.
                         if let Some((progress, error, _)) = self.creating_mut() {
@@ -2162,9 +2162,9 @@ impl App {
 /// with no file name.
 fn repo_label(params: &crate::tui::actions::WorktreeParams, index: usize) -> String {
     params
-        .repos
+        .plans
         .get(index)
-        .and_then(|p| p.file_name())
+        .and_then(|p| p.path.file_name())
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "?".to_string())
 }
@@ -2217,7 +2217,8 @@ fn run_create_worker(
     tx: mpsc::SyncSender<CreateProgress>,
     cancel: Arc<AtomicBool>,
 ) {
-    for (index, repo_path) in params.repos.iter().enumerate() {
+    for (index, plan) in params.plans.iter().enumerate() {
+        let repo_path = &plan.path;
         if cancel.load(Ordering::Relaxed) {
             return;
         }
@@ -2248,7 +2249,7 @@ fn run_create_worker(
                     repo_path,
                     &params.workspace_dir,
                     &params.workspace_name,
-                    &params.branch_strategy,
+                    &plan.strategy,
                     params.pre_create_fetch(repo_path),
                     &cancel,
                 );
@@ -4023,12 +4024,32 @@ mod tests {
         crate::tui::actions::WorktreeParams {
             workspace_name: ws_name.to_string(),
             workspace_dir: ws_dir.to_path_buf(),
-            repos: repos.clone(),
-            branch_strategy: crate::core::workspace::BranchStrategy::DetachedHead,
+            plans: repos
+                .iter()
+                .map(|path| crate::tui::actions::RepoPlan {
+                    path: path.clone(),
+                    strategy: crate::core::workspace::BranchStrategy::DetachedHead,
+                })
+                .collect(),
             is_new: true,
             fresh_repos: repos,
             slow_fetch_repos: vec![],
         }
+    }
+
+    /// Give every repo of `params` the same strategy.
+    fn set_strategy(
+        params: &mut crate::tui::actions::WorktreeParams,
+        strategy: crate::core::workspace::BranchStrategy,
+    ) {
+        for plan in &mut params.plans {
+            plan.strategy = strategy.clone();
+        }
+    }
+
+    /// The repo paths of a run, in order.
+    fn plan_paths(params: &crate::tui::actions::WorktreeParams) -> Vec<PathBuf> {
+        params.plans.iter().map(|p| p.path.clone()).collect()
     }
 
     fn make_job(
@@ -4239,8 +4260,10 @@ mod tests {
         let ws_dir = tmp.path().join("spaces");
         let mut params = create_params(&ws_dir, "ws-a", vec![repo_a]);
         // `main` is checked out in the source repo, so git refuses the add.
-        params.branch_strategy =
-            crate::core::workspace::BranchStrategy::ExistingBranch("main".to_string());
+        set_strategy(
+            &mut params,
+            crate::core::workspace::BranchStrategy::ExistingBranch("main".to_string()),
+        );
 
         let (tx, rx) = mpsc::sync_channel::<CreateProgress>(64);
         run_create_worker(params, tx, Arc::new(AtomicBool::new(false)));
@@ -4479,7 +4502,7 @@ mod tests {
         // strategy did not rule it out.
         params.fresh_repos = vec![];
         assert!(matches!(
-            params.branch_strategy,
+            params.plans[0].strategy,
             crate::core::workspace::BranchStrategy::DetachedHead
         ));
 
@@ -4627,8 +4650,10 @@ mod tests {
         // `origin/*` (a detached HEAD would skip the fetch on its own), so
         // both would be fetched by a run that attempted them.
         params.fresh_repos = vec![];
-        params.branch_strategy =
-            crate::core::workspace::BranchStrategy::NewBranch("topic".to_string());
+        set_strategy(
+            &mut params,
+            crate::core::workspace::BranchStrategy::NewBranch("topic".to_string()),
+        );
         let (tx, rx) = mpsc::sync_channel::<CreateProgress>(64);
         run_create_worker(params, tx, Arc::new(AtomicBool::new(false)));
         let messages: Vec<CreateProgress> = rx.into_iter().collect();
@@ -5098,17 +5123,17 @@ mod tests {
         match action {
             ScreenAction::ExecuteWorktreeFlow(params) => {
                 assert_eq!(
-                    params.repos,
+                    plan_paths(&params),
                     vec![repo_a.clone(), repo_b.clone()],
                     "the retry runs every repo again, including the one already created"
                 );
                 assert!(
-                    matches!(
-                        params.branch_strategy,
+                    params.plans.iter().all(|p| matches!(
+                        p.strategy,
                         crate::core::workspace::BranchStrategy::DetachedHead
-                    ),
+                    )),
                     "the strategy the picker was re-entered to change, got {:?}",
-                    params.branch_strategy
+                    params.plans
                 );
                 assert_eq!(params.workspace_name, "ws-a", "the same space name");
             }
@@ -5139,7 +5164,7 @@ mod tests {
         };
         match action {
             ScreenAction::ExecuteWorktreeFlow(params) => assert_eq!(
-                params.repos,
+                plan_paths(&params),
                 vec![repo_a, repo_b],
                 "the add flow re-runs its whole list too"
             ),
@@ -5183,8 +5208,10 @@ mod tests {
         app.screen = creating_screen();
 
         let mut first = create_params(&ws_dir, "ws-a", vec![repo_a.clone(), repo_b.clone()]);
-        first.branch_strategy =
-            crate::core::workspace::BranchStrategy::ExistingBranch("topic".to_string());
+        set_strategy(
+            &mut first,
+            crate::core::workspace::BranchStrategy::ExistingBranch("topic".to_string()),
+        );
         let (tx, cancel, job) = make_job(first.clone());
         app.create_job = Some(job);
         run_create_worker(first, tx, cancel);
@@ -5229,7 +5256,10 @@ mod tests {
             _ => panic!("expected the create screen"),
         }
         let mut second = create_params(&ws_dir, "ws-a", vec![repo_a.clone(), repo_b.clone()]);
-        second.branch_strategy = crate::core::workspace::BranchStrategy::DetachedHead;
+        set_strategy(
+            &mut second,
+            crate::core::workspace::BranchStrategy::DetachedHead,
+        );
         let (worker_tx, worker_rx) = mpsc::sync_channel::<CreateProgress>(64);
         run_create_worker(second.clone(), worker_tx, Arc::new(AtomicBool::new(false)));
 
@@ -5330,7 +5360,10 @@ mod tests {
         // Put both repos in the space for real first: the retry below has to
         // meet worktrees, not a directory a test made.
         let mut seed = create_params(&ws_dir, "ws-a", vec![repo_a.clone(), repo_b.clone()]);
-        seed.branch_strategy = crate::core::workspace::BranchStrategy::DetachedHead;
+        set_strategy(
+            &mut seed,
+            crate::core::workspace::BranchStrategy::DetachedHead,
+        );
         let (seed_tx, _seed_rx) = mpsc::sync_channel::<CreateProgress>(64);
         run_create_worker(seed, seed_tx, Arc::new(AtomicBool::new(false)));
         for name in ["repo-a", "repo-b"] {
@@ -5353,8 +5386,10 @@ mod tests {
             st.branch_strategy_idx = 1;
         }
         let mut params = create_params(&ws_dir, "ws-a", vec![repo_a.clone(), repo_b.clone()]);
-        params.branch_strategy =
-            crate::core::workspace::BranchStrategy::ExistingBranch("ws-a".to_string());
+        set_strategy(
+            &mut params,
+            crate::core::workspace::BranchStrategy::ExistingBranch("ws-a".to_string()),
+        );
         let (tx, _cancel, job) = make_job(params);
         app.create_job = Some(job);
         tx.send(CreateProgress::Finished {

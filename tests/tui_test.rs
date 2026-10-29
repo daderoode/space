@@ -3706,7 +3706,7 @@ fn the_row_names_the_branch_enter_creates() {
         );
         let field = st.branch_name_input.value().to_string();
         match st.handle_key(key(KeyCode::Enter), &ctx) {
-            ScreenAction::ExecuteWorktreeFlow(p) => match p.branch_strategy {
+            ScreenAction::ExecuteWorktreeFlow(p) => match p.plans[0].strategy.clone() {
                 BranchStrategy::NewBranch(created) => assert_eq!(
                     label, created,
                     "case {:?}: the row said {:?} but Enter created {:?} (field {:?})",
@@ -4109,7 +4109,7 @@ fn the_add_row_names_the_branch_enter_creates() {
         );
         let field = st.branch_name_input.value().to_string();
         match st.handle_key(key(KeyCode::Enter), &ctx) {
-            ScreenAction::ExecuteWorktreeFlow(p) => match p.branch_strategy {
+            ScreenAction::ExecuteWorktreeFlow(p) => match p.plans[0].strategy.clone() {
                 BranchStrategy::NewBranch(created) => assert_eq!(
                     label, created,
                     "case {:?}: the row said {:?} but Enter created {:?} (field {:?})",
