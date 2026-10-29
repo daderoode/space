@@ -1,6 +1,6 @@
 use crate::core::workspace::BranchStrategy;
 use crate::tui::actions::{ScreenAction, ScreenContext, WorktreeParams};
-use crate::tui::screens::branch_plan::{Back, BranchPlan, ForkStep, Next, RowChoice};
+use crate::tui::screens::branch_plan::{Back, BranchPlan, ForkStep, Next, ReviewStep, RowChoice};
 use crate::tui::screens::sync_report::{LogView, SyncReport};
 use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -15,6 +15,7 @@ pub enum AddStage {
     PickBranchStrategy,
     EnterBranchName, // edit the new-branch name
     PickBranch,
+    ReviewPlan, // every repo's strategy, confirmed before anything is created
     Creating,
 }
 
@@ -114,6 +115,7 @@ impl AddState {
                 AddStage::Syncing
                     | AddStage::PickPlanMode
                     | AddStage::PickBranchStrategy
+                    | AddStage::ReviewPlan
                     | AddStage::Creating
             ),
         ) {
@@ -126,6 +128,7 @@ impl AddState {
             AddStage::PickBranchStrategy => self.handle_branch_strategy(key, ctx),
             AddStage::EnterBranchName => self.handle_enter_branch_name(key, ctx),
             AddStage::PickBranch => self.handle_pick_branch(key, ctx),
+            AddStage::ReviewPlan => self.handle_review(key, ctx),
             AddStage::Creating => self.handle_creating(key, ctx),
         }
     }
@@ -207,6 +210,7 @@ impl AddState {
                 self.error = None;
                 match self.plan.back(&self.selected_repos) {
                     Back::PreviousRepo => self.open_picker(),
+                    Back::Review => self.stage = AddStage::ReviewPlan,
                     Back::Fork => self.stage = AddStage::PickPlanMode,
                     Back::Repos => self.stage = AddStage::PickRepos,
                 }
@@ -390,6 +394,19 @@ impl AddState {
         ScreenAction::Continue
     }
 
+    /// The review table; mirrors the create flow.
+    fn handle_review(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
+        match self.plan.review_key(key.code, &self.selected_repos) {
+            ReviewStep::Stay => ScreenAction::Continue,
+            ReviewStep::Edit | ReviewStep::LastRepo => {
+                self.error = None;
+                self.open_picker();
+                ScreenAction::Continue
+            }
+            ReviewStep::Run => self.run(ctx),
+        }
+    }
+
     /// Open the strategy picker on the repo the plan is choosing for.
     fn open_picker(&mut self) {
         self.plan.open_picker(
@@ -417,18 +434,26 @@ impl AddState {
                 self.open_picker();
                 ScreenAction::Continue
             }
-            Next::Run => {
-                self.stage = AddStage::Creating;
-                ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
-                    workspace_name: self.workspace_name.clone(),
-                    workspace_dir: ctx.config.workspaces.dir.clone(),
-                    plans: self.plan.plans(&self.selected_repos),
-                    is_new: false,
-                    fresh_repos: self.report.fetched_ok_paths(),
-                    slow_fetch_repos: self.report.slow_fetch_paths(),
-                })
+            Next::Review => {
+                self.error = None;
+                self.stage = AddStage::ReviewPlan;
+                ScreenAction::Continue
             }
+            Next::Run => self.run(ctx),
         }
+    }
+
+    /// Start the run on what the plan holds.
+    fn run(&mut self, ctx: &ScreenContext) -> ScreenAction {
+        self.stage = AddStage::Creating;
+        ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
+            workspace_name: self.workspace_name.clone(),
+            workspace_dir: ctx.config.workspaces.dir.clone(),
+            plans: self.plan.plans(&self.selected_repos),
+            is_new: false,
+            fresh_repos: self.report.fetched_ok_paths(),
+            slow_fetch_repos: self.report.slow_fetch_paths(),
+        })
     }
 
     fn handle_creating(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {

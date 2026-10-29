@@ -7,7 +7,8 @@
 //!
 //! With more than one repo selected, the flow forks after the sync report:
 //! one strategy for every repo (the picker runs once, as it always has), or
-//! one per repo (the picker runs once for each repo in selection order).
+//! one per repo (the picker runs once for each repo in selection order, and
+//! a review table lists every repo's choice before anything is created).
 
 use crate::core::git::BranchInfo;
 use crate::core::workspace::BranchStrategy;
@@ -35,6 +36,8 @@ pub struct RowChoice {
 pub enum Next {
     /// Open the strategy picker for the next repo (`BranchPlan::current`).
     Configure,
+    /// Every repo has its strategy: show the review table.
+    Review,
     /// Every repo has its strategy: start the run.
     Run,
 }
@@ -44,10 +47,26 @@ pub enum Next {
 pub enum Back {
     /// The previous repo's picker, as that repo was left.
     PreviousRepo,
+    /// The review table, the repo's choice unchanged: it was reopened from
+    /// there.
+    Review,
     /// The fork between one strategy for all and one per repo.
     Fork,
     /// The repo picker: a single repo has no fork.
     Repos,
+}
+
+/// What a key on the review table did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReviewStep {
+    Stay,
+    /// Enter on a repo: open its picker (`BranchPlan::current`), to return
+    /// to the table once it is chosen.
+    Edit,
+    /// Enter on the last row: start the run.
+    Run,
+    /// Esc: back to the last repo's picker.
+    LastRepo,
 }
 
 /// What a key on the fork did.
@@ -67,9 +86,16 @@ pub struct BranchPlan {
     pub per_repo: bool,
     /// The fork's highlighted option: 0 is one strategy for all, 1 per repo.
     pub fork_idx: usize,
-    /// In per-repo mode, the index in the selection of the repo the picker
-    /// is choosing for.
+    /// In per-repo mode, or while a repo reopened from the review table is
+    /// being chosen, the index in the selection of the repo the picker is
+    /// choosing for.
     pub current: usize,
+    /// The review table's highlighted row: a repo's index in the selection,
+    /// or the selection's length for the row that starts the run.
+    pub review_cursor: usize,
+    /// The picker is choosing for one repo reopened from the review table,
+    /// and goes back there once it has.
+    editing: bool,
 }
 
 impl BranchPlan {
@@ -94,14 +120,20 @@ impl BranchPlan {
         }
     }
 
+    /// Whether the picker is choosing one strategy for every repo, rather
+    /// than for the one repo at `current`.
+    fn for_all(&self) -> bool {
+        !self.per_repo && !self.editing
+    }
+
     /// The repo whose branches the picker lists: the one being configured,
     /// or with one strategy for all, the first selected (the branches are
     /// offered for every repo, so they can only come from one of them).
     pub fn picker_repo<'a>(&self, repos: &'a [PathBuf]) -> Option<&'a PathBuf> {
-        if self.per_repo {
-            repos.get(self.current)
-        } else {
+        if self.for_all() {
             repos.first()
+        } else {
+            repos.get(self.current)
         }
     }
 
@@ -129,7 +161,7 @@ impl BranchPlan {
         *recent = repo
             .map(|p| crate::core::git::recent_branches(p, RECENT_BRANCHES))
             .unwrap_or_default();
-        if !self.per_repo {
+        if self.for_all() {
             *strategy_idx = 0;
             return;
         }
@@ -151,7 +183,15 @@ impl BranchPlan {
     /// with one strategy for all) and say where the flow goes next. Every key
     /// that chooses a strategy, in both flows, ends here.
     pub fn record(&mut self, repos: &[PathBuf], choice: RowChoice) -> Next {
-        if !self.per_repo {
+        if self.editing {
+            if let Some(repo) = repos.get(self.current) {
+                self.choices.insert(repo.clone(), choice);
+            }
+            self.editing = false;
+            self.review_cursor = repos.len();
+            return Next::Review;
+        }
+        if self.for_all() {
             for repo in repos {
                 self.choices.insert(repo.clone(), choice.clone());
             }
@@ -164,13 +204,19 @@ impl BranchPlan {
             self.current += 1;
             Next::Configure
         } else {
-            Next::Run
+            // The table opens on the row that starts the run, so Enter
+            // confirms what it lists.
+            self.review_cursor = repos.len();
+            Next::Review
         }
     }
 
     /// Esc on the strategy picker.
     pub fn back(&mut self, repos: &[PathBuf]) -> Back {
-        if self.per_repo && self.current > 0 {
+        if self.editing {
+            self.editing = false;
+            Back::Review
+        } else if self.per_repo && self.current > 0 {
             self.current -= 1;
             Back::PreviousRepo
         } else if repos.len() > 1 {
@@ -178,6 +224,37 @@ impl BranchPlan {
         } else {
             Back::Repos
         }
+    }
+
+    /// The review table's keys. Its rows are the repos in selection order,
+    /// then the row that starts the run.
+    pub fn review_key(&mut self, code: KeyCode, repos: &[PathBuf]) -> ReviewStep {
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.review_cursor = self.review_cursor.saturating_sub(1);
+                ReviewStep::Stay
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.review_cursor = (self.review_cursor + 1).min(repos.len());
+                ReviewStep::Stay
+            }
+            KeyCode::Enter if self.review_cursor >= repos.len() => ReviewStep::Run,
+            KeyCode::Enter => {
+                self.current = self.review_cursor;
+                self.editing = true;
+                ReviewStep::Edit
+            }
+            KeyCode::Esc => {
+                self.current = repos.len().saturating_sub(1);
+                ReviewStep::LastRepo
+            }
+            _ => ReviewStep::Stay,
+        }
+    }
+
+    /// A repo's recorded strategy.
+    pub fn strategy_of(&self, repo: &Path) -> Option<&BranchStrategy> {
+        self.choices.get(repo).map(|c| &c.strategy)
     }
 
     /// The run's repos in selection order, each with its recorded strategy.
@@ -196,7 +273,7 @@ impl BranchPlan {
     /// The strategy picker's title: which repo it is choosing for. The repo
     /// name is cut to `name_cols` so the count after it stays on the border.
     pub fn picker_title(&self, repos: &[PathBuf], name_cols: usize) -> String {
-        if self.per_repo {
+        if !self.for_all() {
             let name = self
                 .picker_repo(repos)
                 .map(|p| repo_name(p))
@@ -238,8 +315,8 @@ pub fn repo_name(path: &Path) -> String {
         .unwrap_or_else(|| "?".to_string())
 }
 
-/// A strategy in a few words, for the Creating log of a run whose repos do
-/// not all share one.
+/// A strategy in a few words, for the review table and for the Creating log
+/// of a run whose repos do not all share one.
 pub fn describe(strategy: &BranchStrategy) -> String {
     match strategy {
         BranchStrategy::NewBranch(name) => format!("new branch '{}'", name),

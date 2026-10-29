@@ -156,6 +156,43 @@ fn plans_of(action: ScreenAction) -> Vec<RepoPlan> {
     }
 }
 
+/// Drive the Creating worker to the end, as the run loop does each frame.
+fn pump_creating(app: &mut App) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while app.creating_in_flight() {
+        app.poll_create_result();
+        assert!(std::time::Instant::now() < deadline, "the run must end");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+}
+
+/// The branch a worktree is on, or `HEAD` when detached.
+fn head_of(worktree: &Path) -> String {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(worktree)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{:?} is not a worktree", worktree);
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+fn render(app: &App, width: u16, height: u16) -> Vec<String> {
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| space::tui::ui::view(app, frame))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect()
+}
+
 /// Down `n` times on the strategy picker.
 fn down(app: &mut App, n: usize) {
     for _ in 0..n {
@@ -183,11 +220,22 @@ fn detached(app: &mut App) -> ScreenAction {
 fn a_single_repo_create_shows_no_fork() {
     let env = TestEnv::new();
     let alpha = env.create_repo("alpha");
-    let app = create_past_sync(&env, "ws", std::slice::from_ref(&alpha));
+    let mut app = create_past_sync(&env, "ws", std::slice::from_ref(&alpha));
     assert_eq!(
         create_stage(&app),
         CreateStage::PickBranchStrategy,
         "one repo goes straight to the strategy picker"
+    );
+    assert_eq!(
+        create_state(&app)
+            .plan
+            .picker_title(std::slice::from_ref(&alpha), 28),
+        " Branch Strategy "
+    );
+    assert_eq!(
+        plans_of(detached(&mut app)).len(),
+        1,
+        "and from it straight to the run, with no review table"
     );
 }
 
@@ -367,9 +415,11 @@ fn a_two_repo_space_gets_each_repo_its_own_strategy() {
     // bravo: its most recent branch, "topic".
     assert_eq!(recent_names(&app)[0], "topic");
     down(&mut app, 3);
-    let plans = plans_of(create_action(&mut app, KeyCode::Enter));
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(create_stage(&app), CreateStage::ReviewPlan);
+    let st = create_state(&app);
     assert_eq!(
-        plans,
+        st.plan.plans(&st.selected_repos),
         vec![
             RepoPlan {
                 path: alpha,
@@ -381,6 +431,14 @@ fn a_two_repo_space_gets_each_repo_its_own_strategy() {
             },
         ]
     );
+
+    // The table opens on the row that starts the run.
+    press(&mut app, KeyCode::Enter);
+    pump_creating(&mut app);
+    assert!(matches!(app.screen, Screen::Dashboard), "the run completes");
+    let space = env.workspaces_dir.join("ws");
+    assert_eq!(head_of(&space.join("alpha")), "feat-a");
+    assert_eq!(head_of(&space.join("bravo")), "topic");
 }
 
 /// Acceptance: one strategy for all behaves as it always has, and choosing
@@ -401,7 +459,9 @@ fn one_strategy_for_all_and_per_repo_reach_the_same_run() {
     let mut each = create_past_sync(&env, "ws", &repos);
     per_repo(&mut each);
     assert!(matches!(detached(&mut each), ScreenAction::Continue));
-    let each_plans = plans_of(detached(&mut each));
+    assert!(matches!(detached(&mut each), ScreenAction::Continue));
+    assert_eq!(create_stage(&each), CreateStage::ReviewPlan);
+    let each_plans = plans_of(create_action(&mut each, KeyCode::Enter));
 
     assert_eq!(all_plans, each_plans);
     assert!(all_plans
@@ -453,4 +513,148 @@ fn question_mark_opens_help_on_the_fork() {
     let mut app = add_past_sync(&env, "ws", &repos);
     press(&mut app, KeyCode::Char('?'));
     assert!(app.help.is_some());
+}
+
+/// Per repo, through to the review table: alpha detached, bravo on a new
+/// branch named after the space.
+fn create_on_review(env: &TestEnv, repos: &[PathBuf]) -> App {
+    let mut app = create_past_sync(env, "ws", repos);
+    per_repo(&mut app);
+    detached(&mut app);
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(create_stage(&app), CreateStage::ReviewPlan);
+    app
+}
+
+/// Acceptance: Enter on a row of the table reopens that repo's choice where
+/// it was left, and choosing returns to the table; Esc on the reopened
+/// picker returns to the table with the choice unchanged.
+#[test]
+fn enter_on_a_review_row_reopens_that_repos_choice() {
+    let env = TestEnv::new();
+    let repos = [env.create_repo("alpha"), env.create_repo("bravo")];
+    let mut app = create_on_review(&env, &repos);
+    assert_eq!(create_state(&app).plan.review_cursor, 2, "on the start row");
+
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Enter);
+    let st = create_state(&app);
+    assert_eq!(st.stage, CreateStage::PickBranchStrategy);
+    assert_eq!(st.branch_strategy_idx, 2, "alpha's detached HEAD row");
+    assert_eq!(
+        st.plan.picker_title(&st.selected_repos, 28),
+        " Branch Strategy: alpha (1 of 2) "
+    );
+
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(create_stage(&app), CreateStage::ReviewPlan);
+    let st = create_state(&app);
+    assert_eq!(
+        st.plan.strategy_of(&repos[0]),
+        Some(&BranchStrategy::DetachedHead),
+        "Esc changed nothing"
+    );
+
+    // Reopen alpha and give it a new branch instead.
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(create_stage(&app), CreateStage::EnterBranchName);
+    press(&mut app, KeyCode::Enter);
+    let st = create_state(&app);
+    assert_eq!(st.stage, CreateStage::ReviewPlan, "back on the table");
+    assert_eq!(
+        st.plan.strategy_of(&repos[0]),
+        Some(&BranchStrategy::NewBranch("ws".to_string()))
+    );
+    assert_eq!(
+        st.plan.strategy_of(&repos[1]),
+        Some(&BranchStrategy::NewBranch("ws".to_string())),
+        "bravo is as it was"
+    );
+}
+
+/// Decision 1: Esc on the table steps back to the last repo's choice.
+#[test]
+fn esc_on_the_review_table_goes_back_to_the_last_repo() {
+    let env = TestEnv::new();
+    let repos = [env.create_repo("alpha"), env.create_repo("bravo")];
+    let mut app = create_on_review(&env, &repos);
+    press(&mut app, KeyCode::Esc);
+    let st = create_state(&app);
+    assert_eq!(st.stage, CreateStage::PickBranchStrategy);
+    assert_eq!(st.plan.current, 1, "bravo, the last repo");
+    assert_eq!(st.branch_strategy_idx, 0, "on the row bravo was left on");
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(
+        create_state(&app).plan.current,
+        0,
+        "and from there the loop walks back as usual"
+    );
+}
+
+/// Acceptance: the table lists every repo with its strategy and reads at the
+/// documented 80-column minimum. A long repo name is cut to a third of the
+/// dialog so the strategy beside it is still on the row, and the start row
+/// is there in full.
+#[test]
+fn the_review_table_reads_at_eighty_columns() {
+    let env = TestEnv::new();
+    let long = "the-repository-with-a-name-far-longer-than-the-column";
+    let repos = [env.create_repo("api"), env.create_repo(long)];
+    let mut app = create_on_review(&env, &repos);
+    press(&mut app, KeyCode::Up);
+
+    let rows = render(&app, 80, 24);
+    let dialog_row = |needle: &str| {
+        rows.iter()
+            .find(|r| r.contains(needle))
+            .unwrap_or_else(|| panic!("no row shows {:?}:\n{}", needle, rows.join("\n")))
+            .clone()
+    };
+    // Each row's text sits between two of the dialog's borders, whatever the
+    // dashboard draws behind it.
+    let cell = |row: &str, needle: &str| -> String {
+        row.split('\u{2502}')
+            .find(|s| s.contains(needle))
+            .unwrap_or_else(|| panic!("{:?} is not inside the dialog: {:?}", needle, row))
+            .to_string()
+    };
+
+    assert!(dialog_row(" Review: 2 repos ").contains("Review"));
+    let api = cell(&dialog_row("  api "), "api");
+    assert!(api.contains("detached HEAD"), "got {:?}", api);
+    let long_row = dialog_row("the-repository-wi");
+    let long_cell = cell(&long_row, "the-repository-wi");
+    assert!(
+        long_cell.starts_with("> the-repository-wi") && long_cell.contains("..."),
+        "the long name is cut, got {:?}",
+        long_cell
+    );
+    assert!(
+        long_cell.contains("new branch 'ws'"),
+        "the strategy is still on the row, got {:?}",
+        long_cell
+    );
+    assert!(cell(&dialog_row("Create 2 repos"), "Create").contains("Create 2 repos"));
+    assert!(dialog_row("ESC back").contains("ENTER change the repo, or start"));
+    assert!(rows
+        .iter()
+        .all(|r| unicode_width::UnicodeWidthStr::width(r.as_str()) <= 80));
+}
+
+#[test]
+fn question_mark_on_the_review_table_opens_its_help() {
+    let env = TestEnv::new();
+    let repos = [env.create_repo("alpha"), env.create_repo("bravo")];
+    let mut app = create_on_review(&env, &repos);
+    press(&mut app, KeyCode::Char('?'));
+    assert!(app.help.is_some(), "the table types nothing, so ? is help");
+    assert_eq!(
+        space::tui::screens::help::landing_group(&app.screen, app.focus),
+        space::tui::keybindings::PLAN_REVIEW_NAME
+    );
 }

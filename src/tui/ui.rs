@@ -685,6 +685,13 @@ fn render_create_overlay(
                 crate::tui::widgets::fuzzy_picker::render(picker, show_cursor, frame);
             }
         }
+        CreateStage::ReviewPlan => render_plan_review(
+            frame,
+            &state.plan,
+            &state.selected_repos,
+            "Create",
+            state.error.as_deref(),
+        ),
         CreateStage::Syncing => render_sync_report(frame, &state.report),
         CreateStage::Creating => render_creating_log(
             frame,
@@ -917,6 +924,109 @@ fn render_plan_fork(frame: &mut Frame, fork_idx: usize, repos: usize) {
         })
         .collect();
     frame.render_widget(List::new(items), inner);
+}
+
+/// The review table: every selected repo with the strategy chosen for it, in
+/// selection order, then the row that starts the run (`verb` names it). The
+/// REPO column takes at most a third of the width, so the strategy beside a
+/// long repo name is still read; both are cut to fit rather than wrapped.
+/// Taller than the frame allows, the list scrolls to keep the cursor shown.
+fn render_plan_review(
+    frame: &mut Frame,
+    plan: &crate::tui::screens::branch_plan::BranchPlan,
+    repos: &[std::path::PathBuf],
+    verb: &str,
+    error: Option<&str>,
+) {
+    use crate::tui::screens::branch_plan::{describe, repo_name};
+    use ratatui::widgets::{Clear, ListState};
+    let frame_area = frame.area();
+    let dialog_w = percent_of(frame_area.width, 70, 62);
+    let inner_w = usize::from(dialog_w.saturating_sub(2));
+    let n = repos.len();
+    // The repo rows, a blank row and the run row; below them the error (a
+    // blank row and two of text) and the hint.
+    let list_rows = n + 2;
+    let below = if error.is_some() { 4 } else { 1 };
+    let cap = percent_of(frame_area.height, 80, 8);
+    let height = fit_u16(list_rows + below + 2).min(cap);
+    let area = centered_rect_fixed(dialog_w, height, frame_area);
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(if error.is_some() {
+            theme::border_danger()
+        } else {
+            theme::border_focused()
+        })
+        .title(format!(" Review: {} repos ", n));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let sections = if error.is_some() {
+        Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Length(1),
+        ])
+        .split(inner)
+    } else {
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner)
+    };
+
+    let name_w = repos
+        .iter()
+        .map(|p| line_width(&repo_name(p)))
+        .max()
+        .unwrap_or(0)
+        .min(inner_w / 3);
+    let marker = |selected: bool| if selected { "> " } else { "  " };
+    let mut items: Vec<ListItem> = repos
+        .iter()
+        .enumerate()
+        .map(|(i, repo)| {
+            let name = pad_to(&truncate_for_width(&repo_name(repo), name_w), name_w);
+            let strategy = plan
+                .strategy_of(repo)
+                .map(describe)
+                .unwrap_or_else(|| "not chosen".to_string());
+            let line = truncate_for_width(
+                &format!("{}{}  {}", marker(i == plan.review_cursor), name, strategy),
+                inner_w,
+            );
+            if i == plan.review_cursor {
+                ListItem::new(line).style(theme::selected())
+            } else {
+                ListItem::new(line)
+            }
+        })
+        .collect();
+    items.push(ListItem::new(""));
+    let on_run = plan.review_cursor >= n;
+    let run = format!("{}{} {} repos", marker(on_run), verb, n);
+    items.push(if on_run {
+        ListItem::new(run).style(theme::selected())
+    } else {
+        ListItem::new(run)
+    });
+    let mut state =
+        ListState::default().with_selected(Some(if on_run { n + 1 } else { plan.review_cursor }));
+    frame.render_stateful_widget(List::new(items), sections[0], &mut state);
+
+    if let Some(err) = error {
+        frame.render_widget(
+            Paragraph::new(format!("\u{26a0}  {}", err))
+                .style(theme::error())
+                .wrap(Wrap { trim: false }),
+            sections[2],
+        );
+    }
+    frame.render_widget(
+        Paragraph::new("ENTER change the repo, or start \u{b7} ESC back").style(theme::muted()),
+        sections[sections.len() - 1],
+    );
 }
 
 /// The branch strategy picker (Stage 4 of create, Stage 3 of add). `title`
@@ -1314,6 +1424,13 @@ fn render_add_overlay(
                 crate::tui::widgets::fuzzy_picker::render(picker, show_cursor, frame);
             }
         }
+        AddStage::ReviewPlan => render_plan_review(
+            frame,
+            &state.plan,
+            &state.selected_repos,
+            "Add",
+            state.error.as_deref(),
+        ),
         AddStage::Syncing => render_sync_report(frame, &state.report),
         AddStage::Creating => render_creating_log(
             frame,

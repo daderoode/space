@@ -1,5 +1,5 @@
 use crate::core::workspace::BranchStrategy;
-use crate::tui::screens::branch_plan::{Back, BranchPlan, ForkStep, Next, RowChoice};
+use crate::tui::screens::branch_plan::{Back, BranchPlan, ForkStep, Next, ReviewStep, RowChoice};
 use crate::tui::screens::sync_report::{LogView, SyncReport};
 use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
 use std::path::PathBuf;
@@ -14,6 +14,7 @@ pub enum CreateStage {
     PickBranchStrategy,
     EnterBranchName, // edit the new-branch name
     PickBranch,
+    ReviewPlan, // every repo's strategy, confirmed before anything is created
     Creating,
 }
 
@@ -103,6 +104,7 @@ impl CreateState {
                 CreateStage::Syncing
                     | CreateStage::PickPlanMode
                     | CreateStage::PickBranchStrategy
+                    | CreateStage::ReviewPlan
                     | CreateStage::Creating
             ),
         ) {
@@ -116,6 +118,7 @@ impl CreateState {
             CreateStage::PickBranchStrategy => self.handle_branch_strategy(key, ctx),
             CreateStage::EnterBranchName => self.handle_enter_branch_name(key, ctx),
             CreateStage::PickBranch => self.handle_pick_branch(key, ctx),
+            CreateStage::ReviewPlan => self.handle_review(key, ctx),
             CreateStage::Creating => self.handle_creating(key, ctx),
         }
     }
@@ -257,6 +260,7 @@ impl CreateState {
                 self.error = None;
                 match self.plan.back(&self.selected_repos) {
                     Back::PreviousRepo => self.open_picker(),
+                    Back::Review => self.stage = CreateStage::ReviewPlan,
                     Back::Fork => self.stage = CreateStage::PickPlanMode,
                     Back::Repos => self.stage = CreateStage::PickRepos,
                 }
@@ -501,6 +505,25 @@ impl CreateState {
         crate::tui::actions::ScreenAction::Continue
     }
 
+    /// The review table: Enter on a repo reopens its picker and comes back
+    /// here, Enter on the last row starts the run, Esc goes back to the last
+    /// repo's picker.
+    fn handle_review(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+        ctx: &crate::tui::actions::ScreenContext,
+    ) -> crate::tui::actions::ScreenAction {
+        match self.plan.review_key(key.code, &self.selected_repos) {
+            ReviewStep::Stay => crate::tui::actions::ScreenAction::Continue,
+            ReviewStep::Edit | ReviewStep::LastRepo => {
+                self.error = None;
+                self.open_picker();
+                crate::tui::actions::ScreenAction::Continue
+            }
+            ReviewStep::Run => self.run(ctx),
+        }
+    }
+
     /// Open the strategy picker on the repo the plan is choosing for.
     fn open_picker(&mut self) {
         self.plan.open_picker(
@@ -520,7 +543,7 @@ impl CreateState {
         strategy: BranchStrategy,
         ctx: &crate::tui::actions::ScreenContext,
     ) -> crate::tui::actions::ScreenAction {
-        use crate::tui::actions::{ScreenAction, WorktreeParams};
+        use crate::tui::actions::ScreenAction;
         let choice = RowChoice {
             strategy,
             strategy_idx: self.branch_strategy_idx,
@@ -533,18 +556,31 @@ impl CreateState {
                 self.open_picker();
                 ScreenAction::Continue
             }
-            Next::Run => {
-                self.stage = CreateStage::Creating;
-                ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
-                    workspace_name: self.ws_name.value().to_string(),
-                    workspace_dir: ctx.config.workspaces.dir.clone(),
-                    plans: self.plan.plans(&self.selected_repos),
-                    is_new: true,
-                    fresh_repos: self.report.fetched_ok_paths(),
-                    slow_fetch_repos: self.report.slow_fetch_paths(),
-                })
+            Next::Review => {
+                self.error = None;
+                self.stage = CreateStage::ReviewPlan;
+                ScreenAction::Continue
             }
+            Next::Run => self.run(ctx),
         }
+    }
+
+    /// Start the run on what the plan holds.
+    fn run(
+        &mut self,
+        ctx: &crate::tui::actions::ScreenContext,
+    ) -> crate::tui::actions::ScreenAction {
+        self.stage = CreateStage::Creating;
+        crate::tui::actions::ScreenAction::ExecuteWorktreeFlow(
+            crate::tui::actions::WorktreeParams {
+                workspace_name: self.ws_name.value().to_string(),
+                workspace_dir: ctx.config.workspaces.dir.clone(),
+                plans: self.plan.plans(&self.selected_repos),
+                is_new: true,
+                fresh_repos: self.report.fetched_ok_paths(),
+                slow_fetch_repos: self.report.slow_fetch_paths(),
+            },
+        )
     }
 
     /// Whether the branch name field is still the one this flow filled in, or

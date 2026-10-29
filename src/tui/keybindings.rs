@@ -19,6 +19,7 @@ pub const WORKSPACE_PANE_NAME: &str = "Workspace Pane";
 pub const REPO_PANE_NAME: &str = "Repo Pane";
 pub const REPO_PICKER_NAME: &str = "Repo Picker";
 pub const CREATE_ADD_FLOW_NAME: &str = "Create / Add Flow";
+pub const PLAN_REVIEW_NAME: &str = "Plan Review";
 pub const CREATING_LOG_NAME: &str = "Creating Log";
 pub const DELETE_CONFIRM_NAME: &str = "Delete Confirm";
 pub const SWITCH_BRANCH_NAME: &str = "Switch Branch";
@@ -336,6 +337,26 @@ const CREATE_ADD_FLOW: BindingGroup = BindingGroup {
     ],
 };
 
+/// The review table that lists every repo's strategy before a per-repo run
+/// (`branch_plan::BranchPlan::review_key`).
+const PLAN_REVIEW: BindingGroup = BindingGroup {
+    name: PLAN_REVIEW_NAME,
+    bindings: &[
+        Binding {
+            key: "\u{2191}\u{2193}/jk",
+            desc: "Select a repo, or the start row",
+        },
+        Binding {
+            key: "Enter",
+            desc: "Change that repo, or start",
+        },
+        Binding {
+            key: "Esc",
+            desc: "Back to the last repo",
+        },
+    ],
+};
+
 const CREATING_LOG: BindingGroup = BindingGroup {
     name: CREATING_LOG_NAME,
     bindings: &[
@@ -487,12 +508,13 @@ const HELP_OVERLAY: BindingGroup = BindingGroup {
 
 /// All binding groups, consumed by the help overlay.
 pub fn all_groups() -> &'static [BindingGroup] {
-    static GROUPS: [BindingGroup; 15] = [
+    static GROUPS: [BindingGroup; 16] = [
         NAVIGATION,
         WORKSPACE_PANE,
         REPO_PANE,
         REPO_PICKER,
         CREATE_ADD_FLOW,
+        PLAN_REVIEW,
         CREATING_LOG,
         DELETE_CONFIRM,
         SWITCH_BRANCH,
