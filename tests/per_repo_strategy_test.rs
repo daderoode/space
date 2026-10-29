@@ -658,6 +658,31 @@ fn question_mark_on_the_review_table_opens_its_help() {
         space::tui::screens::help::landing_group(&app.screen, app.focus),
         space::tui::keybindings::PLAN_REVIEW_NAME
     );
+
+    // The add flow's table, whose allowlist is its own.
+    let mut app = add_past_sync(&env, "ws", &repos);
+    for code in [
+        KeyCode::Down,
+        KeyCode::Enter,
+        KeyCode::Down,
+        KeyCode::Down,
+        KeyCode::Enter,
+        KeyCode::Down,
+        KeyCode::Down,
+        KeyCode::Enter,
+    ] {
+        press(&mut app, code);
+    }
+    match &app.screen {
+        Screen::AddRepos(st) => assert_eq!(st.stage, AddStage::ReviewPlan),
+        _ => panic!("expected the add screen"),
+    }
+    press(&mut app, KeyCode::Char('?'));
+    assert!(app.help.is_some());
+    assert_eq!(
+        space::tui::screens::help::landing_group(&app.screen, app.focus),
+        space::tui::keybindings::PLAN_REVIEW_NAME
+    );
 }
 
 /// Three repos with `topic`, checked out in bravo's source only, and the
@@ -712,6 +737,7 @@ fn a_refused_repo_does_not_stop_the_run_and_the_retry_creates_only_what_is_missi
 
     let rows = render(&app, 80, 24).join("\n");
     assert!(rows.contains("Retry 1 repos"), "got:\n{}", rows);
+    assert!(rows.contains("ESC leave"), "got:\n{}", rows);
     assert!(
         rows.contains("refused \u{b7} branch 'topic'"),
         "got:\n{}",
@@ -759,6 +785,8 @@ fn esc_on_the_table_after_a_run_leaves_with_what_is_in_place() {
     let (mut app, _) = topic_refused_by_bravo(&env);
     existing_topic_for_all(&mut app);
     assert_eq!(create_stage(&app), CreateStage::ReviewPlan);
+    // A second space that sorts first, so selecting by name is not index 0.
+    std::fs::create_dir_all(env.workspaces_dir.join("aaa-other")).unwrap();
 
     press(&mut app, KeyCode::Esc);
     assert!(matches!(app.screen, Screen::Dashboard));
@@ -766,8 +794,9 @@ fn esc_on_the_table_after_a_run_leaves_with_what_is_in_place() {
         app.status_message.as_deref(),
         Some("2 of 3 repos in place. Press a to add the rest.")
     );
-    assert!(
-        app.workspaces.iter().any(|w| w.name == "topic"),
-        "the dashboard lists the partial space"
+    assert_eq!(
+        app.workspaces.get(app.selected_ws).map(|w| w.name.as_str()),
+        Some("topic"),
+        "the partial space is selected, so `a` adds to it"
     );
 }

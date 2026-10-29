@@ -929,21 +929,32 @@ impl App {
 
     /// Refresh workspace list when leaving the Creating stage, or the review
     /// table a run returned to. Catches partially-created worktrees from
-    /// error scenarios.
+    /// error scenarios. The flow's space is selected by name, as the cancel
+    /// path does, because the messages these exits leave point at it ("Press
+    /// a to add the rest" adds to the selected space).
     fn refresh_if_leaving_creating_stage(&mut self) {
         use crate::tui::screens::{add::AddStage, create::CreateStage};
-        let is_creating = matches!(
-            &self.screen,
+        let space = match &self.screen {
             Screen::CreateWorkspace(st)
-                if matches!(st.stage, CreateStage::Creating | CreateStage::ReviewPlan)
-        ) || matches!(
-            &self.screen,
-            Screen::AddRepos(st) if matches!(st.stage, AddStage::Creating | AddStage::ReviewPlan)
-        );
-        if is_creating {
+                if matches!(st.stage, CreateStage::Creating | CreateStage::ReviewPlan) =>
+            {
+                Some(st.ws_name.value().to_string())
+            }
+            Screen::AddRepos(st)
+                if matches!(st.stage, AddStage::Creating | AddStage::ReviewPlan) =>
+            {
+                Some(st.workspace_name.clone())
+            }
+            _ => None,
+        };
+        if let Some(space) = space {
             if let Ok(ws) = crate::core::workspace::list_workspaces(&self.config.workspaces.dir) {
                 self.workspaces = ws;
-                self.selected_ws = 0;
+                self.selected_ws = self
+                    .workspaces
+                    .iter()
+                    .position(|w| w.name == space)
+                    .unwrap_or(0);
                 self.reset_repo_pane_state();
                 // Intentionally synchronous: worktree deletion is infrequent and
                 // the user expects up-to-date data before seeing the dashboard.

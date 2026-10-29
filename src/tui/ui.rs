@@ -1054,8 +1054,14 @@ fn render_plan_review(
             sections[2],
         );
     }
+    // After a run there is nothing to go back to: Esc leaves.
+    let hint = if has_run {
+        "ENTER change the repo, or retry \u{b7} ESC leave"
+    } else {
+        "ENTER change the repo, or start \u{b7} ESC back"
+    };
     frame.render_widget(
-        Paragraph::new("ENTER change the repo, or start \u{b7} ESC back").style(theme::muted()),
+        Paragraph::new(hint).style(theme::muted()),
         sections[sections.len() - 1],
     );
 }
