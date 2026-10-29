@@ -9217,7 +9217,7 @@ mod help_overlay_tests {
             "Create / Add Flow | Esc | Back a stage, or to the previous repo",
             "Plan Review | ↑↓/jk | Select a repo, or the start row",
             "Plan Review | Enter | Change that repo, or start",
-            "Plan Review | Esc | Back to the last repo",
+            "Plan Review | Esc | Last repo's choice; after a run, leave",
             "Creating Log | ↑↓/jk | Scroll the log",
             "Creating Log | PgUp/PgDn | Page the log",
             "Creating Log | Home/End | Top / bottom (End resumes follow)",

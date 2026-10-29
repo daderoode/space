@@ -931,6 +931,10 @@ fn render_plan_fork(frame: &mut Frame, fork_idx: usize, repos: usize) {
 /// REPO column takes at most a third of the width, so the strategy beside a
 /// long repo name is still read; both are cut to fit rather than wrapped.
 /// Taller than the frame allows, the list scrolls to keep the cursor shown.
+///
+/// After a run each repo is marked with how it went, ahead of its strategy
+/// so a cut never takes the mark: in place (dimmed, closed to change),
+/// refused, or failed. The start row then retries what is not in place.
 fn render_plan_review(
     frame: &mut Frame,
     plan: &crate::tui::screens::branch_plan::BranchPlan,
@@ -938,7 +942,7 @@ fn render_plan_review(
     verb: &str,
     error: Option<&str>,
 ) {
-    use crate::tui::screens::branch_plan::{describe, repo_name};
+    use crate::tui::screens::branch_plan::{describe, repo_name, RowOutcome};
     use ratatui::widgets::{Clear, ListState};
     let frame_area = frame.area();
     let dialog_w = percent_of(frame_area.width, 70, 62);
@@ -983,6 +987,7 @@ fn render_plan_review(
         .unwrap_or(0)
         .min(inner_w / 3);
     let marker = |selected: bool| if selected { "> " } else { "  " };
+    let has_run = plan.has_run();
     let mut items: Vec<ListItem> = repos
         .iter()
         .enumerate()
@@ -992,12 +997,34 @@ fn render_plan_review(
                 .strategy_of(repo)
                 .map(describe)
                 .unwrap_or_else(|| "not chosen".to_string());
+            let outcome = plan.outcome_of(repo);
+            let mark = match outcome {
+                _ if !has_run => "",
+                Some(RowOutcome::Placed) => "\u{2713} ",
+                Some(RowOutcome::Refused) | Some(RowOutcome::Failed(_)) => "\u{2717} ",
+                None => "  ",
+            };
+            let status = match outcome {
+                Some(RowOutcome::Placed) => "in place \u{b7} ",
+                Some(RowOutcome::Refused) => "refused \u{b7} ",
+                Some(RowOutcome::Failed(_)) => "failed \u{b7} ",
+                None => "",
+            };
             let line = truncate_for_width(
-                &format!("{}{}  {}", marker(i == plan.review_cursor), name, strategy),
+                &format!(
+                    "{}{}{}  {}{}",
+                    marker(i == plan.review_cursor),
+                    mark,
+                    name,
+                    status,
+                    strategy
+                ),
                 inner_w,
             );
             if i == plan.review_cursor {
                 ListItem::new(line).style(theme::selected())
+            } else if outcome == Some(&RowOutcome::Placed) {
+                ListItem::new(line).style(theme::muted())
             } else {
                 ListItem::new(line)
             }
@@ -1005,7 +1032,11 @@ fn render_plan_review(
         .collect();
     items.push(ListItem::new(""));
     let on_run = plan.review_cursor >= n;
-    let run = format!("{}{} {} repos", marker(on_run), verb, n);
+    let run = if has_run {
+        format!("{}Retry {} repos", marker(on_run), n - plan.placed(repos))
+    } else {
+        format!("{}{} {} repos", marker(on_run), verb, n)
+    };
     items.push(if on_run {
         ListItem::new(run).style(theme::selected())
     } else {

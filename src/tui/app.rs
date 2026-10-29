@@ -4,6 +4,7 @@ use crate::core::{
     workspace::{self, FetchOutcome, SyncOutcome, Workspace},
 };
 use crate::tui::actions::StatusKind;
+use crate::tui::screens::branch_plan::{BranchPlan, RowOutcome};
 use crate::tui::screens::sync_report::PAGE_ROWS;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -49,7 +50,7 @@ pub enum SyncProgress {
 /// neither success nor failure in git's terms and is both in the user's: no
 /// worktree was added by this run, and one is in place. It counts as created
 /// and says so distinctly, so a run over a space that already holds some of
-/// its repos (a retry after the checked-out bounce, or after an Esc) reports
+/// its repos (a repo in place before the run, or after an Esc) reports
 /// what is true on disk instead of failing every such repo on `already
 /// exists` and calling a complete space a failed run.
 #[derive(Debug, PartialEq, Eq)]
@@ -76,19 +77,8 @@ pub enum CreateProgress {
         /// needs what to print, and this keeps `anyhow::Error` off the channel.
         created: CreateOutcome,
     },
-    /// The worker chose to end early and says why. Distinct from `Done` so a
-    /// deliberate stop is stated rather than inferred from a short count, and
-    /// distinct from a silent disconnect, which means the worker died.
-    Stopped(CreateStop),
     /// Every repo was attempted.
     Done,
-}
-
-/// Why the Creating worker ended its run early.
-pub enum CreateStop {
-    /// `git worktree add` refused because the branch is checked out
-    /// elsewhere. The App bounces back to the branch-strategy picker.
-    AlreadyCheckedOut { index: usize },
 }
 
 /// Sent from the git-ops worker thread back to the App during the Running stage.
@@ -135,27 +125,6 @@ pub struct CreateJob {
     /// there; the difference is what the completion message reports.
     skipped: usize,
 }
-
-/// Display columns the bounce message gives the refused repo's name.
-///
-/// The arithmetic it comes out of. Everything in that message except the name
-/// is 72 columns (74 at a three-digit count). The picker draws it as a
-/// `Paragraph` with `Wrap { trim: false }` into a two-row section of the
-/// dialog's inner width, which at the documented 80-column minimum is 60 (the
-/// dialog is `max(80 * 70 / 100, 62)` wide, less two borders), and the first
-/// row also carries the three-column warning prefix. Two rows of 60 is not the
-/// budget, though: the wrap is greedy by word, so a word that will not fit
-/// moves whole to the next row and the columns it left are lost. What decides
-/// the bound is where the break lands. Up to a 44-column name the first row
-/// still holds `\u{26a0}  '<name>' is already` and the second carries
-/// `checked out; ...` at 58 to 60 columns, exactly full at 999; one column
-/// more and the break moves back a word, the second row has to carry
-/// `already checked out; ...` at 66, and the tail lands on a third row that
-/// is never drawn. 32 keeps the break a word or two earlier still, leaving the
-/// second row at 50 to 52 columns: around 8 columns of slack rather than none,
-/// which is what a bound that is not re-derived on every message change wants.
-/// Pinned by `the_bounce_message_reads_in_full_at_eighty_columns`.
-const BOUNCE_LABEL_WIDTH: usize = 32;
 
 const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(5);
 const SCROLL_STEP: u16 = 5;
@@ -958,15 +927,18 @@ impl App {
         }
     }
 
-    /// Refresh workspace list when leaving the Creating stage.
-    /// Catches partially-created worktrees from error scenarios.
+    /// Refresh workspace list when leaving the Creating stage, or the review
+    /// table a run returned to. Catches partially-created worktrees from
+    /// error scenarios.
     fn refresh_if_leaving_creating_stage(&mut self) {
+        use crate::tui::screens::{add::AddStage, create::CreateStage};
         let is_creating = matches!(
             &self.screen,
-            Screen::CreateWorkspace(st) if st.stage == crate::tui::screens::create::CreateStage::Creating
+            Screen::CreateWorkspace(st)
+                if matches!(st.stage, CreateStage::Creating | CreateStage::ReviewPlan)
         ) || matches!(
             &self.screen,
-            Screen::AddRepos(st) if st.stage == crate::tui::screens::add::AddStage::Creating
+            Screen::AddRepos(st) if matches!(st.stage, AddStage::Creating | AddStage::ReviewPlan)
         );
         if is_creating {
             if let Ok(ws) = crate::core::workspace::list_workspaces(&self.config.workspaces.dir) {
@@ -977,6 +949,22 @@ impl App {
                 // the user expects up-to-date data before seeing the dashboard.
                 self.load_selected_workspace_detail();
             }
+        }
+    }
+
+    /// The plan of the active screen, if it is in the Creating stage: where
+    /// each repo's outcome is recorded as it finishes.
+    fn creating_plan_mut(&mut self) -> Option<&mut BranchPlan> {
+        match &mut self.screen {
+            Screen::CreateWorkspace(st)
+                if st.stage == crate::tui::screens::create::CreateStage::Creating =>
+            {
+                Some(&mut st.plan)
+            }
+            Screen::AddRepos(st) if st.stage == crate::tui::screens::add::AddStage::Creating => {
+                Some(&mut st.plan)
+            }
+            _ => None,
         }
     }
 
@@ -1141,8 +1129,8 @@ impl App {
         // but a run that had already finished must be reported as finished,
         // not as a cancellation with a count frozen at the last drain. Without
         // this a fully successful run says "Stopped creating 'ws' after 4 of 5
-        // repos", which is a success reported as a failure, and an
-        // `AlreadyCheckedOut` stop loses its bounce to the strategy picker.
+        // repos", which is a success reported as a failure, and a run with a
+        // refused repo loses its return to the review table.
         self.poll_create_result();
         // The drain narrows the window; it cannot close it. `run_create_worker`
         // sends `Finished` for the last repo inside its loop and `Done` as a
@@ -1158,16 +1146,14 @@ impl App {
             // statement. See the comment at the worker's terminal region.
             //
             // Blind spot, deliberate and reachable. `finished` reaches the
-            // total one statement before the worker decides which terminal
-            // message to send: it sends `Finished` for the last repo, then
-            // evaluates whether to send `Stopped(AlreadyCheckedOut)`. An Esc
-            // in that window is swallowed here and the next drain bounces to
-            // the strategy picker, so the user pressed Esc to leave and
-            // arrives at the picker instead, with the key gone rather than
-            // delayed. Accepted: it beats reporting a finished run as a stop,
-            // and it does not replay a key into a screen the user has not
-            // seen. Pinned by
-            // `esc_between_the_last_finished_and_the_stop_is_swallowed_and_the_bounce_arrives`.
+            // total one statement before the worker sends `Done`. An Esc in
+            // that window is swallowed here and the next drain ends the run,
+            // so the user pressed Esc to leave and, when a repo was refused,
+            // arrives at the review table instead, with the key gone rather
+            // than delayed. Accepted: it beats reporting a finished run as a
+            // stop, and it does not replay a key into a screen the user has
+            // not seen. Pinned by
+            // `esc_between_the_last_finished_and_done_is_swallowed_and_the_table_arrives`.
             if job.finished >= job.params.plans.len() {
                 // Left for the next drain, which finishes the run through the
                 // one completion path. Esc costs a frame nobody perceives.
@@ -1184,7 +1170,7 @@ impl App {
                 // The run ended in this very frame. If the drain left the
                 // Creating stage up it did so because a repo failed, and Esc
                 // still means leave. If it moved the screen itself (the
-                // dashboard on success, the strategy picker on a bounce) this
+                // dashboard on success, the review table after a refusal) this
                 // is a no-op: the key is consumed rather than replayed into a
                 // screen the user has not seen yet, which is the corruption
                 // `run_loop`'s own startup drain exists to prevent.
@@ -1266,11 +1252,12 @@ impl App {
 
     /// Poll the Creating worker channel once per frame. Non-blocking.
     ///
-    /// Applies `Started` and `Finished` to the active screen's log, bounces to
-    /// the branch-strategy picker on `Stopped`, and leaves for the dashboard on
-    /// `Done` unless a repo failed, in which case the stage stays up so the log
-    /// can be read. `Finished` is purely a logging message: no control flow
-    /// hangs off it, only off `Stopped`, `Done` and a disconnect.
+    /// Applies `Started` and `Finished` to the active screen's log and its
+    /// plan's outcomes, and on `Done` returns to the review table when a repo
+    /// was refused as checked out elsewhere, otherwise leaves for the
+    /// dashboard unless a repo failed, in which case the stage stays up so
+    /// the log can be read. `Finished` only logs and records: no control flow
+    /// hangs off it, only off `Done` and a disconnect.
     ///
     /// It deliberately differs from `poll_sync_result` in what the screen may
     /// do. That poller treats "the screen is not the one I expect" as a reason
@@ -1285,8 +1272,8 @@ impl App {
     /// more than any realistic repo count) until the log comes back.
     ///
     /// That is safe because every exit from the Creating stage cancels and
-    /// drops the job explicitly: `CancelCreating`, the `Stopped` bounce,
-    /// re-entry into `ExecuteWorktreeFlow`, and completion. The residual is
+    /// drops the job explicitly: `CancelCreating`, re-entry into
+    /// `ExecuteWorktreeFlow`, and completion. The residual is
     /// that a screen which never returns to the Creating stage would leave the
     /// job in place until the App is dropped, which is unreachable today and
     /// in any case a far better failure than a cancelled run.
@@ -1343,10 +1330,26 @@ impl App {
                     fetch,
                     created,
                 }) => {
-                    let (lines, failure) = match &mut self.create_job {
+                    let (lines, failure, outcome) = match &mut self.create_job {
                         Some(job) => {
                             job.finished += 1;
                             let name = repo_label(&job.params, index);
+                            let outcome = job.params.plans.get(index).map(|plan| {
+                                let outcome = match &created {
+                                    CreateOutcome::Created | CreateOutcome::AlreadyCreated => {
+                                        RowOutcome::Placed
+                                    }
+                                    CreateOutcome::Failed(e)
+                                        if crate::core::workspace::refuses_because_checked_out(
+                                            e,
+                                        ) =>
+                                    {
+                                        RowOutcome::Refused
+                                    }
+                                    CreateOutcome::Failed(e) => RowOutcome::Failed(e.clone()),
+                                };
+                                (plan.path.clone(), outcome)
+                            });
                             let already_created = matches!(created, CreateOutcome::AlreadyCreated);
                             let mut lines = Vec::new();
                             // The fetch line goes in before the outcome, so a
@@ -1364,9 +1367,9 @@ impl App {
                             // whether an add ran at all. A repo already in
                             // the space fetched nothing and added nothing, so
                             // on that row the note would claim work that
-                            // never happened, and the retry after a bounce
-                            // reuses the same report, so a repo can be both
-                            // flagged slow and skipped.
+                            // never happened, and a retry from the review
+                            // table reuses the same report, so a repo can be
+                            // both flagged slow and skipped.
                             if !already_created
                                 && job
                                     .params
@@ -1401,7 +1404,7 @@ impl App {
                                     Some(format!("Failed: {}", e))
                                 }
                             };
-                            (lines, failure)
+                            (lines, failure, outcome)
                         }
                         None => return,
                     };
@@ -1411,44 +1414,10 @@ impl App {
                             *error = failure;
                         }
                     }
-                }
-                Ok(CreateProgress::Stopped(CreateStop::AlreadyCheckedOut { index })) => {
-                    let job = match self.create_job.take() {
-                        Some(job) => job,
-                        None => return,
-                    };
-                    job.cancel.store(true, Ordering::Relaxed);
-                    // The count, not the names: it is bounded however many
-                    // repos ran, and the dialog's error row is two lines of
-                    // its inner width. The rows themselves are not preserved
-                    // (the picker does not render `progress`, and re-entering
-                    // the flow clears it); they come back on the retry as
-                    // `(already created)`, where they are worth reading. The
-                    // one repo name in here is the only unbounded part, so it
-                    // is cut to `BOUNCE_LABEL_WIDTH`.
-                    let msg = format!(
-                        "'{}' is already checked out; {} created. \
-                         Pick another strategy for the rest",
-                        crate::tui::ui::truncate_for_width(
-                            &repo_label(&job.params, index),
-                            BOUNCE_LABEL_WIDTH
-                        ),
-                        job.created
-                    );
-                    match &mut self.screen {
-                        Screen::CreateWorkspace(st) => {
-                            st.stage = crate::tui::screens::create::CreateStage::PickBranchStrategy;
-                            st.progress.clear();
-                            st.error = Some(msg);
-                        }
-                        Screen::AddRepos(st) => {
-                            st.stage = crate::tui::screens::add::AddStage::PickBranchStrategy;
-                            st.progress.clear();
-                            st.error = Some(msg);
-                        }
-                        _ => {}
+                    if let (Some(plan), Some((repo, outcome))) = (self.creating_plan_mut(), outcome)
+                    {
+                        plan.note_outcome(&repo, outcome);
                     }
-                    return;
                 }
                 Ok(CreateProgress::Done) => {
                     let job = match self.create_job.take() {
@@ -1466,7 +1435,7 @@ impl App {
                     };
                     if job.finished < job.params.plans.len() {
                         // The worker died without saying so: a cancelled one
-                        // stops after a `Stopped` or without a job at all.
+                        // stops without a job at all.
                         if let Some((progress, error, _)) = self.creating_mut() {
                             progress.push(
                                 "  \u{2717} the worktree worker stopped unexpectedly".to_string(),
@@ -1482,13 +1451,32 @@ impl App {
         }
     }
 
-    /// Leave for the dashboard, unless a repo failed: then the Creating stage
-    /// stays up so the log can be read (Esc/Enter leaves with the error).
+    /// Back to the review table when a repo was refused as checked out
+    /// elsewhere, so it can be given another strategy; otherwise leave for
+    /// the dashboard, unless a repo failed: then the Creating stage stays up
+    /// so the log can be read (Esc/Enter leaves with the error).
     fn finish_create_run_unless_failed(
         &mut self,
         params: &crate::tui::actions::WorktreeParams,
         skipped: usize,
     ) {
+        match &mut self.screen {
+            Screen::CreateWorkspace(st)
+                if st.stage == crate::tui::screens::create::CreateStage::Creating
+                    && st.plan.refused(&st.selected_repos) > 0 =>
+            {
+                st.return_after_refusal();
+                return;
+            }
+            Screen::AddRepos(st)
+                if st.stage == crate::tui::screens::add::AddStage::Creating
+                    && st.plan.refused(&st.selected_repos) > 0 =>
+            {
+                st.return_after_refusal();
+                return;
+            }
+            _ => {}
+        }
         let failed = self
             .creating_mut()
             .map(|(_, error, _)| error.is_some())
@@ -2184,7 +2172,7 @@ struct WorkerAttempt {
 /// (`workspace::placement_of` says `Adopted`) is skipped: no fetch, no add, and a
 /// `Finished` that says `AlreadyCreated`. That is a property of what is on
 /// disk rather than of how the run got here, so it applies to every run, not
-/// only to a retry after the checked-out bounce. Without it the retry fails
+/// only to a retry from the review table. Without it the retry fails
 /// every repo the first attempt created with `already exists`, which is a
 /// generic failure, so the run carries on and then reports a space that is
 /// complete as a failed one.
@@ -2202,14 +2190,10 @@ struct WorkerAttempt {
 /// that limit several times over. It is on this thread rather than the UI's
 /// precisely so that cost is waited out with a painting screen and a live Esc.
 ///
-/// It ends itself on the "already checked out" refusal rather than letting the
-/// App do it, because the App cannot retroactively stop a worker: carrying on
-/// would create worktrees for later repos under the very strategy the user is
-/// being asked to replace, while the UI had already returned to the picker.
-/// The skip makes that worse rather than harmless, which is why the stop
-/// still matters: the next attempt would find those repos in place and report
-/// them as already created, so the rejected strategy would be what the user
-/// silently ended up with for exactly the repos they were bounced away from.
+/// A refusal because the branch is checked out elsewhere does not end the
+/// run: each repo carries its own strategy, so the other repos' strategies are
+/// not the one being replaced. The App marks the repo and, once the run is
+/// over, returns to the review table to choose again for it (ticket 55).
 fn run_create_worker(
     params: crate::tui::actions::WorktreeParams,
     tx: mpsc::SyncSender<CreateProgress>,
@@ -2263,36 +2247,24 @@ fn run_create_worker(
         if cancel.load(Ordering::Relaxed) {
             return;
         }
-        let created = attempt.created;
-        let stop = match &created {
-            CreateOutcome::Failed(e) => crate::core::workspace::refuses_because_checked_out(e),
-            _ => false,
-        };
         // Everything after this send and before the terminal message is a
         // window `cancel_creating`'s guard cannot see. Its predicate is over
         // counters, and the counters reach their final values when this send
-        // lands, one or more statements before the worker commits to which
-        // terminal message follows. Today that interval holds exactly two
-        // successors, the `stop` branch below and the `Done` after the loop,
-        // and both are handled. Adding a third terminal message, or any
-        // statement between here and the decision, opens a window with
-        // nothing positioned to catch it, and no test will fail, because the
-        // window will not exist until it is written. Change this region and
-        // read `cancel_creating`'s guard first.
+        // lands, one or more statements before the worker sends its terminal
+        // message. Today that interval holds exactly one successor, the
+        // `Done` after the loop, and it is handled. Adding another terminal
+        // message, or any statement between here and `Done`, opens a window
+        // with nothing positioned to catch it, and no test will fail, because
+        // the window will not exist until it is written. Change this region
+        // and read `cancel_creating`'s guard first.
         if tx
             .send(CreateProgress::Finished {
                 index,
                 fetch: attempt.fetch,
-                created,
+                created: attempt.created,
             })
             .is_err()
         {
-            return;
-        }
-        if stop {
-            let _ = tx.send(CreateProgress::Stopped(CreateStop::AlreadyCheckedOut {
-                index,
-            }));
             return;
         }
     }
@@ -4075,6 +4047,27 @@ mod tests {
         Screen::CreateWorkspace(st)
     }
 
+    /// A Creating-stage create screen whose selection is `repos`: what a run
+    /// with a refused repo returns to the table with.
+    fn creating_screen_for(repos: &[PathBuf]) -> Screen {
+        let mut screen = creating_screen();
+        if let Screen::CreateWorkspace(st) = &mut screen {
+            st.selected_repos = repos.to_vec();
+        }
+        screen
+    }
+
+    /// The add flow's Creating stage, for space `ws-a`, over `repos`.
+    fn adding_screen_for(repos: &[PathBuf]) -> Screen {
+        let mut st = crate::tui::screens::add::AddState::new("ws-a".to_string(), vec![], vec![]);
+        st.stage = crate::tui::screens::add::AddStage::Creating;
+        st.selected_repos = repos.to_vec();
+        Screen::AddRepos(st)
+    }
+
+    /// Git's refusal of a branch checked out elsewhere, in 2.42's words.
+    const REFUSED: &str = "fatal: 'main' is already used by worktree at '/x'";
+
     /// Cancelling mid-run stops the repos that had not started, and the
     /// rendezvous channel makes that deterministic without a single sleep.
     ///
@@ -4170,7 +4163,6 @@ mod tests {
                 CreateProgress::Finished { index, .. } => {
                     panic!("repo {} was attempted after the cancel", index)
                 }
-                CreateProgress::Stopped(_) => panic!("a cancelled run must not report a stop"),
                 CreateProgress::Done => panic!("a cancelled run must never send Done"),
             }
         }
@@ -4244,24 +4236,28 @@ mod tests {
 
     /// End to end on the installed git, because the wording is the whole
     /// point. A `worktree add` refused because the branch is checked out in
-    /// the source repo must end the run with `Stopped(AlreadyCheckedOut)` and
-    /// no `Done`, which is what puts the user back on the strategy picker with
-    /// a reason instead of on a generic failure. Every other test in this file
-    /// feeds the refusal in as a literal, so this is the only one that notices
-    /// when the local git's phrasing stops matching the predicate: 2.42 and
-    /// later say "used by worktree at", 2.38 to 2.41 "checked out at", and a
-    /// predicate that knew only the older one made this path dead code.
+    /// the source repo comes back as a `Finished` the App recognises as a
+    /// refusal, and it no longer ends the run (ticket 55): the next repo is
+    /// attempted and `Done` follows. Every other test in this file feeds the
+    /// refusal in as a literal, so this is the only one that notices when
+    /// the local git's phrasing stops matching the predicate: 2.42 and later
+    /// say "used by worktree at", 2.38 to 2.41 "checked out at", and a
+    /// predicate that knew only the older one would leave a refused repo
+    /// unmarked, with nothing to return to the review table for.
     #[test]
-    fn run_create_worker_stops_on_a_branch_checked_out_in_the_source_repo() {
+    fn run_create_worker_carries_on_past_a_branch_checked_out_in_the_source_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let repo_a = make_repo(tmp.path(), "repo-a");
+        let repo_b = make_repo(tmp.path(), "repo-b");
+        git_in(&repo_b, &["branch", "side"]);
         let ws_dir = tmp.path().join("spaces");
-        let mut params = create_params(&ws_dir, "ws-a", vec![repo_a]);
-        // `main` is checked out in the source repo, so git refuses the add.
-        set_strategy(
-            &mut params,
-            crate::core::workspace::BranchStrategy::ExistingBranch("main".to_string()),
-        );
+        let mut params = create_params(&ws_dir, "ws-a", vec![repo_a, repo_b]);
+        // `main` is checked out in repo-a's source, so git refuses that add;
+        // repo-b asks for a branch nothing has checked out.
+        params.plans[0].strategy =
+            crate::core::workspace::BranchStrategy::ExistingBranch("main".to_string());
+        params.plans[1].strategy =
+            crate::core::workspace::BranchStrategy::ExistingBranch("side".to_string());
 
         let (tx, rx) = mpsc::sync_channel::<CreateProgress>(64);
         run_create_worker(params, tx, Arc::new(AtomicBool::new(false)));
@@ -4291,22 +4287,28 @@ mod tests {
             _ => panic!("expected Finished for the refused repo"),
         }
         assert!(
-            matches!(
-                rx.recv().unwrap(),
-                CreateProgress::Stopped(CreateStop::AlreadyCheckedOut { index: 0 })
-            ),
-            "the refusal must end the run with the bounce, not carry on"
+            matches!(rx.recv().unwrap(), CreateProgress::Started { index: 1 }),
+            "the refusal must not end the run"
         );
-        assert!(
-            rx.recv().is_err(),
-            "the run ends at the stop: no Done follows it, and the worker is gone"
-        );
+        match rx.recv().unwrap() {
+            CreateProgress::Finished { index, created, .. } => {
+                assert_eq!(index, 1);
+                assert_eq!(
+                    created,
+                    CreateOutcome::Created,
+                    "repo-b takes its own strategy"
+                );
+            }
+            _ => panic!("expected Finished for repo-b"),
+        }
+        assert!(matches!(rx.recv().unwrap(), CreateProgress::Done));
+        assert!(rx.recv().is_err(), "nothing follows Done");
     }
 
     /// A repo already in this space is reported as already created, with no
     /// fetch outcome to log. Without the skip this is the
-    /// `fatal: '<path>' already exists` row that makes a retry after the
-    /// bounce report a complete space as a failed run.
+    /// `fatal: '<path>' already exists` row that makes a run over a partly
+    /// built space report a complete space as a failed run.
     ///
     /// The repo is deliberately NOT listed as freshly fetched, so a run that
     /// did not skip would fetch before the add and `fetch: None` would not be
@@ -4676,8 +4678,8 @@ mod tests {
 
     /// A skipped repo reads as an ok row, counts as one, and leaves the run
     /// complete. Counted rather than merely not-failed because `job.created`
-    /// is what the Esc message and the bounce line report, and a repo in
-    /// place is what both of them mean.
+    /// is what the Esc message reports, and a repo in place is what it
+    /// means.
     #[test]
     fn poll_create_result_already_created_counts_as_ok_and_says_so() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4778,8 +4780,8 @@ mod tests {
         assert_eq!(app.status_kind, StatusKind::Warning);
     }
 
-    /// The middle case, and the one a user actually meets after a bounce: some
-    /// repos were already in the space, some were created. The run is a
+    /// The middle case, and the one a user meets re-running a create after an
+    /// Esc: some repos were already in the space, some were created. The run is a
     /// success, and the count is what stops it reading as a full creation.
     #[test]
     fn a_partly_skipped_run_says_how_many_were_already_in_place() {
@@ -4963,22 +4965,21 @@ mod tests {
         );
     }
 
-    /// What the bounce carries across. The picker never renders `progress`
-    /// and re-entering the flow clears it, so the created rows cannot survive
-    /// on the log: the error line is where the user learns the retry is not
-    /// starting from nothing, and the retry's `(already created)` rows are
-    /// where the detail comes back.
+    /// Where a run with a refused repo ends (ticket 55, decision 4). Every
+    /// repo was attempted, and `Done` returns the flow to the review table
+    /// rather than leaving or holding the log: the repo the run placed is
+    /// marked in place, the refused one is marked and highlighted, and the
+    /// message says how many to choose again for. The log is not kept: the
+    /// table is where the rows are read now. The same on the add flow, where
+    /// repos predating the run make the refusal likelier.
     #[test]
-    fn poll_create_result_stopped_carries_the_created_count_in_the_picker_error() {
-        const MSG: &str =
-            "'repo-b' is already checked out; 1 created. Pick another strategy for the rest";
-        let params = || {
-            create_params(
-                std::path::Path::new("/ws"),
-                "ws-a",
-                vec![PathBuf::from("/r/repo-a"), PathBuf::from("/r/repo-b")],
-            )
-        };
+    fn a_refused_repo_returns_the_run_to_the_review_table() {
+        use crate::tui::screens::branch_plan::RowOutcome;
+        const MSG: &str = "1 of 2 repos refused: the branch is checked out elsewhere. \
+                           Choose again for them, then retry";
+        let repo_a = PathBuf::from("/r/repo-a");
+        let repo_b = PathBuf::from("/r/repo-b");
+        let repos = vec![repo_a.clone(), repo_b.clone()];
         let feed = |tx: &mpsc::SyncSender<CreateProgress>| {
             tx.send(CreateProgress::Finished {
                 index: 0,
@@ -4986,94 +4987,105 @@ mod tests {
                 created: CreateOutcome::Created,
             })
             .unwrap();
-            tx.send(CreateProgress::Stopped(CreateStop::AlreadyCheckedOut {
+            tx.send(CreateProgress::Finished {
                 index: 1,
-            }))
+                fetch: None,
+                created: CreateOutcome::Failed(REFUSED.to_string()),
+            })
             .unwrap();
+            tx.send(CreateProgress::Done).unwrap();
+        };
+        let check = |plan: &BranchPlan, progress: &[String], error: Option<&str>| {
+            assert_eq!(error, Some(MSG));
+            assert_eq!(plan.review_cursor, 1, "on the refused repo");
+            assert_eq!(plan.outcome_of(&repo_a), Some(&RowOutcome::Placed));
+            assert_eq!(plan.outcome_of(&repo_b), Some(&RowOutcome::Refused));
+            assert!(progress.is_empty(), "the log is cleared on the way back");
         };
 
         let mut app = make_app(vec![]);
-        app.screen = creating_screen();
-        let (tx, _cancel, job) = make_job(params());
+        app.screen = creating_screen_for(&repos);
+        let (tx, _cancel, job) = make_job(create_params(
+            std::path::Path::new("/ws"),
+            "ws-a",
+            repos.clone(),
+        ));
         app.create_job = Some(job);
         feed(&tx);
         app.poll_create_result();
-
         match &app.screen {
             Screen::CreateWorkspace(st) => {
                 assert_eq!(
                     st.stage,
-                    crate::tui::screens::create::CreateStage::PickBranchStrategy
+                    crate::tui::screens::create::CreateStage::ReviewPlan
                 );
-                assert_eq!(st.error.as_deref(), Some(MSG));
+                check(&st.plan, &st.progress, st.error.as_deref());
             }
             _ => panic!("expected the create screen"),
         }
+        assert!(app.create_job.is_none(), "the finished job is dropped");
 
-        // The same sentence on the add flow, where repos predating the run
-        // make the refusal likelier still.
         let mut app = make_app(vec![]);
-        app.screen = Screen::AddRepos(crate::tui::screens::add::AddState::new(
-            "ws-a".to_string(),
-            vec![],
-            vec![],
-        ));
-        if let Screen::AddRepos(st) = &mut app.screen {
-            st.stage = crate::tui::screens::add::AddStage::Creating;
-        }
-        let mut add_params = params();
+        app.screen = adding_screen_for(&repos);
+        let mut add_params = create_params(std::path::Path::new("/ws"), "ws-a", repos.clone());
         add_params.is_new = false;
         let (tx, _cancel, job) = make_job(add_params);
         app.create_job = Some(job);
         feed(&tx);
         app.poll_create_result();
-
         match &app.screen {
             Screen::AddRepos(st) => {
-                assert_eq!(
-                    st.stage,
-                    crate::tui::screens::add::AddStage::PickBranchStrategy
-                );
-                assert_eq!(st.error.as_deref(), Some(MSG));
+                assert_eq!(st.stage, crate::tui::screens::add::AddStage::ReviewPlan);
+                check(&st.plan, &st.progress, st.error.as_deref());
             }
             _ => panic!("expected the add screen"),
         }
     }
 
-    /// The premise the whole design rests on, taken from the picker's own key
-    /// handling rather than assumed: after a bounce, Enter on another
-    /// strategy re-runs the WHOLE list. That is why the skip has to live in
-    /// the worker. The picker has no way to shorten `selected_repos` (Esc to
-    /// PickRepos is the only route to the repo list), so if this ever stopped
-    /// being true, the retry would be deciding what to re-attempt and the
-    /// worker's skip would be dead code.
+    /// The retry, driven by the table's own keys (ticket 55, decision 4). The
+    /// premise used to be the opposite: the old bounce re-ran the whole list
+    /// and leaned on the worker's skip for the repos already made. Now a
+    /// repo the run placed is closed to change and left out of the retry,
+    /// so the retry attempts only the refused repo, under the strategy chosen
+    /// for it again.
     ///
     /// The action is read where the screen returns it, not after the App has
     /// processed it: `process_action` spawns a real `run_create_worker`
     /// thread, which would put a live worker on paths that do not exist for
-    /// no gain here. Nothing about `create_job` is needed either way, and the
-    /// bounce has already dropped it.
+    /// no gain here.
     #[test]
-    fn enter_on_the_picker_after_a_bounce_runs_the_whole_list_again() {
+    fn the_retry_from_the_table_runs_only_the_repos_not_in_place() {
         use crate::tui::actions::ScreenAction;
+        use crate::tui::screens::create::CreateStage;
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let repo_a = PathBuf::from("/r/repo-a");
         let repo_b = PathBuf::from("/r/repo-b");
+        let repos = vec![repo_a.clone(), repo_b.clone()];
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-
         let mut app = make_app(vec![]);
-        app.screen = creating_screen();
-        if let Screen::CreateWorkspace(st) = &mut app.screen {
-            st.ws_name = st.ws_name.clone().with_value("ws-a".to_string());
-            st.selected_repos = vec![repo_a.clone(), repo_b.clone()];
-        }
-        let params = create_params(
-            &app.config.workspaces.dir.clone(),
-            "ws-a",
-            vec![repo_a.clone(), repo_b.clone()],
-        );
-        let (tx, _cancel, job) = make_job(params);
+        let config = app.config.clone();
+        let ctx = crate::tui::actions::ScreenContext {
+            config: &config,
+            creating_in_flight: false,
+        };
+
+        // One strategy for both, chosen on the picker: Detached HEAD.
+        let mut st = crate::tui::screens::create::CreateState::new(vec![], vec![]);
+        st.ws_name = st.ws_name.clone().with_value("ws-a".to_string());
+        st.selected_repos = repos.clone();
+        st.stage = CreateStage::PickBranchStrategy;
+        st.handle_key(key(KeyCode::Down), &ctx);
+        st.handle_key(key(KeyCode::Down), &ctx);
+        let first = match st.handle_key(key(KeyCode::Enter), &ctx) {
+            ScreenAction::ExecuteWorktreeFlow(params) => params,
+            _ => panic!("Enter on a strategy must start a run"),
+        };
+        assert_eq!(plan_paths(&first), repos, "the first run attempts both");
+        app.screen = Screen::CreateWorkspace(st);
+
+        // repo-a is created, repo-b refused.
+        let (tx, _cancel, job) = make_job(first);
         app.create_job = Some(job);
         tx.send(CreateProgress::Finished {
             index: 0,
@@ -5081,117 +5093,72 @@ mod tests {
             created: CreateOutcome::Created,
         })
         .unwrap();
-        tx.send(CreateProgress::Stopped(CreateStop::AlreadyCheckedOut {
+        tx.send(CreateProgress::Finished {
             index: 1,
-        }))
+            fetch: None,
+            created: CreateOutcome::Failed(REFUSED.to_string()),
+        })
         .unwrap();
+        tx.send(CreateProgress::Done).unwrap();
         app.poll_create_result();
-        assert!(
-            app.create_job.is_none(),
-            "the bounce drops the job, so no worker is live while the picker is up"
+
+        let Screen::CreateWorkspace(st) = &mut app.screen else {
+            panic!("expected the create screen");
+        };
+        assert_eq!(st.stage, CreateStage::ReviewPlan);
+
+        // repo-a is in place: Enter on it changes nothing and says why.
+        st.handle_key(key(KeyCode::Up), &ctx);
+        st.handle_key(key(KeyCode::Enter), &ctx);
+        assert_eq!(
+            st.stage,
+            CreateStage::ReviewPlan,
+            "repo-a is closed to change"
+        );
+        assert_eq!(
+            st.error.as_deref(),
+            Some("'repo-a' is already in the space, so its strategy cannot change")
         );
 
-        let creating_in_flight = app.creating_in_flight();
-        let ctx = crate::tui::actions::ScreenContext {
-            config: &app.config,
-            creating_in_flight,
-        };
-        let action = match &mut app.screen {
-            Screen::CreateWorkspace(st) => {
-                assert_eq!(
-                    st.stage,
-                    crate::tui::screens::create::CreateStage::PickBranchStrategy,
-                    "the bounce must have left the picker up"
-                );
-                // Down twice: index 2 is "Detached HEAD", the one strategy
-                // that needs no branch name and no second stage.
-                st.handle_key(key(KeyCode::Down), &ctx);
-                st.handle_key(key(KeyCode::Down), &ctx);
-                assert_eq!(st.branch_strategy_idx, 2, "the detached-HEAD row");
-                let action = st.handle_key(key(KeyCode::Enter), &ctx);
-                assert_eq!(
-                    st.stage,
-                    crate::tui::screens::create::CreateStage::Creating,
-                    "confirming a strategy returns to the Creating stage"
-                );
-                action
-            }
-            _ => panic!("expected the create screen"),
-        };
-        match action {
-            ScreenAction::ExecuteWorktreeFlow(params) => {
-                assert_eq!(
-                    plan_paths(&params),
-                    vec![repo_a.clone(), repo_b.clone()],
-                    "the retry runs every repo again, including the one already created"
-                );
-                assert!(
-                    params.plans.iter().all(|p| matches!(
-                        p.strategy,
-                        crate::core::workspace::BranchStrategy::DetachedHead
-                    )),
-                    "the strategy the picker was re-entered to change, got {:?}",
-                    params.plans
-                );
-                assert_eq!(params.workspace_name, "ws-a", "the same space name");
-            }
-            _ => panic!("Enter on a strategy must start a run"),
-        }
+        // repo-b: reopened on the row it was refused on, given a new branch.
+        st.handle_key(key(KeyCode::Down), &ctx);
+        st.handle_key(key(KeyCode::Enter), &ctx);
+        assert_eq!(st.stage, CreateStage::PickBranchStrategy);
+        assert_eq!(st.branch_strategy_idx, 2, "repo-b's detached HEAD row");
+        st.handle_key(key(KeyCode::Up), &ctx);
+        st.handle_key(key(KeyCode::Up), &ctx);
+        st.handle_key(key(KeyCode::Enter), &ctx);
+        assert_eq!(st.stage, CreateStage::EnterBranchName);
+        st.handle_key(key(KeyCode::Enter), &ctx);
+        assert_eq!(st.stage, CreateStage::ReviewPlan, "back on the table");
+        assert_eq!(st.plan.review_cursor, 2, "on the row that starts the retry");
 
-        // The add flow's picker has the same shape, and repos predating the
-        // run make the refusal likelier there.
-        let mut app = make_app(vec![]);
-        let mut add_state =
-            crate::tui::screens::add::AddState::new("ws-a".to_string(), vec![], vec![]);
-        add_state.stage = crate::tui::screens::add::AddStage::PickBranchStrategy;
-        add_state.selected_repos = vec![repo_a.clone(), repo_b.clone()];
-        app.screen = Screen::AddRepos(add_state);
-        let ctx = crate::tui::actions::ScreenContext {
-            config: &app.config,
-            creating_in_flight: false,
-        };
-        let action = match &mut app.screen {
-            Screen::AddRepos(st) => {
-                st.handle_key(key(KeyCode::Down), &ctx);
-                st.handle_key(key(KeyCode::Down), &ctx);
-                let action = st.handle_key(key(KeyCode::Enter), &ctx);
-                assert_eq!(st.stage, crate::tui::screens::add::AddStage::Creating);
-                action
-            }
-            _ => panic!("expected the add screen"),
-        };
-        match action {
+        match st.handle_key(key(KeyCode::Enter), &ctx) {
             ScreenAction::ExecuteWorktreeFlow(params) => assert_eq!(
-                plan_paths(&params),
-                vec![repo_a, repo_b],
-                "the add flow re-runs its whole list too"
+                params.plans,
+                vec![crate::tui::actions::RepoPlan {
+                    path: repo_b,
+                    strategy: crate::core::workspace::BranchStrategy::NewBranch("ws-a".to_string()),
+                }],
+                "the retry attempts only the repo not in place, as chosen again"
             ),
-            _ => panic!("Enter on a strategy must start a run"),
+            _ => panic!("Enter on the start row must start the retry"),
         }
     }
 
-    /// The App's handling of a retry's worker messages, on the installed git,
-    /// with the picker's Enter stood in for rather than driven: the stage and
-    /// the cleared log are set here, and
-    /// `enter_on_the_picker_after_a_bounce_runs_the_whole_list_again` is what
-    /// proves the picker does that and re-runs the whole list.
-    ///
-    /// One strategy succeeds on repo-a and is refused on repo-b; the retry
-    /// with another strategy must leave a complete space and a report that
-    /// says so.
-    ///
-    /// Before the skip, the retry failed repo-a with `already exists` (a
-    /// generic failure, so the worker carried on), created repo-b, and ended
-    /// on the Creating stage reporting a failed run over a space that was in
-    /// fact complete.
-    ///
-    /// The retry's messages come from a real `run_create_worker` but are
-    /// handed to the App one at a time. `Done` replaces the screen with the
-    /// dashboard, taking the log with it, so a single drain of a queued run
-    /// would leave the rows unobservable; stepping the delivery is what makes
-    /// reading them deterministic rather than a race with the worker thread.
+    /// The whole repair on the installed git (ticket 55, decision 4). One
+    /// strategy is taken by repo-a and refused by repo-b; the run carries on
+    /// past the refusal, returns to the table, and the retry with another
+    /// strategy for repo-b alone completes the space. The worker is driven
+    /// directly and its messages stepped into the App, because `Done`
+    /// replaces the screen and a single drain of a queued run would leave
+    /// the rows unobservable.
     #[test]
-    fn bounce_then_retry_with_another_strategy_completes_the_space() {
+    fn a_refused_run_then_a_retry_from_the_table_completes_the_space() {
+        use crate::tui::actions::ScreenAction;
+        use crate::tui::screens::create::CreateStage;
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
         let tmp = tempfile::tempdir().unwrap();
         let repo_a = make_repo(tmp.path(), "repo-a");
         let repo_b = make_repo(tmp.path(), "repo-b");
@@ -5199,68 +5166,63 @@ mod tests {
         // so one strategy is taken by repo-a and refused by repo-b.
         git_in(&repo_a, &["branch", "topic"]);
         git_in(&repo_b, &["checkout", "-b", "topic"]);
-
         let ws_dir = tmp.path().join("spaces");
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
         let mut app = make_app(vec![]);
         app.config.workspaces.dir = ws_dir.clone();
-        app.screen = creating_screen();
+        let config = app.config.clone();
+        let ctx = crate::tui::actions::ScreenContext {
+            config: &config,
+            creating_in_flight: false,
+        };
 
-        let mut first = create_params(&ws_dir, "ws-a", vec![repo_a.clone(), repo_b.clone()]);
-        set_strategy(
-            &mut first,
-            crate::core::workspace::BranchStrategy::ExistingBranch("topic".to_string()),
-        );
+        // A space named `topic`, so "Existing branch 'topic'" is the row.
+        let mut st = crate::tui::screens::create::CreateState::new(vec![], vec![]);
+        st.ws_name = st.ws_name.clone().with_value("topic".to_string());
+        st.selected_repos = vec![repo_a.clone(), repo_b.clone()];
+        st.stage = CreateStage::PickBranchStrategy;
+        st.handle_key(key(KeyCode::Down), &ctx);
+        let first = match st.handle_key(key(KeyCode::Enter), &ctx) {
+            ScreenAction::ExecuteWorktreeFlow(params) => params,
+            _ => panic!("Enter on a strategy must start a run"),
+        };
+        app.screen = Screen::CreateWorkspace(st);
         let (tx, cancel, job) = make_job(first.clone());
         app.create_job = Some(job);
         run_create_worker(first, tx, cancel);
         app.poll_create_result();
 
-        match &app.screen {
-            Screen::CreateWorkspace(st) => {
-                assert_eq!(
-                    st.stage,
-                    crate::tui::screens::create::CreateStage::PickBranchStrategy,
-                    "the refusal must bounce to the picker"
-                );
-                assert_eq!(
-                    st.error.as_deref(),
-                    Some(
-                        "'repo-b' is already checked out; 1 created. \
-                         Pick another strategy for the rest"
-                    )
-                );
-            }
-            _ => panic!("expected the strategy picker"),
-        }
-        assert!(
-            ws_dir.join("ws-a").join("repo-a").join(".git").exists(),
-            "repo-a took the strategy before repo-b refused it"
-        );
-        assert!(
-            !ws_dir.join("ws-a").join("repo-b").exists(),
-            "repo-b is the repo that refused: nothing of it is on disk"
+        let space = ws_dir.join("topic");
+        assert!(space.join("repo-a").join(".git").exists(), "repo-a took it");
+        assert!(!space.join("repo-b").exists(), "repo-b refused it");
+        let Screen::CreateWorkspace(st) = &mut app.screen else {
+            panic!("expected the create screen");
+        };
+        assert_eq!(
+            st.stage,
+            CreateStage::ReviewPlan,
+            "the refusal returns to the table"
         );
 
-        // The retry. The picker's Enter sets the stage and
+        // repo-b again, detached this time, then the retry.
+        st.handle_key(key(KeyCode::Enter), &ctx);
+        assert_eq!(
+            st.branch_strategy_idx, 1,
+            "on the row repo-b was refused on"
+        );
+        st.handle_key(key(KeyCode::Down), &ctx);
+        st.handle_key(key(KeyCode::Enter), &ctx);
+        let second = match st.handle_key(key(KeyCode::Enter), &ctx) {
+            ScreenAction::ExecuteWorktreeFlow(params) => params,
+            _ => panic!("Enter on the start row must start the retry"),
+        };
         // `ExecuteWorktreeFlow` clears the log and the error before starting
         // a worker; both are done here because the worker below is driven
         // directly, to keep the delivery stepped.
-        match &mut app.screen {
-            Screen::CreateWorkspace(st) => {
-                st.stage = crate::tui::screens::create::CreateStage::Creating;
-                st.progress.clear();
-                st.error = None;
-            }
-            _ => panic!("expected the create screen"),
-        }
-        let mut second = create_params(&ws_dir, "ws-a", vec![repo_a.clone(), repo_b.clone()]);
-        set_strategy(
-            &mut second,
-            crate::core::workspace::BranchStrategy::DetachedHead,
-        );
+        st.progress.clear();
+        st.error = None;
         let (worker_tx, worker_rx) = mpsc::sync_channel::<CreateProgress>(64);
         run_create_worker(second.clone(), worker_tx, Arc::new(AtomicBool::new(false)));
-
         let (tx, _cancel, job) = make_job(second);
         app.create_job = Some(job);
         let mut log: Vec<String> = Vec::new();
@@ -5272,79 +5234,43 @@ mod tests {
             }
         }
 
-        assert!(
-            log.iter()
-                .any(|l| l == "  \u{2713} repo-a (already created)"),
-            "the repo the bounce left behind returns as a skip, got {:?}",
-            log
+        assert_eq!(
+            log,
+            vec![
+                "Creating worktree for repo-b...".to_string(),
+                "  \u{2713} repo-b".to_string()
+            ],
+            "the retry runs repo-b alone"
         );
-        assert!(
-            log.iter().any(|l| l == "  \u{2713} repo-b"),
-            "the repo that refused is created under the new strategy, got {:?}",
-            log
-        );
-        assert!(
-            !log.iter().any(|l| l.contains('\u{2717}')),
-            "a complete space must report no failed repo, got {:?}",
-            log
-        );
-        assert!(
-            matches!(app.screen, Screen::Dashboard),
-            "a run with no failure returns to the dashboard"
-        );
+        assert!(matches!(app.screen, Screen::Dashboard));
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Created space; 1 of 2 repos were already in place"),
-            "repo-a was adopted rather than created, and the report says so"
+            Some("Created workspace 'topic'")
         );
         assert_eq!(app.status_kind, StatusKind::Success);
-        assert!(app.create_job.is_none(), "the finished job is dropped");
-        assert!(
-            ws_dir.join("ws-a").join("repo-b").join(".git").exists(),
-            "the retry created the repo the first run could not"
-        );
+        assert!(space.join("repo-b").join(".git").exists());
         assert_eq!(
-            crate::core::git::current_branch(&ws_dir.join("ws-a").join("repo-a")).unwrap(),
+            crate::core::git::current_branch(&space.join("repo-a")).unwrap(),
             "topic",
-            "the skipped repo keeps the branch the first run gave it: it was \
-             not re-created under the retry's strategy"
+            "repo-a keeps the branch the first run gave it"
         );
     }
 
     /// The retry's first half through the real dispatch, which is where the
-    /// bounce's error is cleared.
+    /// refusal message is cleared.
     ///
-    /// `bounce_then_retry_with_another_strategy_completes_the_space` stands in
-    /// for `ExecuteWorktreeFlow` so it can step the worker's messages, and
-    /// `enter_on_the_picker_after_a_bounce_runs_the_whole_list_again` reads
-    /// the picker's action without dispatching it. Between them nothing fed a
-    /// real picker action into `process_action` after a bounce, so the line in
-    /// that handler that clears `st.error` was unpinned on the only path that
-    /// reaches it with an error set. It is load-bearing: the bounce leaves the
-    /// error on the screen, `finish_create_run_unless_failed` reads that same
-    /// field, and an error left behind would hold a complete run on the
-    /// Creating stage as a failure, which is the defect this ticket exists to
-    /// remove.
+    /// Enter on the table's start row does not clear the message itself,
+    /// and the dispatch's clear is load-bearing: the message sits in the same
+    /// error slot `finish_create_run_unless_failed` reads, and one left
+    /// behind would hold a complete retry on the Creating stage as a
+    /// failure. The keys before it (moving the cursor) would not catch a
+    /// missing clear either, since moving does not touch the slot.
     ///
-    /// Both repos are already in the space, so the retry is decided by disk
-    /// state alone: no git refusal has to be arranged, nothing is created, and
-    /// the run is over as fast as two `placement_of` checks.
-    ///
-    /// Enter is pressed on the row the picker came back on, with no arrow key
-    /// before it, and that is the whole point rather than a shortcut. `Up`,
-    /// `Down`, `j`, `k` and `Esc` all clear `self.error` in the picker\'s own
-    /// handler, and so does Enter on "New branch" and on "Show more...", so
-    /// every one of those reaches the dispatch with nothing left to clear: a
-    /// test that pressed one first would pass with the handler\'s clear
-    /// deleted. Enter on the highlighted strategy does not clear it, and it is
-    /// the retry a user makes after reading the reason. The highlight is the
-    /// strategy the bounced run used, because nothing resets
-    /// `branch_strategy_idx` on the way to the picker, and index 1 is where an
-    /// `already checked out` refusal comes from: an existing branch. Which
-    /// strategy the retry carries changes nothing here, since every repo is
-    /// skipped before a strategy is applied.
+    /// repo-b is already in the space when the retry runs, so the run is
+    /// decided by disk state alone: no git refusal has to be arranged and
+    /// the run is over as fast as one `placement_of` check.
     #[test]
-    fn re_entering_the_flow_after_a_bounce_clears_the_bounce_error() {
+    fn retrying_from_the_table_clears_the_refusal_message() {
         use crate::tui::actions::ScreenAction;
         use crate::tui::screens::create::CreateStage;
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -5353,42 +5279,38 @@ mod tests {
         let repo_a = make_repo(tmp.path(), "repo-a");
         let repo_b = make_repo(tmp.path(), "repo-b");
         let ws_dir = tmp.path().join("spaces");
+        let repos = vec![repo_a.clone(), repo_b.clone()];
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
 
         // Put both repos in the space for real first: the retry below has to
-        // meet worktrees, not a directory a test made.
-        let mut seed = create_params(&ws_dir, "ws-a", vec![repo_a.clone(), repo_b.clone()]);
-        set_strategy(
-            &mut seed,
-            crate::core::workspace::BranchStrategy::DetachedHead,
-        );
+        // meet a worktree, not a directory a test made.
         let (seed_tx, _seed_rx) = mpsc::sync_channel::<CreateProgress>(64);
-        run_create_worker(seed, seed_tx, Arc::new(AtomicBool::new(false)));
-        for name in ["repo-a", "repo-b"] {
-            assert!(
-                ws_dir.join("ws-a").join(name).join(".git").exists(),
-                "{} must be in the space before the retry runs",
-                name
-            );
-        }
+        run_create_worker(
+            create_params(&ws_dir, "ws-a", repos.clone()),
+            seed_tx,
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(ws_dir.join("ws-a").join("repo-b").join(".git").exists());
 
         let mut app = make_app(vec![]);
         app.config.workspaces.dir = ws_dir.clone();
-        app.screen = creating_screen();
-        if let Screen::CreateWorkspace(st) = &mut app.screen {
-            st.ws_name = st.ws_name.clone().with_value("ws-a".to_string());
-            st.selected_repos = vec![repo_a.clone(), repo_b.clone()];
-            // Where the run below was started from, and so where the picker
-            // comes back: "Existing branch", the strategy an `already checked
-            // out` refusal comes from.
-            st.branch_strategy_idx = 1;
-        }
-        let mut params = create_params(&ws_dir, "ws-a", vec![repo_a.clone(), repo_b.clone()]);
-        set_strategy(
-            &mut params,
-            crate::core::workspace::BranchStrategy::ExistingBranch("ws-a".to_string()),
-        );
-        let (tx, _cancel, job) = make_job(params);
+        let config = app.config.clone();
+        let ctx = crate::tui::actions::ScreenContext {
+            config: &config,
+            creating_in_flight: false,
+        };
+        let mut st = crate::tui::screens::create::CreateState::new(vec![], vec![]);
+        st.ws_name = st.ws_name.clone().with_value("ws-a".to_string());
+        st.selected_repos = repos.clone();
+        st.stage = CreateStage::PickBranchStrategy;
+        st.handle_key(key(KeyCode::Down), &ctx);
+        st.handle_key(key(KeyCode::Down), &ctx);
+        let first = match st.handle_key(key(KeyCode::Enter), &ctx) {
+            ScreenAction::ExecuteWorktreeFlow(params) => params,
+            _ => panic!("Enter on a strategy must start a run"),
+        };
+        app.screen = Screen::CreateWorkspace(st);
+        let (tx, _cancel, job) = make_job(first);
         app.create_job = Some(job);
         tx.send(CreateProgress::Finished {
             index: 0,
@@ -5396,61 +5318,48 @@ mod tests {
             created: CreateOutcome::Created,
         })
         .unwrap();
-        tx.send(CreateProgress::Stopped(CreateStop::AlreadyCheckedOut {
+        tx.send(CreateProgress::Finished {
             index: 1,
-        }))
+            fetch: None,
+            created: CreateOutcome::Failed(REFUSED.to_string()),
+        })
         .unwrap();
+        tx.send(CreateProgress::Done).unwrap();
         app.poll_create_result();
 
-        let creating_in_flight = app.creating_in_flight();
-        let ctx = crate::tui::actions::ScreenContext {
-            config: &app.config,
-            creating_in_flight,
-        };
         let action = match &mut app.screen {
             Screen::CreateWorkspace(st) => {
-                assert_eq!(st.stage, CreateStage::PickBranchStrategy);
-                assert!(
-                    st.error.is_some(),
-                    "the bounce must leave its reason on the picker"
-                );
+                assert_eq!(st.stage, CreateStage::ReviewPlan);
+                assert!(st.error.is_some(), "the table shows why it is up");
+                st.handle_key(key(KeyCode::Down), &ctx);
                 let action = st.handle_key(key(KeyCode::Enter), &ctx);
                 assert!(
                     st.error.is_some(),
-                    "the picker itself does not clear the reason on this key, \
+                    "the table itself does not clear the message on this key, \
                      which is what leaves the clearing to the dispatch"
                 );
-                assert_eq!(
-                    st.stage,
-                    CreateStage::Creating,
-                    "Enter on a strategy returns to the Creating stage"
-                );
+                assert_eq!(st.stage, CreateStage::Creating);
                 action
             }
-            _ => panic!("expected the strategy picker"),
+            _ => panic!("expected the review table"),
         };
-        assert!(
-            matches!(action, ScreenAction::ExecuteWorktreeFlow(_)),
-            "Enter on a strategy must start a run"
-        );
+        assert!(matches!(action, ScreenAction::ExecuteWorktreeFlow(_)));
         app.process_action(action);
 
         match &app.screen {
             Screen::CreateWorkspace(st) => {
                 assert_eq!(
                     st.error, None,
-                    "the bounce's reason belongs to the attempt the user replaced"
+                    "the message belongs to the run the user replaced"
                 );
                 assert!(st.progress.is_empty(), "the retry starts with a clean log");
-                assert_eq!(st.stage, CreateStage::Creating);
             }
             _ => panic!("expected the create screen"),
         }
         assert!(app.create_job.is_some(), "the dispatch started a worker");
 
         // The worker runs on its own thread, so the end of the run is waited
-        // for rather than stepped. Five seconds at the outside, which is two
-        // `placement_of` checks' worth many times over.
+        // for rather than stepped. Five seconds at the outside.
         for _ in 0..500 {
             app.poll_create_result();
             if app.create_job.is_none() {
@@ -5461,65 +5370,38 @@ mod tests {
         assert!(app.create_job.is_none(), "the run must end");
         assert!(
             matches!(app.screen, Screen::Dashboard),
-            "a run with no failure returns to the dashboard, and the error the \
-             bounce left would have held it on the Creating stage"
+            "a run with no failure returns to the dashboard, and the message \
+             the table left would have held it on the Creating stage"
         );
         assert_eq!(
             app.status_message.as_deref(),
-            Some("Nothing created: all 2 repos were already in this space")
+            Some("Nothing created: all 1 repos were already in this space"),
+            "the retry ran repo-b alone, and found it in place"
         );
-        assert_eq!(app.status_kind, StatusKind::Warning);
     }
 
-    /// The bounce message at the width it is read at. The picker draws its
-    /// error as a `Paragraph` with `Wrap { trim: false }` over two rows of
-    /// the dialog's inner width (60 at 80 columns), so the sentence wraps and
-    /// the half that says what to do lands on the second row. A repo name at
-    /// the long end must not push it off the dialog.
+    /// The two refusal messages at the width they are read at. Both are drawn
+    /// as a `Paragraph` with `Wrap { trim: false }` over two rows of the
+    /// dialog's inner width (60 at 80 columns), so the sentence wraps and the
+    /// half that says what to do lands on the second row.
     ///
-    /// The lengths are the ones the arithmetic turns on. 30 is an ordinary
-    /// long name; 44 is the longest name that still fits untruncated, because
-    /// `\u{26a0}  '<name>' is already` is exactly 60 columns there; 45 is the
-    /// first that does not, leaving row two to carry `already checked out;
-    /// ...` at 66 columns, which is never drawn; 80 is a name longer than the
-    /// terminal itself. Every one of them must read in full, which is what
-    /// `BOUNCE_LABEL_WIDTH` buys.
+    /// With one repo the message names it and returns to its picker. 30 is an
+    /// ordinary long name, 32 the longest kept whole, 33 the first cut, and
+    /// 80 a name longer than the terminal itself; every one must read in
+    /// full, which is what `MESSAGE_NAME_COLS` buys. With several repos the
+    /// table's message counts them instead, and is pinned at three-digit
+    /// counts, its longest.
     #[test]
-    fn the_bounce_message_reads_in_full_at_eighty_columns() {
+    fn the_refusal_messages_read_in_full_at_eighty_columns() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
-        for len in [30usize, 44, 45, 80] {
-            let name = format!("a-repository-with-a-long-name-{}", "x".repeat(len - 30));
-            assert_eq!(name.len(), len, "the width being tested");
-
-            let mut app = make_app(vec![]);
-            app.screen = creating_screen();
-            let params = create_params(
-                std::path::Path::new("/ws"),
-                "ws-a",
-                vec![
-                    PathBuf::from("/r/repo-a"),
-                    PathBuf::from(format!("/r/{}", name)),
-                ],
-            );
-            let (tx, _cancel, job) = make_job(params);
-            app.create_job = Some(job);
-            tx.send(CreateProgress::Finished {
-                index: 0,
-                fetch: None,
-                created: CreateOutcome::Created,
-            })
-            .unwrap();
-            tx.send(CreateProgress::Stopped(CreateStop::AlreadyCheckedOut {
-                index: 1,
-            }))
-            .unwrap();
-            app.poll_create_result();
-
+        /// The two rows from the warning sign on, inside the dialog's
+        /// borders, rejoined: the wrap eats the space it broke on.
+        fn read_message(app: &App) -> String {
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
             terminal
-                .draw(|frame| crate::tui::ui::view(&app, frame))
+                .draw(|frame| crate::tui::ui::view(app, frame))
                 .unwrap();
             let buffer = terminal.backend().buffer();
             let rows: Vec<String> = (0..buffer.area.height)
@@ -5529,55 +5411,56 @@ mod tests {
                         .collect::<String>()
                 })
                 .collect();
-
             let warn = rows
                 .iter()
                 .position(|r| r.contains('\u{26a0}'))
-                .expect("the picker must draw the error row");
-            // Both rows cross the same vertical borders, the dialog's and the
-            // dashboard's behind it, so the dialog's text is the same
-            // border-delimited column in each. Reading it this way also means
-            // a sentence that overran the dialog would take a border with it
-            // and fail here rather than quietly widening the column.
+                .expect("the dialog must draw the message");
+            // Both rows cross the same vertical borders, so the dialog's text
+            // is the same border-delimited column in each, and a sentence that
+            // overran the dialog would take a border with it.
             let column = |row: &str| {
                 row.split('\u{2502}')
                     .map(|s| s.to_string())
                     .collect::<Vec<_>>()
             };
             let top = column(&rows[warn]);
-            let idx = top
-                .iter()
-                .position(|s| s.contains('\u{26a0}'))
-                .expect("the error row sits inside the dialog");
+            let idx = top.iter().position(|s| s.contains('\u{26a0}')).unwrap();
             let bottom = column(&rows[warn + 1]);
-            // The wrap breaks the sentence between the rows and eats the space
-            // it broke on, so they are rejoined before they are read. A third
-            // row is never drawn (the error section is two rows long), so
-            // anything pushed onto one is simply missing here.
-            let message: String = format!("{} {}", top[idx], bottom[idx])
+            format!("{} {}", top[idx], bottom[idx])
                 .split_whitespace()
                 .collect::<Vec<_>>()
-                .join(" ");
-            let message = message
+                .join(" ")
                 .trim_start_matches('\u{26a0}')
                 .trim_start()
-                .to_string();
-            assert!(
-                message.contains("Pick another strategy for the rest"),
-                "{}: the recovery must survive the wrap, got {:?}",
-                len,
-                message
-            );
-            // What the row shows for the repo: everything between the first
-            // two quotes. Read back rather than recomputed, so the test does
-            // not restate the truncation it is checking.
+                .to_string()
+        }
+
+        for len in [30usize, 32, 33, 80] {
+            let name = format!("a-repository-with-a-long-name-{}", "x".repeat(len - 30));
+            assert_eq!(name.len(), len, "the width being tested");
+            let repos = vec![PathBuf::from(format!("/r/{}", name))];
+            let mut app = make_app(vec![]);
+            app.screen = creating_screen_for(&repos);
+            let (tx, _cancel, job) =
+                make_job(create_params(std::path::Path::new("/ws"), "ws-a", repos));
+            app.create_job = Some(job);
+            tx.send(CreateProgress::Finished {
+                index: 0,
+                fetch: None,
+                created: CreateOutcome::Failed(REFUSED.to_string()),
+            })
+            .unwrap();
+            tx.send(CreateProgress::Done).unwrap();
+            app.poll_create_result();
+
+            let message = read_message(&app);
             let shown = message
                 .split('\'')
                 .nth(1)
-                .expect("the repo name is quoted, got {message:?}");
+                .unwrap_or_else(|| panic!("the repo name is quoted, got {:?}", message));
             assert!(
                 name.starts_with(shown.trim_end_matches("...")),
-                "{}: the row must name the repo that refused, got {:?}",
+                "{}: the message must name the repo that refused, got {:?}",
                 len,
                 shown
             );
@@ -5591,14 +5474,43 @@ mod tests {
             assert_eq!(
                 message,
                 format!(
-                    "'{}' is already checked out; 1 created. \
-                     Pick another strategy for the rest",
+                    "'{}' is already checked out elsewhere. Pick another strategy",
                     shown
                 ),
                 "{}: the whole sentence must be on the dialog",
                 len
             );
         }
+
+        // The table's message at three-digit counts: 100 repos, all refused.
+        let repos: Vec<PathBuf> = (0..100)
+            .map(|i| PathBuf::from(format!("/r/repo-{:03}", i)))
+            .collect();
+        let mut app = make_app(vec![]);
+        app.screen = creating_screen_for(&repos);
+        let (tx, _cancel, job) = make_job(create_params(
+            std::path::Path::new("/ws"),
+            "ws-a",
+            repos.clone(),
+        ));
+        app.create_job = Some(job);
+        app.poll_create_result();
+        for index in 0..repos.len() {
+            tx.send(CreateProgress::Finished {
+                index,
+                fetch: None,
+                created: CreateOutcome::Failed(REFUSED.to_string()),
+            })
+            .unwrap();
+            app.poll_create_result();
+        }
+        tx.send(CreateProgress::Done).unwrap();
+        app.poll_create_result();
+        assert_eq!(
+            read_message(&app),
+            "100 of 100 repos refused: the branch is checked out elsewhere. \
+             Choose again for them, then retry"
+        );
     }
 
     #[test]
@@ -5851,48 +5763,43 @@ mod tests {
         assert!(app.create_job.is_none(), "the finished job is dropped");
     }
 
+    /// A single repo has no review table, so its refusal returns to its own
+    /// picker with the reason, as the bounce always did. The run ended
+    /// itself with `Done`, so there is no worker left to stop.
     #[test]
-    fn poll_create_result_stopped_bounces_to_the_branch_strategy_picker() {
+    fn a_single_repo_refusal_returns_to_its_picker() {
         use crate::tui::screens::create::CreateStage;
+        let repos = vec![PathBuf::from("/r/repo-a")];
         let mut app = make_app(vec![]);
-        app.screen = creating_screen();
+        app.screen = creating_screen_for(&repos);
         if let Screen::CreateWorkspace(st) = &mut app.screen {
             st.progress
                 .push("Creating worktree for repo-a...".to_string());
         }
-        let params = create_params(
-            std::path::Path::new("/ws"),
-            "ws-a",
-            vec![PathBuf::from("/r/repo-a")],
-        );
-        let (tx, cancel, job) = make_job(params);
+        let (tx, _cancel, job) =
+            make_job(create_params(std::path::Path::new("/ws"), "ws-a", repos));
         app.create_job = Some(job);
-
-        tx.send(CreateProgress::Stopped(CreateStop::AlreadyCheckedOut {
+        tx.send(CreateProgress::Finished {
             index: 0,
-        }))
+            fetch: None,
+            created: CreateOutcome::Failed(REFUSED.to_string()),
+        })
         .unwrap();
+        tx.send(CreateProgress::Done).unwrap();
         app.poll_create_result();
 
         match &app.screen {
             Screen::CreateWorkspace(st) => {
                 assert_eq!(st.stage, CreateStage::PickBranchStrategy);
-                assert!(st.progress.is_empty(), "the log is cleared on the bounce");
+                assert!(st.progress.is_empty(), "the log is cleared on the way back");
                 assert_eq!(
                     st.error.as_deref(),
-                    Some(
-                        "'repo-a' is already checked out; 0 created. \
-                         Pick another strategy for the rest"
-                    )
+                    Some("'repo-a' is already checked out elsewhere. Pick another strategy")
                 );
             }
             _ => panic!("expected the create screen"),
         }
-        assert!(
-            cancel.load(Ordering::Relaxed),
-            "the worker must be stopped before the user picks again"
-        );
-        assert!(app.create_job.is_none(), "the stopped job is dropped");
+        assert!(app.create_job.is_none(), "the finished job is dropped");
     }
 
     #[test]
@@ -6102,27 +6009,35 @@ mod tests {
         assert!(app.create_job.is_none());
     }
 
-    /// The worse half of the same race. An `AlreadyCheckedOut` stop exists to
-    /// put the user back on the strategy picker with a reason they can act on.
-    /// Treating that frame's Esc as a cancellation would drop them on the
-    /// dashboard with a generic message and silently lose the recovery path
-    /// the `Stopped` variant was added to provide.
+    /// The worse half of the same race. A run with a refused repo ends on the
+    /// review table so the user can choose again for it. Treating that
+    /// frame's Esc as a cancellation would drop them on the dashboard with a
+    /// generic message and silently lose the repair.
     #[test]
-    fn esc_in_the_frame_a_stop_arrived_still_bounces_to_the_picker() {
+    fn esc_in_the_frame_a_refused_run_ended_still_returns_to_the_table() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let tmp = tempfile::tempdir().unwrap();
         let ws_dir = tmp.path().join("spaces");
+        let repos = vec![PathBuf::from("/r/repo-a"), PathBuf::from("/r/repo-b")];
 
         let mut app = make_app(vec![]);
         app.config.workspaces.dir = ws_dir.clone();
-        app.screen = creating_screen();
-        let params = create_params(&ws_dir, "ws-a", vec![PathBuf::from("/r/repo-a")]);
-        let (tx, _cancel, job) = make_job(params);
+        app.screen = creating_screen_for(&repos);
+        let (tx, _cancel, job) = make_job(create_params(&ws_dir, "ws-a", repos));
         app.create_job = Some(job);
-        tx.send(CreateProgress::Stopped(CreateStop::AlreadyCheckedOut {
+        tx.send(CreateProgress::Finished {
             index: 0,
-        }))
+            fetch: None,
+            created: CreateOutcome::Created,
+        })
         .unwrap();
+        tx.send(CreateProgress::Finished {
+            index: 1,
+            fetch: None,
+            created: CreateOutcome::Failed(REFUSED.to_string()),
+        })
+        .unwrap();
+        tx.send(CreateProgress::Done).unwrap();
 
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
@@ -6130,61 +6045,61 @@ mod tests {
             Screen::CreateWorkspace(st) => {
                 assert_eq!(
                     st.stage,
-                    crate::tui::screens::create::CreateStage::PickBranchStrategy,
-                    "the bounce must survive an Esc in the same frame"
+                    crate::tui::screens::create::CreateStage::ReviewPlan,
+                    "the return to the table must survive an Esc in the same frame"
                 );
-                assert_eq!(
-                    st.error.as_deref(),
-                    Some(
-                        "'repo-a' is already checked out; 0 created. \
-                         Pick another strategy for the rest"
-                    ),
+                assert!(
+                    st.error.as_deref().is_some_and(|e| e.contains("refused")),
                     "the actionable reason must not be replaced by a generic stop"
                 );
             }
-            _ => panic!("expected the strategy picker, not the dashboard"),
+            _ => panic!("expected the review table, not the dashboard"),
         }
         assert!(app.create_job.is_none());
     }
 
-    /// The window `cancel_creating`'s guard is documented to swallow, pinned
-    /// here because the predicate fix makes it reachable. On the LAST repo the
-    /// worker sends `Finished` (so `finished` reaches `repos.len()`) and only
-    /// THEN decides to send `Stopped(AlreadyCheckedOut)`, so there is an
-    /// interval where the counters say the run is over, the channel is empty,
-    /// and the bounce is still coming.
+    /// The window `cancel_creating`'s guard is documented to swallow. On the
+    /// LAST repo the worker sends `Finished` (so `finished` reaches the total)
+    /// and only THEN sends `Done`, so there is an interval where the counters
+    /// say the run is over, the channel is empty, and the return to the
+    /// review table is still coming.
     ///
     /// An Esc landing there is swallowed: the job is left in place, the cancel
-    /// flag stays clear, the screen does not move, and the next drain delivers
-    /// the bounce. That is the accepted behaviour rather than a defect to fix,
-    /// because both alternatives are worse: reporting a finished run as a stop
-    /// is a success reported as a failure, and replaying the key would push it
-    /// into a screen the user has not been shown yet. The user loses the key,
-    /// not the recovery path.
+    /// flag stays clear, the screen does not move, and the next drain ends
+    /// the run on the table. That is the accepted behaviour rather than a
+    /// defect to fix, because both alternatives are worse: reporting a
+    /// finished run as a stop is a success reported as a failure, and
+    /// replaying the key would push it into a screen the user has not been
+    /// shown yet. The user loses the key, not the repair.
     #[test]
-    fn esc_between_the_last_finished_and_the_stop_is_swallowed_and_the_bounce_arrives() {
+    fn esc_between_the_last_finished_and_done_is_swallowed_and_the_table_arrives() {
         use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let tmp = tempfile::tempdir().unwrap();
         let ws_dir = tmp.path().join("spaces");
+        let repos = vec![PathBuf::from("/r/repo-a"), PathBuf::from("/r/repo-b")];
 
         let mut app = make_app(vec![]);
         app.config.workspaces.dir = ws_dir.clone();
-        app.screen = creating_screen();
-        let params = create_params(&ws_dir, "ws-a", vec![PathBuf::from("/r/repo-a")]);
-        let (tx, cancel, job) = make_job(params);
+        app.screen = creating_screen_for(&repos);
+        let (tx, cancel, job) = make_job(create_params(&ws_dir, "ws-a", repos));
         app.create_job = Some(job);
 
         tx.send(CreateProgress::Started { index: 0 }).unwrap();
         tx.send(CreateProgress::Finished {
             index: 0,
             fetch: None,
-            created: CreateOutcome::Failed(
-                "fatal: 'main' is already used by worktree at '/x'".to_string(),
-            ),
+            created: CreateOutcome::Created,
+        })
+        .unwrap();
+        tx.send(CreateProgress::Started { index: 1 }).unwrap();
+        tx.send(CreateProgress::Finished {
+            index: 1,
+            fetch: None,
+            created: CreateOutcome::Failed(REFUSED.to_string()),
         })
         .unwrap();
         // Drained, so `finished` has reached the total and the channel is
-        // empty: the worker has not sent `Stopped` yet. That is the window.
+        // empty: the worker has not sent `Done` yet. That is the window.
         app.poll_create_result();
 
         // The routing is proven here rather than assumed. Every first-half
@@ -6216,7 +6131,7 @@ mod tests {
         );
         assert!(
             !cancel.load(Ordering::Relaxed),
-            "a swallowed Esc must not cancel a worker that is about to stop itself"
+            "a swallowed Esc must not cancel a worker that is about to finish"
         );
         match &app.screen {
             Screen::CreateWorkspace(st) => assert_eq!(
@@ -6231,35 +6146,18 @@ mod tests {
             "the run is neither finished nor cancelled yet, so nothing is reported"
         );
 
-        tx.send(CreateProgress::Stopped(CreateStop::AlreadyCheckedOut {
-            index: 0,
-        }))
-        .unwrap();
+        tx.send(CreateProgress::Done).unwrap();
         app.poll_create_result();
 
         match &app.screen {
-            Screen::CreateWorkspace(st) => {
-                assert_eq!(
-                    st.stage,
-                    crate::tui::screens::create::CreateStage::PickBranchStrategy,
-                    "the next drain must deliver the bounce the Esc did not take"
-                );
-                assert_eq!(
-                    st.error.as_deref(),
-                    Some(
-                        "'repo-a' is already checked out; 0 created. \
-                         Pick another strategy for the rest"
-                    ),
-                    "the actionable reason survives the swallowed key"
-                );
-            }
-            _ => panic!("expected the strategy picker"),
+            Screen::CreateWorkspace(st) => assert_eq!(
+                st.stage,
+                crate::tui::screens::create::CreateStage::ReviewPlan,
+                "the next drain must deliver the table the Esc did not take"
+            ),
+            _ => panic!("expected the review table"),
         }
-        assert!(app.create_job.is_none(), "the stopped job is dropped");
-        assert!(
-            cancel.load(Ordering::Relaxed),
-            "the bounce stops the worker before the user picks again"
-        );
+        assert!(app.create_job.is_none(), "the finished job is dropped");
     }
 
     #[test]

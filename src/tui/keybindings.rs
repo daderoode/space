@@ -352,7 +352,7 @@ const PLAN_REVIEW: BindingGroup = BindingGroup {
         },
         Binding {
             key: "Esc",
-            desc: "Back to the last repo",
+            desc: "Last repo's choice; after a run, leave",
         },
     ],
 };

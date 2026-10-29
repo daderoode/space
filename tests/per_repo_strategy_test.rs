@@ -168,6 +168,7 @@ fn pump_creating(app: &mut App) {
 
 /// The branch a worktree is on, or `HEAD` when detached.
 fn head_of(worktree: &Path) -> String {
+    assert!(worktree.exists(), "{:?} was not created", worktree);
     let out = std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .current_dir(worktree)
@@ -656,5 +657,117 @@ fn question_mark_on_the_review_table_opens_its_help() {
     assert_eq!(
         space::tui::screens::help::landing_group(&app.screen, app.focus),
         space::tui::keybindings::PLAN_REVIEW_NAME
+    );
+}
+
+/// Three repos with `topic`, checked out in bravo's source only, and the
+/// create flow for space `topic` past its sync report.
+fn topic_refused_by_bravo(env: &TestEnv) -> (App, [PathBuf; 3]) {
+    let repos = [
+        env.create_repo("alpha"),
+        env.create_repo("bravo"),
+        env.create_repo("charlie"),
+    ];
+    git(&repos[0], &["branch", "topic"]);
+    git(&repos[1], &["checkout", "-q", "-b", "topic"]);
+    git(&repos[2], &["branch", "topic"]);
+    (create_past_sync(env, "topic", &repos), repos)
+}
+
+/// One strategy for all three: "Existing branch 'topic'", the space name.
+fn existing_topic_for_all(app: &mut App) {
+    press(app, KeyCode::Enter);
+    down(app, 1);
+    press(app, KeyCode::Enter);
+    pump_creating(app);
+}
+
+/// Decision 4, end to end on the installed git. A repo refused because its
+/// branch is checked out elsewhere does not stop the run: charlie, after
+/// the refused bravo, is created too. The run returns to the review table
+/// with bravo marked; alpha and charlie are in place and closed to change;
+/// and the retry after bravo is given another strategy creates bravo alone.
+#[test]
+fn a_refused_repo_does_not_stop_the_run_and_the_retry_creates_only_what_is_missing() {
+    use space::tui::screens::branch_plan::RowOutcome;
+    let env = TestEnv::new();
+    let (mut app, [alpha, bravo, charlie]) = topic_refused_by_bravo(&env);
+    existing_topic_for_all(&mut app);
+
+    let space = env.workspaces_dir.join("topic");
+    assert_eq!(head_of(&space.join("alpha")), "topic");
+    assert_eq!(
+        head_of(&space.join("charlie")),
+        "topic",
+        "the repo after the refusal is created: the refusal did not stop the run"
+    );
+    assert!(!space.join("bravo").exists());
+
+    let st = create_state(&app);
+    assert_eq!(st.stage, CreateStage::ReviewPlan);
+    assert_eq!(st.plan.outcome_of(&alpha), Some(&RowOutcome::Placed));
+    assert_eq!(st.plan.outcome_of(&bravo), Some(&RowOutcome::Refused));
+    assert_eq!(st.plan.outcome_of(&charlie), Some(&RowOutcome::Placed));
+    assert_eq!(st.plan.review_cursor, 1, "on bravo");
+
+    let rows = render(&app, 80, 24).join("\n");
+    assert!(rows.contains("Retry 1 repos"), "got:\n{}", rows);
+    assert!(
+        rows.contains("refused \u{b7} branch 'topic'"),
+        "got:\n{}",
+        rows
+    );
+    assert!(
+        rows.contains("in place \u{b7} branch 'topic'"),
+        "got:\n{}",
+        rows
+    );
+
+    // charlie is in place: Enter on it reopens nothing.
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(create_stage(&app), CreateStage::ReviewPlan);
+    assert!(create_state(&app)
+        .error
+        .as_deref()
+        .is_some_and(|e| e.contains("'charlie' is already in the space")));
+
+    // bravo, detached this time.
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(create_stage(&app), CreateStage::PickBranchStrategy);
+    down(&mut app, 1);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(create_stage(&app), CreateStage::ReviewPlan);
+    press(&mut app, KeyCode::Enter);
+    pump_creating(&mut app);
+
+    assert!(matches!(app.screen, Screen::Dashboard));
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Created workspace 'topic'"),
+        "the retry created bravo and attempted nothing already in place"
+    );
+    assert_eq!(head_of(&space.join("bravo")), "HEAD", "bravo is detached");
+    assert_eq!(head_of(&space.join("alpha")), "topic");
+}
+
+/// Esc on the table after a run leaves the flow and says what is in place.
+#[test]
+fn esc_on_the_table_after_a_run_leaves_with_what_is_in_place() {
+    let env = TestEnv::new();
+    let (mut app, _) = topic_refused_by_bravo(&env);
+    existing_topic_for_all(&mut app);
+    assert_eq!(create_stage(&app), CreateStage::ReviewPlan);
+
+    press(&mut app, KeyCode::Esc);
+    assert!(matches!(app.screen, Screen::Dashboard));
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("2 of 3 repos in place. Press a to add the rest.")
+    );
+    assert!(
+        app.workspaces.iter().any(|w| w.name == "topic"),
+        "the dashboard lists the partial space"
     );
 }

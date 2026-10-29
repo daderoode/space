@@ -9,6 +9,12 @@
 //! one strategy for every repo (the picker runs once, as it always has), or
 //! one per repo (the picker runs once for each repo in selection order, and
 //! a review table lists every repo's choice before anything is created).
+//!
+//! A run attempts every repo. A repo refused because its branch is checked
+//! out elsewhere does not stop the others; once the run ends the flow returns
+//! to the review table with that repo marked, the repos in place shown as
+//! such and closed to change, and the next run attempts only what is not in
+//! place.
 
 use crate::core::git::BranchInfo;
 use crate::core::workspace::BranchStrategy;
@@ -20,6 +26,13 @@ use tui_input::Input;
 
 /// How many recent branches the strategy picker lists.
 const RECENT_BRANCHES: usize = 5;
+
+/// Display columns a message gives one repo's name. The messages are drawn
+/// in two wrapped rows of the dialog's inner width, 60 at the documented
+/// 80-column minimum, and a name past this would push the part that says
+/// what to do onto a third row that is never drawn. Pinned by
+/// `the_refusal_messages_read_in_full_at_eighty_columns`.
+const MESSAGE_NAME_COLS: usize = 32;
 
 /// One repo's recorded choice: the strategy, and the picker state that chose
 /// it, so the repo can be reopened where it was left.
@@ -56,10 +69,27 @@ pub enum Back {
     Repos,
 }
 
+/// How a repo's last attempt in this flow turned out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowOutcome {
+    /// Its worktree is in the space, created by a run or found there.
+    Placed,
+    /// Git refused it because the branch is checked out elsewhere.
+    Refused,
+    /// It failed for another reason, with git's text.
+    Failed(String),
+}
+
 /// What a key on the review table did.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReviewStep {
     Stay,
+    /// Enter on a repo already in place: its strategy no longer decides
+    /// anything (a run skips a repo already in the space), so it is closed
+    /// to change.
+    Locked,
+    /// Esc after a run: leave the flow, with what is in place left there.
+    Leave,
     /// Enter on a repo: open its picker (`BranchPlan::current`), to return
     /// to the table once it is chosen.
     Edit,
@@ -96,6 +126,8 @@ pub struct BranchPlan {
     /// The picker is choosing for one repo reopened from the review table,
     /// and goes back there once it has.
     editing: bool,
+    /// What each repo's last attempt came to; empty until a run ends.
+    outcomes: BTreeMap<PathBuf, RowOutcome>,
 }
 
 impl BranchPlan {
@@ -185,6 +217,9 @@ impl BranchPlan {
     pub fn record(&mut self, repos: &[PathBuf], choice: RowChoice) -> Next {
         if self.editing {
             if let Some(repo) = repos.get(self.current) {
+                // A new choice is a new attempt: the repo is no longer marked
+                // for how the last one went.
+                self.outcomes.remove(repo);
                 self.choices.insert(repo.clone(), choice);
             }
             self.editing = false;
@@ -193,7 +228,10 @@ impl BranchPlan {
         }
         if self.for_all() {
             for repo in repos {
-                self.choices.insert(repo.clone(), choice.clone());
+                if self.outcomes.get(repo) != Some(&RowOutcome::Placed) {
+                    self.outcomes.remove(repo);
+                    self.choices.insert(repo.clone(), choice.clone());
+                }
             }
             return Next::Run;
         }
@@ -240,10 +278,17 @@ impl BranchPlan {
             }
             KeyCode::Enter if self.review_cursor >= repos.len() => ReviewStep::Run,
             KeyCode::Enter => {
+                let placed = repos
+                    .get(self.review_cursor)
+                    .is_some_and(|r| self.outcomes.get(r) == Some(&RowOutcome::Placed));
+                if placed {
+                    return ReviewStep::Locked;
+                }
                 self.current = self.review_cursor;
                 self.editing = true;
                 ReviewStep::Edit
             }
+            KeyCode::Esc if self.has_run() => ReviewStep::Leave,
             KeyCode::Esc => {
                 self.current = repos.len().saturating_sub(1);
                 ReviewStep::LastRepo
@@ -252,15 +297,103 @@ impl BranchPlan {
         }
     }
 
+    /// Record how a repo's attempt turned out. Called as each repo of a run
+    /// finishes.
+    pub fn note_outcome(&mut self, repo: &Path, outcome: RowOutcome) {
+        self.outcomes.insert(repo.to_path_buf(), outcome);
+    }
+
+    /// How a repo's last attempt turned out, if it has had one.
+    pub fn outcome_of(&self, repo: &Path) -> Option<&RowOutcome> {
+        self.outcomes.get(repo)
+    }
+
+    /// Whether a run has ended in this flow (its outcomes are what the table
+    /// marks).
+    pub fn has_run(&self) -> bool {
+        !self.outcomes.is_empty()
+    }
+
+    /// The repos refused because their branch is checked out elsewhere.
+    pub fn refused(&self, repos: &[PathBuf]) -> usize {
+        repos
+            .iter()
+            .filter(|r| self.outcomes.get(*r) == Some(&RowOutcome::Refused))
+            .count()
+    }
+
+    /// The repos whose worktree is in the space.
+    pub fn placed(&self, repos: &[PathBuf]) -> usize {
+        repos
+            .iter()
+            .filter(|r| self.outcomes.get(*r) == Some(&RowOutcome::Placed))
+            .count()
+    }
+
+    /// Open the review table after a run with refusals, on the first repo
+    /// refused.
+    pub fn review_after_run(&mut self, repos: &[PathBuf]) {
+        self.editing = false;
+        self.review_cursor = repos
+            .iter()
+            .position(|r| self.outcomes.get(r) == Some(&RowOutcome::Refused))
+            .unwrap_or(repos.len());
+    }
+
+    /// What the flow says on returning after a run in which repos were
+    /// refused because their branch is checked out elsewhere: with one repo,
+    /// which returns to its picker, the repo by name; otherwise how many,
+    /// since the table marks which.
+    pub fn refusal_message(&self, repos: &[PathBuf]) -> String {
+        match repos {
+            [only] => format!(
+                "'{}' is already checked out elsewhere. Pick another strategy",
+                crate::tui::ui::truncate_for_width(&repo_name(only), MESSAGE_NAME_COLS)
+            ),
+            _ => format!(
+                "{} of {} repos refused: the branch is checked out elsewhere. \
+                 Choose again for them, then retry",
+                self.refused(repos),
+                repos.len()
+            ),
+        }
+    }
+
+    /// What Enter on a repo already in place says.
+    pub fn locked_message(&self, repos: &[PathBuf]) -> String {
+        let name = repos
+            .get(self.review_cursor)
+            .map(|r| repo_name(r))
+            .unwrap_or_default();
+        format!(
+            "'{}' is already in the space, so its strategy cannot change",
+            crate::tui::ui::truncate_for_width(&name, MESSAGE_NAME_COLS)
+        )
+    }
+
+    /// What leaving the table after a run says: how much of the selection is
+    /// in place, and how to add the rest. No space name, so it fits the
+    /// one-row status line at 80 columns.
+    pub fn leave_message(&self, repos: &[PathBuf]) -> String {
+        format!(
+            "{} of {} repos in place. Press a to add the rest.",
+            self.placed(repos),
+            repos.len()
+        )
+    }
+
     /// A repo's recorded strategy.
     pub fn strategy_of(&self, repo: &Path) -> Option<&BranchStrategy> {
         self.choices.get(repo).map(|c| &c.strategy)
     }
 
     /// The run's repos in selection order, each with its recorded strategy.
+    /// A repo already in place is left out: a retry attempts only what is
+    /// missing.
     pub fn plans(&self, repos: &[PathBuf]) -> Vec<RepoPlan> {
         repos
             .iter()
+            .filter(|path| self.outcomes.get(*path) != Some(&RowOutcome::Placed))
             .filter_map(|path| {
                 self.choices.get(path).map(|c| RepoPlan {
                     path: path.clone(),

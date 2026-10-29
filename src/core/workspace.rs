@@ -308,7 +308,8 @@ pub fn workspace_detail(ws_dir: &Path, name: &str) -> Result<Workspace> {
 /// `LC_ALL=C` pins git's output language, as the `branch -f` runner in
 /// `sync_repo_cancellable` does, because `refuses_because_checked_out` reads
 /// this message: a localized git would turn every checked-out refusal into
-/// the generic failure and the strategy-picker bounce would be dead again.
+/// the generic failure and the return to choose another strategy would be
+/// dead again.
 /// The cost is that every `worktree add` refusal reaches the log in English.
 ///
 /// No time limit and no `setsid` here, and a test depends on that:
@@ -1947,8 +1948,9 @@ pub fn create_worktree_with_fetch(
 /// rather than as a plain failure.
 ///
 /// One predicate because two layers act on it and they must not drift: the
-/// Creating worker ends its run on it, and the App bounces the flow back to
-/// the branch-strategy picker.
+/// App marks the repo refused as its outcome arrives, and once the run ends
+/// returns the flow to the review table (or, with one repo, its strategy
+/// picker) to choose again for it.
 ///
 /// Both of git's wordings count: `fatal: '<branch>' is already used by
 /// worktree at '<path>'` (git 2.42 and later, verified on git 2.50.1, Apple
@@ -7150,9 +7152,9 @@ mod tests {
     }
 
     /// The predicate the Creating worker skips on. A worktree made by the
-    /// production path counts whatever branch it carries, which is the case
-    /// the retry after a checked-out bounce turns on: the repos already in
-    /// the space were created under the strategy the user has just replaced.
+    /// production path counts whatever branch it carries, which is the case a
+    /// run over a space that already holds some of its repos turns on: those
+    /// repos were created under whatever strategy they were given then.
     #[test]
     fn placement_of_adopts_a_worktree_of_the_source_repo() {
         let tmp = tempfile::tempdir().unwrap();

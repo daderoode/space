@@ -286,7 +286,7 @@ impl AddState {
                             return ScreenAction::Continue;
                         }
                     }
-                    // The bounce reason (ticket 12) stays on the picker here;
+                    // A refusal's reason (ticket 12) stays on the picker here;
                     // the dispatch clears it, as it did before this check.
                     self.record(strategy, ctx)
                 }
@@ -398,12 +398,32 @@ impl AddState {
     fn handle_review(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
         match self.plan.review_key(key.code, &self.selected_repos) {
             ReviewStep::Stay => ScreenAction::Continue,
+            ReviewStep::Locked => {
+                self.error = Some(self.plan.locked_message(&self.selected_repos));
+                ScreenAction::Continue
+            }
             ReviewStep::Edit | ReviewStep::LastRepo => {
                 self.error = None;
                 self.open_picker();
                 ScreenAction::Continue
             }
             ReviewStep::Run => self.run(ctx),
+            ReviewStep::Leave => ScreenAction::BackWithStatus(
+                self.plan.leave_message(&self.selected_repos),
+                crate::tui::actions::StatusKind::Warning,
+            ),
+        }
+    }
+
+    /// After a run with a refused repo; mirrors the create flow.
+    pub fn return_after_refusal(&mut self) {
+        self.progress.clear();
+        self.error = Some(self.plan.refusal_message(&self.selected_repos));
+        if self.selected_repos.len() > 1 {
+            self.plan.review_after_run(&self.selected_repos);
+            self.stage = AddStage::ReviewPlan;
+        } else {
+            self.stage = AddStage::PickBranchStrategy;
         }
     }
 
