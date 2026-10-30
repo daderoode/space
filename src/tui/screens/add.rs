@@ -241,25 +241,14 @@ impl AddState {
             KeyCode::Enter => {
                 if self.branch_strategy_idx == max_idx {
                     // "Show more..." / "Pick a branch...": open fuzzy picker
-                    let repo_path = self.plan.picker_repo(&self.selected_repos).cloned();
-                    if let Some(repo_path) = repo_path {
-                        let repo_name = repo_path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        match crate::tui::app::build_branch_picker(&repo_path, &repo_name, "Branch")
-                        {
-                            Some(picker) => {
-                                self.picked_branch = None;
-                                self.error = None;
-                                self.branch_picker = Some(picker);
-                                self.stage = AddStage::PickBranch;
-                            }
-                            None => {
-                                self.error =
-                                    Some(format!("Could not list branches for {}", repo_name));
-                            }
+                    match self.plan.branch_picker(&self.selected_repos) {
+                        Ok(picker) => {
+                            self.picked_branch = None;
+                            self.error = None;
+                            self.branch_picker = Some(picker);
+                            self.stage = AddStage::PickBranch;
                         }
+                        Err(message) => self.error = Some(message),
                     }
                     ScreenAction::Continue
                 } else if self.branch_strategy_idx >= 3 && n > 0 {

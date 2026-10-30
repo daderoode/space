@@ -163,19 +163,54 @@ impl BranchPlan {
         !self.per_repo && !self.editing
     }
 
-    /// The repo whose branches the picker lists: the one being configured,
-    /// or with one strategy for all, the first selected (the branches are
-    /// offered for every repo, so they can only come from one of them).
-    pub fn picker_repo<'a>(&self, repos: &'a [PathBuf]) -> Option<&'a PathBuf> {
+    /// The branches the picker offers: the repo being configured's own, or
+    /// with one strategy for all, the branches every selected repo has
+    /// (`git::shared_branches`), so whatever is picked exists in each repo
+    /// it is used for.
+    fn picker_branches(&self, repos: &[PathBuf]) -> anyhow::Result<Vec<BranchInfo>> {
         if self.for_all() {
-            repos.first()
+            crate::core::git::shared_branches(repos)
         } else {
-            repos.get(self.current)
+            match repos.get(self.current) {
+                Some(repo) => crate::core::git::list_branches(repo),
+                None => Ok(Vec::new()),
+            }
+        }
+    }
+
+    /// Where the picker's branches come from, as its titles name it: the
+    /// repo, or with one strategy for several, all of them.
+    fn picker_source(&self, repos: &[PathBuf]) -> String {
+        match repos {
+            [_, _, ..] if self.for_all() => format!("all {} repos", repos.len()),
+            _ => repos
+                .get(if self.for_all() { 0 } else { self.current })
+                .map(|p| repo_name(p))
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The full branch picker that Show more opens, or what to say when it
+    /// cannot open: no branch is in every selected repo, or none could be
+    /// listed.
+    pub fn branch_picker(
+        &self,
+        repos: &[PathBuf],
+    ) -> Result<crate::tui::widgets::fuzzy_picker::FuzzyPicker, String> {
+        let source = self.picker_source(repos);
+        let branches = self.picker_branches(repos).ok();
+        let shared_none =
+            self.for_all() && repos.len() > 1 && branches.as_ref().is_some_and(|b| b.is_empty());
+        match branches.and_then(|b| crate::tui::app::branch_picker_of(b, &source, "Branch")) {
+            Some(picker) => Ok(picker),
+            None if shared_none => Err(format!("No branch is in {}", source)),
+            None => Err(format!("Could not list branches for {}", source)),
         }
     }
 
     /// Set the strategy picker's fields for the repo it is about to choose
-    /// for: that repo's recent branches, and the cursor, name field and
+    /// for: its recent branches (with one strategy for all, those every repo
+    /// has, which may be none), and the cursor, name field and
     /// picked branch the repo was left with, or the defaults for a repo not
     /// chosen yet. Called every time the picker changes repo, because each
     /// field otherwise carries over from the repo before: a cursor past the
@@ -194,15 +229,15 @@ impl BranchPlan {
         picked_branch: &mut Option<String>,
         recent: &mut Vec<BranchInfo>,
     ) {
-        let repo = self.picker_repo(repos);
-        *recent = repo
-            .map(|p| crate::core::git::recent_branches(p, RECENT_BRANCHES))
+        *recent = self
+            .picker_branches(repos)
+            .map(|b| crate::core::git::most_recent(b, RECENT_BRANCHES))
             .unwrap_or_default();
         if self.for_all() {
             *strategy_idx = 0;
             return;
         }
-        match repo.and_then(|p| self.choices.get(p)) {
+        match repos.get(self.current).and_then(|p| self.choices.get(p)) {
             Some(choice) => {
                 *strategy_idx = cursor_for(choice, recent);
                 *name_input = choice.name_input.clone();
@@ -429,8 +464,8 @@ impl BranchPlan {
     /// name is cut to `name_cols` so the count after it stays on the border.
     pub fn picker_title(&self, repos: &[PathBuf], name_cols: usize) -> String {
         if !self.for_all() {
-            let name = self
-                .picker_repo(repos)
+            let name = repos
+                .get(self.current)
                 .map(|p| repo_name(p))
                 .unwrap_or_default();
             format!(

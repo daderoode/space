@@ -977,3 +977,150 @@ fn a_name_typed_per_repo_does_not_reach_one_strategy_for_all() {
         _ => panic!("expected the add screen"),
     }
 }
+
+/// The branch names the open full picker lists, sorted.
+fn picker_names(app: &App) -> Vec<String> {
+    let picker = create_state(app)
+        .branch_picker
+        .as_ref()
+        .expect("the picker opened");
+    let mut names: Vec<String> = picker.all_items.iter().map(|i| i.name.clone()).collect();
+    names.sort();
+    names
+}
+
+fn sorted(mut names: Vec<String>) -> Vec<String> {
+    names.sort();
+    names
+}
+
+/// Ticket 01(b) with one strategy for all: the recent rows and Show more
+/// offer only the branches every selected repo has, so whatever is picked
+/// exists in each. Three repos share `main` and `everywhere`; `ab` is in two
+/// of them and `alpha-only` in one. Remote-tracking branches match by their
+/// whole name: `origin/both` is in all three, `origin/two` is `upstream/two`
+/// in charlie, and `origin/spelled` is a local branch of that spelling in
+/// alpha. Per repo, each still offers its own.
+#[test]
+fn one_strategy_for_all_offers_only_the_branches_every_repo_has() {
+    let env = TestEnv::new();
+    let repos = [
+        env.create_repo("alpha"),
+        env.create_repo("bravo"),
+        env.create_repo("charlie"),
+    ];
+    for repo in &repos {
+        git(repo, &["branch", "everywhere"]);
+        git(repo, &["update-ref", "refs/remotes/origin/both", "HEAD"]);
+    }
+    git(&repos[0], &["branch", "ab"]);
+    git(&repos[1], &["branch", "ab"]);
+    git(&repos[0], &["branch", "alpha-only"]);
+    git(
+        &repos[0],
+        &["update-ref", "refs/remotes/origin/two", "HEAD"],
+    );
+    git(
+        &repos[1],
+        &["update-ref", "refs/remotes/origin/two", "HEAD"],
+    );
+    git(
+        &repos[2],
+        &["update-ref", "refs/remotes/upstream/two", "HEAD"],
+    );
+    git(&repos[0], &["branch", "origin/spelled"]);
+    git(
+        &repos[1],
+        &["update-ref", "refs/remotes/origin/spelled", "HEAD"],
+    );
+    git(
+        &repos[2],
+        &["update-ref", "refs/remotes/origin/spelled", "HEAD"],
+    );
+
+    let mut app = create_past_sync(&env, "ws", &repos);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(create_stage(&app), CreateStage::PickBranchStrategy);
+    assert_eq!(
+        sorted(recent_names(&app)),
+        ["everywhere", "main"],
+        "the recent rows are the shared local branches"
+    );
+
+    let show_more = 3 + recent_names(&app).len();
+    down(&mut app, show_more);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(create_stage(&app), CreateStage::PickBranch);
+    assert_eq!(picker_names(&app), ["everywhere", "main", "origin/both"]);
+    let prompt = &create_state(&app).branch_picker.as_ref().unwrap().prompt;
+    assert!(prompt.contains("(all 3 repos)"), "got {:?}", prompt);
+    assert!(
+        ["alpha", "bravo", "charlie"]
+            .iter()
+            .all(|r| !prompt.contains(r)),
+        "no one repo is named, got {:?}",
+        prompt
+    );
+
+    // Per repo, each repo's own: back to the fork through the picker.
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    per_repo(&mut app);
+    let alpha = recent_names(&app);
+    assert!(["ab", "alpha-only"]
+        .iter()
+        .all(|b| alpha.contains(&b.to_string())));
+    detached(&mut app);
+    let bravo = recent_names(&app);
+    assert!(bravo.contains(&"ab".to_string()) && !bravo.contains(&"alpha-only".to_string()));
+    detached(&mut app);
+    let charlie = recent_names(&app);
+    assert!(!charlie.contains(&"ab".to_string()), "got {:?}", charlie);
+}
+
+/// No branch in every repo: one strategy for all lists none, with nothing
+/// left from a repo looked at before; Show more says why it cannot open;
+/// the cursor stops at the last row; the fixed rows still work.
+#[test]
+fn one_strategy_for_all_with_no_shared_branch_lists_none() {
+    let env = TestEnv::new();
+    let repos = [env.create_repo("alpha"), env.create_repo("bravo")];
+    git(&repos[1], &["branch", "-m", "main", "trunk"]);
+    git(&repos[0], &["branch", "alpha-only"]);
+
+    let mut app = create_past_sync(&env, "ws", &repos);
+    per_repo(&mut app);
+    assert!(!recent_names(&app).is_empty(), "alpha's own, per repo");
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Enter);
+    assert!(recent_names(&app).is_empty(), "no stale rows");
+
+    down(&mut app, 10);
+    assert_eq!(
+        create_state(&app).branch_strategy_idx,
+        3,
+        "Pick a branch..."
+    );
+    press(&mut app, KeyCode::Enter);
+    let st = create_state(&app);
+    assert_eq!(st.stage, CreateStage::PickBranchStrategy);
+    assert_eq!(st.error.as_deref(), Some("No branch is in all 2 repos"));
+
+    for _ in 0..3 {
+        press(&mut app, KeyCode::Up);
+    }
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(create_stage(&app), CreateStage::EnterBranchName);
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(create_state(&app).branch_strategy_idx, 0);
+    assert_eq!(
+        sorted(
+            plans_of(detached(&mut app))
+                .into_iter()
+                .map(|p| format!("{:?}", p.strategy))
+                .collect()
+        ),
+        ["DetachedHead", "DetachedHead"]
+    );
+}

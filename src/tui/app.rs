@@ -2972,10 +2972,22 @@ pub(crate) fn build_branch_picker(
     repo_name: &str,
     label: &str,
 ) -> Option<crate::tui::widgets::fuzzy_picker::FuzzyPicker> {
-    use crate::core::git::list_branches;
+    branch_picker_of(
+        crate::core::git::list_branches(repo_path).ok()?,
+        repo_name,
+        label,
+    )
+}
+
+/// A FuzzyPicker over `branches`, titled with `source`, where they come from
+/// (a repo's name). `None` when there are none. See `build_branch_picker`.
+pub(crate) fn branch_picker_of(
+    branches: Vec<crate::core::git::BranchInfo>,
+    source: &str,
+    label: &str,
+) -> Option<crate::tui::widgets::fuzzy_picker::FuzzyPicker> {
     use crate::tui::widgets::fuzzy_picker::{FuzzyPicker, PickerItem};
 
-    let branches = list_branches(repo_path).ok()?;
     if branches.is_empty() {
         return None;
     }
@@ -2999,7 +3011,7 @@ pub(crate) fn build_branch_picker(
 
     Some(
         FuzzyPicker::new(
-            format!("{}  ({})  ENTER=select  ESC=back", label, repo_name),
+            format!("{}  ({})  ENTER=select  ESC=back", label, source),
             items,
             false,
         )
