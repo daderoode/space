@@ -97,9 +97,10 @@ fn create_worktree_reuses_existing_local_branch() {
 /// returns an error for every reason git can refuse an add, so the assertion
 /// held whether the refusal was recognised as "the branch is checked out
 /// elsewhere" or fell through to the generic failure path, and those are the
-/// two outcomes the Creating stage acts on differently: only the first bounces
-/// the user back to the branch-strategy picker. This pins the refusal against
-/// the predicate that gates that bounce, on whatever wording the local git uses.
+/// two outcomes the Creating stage acts on differently: only the first returns
+/// the user to choose another strategy for that repo. This pins the refusal
+/// against the predicate that gates that return, on whatever wording the local
+/// git uses.
 #[test]
 fn create_worktree_refuses_a_checked_out_branch_as_pick_another_strategy() {
     let repo_dir = TempDir::new().unwrap();
@@ -550,23 +551,23 @@ fn create_worktree_cancellable_creates_when_the_flag_is_unset() {
 /// wild, so the predicate has to know both: "is already used by worktree at"
 /// (git 2.42 and later, including the 2.50.1 this is developed on) and "is
 /// already checked out at" (git 2.38 to 2.41). A wording it misses is a user
-/// shown a generic failure instead of the branch-strategy picker the stage
-/// bounces to, which is what a wording drift cost once already.
+/// shown a generic failure instead of the chance to choose another strategy,
+/// which is what a wording drift cost once already.
 #[test]
 fn refuses_because_checked_out_matches_both_git_wordings() {
     use space::core::workspace::refuses_because_checked_out;
 
     assert!(
         refuses_because_checked_out("fatal: 'main' is already checked out at '/x'"),
-        "git 2.38 to 2.41 wording must bounce to the strategy picker"
+        "git 2.38 to 2.41 wording must count as checked out elsewhere"
     );
     assert!(
         refuses_because_checked_out("fatal: 'main' is already used by worktree at '/x'"),
-        "git 2.42 and later wording must bounce to the strategy picker"
+        "git 2.42 and later wording must count as checked out elsewhere"
     );
     assert!(
         !refuses_because_checked_out("fatal: not a git repository"),
-        "an unrelated refusal must not bounce to the strategy picker"
+        "an unrelated refusal must not count as checked out elsewhere"
     );
 }
 

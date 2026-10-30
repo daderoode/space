@@ -1,5 +1,6 @@
 use crate::core::workspace::BranchStrategy;
 use crate::tui::actions::{ScreenAction, ScreenContext, WorktreeParams};
+use crate::tui::screens::branch_plan::{Back, BranchPlan, ForkStep, Next, ReviewStep, RowChoice};
 use crate::tui::screens::sync_report::{LogView, SyncReport};
 use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -10,9 +11,11 @@ use tui_input::Input;
 pub enum AddStage {
     PickRepos,
     Syncing,
+    PickPlanMode, // one strategy for every repo, or one per repo (several repos only)
     PickBranchStrategy,
     EnterBranchName, // edit the new-branch name
     PickBranch,
+    ReviewPlan, // every repo's strategy, confirmed before anything is created
     Creating,
 }
 
@@ -26,6 +29,7 @@ pub struct AddState {
     pub branch_picker: Option<FuzzyPicker>,
     pub picked_branch: Option<String>,
     pub recent_branches: Vec<crate::core::git::BranchInfo>,
+    pub plan: BranchPlan, // the strategy chosen for each selected repo
     pub progress: Vec<String>,
     pub report: SyncReport, // per-repo sync outcomes shown during Syncing stage
     pub log_view: LogView,  // scroll state of the Creating log
@@ -53,6 +57,7 @@ impl AddState {
             branch_picker: None,
             picked_branch: None,
             recent_branches: vec![],
+            plan: BranchPlan::default(),
             progress: vec![],
             report: SyncReport::empty(),
             log_view: LogView::new(),
@@ -107,7 +112,11 @@ impl AddState {
             key.code,
             matches!(
                 self.stage,
-                AddStage::Syncing | AddStage::PickBranchStrategy | AddStage::Creating
+                AddStage::Syncing
+                    | AddStage::PickPlanMode
+                    | AddStage::PickBranchStrategy
+                    | AddStage::ReviewPlan
+                    | AddStage::Creating
             ),
         ) {
             return ScreenAction::OpenHelp;
@@ -115,9 +124,11 @@ impl AddState {
         match self.stage {
             AddStage::PickRepos => self.handle_pick_repos(key),
             AddStage::Syncing => self.handle_syncing(key),
+            AddStage::PickPlanMode => self.handle_plan_mode(key),
             AddStage::PickBranchStrategy => self.handle_branch_strategy(key, ctx),
             AddStage::EnterBranchName => self.handle_enter_branch_name(key, ctx),
             AddStage::PickBranch => self.handle_pick_branch(key, ctx),
+            AddStage::ReviewPlan => self.handle_review(key, ctx),
             AddStage::Creating => self.handle_creating(key, ctx),
         }
     }
@@ -137,6 +148,8 @@ impl AddState {
                     return ScreenAction::Continue;
                 }
                 self.selected_repos = confirmed;
+                // A new selection starts a new plan (see the create flow).
+                self.plan = BranchPlan::default();
                 self.error = None;
                 self.progress.clear();
                 self.report = SyncReport::new(&self.selected_repos);
@@ -195,7 +208,20 @@ impl AddState {
         match key.code {
             KeyCode::Esc => {
                 self.error = None;
-                self.stage = AddStage::PickRepos;
+                match self.plan.back(&self.selected_repos) {
+                    Back::PreviousRepo => self.open_picker(),
+                    Back::Review => self.stage = AddStage::ReviewPlan,
+                    Back::Fork => {
+                        // A name or branch picked for the first repo is its own;
+                        // one strategy for all does not start from it.
+                        if self.plan.per_repo {
+                            self.branch_name_input = Input::default();
+                            self.picked_branch = None;
+                        }
+                        self.stage = AddStage::PickPlanMode;
+                    }
+                    Back::Repos => self.stage = AddStage::PickRepos,
+                }
                 ScreenAction::Continue
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -215,25 +241,14 @@ impl AddState {
             KeyCode::Enter => {
                 if self.branch_strategy_idx == max_idx {
                     // "Show more..." / "Pick a branch...": open fuzzy picker
-                    let repo_path = self.selected_repos.first().cloned();
-                    if let Some(repo_path) = repo_path {
-                        let repo_name = repo_path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        match crate::tui::app::build_branch_picker(&repo_path, &repo_name, "Branch")
-                        {
-                            Some(picker) => {
-                                self.picked_branch = None;
-                                self.error = None;
-                                self.branch_picker = Some(picker);
-                                self.stage = AddStage::PickBranch;
-                            }
-                            None => {
-                                self.error =
-                                    Some(format!("Could not list branches for {}", repo_name));
-                            }
+                    match self.plan.branch_picker(&self.selected_repos) {
+                        Ok(picker) => {
+                            self.picked_branch = None;
+                            self.error = None;
+                            self.branch_picker = Some(picker);
+                            self.stage = AddStage::PickBranch;
                         }
+                        Err(message) => self.error = Some(message),
                     }
                     ScreenAction::Continue
                 } else if self.branch_strategy_idx >= 3 && n > 0 {
@@ -241,16 +256,7 @@ impl AddState {
                     let branch_name = self.recent_branches[self.branch_strategy_idx - 3]
                         .name
                         .clone();
-                    self.stage = AddStage::Creating;
-                    ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
-                        workspace_name: self.workspace_name.clone(),
-                        workspace_dir: ctx.config.workspaces.dir.clone(),
-                        repos: self.selected_repos.clone(),
-                        branch_strategy: BranchStrategy::ExistingBranch(branch_name),
-                        is_new: false,
-                        fresh_repos: self.report.fetched_ok_paths(),
-                        slow_fetch_repos: self.report.slow_fetch_paths(),
-                    })
+                    self.record(BranchStrategy::ExistingBranch(branch_name), ctx)
                 } else if self.branch_strategy_idx == 0 {
                     // New branch: open the branch name stage on
                     // `new_branch_name`, the name the picker's row shows. A
@@ -277,18 +283,9 @@ impl AddState {
                             return ScreenAction::Continue;
                         }
                     }
-                    // The bounce reason (ticket 12) stays on the picker here;
+                    // A refusal's reason (ticket 12) stays on the picker here;
                     // the dispatch clears it, as it did before this check.
-                    self.stage = AddStage::Creating;
-                    ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
-                        workspace_name: self.workspace_name.clone(),
-                        workspace_dir: ctx.config.workspaces.dir.clone(),
-                        repos: self.selected_repos.clone(),
-                        branch_strategy: strategy,
-                        is_new: false,
-                        fresh_repos: self.report.fetched_ok_paths(),
-                        slow_fetch_repos: self.report.slow_fetch_paths(),
-                    })
+                    self.record(strategy, ctx)
                 }
             }
             _ => ScreenAction::Continue,
@@ -315,16 +312,7 @@ impl AddState {
                     return ScreenAction::Continue;
                 }
                 self.error = None;
-                self.stage = AddStage::Creating;
-                ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
-                    workspace_name: self.workspace_name.clone(),
-                    workspace_dir: ctx.config.workspaces.dir.clone(),
-                    repos: self.selected_repos.clone(),
-                    branch_strategy: BranchStrategy::NewBranch(name),
-                    is_new: false,
-                    fresh_repos: self.report.fetched_ok_paths(),
-                    slow_fetch_repos: self.report.slow_fetch_paths(),
-                })
+                self.record(BranchStrategy::NewBranch(name), ctx)
             }
             _ => {
                 if let Some(req) = crate::tui::app::key_to_input_request(&key) {
@@ -366,16 +354,7 @@ impl AddState {
                 };
                 self.error = None;
                 self.picked_branch = Some(branch.clone());
-                self.stage = AddStage::Creating;
-                ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
-                    workspace_name: self.workspace_name.clone(),
-                    workspace_dir: ctx.config.workspaces.dir.clone(),
-                    repos: self.selected_repos.clone(),
-                    branch_strategy: BranchStrategy::ExistingBranch(branch),
-                    is_new: false,
-                    fresh_repos: self.report.fetched_ok_paths(),
-                    slow_fetch_repos: self.report.slow_fetch_paths(),
-                })
+                self.record(BranchStrategy::ExistingBranch(branch), ctx)
             }
             _ => {
                 if let Some(ref mut bp) = self.branch_picker {
@@ -387,6 +366,111 @@ impl AddState {
                 ScreenAction::Continue
             }
         }
+    }
+
+    /// Enter on a finished sync report; mirrors the create flow. Only the
+    /// repos being added count: the ones already in the space are not
+    /// selected here.
+    pub fn continue_from_sync_report(&mut self) {
+        self.progress.clear();
+        if self.selected_repos.len() > 1 {
+            self.stage = AddStage::PickPlanMode;
+        } else {
+            self.plan.per_repo = false;
+            self.open_picker();
+        }
+    }
+
+    /// The fork; mirrors the create flow.
+    fn handle_plan_mode(&mut self, key: KeyEvent) -> ScreenAction {
+        match self.plan.fork_key(key.code) {
+            ForkStep::Stay => {}
+            ForkStep::Chosen => self.open_picker(),
+            ForkStep::Back => self.stage = AddStage::PickRepos,
+        }
+        ScreenAction::Continue
+    }
+
+    /// The review table; mirrors the create flow.
+    fn handle_review(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
+        match self.plan.review_key(key.code, &self.selected_repos) {
+            ReviewStep::Stay => ScreenAction::Continue,
+            ReviewStep::Locked => {
+                self.error = Some(self.plan.locked_message(&self.selected_repos));
+                ScreenAction::Continue
+            }
+            ReviewStep::Edit | ReviewStep::LastRepo => {
+                self.error = None;
+                self.open_picker();
+                ScreenAction::Continue
+            }
+            ReviewStep::Run => self.run(ctx),
+            ReviewStep::Leave => ScreenAction::BackWithStatus(
+                self.plan.leave_message(&self.selected_repos),
+                crate::tui::actions::StatusKind::Warning,
+            ),
+        }
+    }
+
+    /// After a run with a refused repo; mirrors the create flow.
+    pub fn return_after_refusal(&mut self) {
+        self.progress.clear();
+        self.error = Some(self.plan.refusal_message(&self.selected_repos));
+        if self.selected_repos.len() > 1 {
+            self.plan.review_after_run(&self.selected_repos);
+            self.stage = AddStage::ReviewPlan;
+        } else {
+            self.stage = AddStage::PickBranchStrategy;
+        }
+    }
+
+    /// Open the strategy picker on the repo the plan is choosing for.
+    fn open_picker(&mut self) {
+        self.plan.open_picker(
+            &self.selected_repos,
+            &mut self.branch_strategy_idx,
+            &mut self.branch_name_input,
+            &mut self.picked_branch,
+            &mut self.recent_branches,
+        );
+        self.stage = AddStage::PickBranchStrategy;
+    }
+
+    /// Record `strategy` with the picker state that chose it, and move on.
+    /// Every key that chooses a strategy leaves through here.
+    fn record(&mut self, strategy: BranchStrategy, ctx: &ScreenContext) -> ScreenAction {
+        let choice = RowChoice {
+            strategy,
+            strategy_idx: self.branch_strategy_idx,
+            name_input: self.branch_name_input.clone(),
+            picked_branch: self.picked_branch.clone(),
+        };
+        match self.plan.record(&self.selected_repos, choice) {
+            Next::Configure => {
+                self.error = None;
+                self.open_picker();
+                ScreenAction::Continue
+            }
+            Next::Review => {
+                self.error = None;
+                self.stage = AddStage::ReviewPlan;
+                ScreenAction::Continue
+            }
+            Next::Run => self.run(ctx),
+        }
+    }
+
+    /// Start the run on what the plan holds.
+    fn run(&mut self, ctx: &ScreenContext) -> ScreenAction {
+        self.stage = AddStage::Creating;
+        ScreenAction::ExecuteWorktreeFlow(WorktreeParams {
+            workspace_name: self.workspace_name.clone(),
+            workspace_dir: ctx.config.workspaces.dir.clone(),
+            plans: self.plan.plans(&self.selected_repos),
+            is_new: false,
+            fresh_repos: self.report.fetched_ok_paths(),
+            slow_fetch_repos: self.report.slow_fetch_paths(),
+        })
     }
 
     fn handle_creating(&mut self, key: KeyEvent, ctx: &ScreenContext) -> ScreenAction {
@@ -565,7 +649,7 @@ mod tests {
     /// Enter on the branch-name stage: the new-branch name it creates.
     fn confirm_branch_name(st: &mut AddState) -> String {
         match press(st, KeyCode::Enter) {
-            ScreenAction::ExecuteWorktreeFlow(p) => match p.branch_strategy {
+            ScreenAction::ExecuteWorktreeFlow(p) => match p.plans[0].strategy.clone() {
                 BranchStrategy::NewBranch(name) => name,
                 other => panic!("expected a new branch, got {:?}", other),
             },

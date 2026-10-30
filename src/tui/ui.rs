@@ -658,8 +658,14 @@ fn render_create_overlay(
         CreateStage::PickRepos => {
             crate::tui::widgets::fuzzy_picker::render(&state.picker, show_cursor, frame);
         }
+        CreateStage::PickPlanMode => {
+            render_plan_fork(frame, state.plan.fork_idx, state.selected_repos.len())
+        }
         CreateStage::PickBranchStrategy => render_branch_strategy_picker(
             frame,
+            &state
+                .plan
+                .picker_title(&state.selected_repos, PICKER_TITLE_NAME_COLS),
             state.ws_name.value(),
             state.new_branch_name(),
             state.branch_strategy_idx,
@@ -679,6 +685,13 @@ fn render_create_overlay(
                 crate::tui::widgets::fuzzy_picker::render(picker, show_cursor, frame);
             }
         }
+        CreateStage::ReviewPlan => render_plan_review(
+            frame,
+            &state.plan,
+            &state.selected_repos,
+            "Create",
+            state.error.as_deref(),
+        ),
         CreateStage::Syncing => render_sync_report(frame, &state.report),
         CreateStage::Creating => render_creating_log(
             frame,
@@ -875,7 +888,224 @@ fn render_name_input(
     );
 }
 
-/// The branch strategy picker (Stage 4 of create, Stage 3 of add).
+/// Display columns the strategy picker's title gives the repo it is choosing
+/// for. The dialog is 62 wide at the documented 80-column minimum, 60 inside
+/// its corners, and the rest of the title (` Branch Strategy: ` and
+/// ` (99 of 99) `) is 30, so 28 keeps the count on the border.
+const PICKER_TITLE_NAME_COLS: usize = 28;
+
+/// The fork shown after the sync report when several repos are selected: one
+/// strategy for every repo, or one chosen per repo.
+fn render_plan_fork(frame: &mut Frame, fork_idx: usize, repos: usize) {
+    use ratatui::widgets::Clear;
+    let dialog_w = percent_of(frame.area().width, 70, 62);
+    let area = centered_rect_fixed(dialog_w, 4, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(theme::border_focused())
+        .title(" Branch Strategy ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let options = [
+        format!("Same strategy for all {} repos", repos),
+        "Choose a strategy per repo".to_string(),
+    ];
+    let items: Vec<ListItem> = options
+        .iter()
+        .enumerate()
+        .map(|(i, opt)| {
+            if i == fork_idx {
+                ListItem::new(format!("> {}", opt)).style(theme::selected())
+            } else {
+                ListItem::new(format!("  {}", opt))
+            }
+        })
+        .collect();
+    frame.render_widget(List::new(items), inner);
+}
+
+/// The review table: every selected repo with the strategy chosen for it, in
+/// selection order, then the row that starts the run (`verb` names it). The
+/// REPO column takes at most a third of the width, so the strategy beside a
+/// long repo name is still read; both are cut to fit rather than wrapped.
+/// Taller than the frame allows, the list scrolls to keep the cursor shown.
+///
+/// After a run each repo is marked with how it went, ahead of its strategy
+/// so a cut never takes the mark: in place (dimmed, closed to change),
+/// refused, or failed. The start row then retries what is not in place.
+///
+/// Below the list, the highlighted repo's full name and strategy, which the
+/// row may have cut (two names sharing a long prefix read alike there), and
+/// for a repo that failed, git's reason.
+fn render_plan_review(
+    frame: &mut Frame,
+    plan: &crate::tui::screens::branch_plan::BranchPlan,
+    repos: &[std::path::PathBuf],
+    verb: &str,
+    error: Option<&str>,
+) {
+    use crate::tui::screens::branch_plan::{describe, repo_name, RowOutcome};
+    use ratatui::widgets::{Clear, ListState};
+    let frame_area = frame.area();
+    let dialog_w = percent_of(frame_area.width, 70, 62);
+    let inner_w = usize::from(dialog_w.saturating_sub(2));
+    let n = repos.len();
+    // The repo rows, a blank row and the run row; below them a blank row
+    // and the detail (two rows more for a failure's reason), then the error
+    // (a blank row and two of text) and the hint.
+    let list_rows = n + 2;
+    let detail_rows = if plan.failed(repos) > 0 { 4 } else { 2 };
+    let below = 1 + detail_rows + if error.is_some() { 4 } else { 1 };
+    let cap = percent_of(frame_area.height, 80, 8);
+    let height = fit_u16(list_rows + below + 2).min(cap);
+    let area = centered_rect_fixed(dialog_w, height, frame_area);
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(if error.is_some() {
+            theme::border_danger()
+        } else {
+            theme::border_focused()
+        })
+        .title(format!(" Review: {} repos ", n));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let detail_h = fit_u16(detail_rows);
+    let sections = if error.is_some() {
+        Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(detail_h),
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Length(1),
+        ])
+        .split(inner)
+    } else {
+        Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(detail_h),
+            Constraint::Length(1),
+        ])
+        .split(inner)
+    };
+
+    let name_w = repos
+        .iter()
+        .map(|p| line_width(&repo_name(p)))
+        .max()
+        .unwrap_or(0)
+        .min(inner_w / 3);
+    let marker = |selected: bool| if selected { "> " } else { "  " };
+    let has_run = plan.has_run();
+    let mut items: Vec<ListItem> = repos
+        .iter()
+        .enumerate()
+        .map(|(i, repo)| {
+            let name = pad_to(&truncate_for_width(&repo_name(repo), name_w), name_w);
+            let strategy = plan
+                .strategy_of(repo)
+                .map(describe)
+                .unwrap_or_else(|| "not chosen".to_string());
+            let outcome = plan.outcome_of(repo);
+            let mark = match outcome {
+                _ if !has_run => "",
+                Some(RowOutcome::Placed) => "\u{2713} ",
+                Some(RowOutcome::Refused) | Some(RowOutcome::Failed(_)) => "\u{2717} ",
+                None => "  ",
+            };
+            let status = match outcome {
+                Some(RowOutcome::Placed) => "in place \u{b7} ",
+                Some(RowOutcome::Refused) => "refused \u{b7} ",
+                Some(RowOutcome::Failed(_)) => "failed \u{b7} ",
+                None => "",
+            };
+            let line = truncate_for_width(
+                &format!(
+                    "{}{}{}  {}{}",
+                    marker(i == plan.review_cursor),
+                    mark,
+                    name,
+                    status,
+                    strategy
+                ),
+                inner_w,
+            );
+            if i == plan.review_cursor {
+                ListItem::new(line).style(theme::selected())
+            } else if outcome == Some(&RowOutcome::Placed) {
+                ListItem::new(line).style(theme::muted())
+            } else {
+                ListItem::new(line)
+            }
+        })
+        .collect();
+    items.push(ListItem::new(""));
+    let on_run = plan.review_cursor >= n;
+    let run = if has_run {
+        format!("{}Retry {} repos", marker(on_run), n - plan.placed(repos))
+    } else {
+        format!("{}{} {} repos", marker(on_run), verb, n)
+    };
+    items.push(if on_run {
+        ListItem::new(run).style(theme::selected())
+    } else {
+        ListItem::new(run)
+    });
+    let mut state =
+        ListState::default().with_selected(Some(if on_run { n + 1 } else { plan.review_cursor }));
+    frame.render_stateful_widget(List::new(items), sections[0], &mut state);
+
+    if let Some(repo) = repos.get(plan.review_cursor) {
+        let strategy = plan
+            .strategy_of(repo)
+            .map(describe)
+            .unwrap_or_else(|| "not chosen".to_string());
+        // Indented to the rows' names.
+        let indent =
+            |text: &str| format!("  {}", truncate_for_width(text, inner_w.saturating_sub(2)));
+        let mut lines = vec![
+            Line::from(indent(&repo_name(repo))),
+            Line::from(indent(&strategy)).style(theme::muted()),
+        ];
+        if let Some(RowOutcome::Failed(reason)) = plan.outcome_of(repo) {
+            // Git's text can run over several lines; the rows here wrap it.
+            let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+            lines.push(Line::from(format!("  failed: {}", reason)).style(theme::error()));
+        }
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            sections[2],
+        );
+    }
+
+    if let Some(err) = error {
+        frame.render_widget(
+            Paragraph::new(format!("\u{26a0}  {}", err))
+                .style(theme::error())
+                .wrap(Wrap { trim: false }),
+            sections[4],
+        );
+    }
+    // After a run there is nothing to go back to: Esc leaves.
+    let hint = if has_run {
+        "ENTER change the repo, or retry \u{b7} ESC leave"
+    } else {
+        "ENTER change the repo, or start \u{b7} ESC back"
+    };
+    frame.render_widget(
+        Paragraph::new(hint).style(theme::muted()),
+        sections[sections.len() - 1],
+    );
+}
+
+/// The branch strategy picker (Stage 4 of create, Stage 3 of add). `title`
+/// names the repo it is choosing for, or all of them.
 /// `workspace_name` is the live space name, which the Existing-branch row
 /// sends to git unchanged; `new_branch_name` is the branch the New-branch row
 /// creates, which is the space name until the user types one of their own in
@@ -884,6 +1114,7 @@ fn render_name_input(
 /// because its space name is fixed for the whole flow (ticket 32).
 fn render_branch_strategy_picker(
     frame: &mut Frame,
+    title: &str,
     workspace_name: &str,
     new_branch_name: &str,
     strategy_idx: usize,
@@ -918,7 +1149,7 @@ fn render_branch_strategy_picker(
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(border_style)
-        .title(" Branch Strategy ");
+        .title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1241,8 +1472,14 @@ fn render_add_overlay(
         AddStage::PickRepos => {
             crate::tui::widgets::fuzzy_picker::render(&state.picker, show_cursor, frame);
         }
+        AddStage::PickPlanMode => {
+            render_plan_fork(frame, state.plan.fork_idx, state.selected_repos.len())
+        }
         AddStage::PickBranchStrategy => render_branch_strategy_picker(
             frame,
+            &state
+                .plan
+                .picker_title(&state.selected_repos, PICKER_TITLE_NAME_COLS),
             &state.workspace_name,
             state.new_branch_name(),
             state.branch_strategy_idx,
@@ -1262,6 +1499,13 @@ fn render_add_overlay(
                 crate::tui::widgets::fuzzy_picker::render(picker, show_cursor, frame);
             }
         }
+        AddStage::ReviewPlan => render_plan_review(
+            frame,
+            &state.plan,
+            &state.selected_repos,
+            "Add",
+            state.error.as_deref(),
+        ),
         AddStage::Syncing => render_sync_report(frame, &state.report),
         AddStage::Creating => render_creating_log(
             frame,
