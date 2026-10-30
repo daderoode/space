@@ -76,7 +76,8 @@ pub enum RowOutcome {
     Placed,
     /// Git refused it because the branch is checked out elsewhere.
     Refused,
-    /// It failed for another reason, with git's text.
+    /// It failed for another reason, with git's text, which the review
+    /// table shows for the highlighted row.
     Failed(String),
 }
 
@@ -128,6 +129,10 @@ pub struct BranchPlan {
     editing: bool,
     /// What each repo's last attempt came to; empty until a run ends.
     outcomes: BTreeMap<PathBuf, RowOutcome>,
+    /// A run has ended in this flow. Kept apart from `outcomes`, which
+    /// empties again as the repos marked are chosen anew, while the table
+    /// stays the one after a run: Esc leaves rather than reopening a picker.
+    ran: bool,
 }
 
 impl BranchPlan {
@@ -308,10 +313,9 @@ impl BranchPlan {
         self.outcomes.get(repo)
     }
 
-    /// Whether a run has ended in this flow (its outcomes are what the table
-    /// marks).
+    /// Whether a run has ended in this flow.
     pub fn has_run(&self) -> bool {
-        !self.outcomes.is_empty()
+        self.ran
     }
 
     /// The repos refused because their branch is checked out elsewhere.
@@ -319,6 +323,14 @@ impl BranchPlan {
         repos
             .iter()
             .filter(|r| self.outcomes.get(*r) == Some(&RowOutcome::Refused))
+            .count()
+    }
+
+    /// The repos that failed for another reason.
+    pub fn failed(&self, repos: &[PathBuf]) -> usize {
+        repos
+            .iter()
+            .filter(|r| matches!(self.outcomes.get(*r), Some(RowOutcome::Failed(_))))
             .count()
     }
 
@@ -333,6 +345,7 @@ impl BranchPlan {
     /// Open the review table after a run with refusals, on the first repo
     /// refused.
     pub fn review_after_run(&mut self, repos: &[PathBuf]) {
+        self.ran = true;
         self.editing = false;
         self.review_cursor = repos
             .iter()
@@ -343,12 +356,21 @@ impl BranchPlan {
     /// What the flow says on returning after a run in which repos were
     /// refused because their branch is checked out elsewhere: with one repo,
     /// which returns to its picker, the repo by name; otherwise how many,
-    /// since the table marks which.
+    /// since the table marks which, and how many failed for another reason,
+    /// whose own reason the table shows for the highlighted row.
     pub fn refusal_message(&self, repos: &[PathBuf]) -> String {
+        let failed = self.failed(repos);
         match repos {
             [only] => format!(
                 "'{}' is already checked out elsewhere. Pick another strategy",
                 crate::tui::ui::truncate_for_width(&repo_name(only), MESSAGE_NAME_COLS)
+            ),
+            _ if failed > 0 => format!(
+                "{} of {} repos refused (branch checked out elsewhere), {} failed. \
+                 Choose again for them, then retry",
+                self.refused(repos),
+                repos.len(),
+                failed
             ),
             _ => format!(
                 "{} of {} repos refused: the branch is checked out elsewhere. \
@@ -551,5 +573,52 @@ mod tests {
         assert_eq!(plan.current, 0);
         assert_eq!(plan.back(&rs), Back::Fork);
         assert_eq!(BranchPlan::default().back(&rs[..1]), Back::Repos);
+    }
+
+    /// One strategy for both repos, both refused, as the run leaves them.
+    fn both_refused(rs: &[PathBuf]) -> BranchPlan {
+        let mut plan = BranchPlan::default();
+        let topic = BranchStrategy::ExistingBranch("topic".to_string());
+        assert_eq!(plan.record(rs, choice(topic, 1)), Next::Run);
+        for r in rs {
+            plan.note_outcome(r, RowOutcome::Refused);
+        }
+        plan.review_after_run(rs);
+        plan
+    }
+
+    /// Choose again for the repo at `row` from the table.
+    fn rechoose(plan: &mut BranchPlan, rs: &[PathBuf], row: usize) {
+        plan.review_cursor = row;
+        assert_eq!(plan.review_key(KeyCode::Enter, rs), ReviewStep::Edit);
+        assert_eq!(
+            plan.record(rs, choice(BranchStrategy::DetachedHead, 2)),
+            Next::Review
+        );
+    }
+
+    #[test]
+    fn choosing_again_for_a_refused_repo_clears_its_mark_and_no_other() {
+        let rs = repos(&["a", "b"]);
+        let mut plan = both_refused(&rs);
+        rechoose(&mut plan, &rs, 0);
+        assert_eq!(plan.outcome_of(&rs[0]), None, "a new choice, a new attempt");
+        assert_eq!(plan.outcome_of(&rs[1]), Some(&RowOutcome::Refused));
+        assert_eq!(plan.refused(&rs), 1);
+    }
+
+    #[test]
+    fn esc_on_the_table_leaves_after_a_run_even_once_every_mark_is_cleared() {
+        let rs = repos(&["a", "b"]);
+        let mut plan = both_refused(&rs);
+        rechoose(&mut plan, &rs, 0);
+        rechoose(&mut plan, &rs, 1);
+        assert_eq!(plan.refused(&rs), 0, "every mark is cleared");
+        assert!(plan.has_run());
+        assert_eq!(
+            plan.review_key(KeyCode::Esc, &rs),
+            ReviewStep::Leave,
+            "not the picker for all repos, whose choice would overwrite both"
+        );
     }
 }

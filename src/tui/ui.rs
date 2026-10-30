@@ -935,6 +935,10 @@ fn render_plan_fork(frame: &mut Frame, fork_idx: usize, repos: usize) {
 /// After a run each repo is marked with how it went, ahead of its strategy
 /// so a cut never takes the mark: in place (dimmed, closed to change),
 /// refused, or failed. The start row then retries what is not in place.
+///
+/// Below the list, the highlighted repo's full name and strategy, which the
+/// row may have cut (two names sharing a long prefix read alike there), and
+/// for a repo that failed, git's reason.
 fn render_plan_review(
     frame: &mut Frame,
     plan: &crate::tui::screens::branch_plan::BranchPlan,
@@ -948,10 +952,12 @@ fn render_plan_review(
     let dialog_w = percent_of(frame_area.width, 70, 62);
     let inner_w = usize::from(dialog_w.saturating_sub(2));
     let n = repos.len();
-    // The repo rows, a blank row and the run row; below them the error (a
-    // blank row and two of text) and the hint.
+    // The repo rows, a blank row and the run row; below them a blank row
+    // and the detail (two rows more for a failure's reason), then the error
+    // (a blank row and two of text) and the hint.
     let list_rows = n + 2;
-    let below = if error.is_some() { 4 } else { 1 };
+    let detail_rows = if plan.failed(repos) > 0 { 4 } else { 2 };
+    let below = 1 + detail_rows + if error.is_some() { 4 } else { 1 };
     let cap = percent_of(frame_area.height, 80, 8);
     let height = fit_u16(list_rows + below + 2).min(cap);
     let area = centered_rect_fixed(dialog_w, height, frame_area);
@@ -968,16 +974,25 @@ fn render_plan_review(
         .title(format!(" Review: {} repos ", n));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let detail_h = fit_u16(detail_rows);
     let sections = if error.is_some() {
         Layout::vertical([
             Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(detail_h),
             Constraint::Length(1),
             Constraint::Length(2),
             Constraint::Length(1),
         ])
         .split(inner)
     } else {
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner)
+        Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(detail_h),
+            Constraint::Length(1),
+        ])
+        .split(inner)
     };
 
     let name_w = repos
@@ -1046,12 +1061,35 @@ fn render_plan_review(
         ListState::default().with_selected(Some(if on_run { n + 1 } else { plan.review_cursor }));
     frame.render_stateful_widget(List::new(items), sections[0], &mut state);
 
+    if let Some(repo) = repos.get(plan.review_cursor) {
+        let strategy = plan
+            .strategy_of(repo)
+            .map(describe)
+            .unwrap_or_else(|| "not chosen".to_string());
+        // Indented to the rows' names.
+        let indent =
+            |text: &str| format!("  {}", truncate_for_width(text, inner_w.saturating_sub(2)));
+        let mut lines = vec![
+            Line::from(indent(&repo_name(repo))),
+            Line::from(indent(&strategy)).style(theme::muted()),
+        ];
+        if let Some(RowOutcome::Failed(reason)) = plan.outcome_of(repo) {
+            // Git's text can run over several lines; the rows here wrap it.
+            let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+            lines.push(Line::from(format!("  failed: {}", reason)).style(theme::error()));
+        }
+        frame.render_widget(
+            Paragraph::new(lines).wrap(Wrap { trim: false }),
+            sections[2],
+        );
+    }
+
     if let Some(err) = error {
         frame.render_widget(
             Paragraph::new(format!("\u{26a0}  {}", err))
                 .style(theme::error())
                 .wrap(Wrap { trim: false }),
-            sections[2],
+            sections[4],
         );
     }
     // After a run there is nothing to go back to: Esc leaves.

@@ -5401,7 +5401,7 @@ mod tests {
     /// 80 a name longer than the terminal itself; every one must read in
     /// full, which is what `MESSAGE_NAME_COLS` buys. With several repos the
     /// table's message counts them instead, and is pinned at three-digit
-    /// counts, its longest.
+    /// counts, its longest, with refusals alone and beside failures.
     #[test]
     fn the_refusal_messages_read_in_full_at_eighty_columns() {
         use ratatui::backend::TestBackend;
@@ -5520,6 +5520,39 @@ mod tests {
         assert_eq!(
             read_message(&app),
             "100 of 100 repos refused: the branch is checked out elsewhere. \
+             Choose again for them, then retry"
+        );
+
+        // With failures beside the refusals the message counts both: half
+        // of 100 each, two two-digit counts beside the three-digit total.
+        let mut app = make_app(vec![]);
+        app.screen = creating_screen_for(&repos);
+        let (tx, _cancel, job) = make_job(create_params(
+            std::path::Path::new("/ws"),
+            "ws-a",
+            repos.clone(),
+        ));
+        app.create_job = Some(job);
+        app.poll_create_result();
+        for index in 0..repos.len() {
+            let error = if index % 2 == 0 {
+                REFUSED
+            } else {
+                "fatal: invalid reference: topic"
+            };
+            tx.send(CreateProgress::Finished {
+                index,
+                fetch: None,
+                created: CreateOutcome::Failed(error.to_string()),
+            })
+            .unwrap();
+            app.poll_create_result();
+        }
+        tx.send(CreateProgress::Done).unwrap();
+        app.poll_create_result();
+        assert_eq!(
+            read_message(&app),
+            "50 of 100 repos refused (branch checked out elsewhere), 50 failed. \
              Choose again for them, then retry"
         );
     }

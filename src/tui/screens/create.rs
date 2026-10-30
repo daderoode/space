@@ -261,7 +261,15 @@ impl CreateState {
                 match self.plan.back(&self.selected_repos) {
                     Back::PreviousRepo => self.open_picker(),
                     Back::Review => self.stage = CreateStage::ReviewPlan,
-                    Back::Fork => self.stage = CreateStage::PickPlanMode,
+                    Back::Fork => {
+                        // A name or branch picked for the first repo is its own;
+                        // one strategy for all does not start from it.
+                        if self.plan.per_repo {
+                            self.branch_name_input = Input::default();
+                            self.picked_branch = None;
+                        }
+                        self.stage = CreateStage::PickPlanMode;
+                    }
                     Back::Repos => self.stage = CreateStage::PickRepos,
                 }
                 ScreenAction::Continue

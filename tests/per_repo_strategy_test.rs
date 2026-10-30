@@ -800,3 +800,180 @@ fn esc_on_the_table_after_a_run_leaves_with_what_is_in_place() {
         "the partial space is selected, so `a` adds to it"
     );
 }
+
+/// A refusal and a failure in one run: bravo is refused (its branch is
+/// checked out in its source repo) and charlie fails for another reason (it
+/// has no `topic`). The run returns to the table for the refusal; the error
+/// counts both, and charlie's row, highlighted, shows git's reason, which
+/// the cleared log no longer holds.
+#[test]
+fn a_failure_beside_a_refusal_keeps_its_reason_on_the_table() {
+    use space::tui::screens::branch_plan::RowOutcome;
+    let env = TestEnv::new();
+    let repos = [
+        env.create_repo("alpha"),
+        env.create_repo("bravo"),
+        env.create_repo("charlie"),
+    ];
+    git(&repos[0], &["branch", "topic"]);
+    git(&repos[1], &["checkout", "-q", "-b", "topic"]);
+    let mut app = create_past_sync(&env, "topic", &repos);
+    existing_topic_for_all(&mut app);
+
+    let st = create_state(&app);
+    assert_eq!(st.stage, CreateStage::ReviewPlan);
+    assert_eq!(st.plan.outcome_of(&repos[1]), Some(&RowOutcome::Refused));
+    let reason = match st.plan.outcome_of(&repos[2]) {
+        Some(RowOutcome::Failed(reason)) => reason.clone(),
+        other => panic!("charlie must fail, got {:?}", other),
+    };
+    assert!(reason.contains("topic"), "git's reason, got {:?}", reason);
+    assert_eq!(
+        st.error.as_deref(),
+        Some(
+            "1 of 3 repos refused (branch checked out elsewhere), 1 failed. \
+             Choose again for them, then retry"
+        )
+    );
+
+    let rows = render(&app, 80, 24).join("\n");
+    assert!(
+        rows.contains("failed. Choose again"),
+        "the message reads, got:\n{}",
+        rows
+    );
+    assert!(
+        !rows.contains("failed: "),
+        "bravo is highlighted, got:\n{}",
+        rows
+    );
+
+    press(&mut app, KeyCode::Down);
+    let rows = render(&app, 80, 24).join("\n");
+    let shown = format!(
+        "failed: {}",
+        reason.split_whitespace().collect::<Vec<_>>().join(" ")
+    );
+    // The reason wraps over the detail's rows; compare its first 40 columns,
+    // which sit on the first.
+    assert!(
+        rows.contains(&shown[..40.min(shown.len())]),
+        "charlie's reason is shown, got:\n{}",
+        rows
+    );
+    assert!(
+        rows.lines()
+            .all(|r| !r.contains("Retry") || r.contains("Retry 2 repos")),
+        "the retry attempts both, got:\n{}",
+        rows
+    );
+}
+
+/// Two repo names that share a long prefix are cut alike in their rows; the
+/// highlighted one's full name and strategy are shown below the list, at the
+/// documented 80-column minimum.
+#[test]
+fn the_highlighted_repo_is_shown_in_full_below_the_table() {
+    let env = TestEnv::new();
+    let auth = "mycompany-backend-auth";
+    let billing = "mycompany-backend-billing";
+    let branch = "feature/billing-retries-for-failed-cards";
+    let repos = [env.create_repo(auth), env.create_repo(billing)];
+    let mut app = create_past_sync(&env, "ws", &repos);
+    per_repo(&mut app);
+    detached(&mut app);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(create_stage(&app), CreateStage::EnterBranchName);
+    app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+        KeyCode::Char('u'),
+        ratatui::crossterm::event::KeyModifiers::CONTROL,
+    ));
+    type_text(&mut app, branch);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(create_stage(&app), CreateStage::ReviewPlan);
+
+    let full_strategy = format!("new branch '{}'", branch);
+    press(&mut app, KeyCode::Up);
+    let rows = render(&app, 80, 24);
+    let row_of = |needle: &str| rows.iter().filter(|r| r.contains(needle)).count();
+    assert_eq!(
+        row_of(billing),
+        1,
+        "the full name is on one row, the detail:\n{}",
+        rows.join("\n")
+    );
+    assert_eq!(row_of(&full_strategy), 1, "{}", rows.join("\n"));
+    assert_eq!(row_of(auth), 0, "auth is cut in its row too");
+    assert_eq!(row_of("mycompany-backend..."), 2, "the rows read alike");
+    assert!(rows
+        .iter()
+        .all(|r| unicode_width::UnicodeWidthStr::width(r.as_str()) <= 80));
+
+    press(&mut app, KeyCode::Up);
+    let rows = render(&app, 80, 24);
+    let detail = rows
+        .iter()
+        .position(|r| r.contains(auth))
+        .unwrap_or_else(|| panic!("auth in full:\n{}", rows.join("\n")));
+    assert!(rows[detail + 1].contains("detached HEAD"));
+}
+
+/// A name typed for the first repo in per-repo mode is that repo's: Esc back
+/// to the fork and one strategy for all opens the name stage on the space
+/// name.
+#[test]
+fn a_name_typed_per_repo_does_not_reach_one_strategy_for_all() {
+    let env = TestEnv::new();
+    let repos = [env.create_repo("alpha"), env.create_repo("bravo")];
+    let mut app = create_past_sync(&env, "ws", &repos);
+    per_repo(&mut app);
+    press(&mut app, KeyCode::Enter);
+    app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+        KeyCode::Char('u'),
+        ratatui::crossterm::event::KeyModifiers::CONTROL,
+    ));
+    type_text(&mut app, "feat-x");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(
+        create_state(&app).branch_name_input.value(),
+        "feat-x",
+        "back on alpha, as it was left"
+    );
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(create_stage(&app), CreateStage::PickPlanMode);
+
+    press(&mut app, KeyCode::Up);
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(create_stage(&app), CreateStage::EnterBranchName);
+    assert_eq!(create_state(&app).branch_name_input.value(), "ws");
+
+    // The add flow's own fork, the same way.
+    let mut app = add_past_sync(&env, "ws", &repos);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Enter);
+    app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+        KeyCode::Char('u'),
+        ratatui::crossterm::event::KeyModifiers::CONTROL,
+    ));
+    type_text(&mut app, "feat-x");
+    press(&mut app, KeyCode::Enter);
+    for code in [
+        KeyCode::Esc,
+        KeyCode::Esc,
+        KeyCode::Up,
+        KeyCode::Enter,
+        KeyCode::Enter,
+    ] {
+        press(&mut app, code);
+    }
+    match &app.screen {
+        Screen::AddRepos(st) => {
+            assert_eq!(st.stage, AddStage::EnterBranchName);
+            assert_eq!(st.branch_name_input.value(), "ws");
+        }
+        _ => panic!("expected the add screen"),
+    }
+}
