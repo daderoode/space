@@ -15,13 +15,22 @@ pub struct ScreenContext<'a> {
     pub creating_in_flight: bool,
 }
 
+/// One repo of a run and the strategy it is placed with. Each repo carries
+/// its own, so a space can hold repos on different branches.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RepoPlan {
+    pub path: PathBuf,
+    pub strategy: BranchStrategy,
+}
+
 /// Parameters for creating/adding worktrees, shared between Create and Add flows.
 #[derive(Clone)]
 pub struct WorktreeParams {
     pub workspace_name: String,
     pub workspace_dir: PathBuf,
-    pub repos: Vec<PathBuf>,
-    pub branch_strategy: BranchStrategy,
+    /// The repos of the run, in order, each with its strategy. The only repo
+    /// list here: progress messages address repos by their index in it.
+    pub plans: Vec<RepoPlan>,
     pub is_new: bool,
     /// Repos the sync report fetched successfully in this flow. Their refs
     /// are the remote's, so the worktree creation skips its own fetch and
@@ -186,8 +195,7 @@ mod tests {
         WorktreeParams {
             workspace_name: "ws".to_string(),
             workspace_dir: PathBuf::from("/ws"),
-            repos: vec![],
-            branch_strategy: BranchStrategy::DetachedHead,
+            plans: vec![],
             is_new: true,
             fresh_repos: fresh,
             slow_fetch_repos: slow,

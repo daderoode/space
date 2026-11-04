@@ -162,13 +162,53 @@ pub fn list_branches(repo_path: &Path) -> Result<Vec<BranchInfo>> {
 /// Return the N most recently committed-to local branches for a repo.
 pub fn recent_branches(repo_path: &std::path::Path, limit: usize) -> Vec<BranchInfo> {
     list_branches(repo_path)
-        .map(|mut branches| {
-            branches.retain(|b| !b.is_remote);
-            branches.sort_by_key(|b| Reverse(b.last_commit_time));
-            branches.truncate(limit);
-            branches
-        })
+        .map(|branches| most_recent(branches, limit))
         .unwrap_or_default()
+}
+
+/// The `limit` most recently committed-to local branches of `branches`.
+pub fn most_recent(mut branches: Vec<BranchInfo>, limit: usize) -> Vec<BranchInfo> {
+    branches.retain(|b| !b.is_remote);
+    branches.sort_by_key(|b| Reverse(b.last_commit_time));
+    branches.truncate(limit);
+    branches
+}
+
+/// The branches every repo in `repo_paths` has, in `list_branches` order.
+///
+/// Matched by whole name and kind: a local branch by its name, and a
+/// remote-tracking branch by its name with the remote, so `origin/x` is
+/// shared only when every repo has `origin/x`, and `origin/x` in one repo
+/// with `upstream/x` in another is not. Only then does picking it mean the
+/// same in each repo (a remote-tracking pick checks out a local branch
+/// tracking that remote). A local branch is never matched with a
+/// remote-tracking one of the same spelling.
+///
+/// A shared branch is current when it is checked out in any of the repos,
+/// and dated by its latest commit among them.
+pub fn shared_branches(repo_paths: &[std::path::PathBuf]) -> Result<Vec<BranchInfo>> {
+    let mut paths = repo_paths.iter();
+    let Some(first) = paths.next() else {
+        return Ok(Vec::new());
+    };
+    let mut shared = list_branches(first)?;
+    for path in paths {
+        let theirs = list_branches(path)?;
+        shared.retain_mut(|b| {
+            match theirs
+                .iter()
+                .find(|t| t.name == b.name && t.is_remote == b.is_remote)
+            {
+                Some(t) => {
+                    b.is_current |= t.is_current;
+                    b.last_commit_time = b.last_commit_time.max(t.last_commit_time);
+                    true
+                }
+                None => false,
+            }
+        });
+    }
+    Ok(shared)
 }
 
 /// Return the `origin` remote URL for a repo, or `None` if unavailable.

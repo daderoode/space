@@ -3,8 +3,9 @@
 A CLI workspace manager for multi-repo git worktrees.
 
 `space` lets you create named workspaces that group multiple repositories into
-git worktrees checked out on the same branch, so you can switch between feature
-work across many repos in a single `space go` command.
+git worktrees, each on the branch (or detached commit) chosen for it and by
+default the same branch in all of them, so you can switch between feature work
+across many repos in a single `space go` command.
 
 Running `space` with no arguments opens the TUI dashboard.
 

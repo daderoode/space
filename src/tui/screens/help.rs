@@ -74,6 +74,7 @@ pub fn landing_group(screen: &Screen, focus: Pane) -> &'static str {
         Screen::CreateWorkspace(st) => match st.stage {
             CreateStage::PickRepos => kb::REPO_PICKER_NAME,
             CreateStage::Syncing => kb::SYNC_REPORT_NAME,
+            CreateStage::ReviewPlan => kb::PLAN_REVIEW_NAME,
             // The Creating stage is a scrollable log, not a flow prompt: its
             // keys are nothing like the flow's.
             CreateStage::Creating => kb::CREATING_LOG_NAME,
@@ -82,6 +83,7 @@ pub fn landing_group(screen: &Screen, focus: Pane) -> &'static str {
         Screen::AddRepos(st) => match st.stage {
             AddStage::PickRepos => kb::REPO_PICKER_NAME,
             AddStage::Syncing => kb::SYNC_REPORT_NAME,
+            AddStage::ReviewPlan => kb::PLAN_REVIEW_NAME,
             AddStage::Creating => kb::CREATING_LOG_NAME,
             _ => kb::CREATE_ADD_FLOW_NAME,
         },

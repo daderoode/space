@@ -1,11 +1,11 @@
 # space
 
-A terminal workspace manager for multi-repo git worktrees. A user groups repositories into named spaces, each checked out on a branch, and moves between them from one dashboard.
+A terminal workspace manager for multi-repo git worktrees. A user groups repositories into named spaces, each repo on the branch or detached commit chosen for it, and moves between them from one dashboard.
 
 ## Language
 
 **Space**:
-A named group of repositories, each present as a git worktree, that a user works on together.
+A named directory of git worktrees for several repositories that a user works on together, each repo on whatever branch or detached commit was chosen for it when it was placed, by default the same branch in all of them.
 _Avoid_: workspace (the code type and older docs use it; new user-facing text says space)
 
 **Space name**:

@@ -11,7 +11,8 @@ Reviewed at v0.4.0, 2026-03-23.
 ## What It Is
 
 A workspace manager for multi-repo git worktrees. One command to set up a
-directory of git worktrees for multiple repos all on the same branch, one command
+directory of git worktrees for multiple repos, each on the branch chosen for it
+(by default the same branch in all of them), one command
 to tear it down. No metadata database -- the filesystem is the state.
 
 Three interfaces sharing one core:
